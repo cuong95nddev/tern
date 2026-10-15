@@ -64,8 +64,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 8] =
-        [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Pen, Tool::Text, Tool::Marker, Tool::Mosaic];
+    pub const ALL: [Tool; 8] = [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Pen, Tool::Text, Tool::Marker, Tool::Mosaic];
 }
 
 /// Colour and one of three sizes; the sizes are in points, times the
@@ -116,15 +115,45 @@ pub const MOSAIC_BLOCK: f32 = 8.;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
-    Rect { a: P, b: P, style: Style },
-    Ellipse { a: P, b: P, style: Style },
-    Line { a: P, b: P, style: Style },
-    Arrow { a: P, b: P, style: Style },
-    Pen { points: Vec<P>, style: Style },
+    Rect {
+        a: P,
+        b: P,
+        style: Style,
+    },
+    Ellipse {
+        a: P,
+        b: P,
+        style: Style,
+    },
+    Line {
+        a: P,
+        b: P,
+        style: Style,
+    },
+    Arrow {
+        a: P,
+        b: P,
+        style: Style,
+    },
+    Pen {
+        points: Vec<P>,
+        style: Style,
+    },
     /// `at` is the top left of the first line.
-    Text { at: P, text: String, style: Style },
-    Marker { at: P, n: u32, style: Style },
-    Mosaic { a: P, b: P },
+    Text {
+        at: P,
+        text: String,
+        style: Style,
+    },
+    Marker {
+        at: P,
+        n: u32,
+        style: Style,
+    },
+    Mosaic {
+        a: P,
+        b: P,
+    },
 }
 
 /// The shapes drawn on one capture, oldest first, with undo/redo. Points

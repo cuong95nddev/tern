@@ -6528,6 +6528,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "lyon_tessellation",
  "semver",
  "tern-bridge",
  "tern-fs",

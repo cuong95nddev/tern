@@ -13,6 +13,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
 tiny-skia = "0.11"
 libc = "0.2.190"
+lyon_tessellation = "1"
 log = "0.4.34"
 semver = "1"
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }

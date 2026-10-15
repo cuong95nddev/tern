@@ -88,11 +88,14 @@ fn main() {
         cx.set_menus([Menu::new("Tern").items([
             MenuItem::action("Check for Updates…", update::CheckForUpdates),
             MenuItem::separator(),
+            MenuItem::action("Capture Screenshot (⌘⇧2)", shot::CaptureScreenshot),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Quit Tern", Quit),
         ])]);
         update::init(cx);
+        shot::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
         cx.on_action(|_: &main_window::NewWindow, cx| main_window::open_window(Content::Welcome, None, cx));

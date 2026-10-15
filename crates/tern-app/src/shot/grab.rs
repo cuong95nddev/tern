@@ -8,10 +8,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGDisplayBounds(display: u32) -> CGRect;
+}
+
+/// Display `id`'s frame in global points (top left origin): x, y, w, h.
+pub fn display_frame(id: u64) -> (f32, f32, f32, f32) {
+    let r = unsafe { CGDisplayBounds(id as u32) };
+    (r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
 
 /// Whether Tern may record the screen (other apps' windows show up).
