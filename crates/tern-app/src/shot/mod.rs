@@ -171,3 +171,73 @@ fn notify(title: &str, body: &str, cx: &mut App) {
         actions: vec![],
     });
 }
+
+/// Control socket commands (debug builds):
+///   shot             start a capture
+///   @shot CMD        input CMD (click, drag, key) to the first overlay
+///   @tray CMD        input CMD to the tray
+///   shot-fake PNG    the overlay over PNG instead of the screen
+///   shot-state       the overlay's and the tray's state
+///   tray-add PATH    add a PNG to the tray
+///   tray-prompt TEXT set the tray's prompt
+///   tray-target N    pick the tray's target N (as `shot-state` lists them)
+///   tray-send        send what the tray holds
+#[cfg(debug_assertions)]
+pub fn control(line: &str, cx: &mut App) -> Option<String> {
+    let line = line.trim();
+    let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+    let input_to = |handle: Option<AnyWindowHandle>, arg: &str, cx: &mut App| {
+        let Some(handle) = handle else { return "error: not open".to_owned() };
+        handle
+            .update(cx, |_, window, cx| crate::control::input(arg, window, cx).unwrap_or_else(|| "error: unknown input".into()))
+            .unwrap_or_else(|_| "error: window closed".into())
+    };
+    Some(match cmd {
+        "shot" => {
+            start(cx);
+            "ok".into()
+        },
+        "@shot" => {
+            let first = cx.default_global::<Capture>().overlays.first().copied();
+            input_to(first, arg, cx)
+        },
+        "@tray" => {
+            let tray = tray::window(cx);
+            input_to(tray, arg, cx)
+        },
+        "shot-state" => {
+            let overlays = cx.default_global::<Capture>().overlays.clone();
+            let mut out: Vec<String> = overlays
+                .iter()
+                .filter_map(|h| h.downcast::<gpui_kit::base::Root>())
+                .filter_map(|h| {
+                    h.update(cx, |root, _, cx| root.view().clone().downcast::<Overlay>().ok().map(|o| o.read(cx).debug_state()))
+                        .ok()
+                        .flatten()
+                })
+                .collect();
+            out.push(tray::debug_state(cx));
+            out.join(" | ")
+        },
+        "shot-fake" => {
+            // The overlay over a PNG instead of the screen, on the main display.
+            let Some(display) = cx.primary_display() else { return Some("error: no display".into()) };
+            let img = image::open(arg).map(|i| i.to_rgba8()).map_err(|e| e.to_string());
+            cx.default_global::<Capture>().on = true;
+            tray::hide(cx);
+            open_overlays(vec![(display.id(), display.bounds().size, img)], cx);
+            "ok".into()
+        },
+        "tray-add" => {
+            tray::add(arg.into(), cx);
+            "ok".into()
+        },
+        "tray-prompt" | "tray-target" | "tray-send" => tray::control(cmd, arg, cx),
+        _ => return None,
+    })
+}
+
+#[cfg(not(debug_assertions))]
+pub fn control(_: &str, _: &mut App) -> Option<String> {
+    None
+}

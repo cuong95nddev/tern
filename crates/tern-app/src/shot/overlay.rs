@@ -234,7 +234,9 @@ impl Overlay {
             InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_text(window, cx),
             _ => {},
         });
-        input.focus_handle(cx).focus(window, cx);
+        // After this click, which focuses the overlay when it ends.
+        let handle = input.focus_handle(cx);
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
         self.text = Some(TextEdit { at: q, input, _sub: sub });
         cx.notify();
     }
@@ -353,6 +355,18 @@ impl Overlay {
             shapes.push(s.clone());
         }
         Scene { shapes, sel: self.sel, scale: self.scale, base: self.base.clone(), accent: hsla(COLORS[1]) }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_state(&self) -> String {
+        let sel = self.sel.map(|(lo, hi)| format!("{},{} {}x{}", lo.x, lo.y, hi.x - lo.x, hi.y - lo.y));
+        format!(
+            "overlay sel={sel:?} tool={:?} shapes={} scale={} text={}",
+            self.tool,
+            self.doc.shapes.len(),
+            self.scale,
+            self.text.is_some()
+        )
     }
 
     fn tool_button(&self, tool: Tool, cx: &mut Context<Self>) -> Button {

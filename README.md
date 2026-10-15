@@ -26,6 +26,7 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 - **Changes panel** listing the git changes of every repo under the folder; click a file to preview its diff
 - **Scratch files** that save as you type
 - **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
+- **Screenshots for agents**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> anywhere freezes the screen; pick a region, mark it up (boxes, arrows, text, numbered markers, mosaic), collect a few, add a prompt and send them all to an agent tab (or a new Claude Code, Codex or OpenCode tab). Needs Screen Recording access.
 - **Automatic updates**: Tern checks for new releases and installs them in place, keeping your session
 
 ## Install
@@ -56,6 +57,7 @@ Then run `tern ~/code/my-project`. Dropping a folder on the Dock icon works too.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>D</kbd> | Diff the open file against `HEAD` |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>V</kbd> | Toggle Markdown preview |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd> | Open the file in VS Code or Cursor |
+| <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> | Capture a screenshot for an agent (works from any app) |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 
 ## Updates

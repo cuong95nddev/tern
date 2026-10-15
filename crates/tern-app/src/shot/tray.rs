@@ -75,6 +75,69 @@ pub fn show(cx: &mut App) {
     }
 }
 
+/// The tray window while it is open.
+#[cfg(debug_assertions)]
+pub fn window(cx: &mut App) -> Option<AnyWindowHandle> {
+    cx.default_global::<TrayData>().window
+}
+
+#[cfg(debug_assertions)]
+fn tray_view(cx: &mut App) -> Option<Entity<Tray>> {
+    let handle = window(cx)?.downcast::<gpui_kit::base::Root>()?;
+    handle.update(cx, |root, _, _| root.view().clone().downcast::<Tray>().ok()).ok().flatten()
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_state(cx: &mut App) -> String {
+    let choices = tray_view(cx).map(|t| {
+        t.update(cx, |t, cx| {
+            t.refresh_choices(cx);
+            t.choices.iter().enumerate().map(|(i, c)| format!("{i}:{}", c.label)).collect::<Vec<_>>()
+        })
+    });
+    let error = tray_view(cx).and_then(|t| t.read(cx).error.clone());
+    let data = cx.default_global::<TrayData>();
+    let chosen = data.dest.is_some();
+    format!(
+        "tray open={} shots={} prompt={:?} chosen={chosen} error={error:?} choices={choices:?}",
+        data.window.is_some(),
+        data.shots.len(),
+        data.prompt
+    )
+}
+
+#[cfg(debug_assertions)]
+pub fn control(cmd: &str, arg: &str, cx: &mut App) -> String {
+    let Some(tray) = tray_view(cx) else { return "error: tray not open".into() };
+    let Some(handle) = window(cx) else { return "error: tray not open".into() };
+    handle
+        .update(cx, |_, window, cx| {
+            tray.update(cx, |t, cx| match cmd {
+                "tray-prompt" => {
+                    t.prompt.update(cx, |p, cx| p.set_value(arg.to_owned(), window, cx));
+                    cx.default_global::<TrayData>().prompt = arg.to_owned();
+                    "ok".to_owned()
+                },
+                "tray-target" => {
+                    t.refresh_choices(cx);
+                    match arg.parse::<usize>().ok().and_then(|i| t.choices.get(i)) {
+                        Some(c) => {
+                            cx.default_global::<TrayData>().dest = Some(c.dest.clone());
+                            cx.notify();
+                            "ok".to_owned()
+                        },
+                        None => "error: no such target".to_owned(),
+                    }
+                },
+                _ => {
+                    t.send(window, cx);
+                    "ok".to_owned()
+                },
+            })
+        })
+        .unwrap_or_else(|_| "error: window closed".into())
+}
+
 /// Close the tray window, keeping what it holds.
 pub fn hide(cx: &mut App) {
     if let Some(window) = cx.default_global::<TrayData>().window.take() {
