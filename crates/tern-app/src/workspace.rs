@@ -448,7 +448,8 @@ pub struct TermTabInfo {
 pub enum WorkspaceEvent {
     /// The last tab closed: the workspace is done.
     Close,
-    /// Tabs opened, closed, switched or renamed: the session should be saved.
+    /// Tabs opened, closed, switched or renamed, or a side panel shown or
+    /// hidden: the session should be saved.
     TabsChanged,
 }
 
@@ -503,7 +504,7 @@ impl Workspace {
             },
             FileTreeEvent::Hide => {
                 this.show_explorer = false;
-                cx.notify();
+                this.panels_changed(cx);
             },
         });
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
@@ -517,7 +518,7 @@ impl Workspace {
             },
             ChangesEvent::Hide => {
                 this.show_changes = false;
-                cx.notify();
+                this.panels_changed(cx);
             },
         });
         let scratches_sub = cx.subscribe_in(&scratches, window, |this, _, ev: &ScratchesEvent, window, cx| match ev {
@@ -526,7 +527,7 @@ impl Workspace {
             ScratchesEvent::Delete(p) => this.confirm_delete_scratch(p.clone(), window, cx),
             ScratchesEvent::Hide => {
                 this.show_scratches = false;
-                cx.notify();
+                this.panels_changed(cx);
             },
         });
 
@@ -546,9 +547,9 @@ impl Workspace {
             next_group: 0,
             _rename: None,
             preview: None,
-            show_explorer: true,
-            show_changes: true,
-            show_scratches: true,
+            show_explorer: !saved.hidden.iter().any(|h| h == "explorer"),
+            show_changes: !saved.hidden.iter().any(|h| h == "changes"),
+            show_scratches: !saved.hidden.iter().any(|h| h == "scratches"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -654,7 +655,12 @@ impl Workspace {
         } else {
             Default::default()
         };
-        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active }
+        let hidden = [("explorer", self.show_explorer), ("changes", self.show_changes), ("scratches", self.show_scratches)]
+            .into_iter()
+            .filter(|(_, shown)| !shown)
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active, hidden }
     }
 
     fn subscribe_viewer(viewer: &Entity<Viewer>, window: &Window, cx: &mut Context<Self>) -> Vec<Subscription> {
@@ -1551,7 +1557,10 @@ impl Workspace {
                     return cx.reveal_path(path);
                 }
                 if path.is_dir() {
-                    self.show_explorer = true;
+                    if !self.show_explorer {
+                        self.show_explorer = true;
+                        cx.emit(WorkspaceEvent::TabsChanged);
+                    }
                     self.tree.update(cx, |t, cx| t.reveal(path, cx));
                     return cx.notify();
                 }
@@ -2469,19 +2478,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A side panel was shown or hidden: keep it so at the next launch.
+    fn panels_changed(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
     fn toggle_explorer(&mut self, _: &ToggleExplorer, _: &mut Window, cx: &mut Context<Self>) {
         self.show_explorer = !self.show_explorer;
-        cx.notify();
+        self.panels_changed(cx);
     }
 
     fn toggle_changes(&mut self, _: &ToggleChanges, _: &mut Window, cx: &mut Context<Self>) {
         self.show_changes = !self.show_changes;
-        cx.notify();
+        self.panels_changed(cx);
     }
 
     fn toggle_scratches(&mut self, _: &ToggleScratches, _: &mut Window, cx: &mut Context<Self>) {
         self.show_scratches = !self.show_scratches;
-        cx.notify();
+        self.panels_changed(cx);
     }
 
     fn ui<R>(&self, pane: PaneId, f: impl FnOnce(&mut PaneUi) -> R) -> R {

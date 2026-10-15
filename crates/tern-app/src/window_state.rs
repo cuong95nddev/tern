@@ -271,6 +271,8 @@ pub struct SavedWorkspace {
     pub tab_panes: Vec<usize>,
     /// Per pane, the tab it shows (none when it is empty).
     pub pane_active: Vec<Option<usize>>,
+    /// Side panels the user hid: `explorer`, `changes`, `scratches`.
+    pub hidden: Vec<String>,
 }
 
 impl SavedWorkspace {
@@ -285,6 +287,7 @@ impl SavedWorkspace {
             panes: String::new(),
             tab_panes: vec![],
             pane_active: vec![],
+            hidden: vec![],
         }
     }
 }
@@ -311,7 +314,8 @@ fn field(s: &str) -> String {
 /// one per tab group (`group`, color, collapsed, name) and one per tab, its
 /// kind and fields separated by tabs, after `@N` when it is in group N.
 /// A split center adds `panes`, its layout and each pane's tab (`-` for none),
-/// and `tab-panes`, each tab's pane; older builds skip both lines.
+/// and `tab-panes`, each tab's pane; older builds skip both lines. `hidden`
+/// lists the side panels the user hid.
 fn encode_session(windows: &[SavedWindow]) -> String {
     let mut out = String::new();
     for w in windows {
@@ -321,6 +325,9 @@ fn encode_session(windows: &[SavedWindow]) -> String {
         }
         for ws in &w.workspaces {
             out.push_str(&format!("\t{}\n", field(&ws.folder.display().to_string())));
+            if !ws.hidden.is_empty() {
+                out.push_str(&format!("\t\thidden\t{}\n", field(&ws.hidden.join(" "))));
+            }
             if ws.tabs.is_empty() {
                 continue;
             }
@@ -386,6 +393,8 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
                 let (layout, active) = p.split_once('\t').unwrap_or((p, ""));
                 ws.panes = layout.to_owned();
                 ws.pane_active = active.split_whitespace().map(|a| a.parse().ok()).collect();
+            } else if let Some(h) = rest.strip_prefix("hidden\t") {
+                ws.hidden = h.split_whitespace().map(str::to_owned).collect();
             } else if let Some(p) = rest.strip_prefix("tab-panes\t") {
                 ws.tab_panes = p.split_whitespace().map(|n| n.parse().unwrap_or(0)).collect();
             } else if let Some(g) = rest.strip_prefix("group\t") {
@@ -489,8 +498,9 @@ mod tests {
                         panes: "h(0,v(1,2))".into(),
                         tab_panes: vec![0, 0, 1, 1, 2, 0],
                         pane_active: vec![Some(0), Some(3), None],
+                        hidden: vec!["explorer".into(), "scratches".into()],
                     },
-                    SavedWorkspace::fresh(PathBuf::from("/d")),
+                    SavedWorkspace { hidden: vec!["changes".into()], ..SavedWorkspace::fresh(PathBuf::from("/d")) },
                 ],
                 active: 1,
             },
