@@ -16,6 +16,7 @@ pub enum Edge {
 }
 
 impl Edge {
+    #[cfg(debug_assertions)] // the debug control socket
     pub const ALL: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
 
     /// The split that puts a pane on this side.
@@ -31,6 +32,7 @@ impl Edge {
         matches!(self, Edge::Right | Edge::Bottom)
     }
 
+    #[cfg(debug_assertions)] // the debug control socket
     pub fn key(self) -> &'static str {
         match self {
             Edge::Left => "left",
@@ -40,6 +42,7 @@ impl Edge {
         }
     }
 
+    #[cfg(debug_assertions)] // the debug control socket
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|e| e.key() == s)
     }
@@ -62,6 +65,7 @@ impl Zone {
         if d < 1. / 3. { Zone::Edge(edge) } else { Zone::Center }
     }
 
+    #[cfg(debug_assertions)] // the debug control socket
     pub fn parse(s: &str) -> Option<Self> {
         if s == "center" { Some(Zone::Center) } else { Edge::parse(s).map(Zone::Edge) }
     }

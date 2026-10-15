@@ -51,10 +51,8 @@ impl Mods {
 pub fn encode(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Option<Vec<u8>> {
     let kitty_all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
     let kitty = kitty_all || mode.contains(TermMode::DISAMBIGUATE_ESC_CODES);
-    if kitty {
-        if let Some(b) = encode_kitty(key, mods, text, kitty_all) {
-            return Some(b);
-        }
+    if kitty && let Some(b) = encode_kitty(key, mods, text, kitty_all) {
+        return Some(b);
     }
     encode_legacy(key, mods, text, mode)
 }

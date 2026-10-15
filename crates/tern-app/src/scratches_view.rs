@@ -92,6 +92,7 @@ impl ScratchesView {
         cx.notify();
     }
 
+    #[cfg(debug_assertions)] // the debug control socket
     pub fn len(&self) -> usize {
         self.files.len()
     }

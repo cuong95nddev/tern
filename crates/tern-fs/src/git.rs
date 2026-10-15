@@ -201,6 +201,28 @@ pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBu
     (branch, files)
 }
 
+/// Unified diff of `path` against HEAD in its own repository (or vs /dev/null
+/// when untracked / not in a repo). External diff drivers and textconv are
+/// disabled (repo config could name arbitrary programs).
+pub fn diff_vs_head(path: &Path) -> Option<String> {
+    let root = &repo_for(path).or_else(|| path.parent().map(Path::to_path_buf))?;
+    if repo_defines_commands(root) {
+        return None;
+    }
+    let base = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--no-color", "-U3"];
+    let out = git(root).args(base).arg("HEAD").arg("--").arg(path).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !text.is_empty() {
+        return Some(text);
+    }
+    // Untracked (or no HEAD yet): show the whole file as added. Relative to
+    // the repo so the patch header names `dir/file`, not an absolute path.
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let out = git(root).args(base).args(["--no-index", "--", "/dev/null"]).arg(rel).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,26 +311,4 @@ mod tests {
         assert!(patch.contains("+++ b/--output=pwned\n"), "{patch}");
         assert!(!root.join("pwned").exists());
     }
-}
-
-/// Unified diff of `path` against HEAD in its own repository (or vs /dev/null
-/// when untracked / not in a repo). External diff drivers and textconv are
-/// disabled (repo config could name arbitrary programs).
-pub fn diff_vs_head(path: &Path) -> Option<String> {
-    let root = &repo_for(path).or_else(|| path.parent().map(Path::to_path_buf))?;
-    if repo_defines_commands(root) {
-        return None;
-    }
-    let base = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--no-color", "-U3"];
-    let out = git(root).args(base).arg("HEAD").arg("--").arg(path).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !text.is_empty() {
-        return Some(text);
-    }
-    // Untracked (or no HEAD yet): show the whole file as added. Relative to
-    // the repo so the patch header names `dir/file`, not an absolute path.
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let out = git(root).args(base).args(["--no-index", "--", "/dev/null"]).arg(rel).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    (!text.is_empty()).then_some(text)
 }

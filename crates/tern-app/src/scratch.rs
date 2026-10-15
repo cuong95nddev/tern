@@ -75,7 +75,7 @@ pub fn list_with_times(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
             Some((e.path(), m.modified().ok()))
         })
         .collect();
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files
 }
 

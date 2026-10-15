@@ -159,9 +159,7 @@ impl FileTreeView {
                 } else {
                     file_icons::file_icon(name, theme)
                 };
-                let chevron = row.entry.is_dir.then(|| {
-                    if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }
-                });
+                let chevron = row.entry.is_dir.then_some(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight });
                 Some(
                     div()
                         .id(ix)

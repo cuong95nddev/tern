@@ -34,6 +34,9 @@ use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, Termin
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedTab, SavedWorkspace, TabLayout};
 
+/// What a name dialog does with the typed name (see `Workspace::ask_name`).
+type ApplyName = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
+
 actions!(
     workspace,
     [
@@ -929,6 +932,7 @@ impl Workspace {
     }
 
     /// The bar's slots: group chips and the tabs that show, of every pane.
+    #[cfg(debug_assertions)] // the debug control socket
     fn slots(&self) -> Vec<Slot> {
         self.layout.panes().into_iter().flat_map(|p| self.slots_in(p)).collect()
     }
@@ -2093,7 +2097,7 @@ impl Workspace {
         &mut self,
         title: &'static str,
         current: SharedString,
-        apply: Rc<dyn Fn(&mut Self, &str, &mut Window, &mut Context<Self>)>,
+        apply: ApplyName,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

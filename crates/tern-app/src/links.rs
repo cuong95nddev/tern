@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(resolve("src/y.rs", &bases), None);
         // Printed relative to a project below the folder the program runs in.
         assert_eq!(resolve("src/x.rs", std::slice::from_ref(&root)), Some(dir.join("src/x.rs")));
-        assert_eq!(resolve("repo/src/x.rs", &[root.clone()]), Some(dir.join("src/x.rs")));
+        assert_eq!(resolve("repo/src/x.rs", std::slice::from_ref(&root)), Some(dir.join("src/x.rs")));
         assert_eq!(resolve("../repo/src/x.rs", &[root.join("target")]), Some(dir.join("src/x.rs")));
         std::fs::remove_dir_all(root).unwrap();
     }
