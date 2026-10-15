@@ -98,9 +98,18 @@ The store is created in `Session::spawn`, shared with `TapReader`, exposed as
 ### Setting
 
 `TerminalConfig.graphics: bool`, default `true`; `TERN_GRAPHICS=0` in Tern's own environment
-at launch sets it to `false`. When off, the parser still consumes APC (alacritty ignores it
-anyway) but sends no replies and stores nothing, so programs see an unsupporting terminal and
-fall back to text.
+at launch sets it to `false`. When off, no graphics tap is installed (alacritty ignores APC
+anyway): no replies, nothing stored, so programs see an unsupporting terminal and fall back to
+text.
+
+### Being recognised by Claude Code
+
+Claude Code draws images only on terminals it recognises by their XTVERSION name (kitty ≥
+0.28, Ghostty), unless `CLAUDE_CODE_FORCE_TERMINAL_IMAGES` is set. Tern does not impersonate
+another terminal; when graphics are on it adds `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` to the
+child environment (only if not already set). This variable is undocumented Claude Code
+behaviour: if a later version drops it, Claude Code falls back to alt text and nothing else
+breaks.
 
 ## Claude Code mod (sub-project 2)
 
