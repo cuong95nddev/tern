@@ -1,0 +1,504 @@
+//! One program in the daemon: its PTY, the terminal that parses its output,
+//! and the thread that drives both.
+//!
+//! The thread reads from the PTY, parses under the terminal lock and hands
+//! the same bytes to the attached client before unlocking. Attaching takes
+//! that lock to capture the snapshot and set the subscriber, so the client
+//! gets every byte after its snapshot exactly once. Resizes, the end of a
+//! synchronized update and the exit are sent the same way, as markers.
+//! (alacritty's own event loop reads before it locks, so it can't do this.)
+
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, ErrorKind, Read, Write};
+use std::num::NonZeroUsize;
+use std::os::fd::{AsRawFd, RawFd};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
+use tern_term::vt::sync::FairMutex;
+use tern_term::vt::term::{Config, Osc52, Term};
+use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
+use polling::{Event as PollEvent, Events, PollMode, Poller};
+use tern_term::mirror::Marker;
+use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY};
+use tern_term::palette::Palette;
+use tern_term::snapshot::{self, Snapshot};
+use tern_term::status::{ActivityStatus, next_status};
+use tern_term::{SpawnConfig, TermSize};
+
+use crate::proto::SessionInfo;
+
+/// alacritty's poll keys for the PTY and its child-exit pipe.
+const PTY_READ_WRITE_TOKEN: usize = 0;
+const PTY_CHILD_EVENT_TOKEN: usize = 1;
+const READ_BUFFER: usize = 64 << 10;
+/// The most bytes parsed in one go under the lock before letting an attach in.
+const MAX_LOCKED_READ: usize = 1 << 20;
+const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the rows+1 size of an attach "jiggle" lasts.
+const JIGGLE: Duration = Duration::from_millis(50);
+/// How long a closed program has to exit after SIGHUP before SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(3);
+
+/// Where an attached client gets its bytes. Called with the terminal locked:
+/// must not block (queue and return).
+pub trait Subscriber: Send + Sync {
+    fn output(&self, id: u64, bytes: &[u8]);
+    fn marker(&self, id: u64, marker: &Marker);
+}
+
+/// What the daemon wants to know about a program, attached or not.
+pub trait Observer: Send + Sync {
+    fn status(&self, id: u64, old: ActivityStatus, new: ActivityStatus);
+    fn notify(&self, id: u64, title: Option<String>, body: String);
+    fn exited(&self, id: u64, code: Option<i32>);
+}
+
+enum Msg {
+    Input(Cow<'static, [u8]>),
+    Resize(TermSize),
+    Jiggle(TermSize),
+    Shutdown,
+}
+
+struct Shared {
+    tx: Mutex<Sender<Msg>>,
+    poller: Arc<Poller>,
+    size: Mutex<TermSize>,
+    title: Mutex<Option<String>>,
+    status: Mutex<ActivityStatus>,
+    exited: Mutex<Option<Option<i32>>>,
+    subscriber: Mutex<Option<Arc<dyn Subscriber>>>,
+}
+
+impl Shared {
+    fn send(&self, msg: Msg) {
+        let _ = self.tx.lock().unwrap().send(msg);
+        let _ = self.poller.notify();
+    }
+
+    fn subscriber(&self) -> Option<Arc<dyn Subscriber>> {
+        self.subscriber.lock().unwrap().clone()
+    }
+}
+
+#[derive(Clone)]
+struct Listener {
+    shared: Arc<Shared>,
+    palette: Arc<Palette>,
+    term: Arc<OnceLock<Arc<FairMutex<HostTerm>>>>,
+}
+
+type HostTerm = Term<Listener>;
+
+impl EventListener for Listener {
+    fn send_event(&self, event: Event) {
+        let sh = &self.shared;
+        match event {
+            Event::PtyWrite(text) => sh.send(Msg::Input(text.into_bytes().into())),
+            Event::ColorRequest(idx, fmt) => {
+                // Asked from inside the parser, with the lock held: overrides
+                // are read when the lock happens to be free.
+                let rgb = self
+                    .term
+                    .get()
+                    .and_then(|t| t.try_lock_unfair().map(|t| self.palette.indexed(t.colors(), idx)))
+                    .unwrap_or_else(|| self.palette.indexed(&Default::default(), idx));
+                sh.send(Msg::Input(fmt(rgb).into_bytes().into()));
+            },
+            Event::TextAreaSizeRequest(fmt) => {
+                let s = *sh.size.lock().unwrap();
+                let ws = WindowSize { num_lines: s.rows, num_cols: s.cols, cell_width: s.cell_width, cell_height: s.cell_height };
+                sh.send(Msg::Input(fmt(ws).into_bytes().into()));
+            },
+            Event::Title(t) => *sh.title.lock().unwrap() = Some(t),
+            Event::ResetTitle => *sh.title.lock().unwrap() = None,
+            _ => {},
+        }
+    }
+}
+
+pub struct Host {
+    id: u64,
+    pid: u32,
+    /// The PTY master, for foreground-process queries and fd passing.
+    master: File,
+    shared: Arc<Shared>,
+    term: Arc<FairMutex<HostTerm>>,
+}
+
+fn window_size(s: TermSize) -> WindowSize {
+    WindowSize { num_lines: s.rows, num_cols: s.cols, cell_width: s.cell_width, cell_height: s.cell_height }
+}
+
+impl Host {
+    pub fn spawn(id: u64, cfg: &SpawnConfig, observer: Arc<dyn Observer>) -> io::Result<Arc<Self>> {
+        let (tx, rx) = mpsc::channel();
+        let poller = Arc::new(Poller::new()?);
+        let shared = Arc::new(Shared {
+            tx: Mutex::new(tx),
+            poller: poller.clone(),
+            size: Mutex::new(cfg.size),
+            title: Mutex::new(None),
+            status: Mutex::new(ActivityStatus::None),
+            exited: Mutex::new(None),
+            subscriber: Mutex::new(None),
+        });
+        let cell = Arc::new(OnceLock::new());
+        let listener = Listener { shared: shared.clone(), palette: Arc::new(Palette::default()), term: cell.clone() };
+        let config =
+            Config { scrolling_history: cfg.scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
+        let term = Arc::new(FairMutex::new(Term::new(config, &cfg.size, listener)));
+        let _ = cell.set(term.clone());
+
+        let mut env = cfg.env.clone();
+        env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
+        env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
+        env.entry("TERM_PROGRAM".into()).or_insert_with(|| "Tern".into());
+        let opts = Options {
+            shell: cfg.program.clone().map(|p| Shell::new(p, cfg.args.clone())),
+            working_directory: cfg.cwd.clone(),
+            drain_on_exit: true,
+            env,
+        };
+        let pty = tty::new(&opts, window_size(cfg.size), id)?;
+        let pid = pty.child().id();
+        let master = pty.file().try_clone()?;
+        let host = Arc::new(Self { id, pid, master, shared: shared.clone(), term: term.clone() });
+        let driver = Driver {
+            id,
+            pty,
+            poller,
+            rx,
+            term,
+            shared,
+            observer,
+            parser: Processor::new(),
+            scanner: OscScanner::new(),
+            writes: VecDeque::new(),
+            last_probe_reply: None,
+            jiggle: None,
+        };
+        std::thread::Builder::new().name(format!("host {id}")).spawn(move || driver.run())?;
+        Ok(host)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn master_fd(&self) -> RawFd {
+        self.master.as_raw_fd()
+    }
+
+    pub fn size(&self) -> TermSize {
+        *self.shared.size.lock().unwrap()
+    }
+
+    pub fn status(&self) -> ActivityStatus {
+        *self.shared.status.lock().unwrap()
+    }
+
+    pub fn exited(&self) -> Option<Option<i32>> {
+        *self.shared.exited.lock().unwrap()
+    }
+
+    /// Start sending to `sub`; returns the state it starts from. Replaces a
+    /// previous subscriber.
+    pub fn attach(&self, sub: Arc<dyn Subscriber>) -> Snapshot {
+        let mut term = self.term.lock();
+        let title = self.shared.title.lock().unwrap().clone();
+        let snap = snapshot::capture(&mut term, self.size(), title, self.status());
+        *self.shared.subscriber.lock().unwrap() = Some(sub);
+        snap
+    }
+
+    /// Stop sending to `sub` (if it is still the one attached).
+    pub fn detach(&self, sub: &Arc<dyn Subscriber>) {
+        let _term = self.term.lock();
+        let mut cur = self.shared.subscriber.lock().unwrap();
+        if cur.as_ref().is_some_and(|c| Arc::ptr_eq(c, sub)) {
+            *cur = None;
+        }
+    }
+
+    pub fn attached(&self) -> bool {
+        self.shared.subscriber.lock().unwrap().is_some()
+    }
+
+    pub fn input(&self, bytes: Vec<u8>) {
+        self.shared.send(Msg::Input(bytes.into()));
+    }
+
+    pub fn resize(&self, size: TermSize) {
+        self.shared.send(Msg::Resize(size));
+    }
+
+    /// Resize to one more row, then to `size`: full-screen programs repaint
+    /// even when the size didn't change (as shpool does on attach).
+    pub fn jiggle(&self, size: TermSize) {
+        self.shared.send(Msg::Jiggle(size));
+    }
+
+    pub fn info(&self) -> SessionInfo {
+        SessionInfo {
+            id: self.id,
+            pid: self.pid,
+            exited: self.exited().is_some(),
+            cwd: self.cwd(),
+            title: self.shared.title.lock().unwrap().clone(),
+        }
+    }
+
+    pub fn cwd(&self) -> Option<PathBuf> {
+        tern_term::procs::foreground_cwd(&self.master)
+    }
+
+    pub fn foreground_programs(&self) -> Vec<String> {
+        tern_term::procs::foreground_programs(&self.master)
+    }
+
+    /// End the program: SIGHUP, then SIGKILL if it is still there after a
+    /// grace period. Returns at once.
+    pub fn kill(&self) {
+        self.shared.send(Msg::Shutdown);
+    }
+}
+
+struct Driver {
+    id: u64,
+    pty: tty::Pty,
+    poller: Arc<Poller>,
+    rx: Receiver<Msg>,
+    term: Arc<FairMutex<HostTerm>>,
+    shared: Arc<Shared>,
+    observer: Arc<dyn Observer>,
+    parser: Processor<StdSyncHandler>,
+    scanner: OscScanner,
+    writes: VecDeque<(Cow<'static, [u8]>, usize)>,
+    last_probe_reply: Option<Instant>,
+    /// The size to go back to after an attach's extra row, and when.
+    jiggle: Option<(Instant, TermSize)>,
+}
+
+impl Driver {
+    fn run(mut self) {
+        let mut interest = PollEvent::readable(0);
+        // SAFETY: the PTY's fds stay open (owned by `self.pty`) until they
+        // are deregistered below.
+        if let Err(e) = unsafe { self.pty.register(&self.poller, interest, PollMode::Level) } {
+            log::error!("host {}: poll registration failed: {e}", self.id);
+            return self.finish(None);
+        }
+        let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
+        let mut buf = vec![0u8; READ_BUFFER];
+        let code = 'run: loop {
+            let now = Instant::now();
+            let deadlines = [self.parser.sync_timeout().sync_timeout(), self.jiggle.map(|j| j.0)];
+            let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
+            events.clear();
+            if let Err(e) = self.poller.wait(&mut events, timeout) {
+                if e.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                log::error!("host {}: poll failed: {e}", self.id);
+                break None;
+            }
+            let now = Instant::now();
+            if self.parser.sync_timeout().sync_timeout().is_some_and(|t| t <= now) {
+                let mut term = self.term.lock();
+                self.parser.stop_sync(&mut *term);
+                self.emit_marker(&Marker::SyncFlush);
+            }
+            if let Some((at, size)) = self.jiggle
+                && at <= now
+            {
+                self.jiggle = None;
+                self.resize(size);
+            }
+            loop {
+                match self.rx.try_recv() {
+                    Ok(Msg::Input(bytes)) => self.writes.push_back((bytes, 0)),
+                    Ok(Msg::Resize(size)) => {
+                        self.jiggle = None;
+                        self.resize(size);
+                    },
+                    Ok(Msg::Jiggle(size)) => {
+                        self.resize(TermSize { rows: size.rows + 1, ..size });
+                        self.jiggle = Some((Instant::now() + JIGGLE, size));
+                    },
+                    Ok(Msg::Shutdown) => {
+                        self.hang_up();
+                        return self.finish(None);
+                    },
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'run None,
+                }
+            }
+            for event in events.iter() {
+                match event.key {
+                    PTY_CHILD_EVENT_TOKEN => {
+                        if let Some(ChildEvent::Exited(status)) = self.pty.next_child_event() {
+                            let _ = self.read(&mut buf);
+                            break 'run status.and_then(|s| s.code());
+                        }
+                    },
+                    PTY_READ_WRITE_TOKEN if !event.is_interrupt() => {
+                        if event.readable
+                            && let Err(e) = self.read(&mut buf)
+                        {
+                            // The program closed the PTY; its exit follows.
+                            log::debug!("host {}: read: {e}", self.id);
+                        }
+                        if event.writable
+                            && let Err(e) = self.write()
+                        {
+                            log::warn!("host {}: write: {e}", self.id);
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            let needs_write = !self.writes.is_empty();
+            if needs_write != interest.writable {
+                interest.writable = needs_write;
+                if let Err(e) = self.pty.reregister(&self.poller, interest, PollMode::Level) {
+                    log::error!("host {}: poll reregistration failed: {e}", self.id);
+                    break None;
+                }
+            }
+        };
+        self.finish(code)
+    }
+
+    fn emit_marker(&self, marker: &Marker) {
+        if let Some(sub) = self.shared.subscriber() {
+            sub.marker(self.id, marker);
+        }
+    }
+
+    fn resize(&mut self, size: TermSize) {
+        *self.shared.size.lock().unwrap() = size;
+        self.pty.on_resize(window_size(size));
+        let mut term = self.term.lock();
+        term.resize(size);
+        self.emit_marker(&Marker::Resized(size));
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let mut locked = 0;
+        loop {
+            let n = match self.pty.reader().read(buf) {
+                Ok(0) => return Ok(()),
+                Ok(n) => n,
+                Err(e) if matches!(e.kind(), ErrorKind::Interrupted) => continue,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            let bytes = &buf[..n];
+            {
+                let mut term = self.term.lock();
+                self.parser.advance(&mut *term, bytes);
+                if let Some(sub) = self.shared.subscriber() {
+                    sub.output(self.id, bytes);
+                }
+            }
+            self.scan(n, buf);
+            locked += n;
+            if locked >= MAX_LOCKED_READ {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Watch the bytes just read for OSC 7501 / 9 / 777.
+    fn scan(&mut self, n: usize, buf: &[u8]) {
+        let mut signals = vec![];
+        self.scanner.feed(&buf[..n], |sig| signals.push(sig));
+        for sig in signals {
+            match &sig {
+                OscSignal::ProgramStatusProbe => {
+                    // If the tty echoes our reply back as output (echoctl
+                    // off), an unthrottled reply would loop forever.
+                    let now = Instant::now();
+                    if self.last_probe_reply.is_none_or(|t| now.duration_since(t) >= PROBE_REPLY_MIN_INTERVAL) {
+                        self.last_probe_reply = Some(now);
+                        self.writes.push_back((PROGRAM_STATUS_PROBE_REPLY.into(), 0));
+                    }
+                },
+                OscSignal::Notify { title, body } => self.observer.notify(self.id, title.clone(), body.clone()),
+                OscSignal::ProgramStatus(_) => {
+                    let mut status = self.shared.status.lock().unwrap();
+                    if let Some(new) = next_status(*status, &sig) {
+                        let old = std::mem::replace(&mut *status, new);
+                        drop(status);
+                        self.observer.status(self.id, old, new);
+                    }
+                },
+            }
+        }
+    }
+
+    fn write(&mut self) -> io::Result<()> {
+        while let Some((bytes, done)) = self.writes.front_mut() {
+            match self.pty.writer().write(&bytes[*done..]) {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    *done += n;
+                    if *done == bytes.len() {
+                        self.writes.pop_front();
+                    }
+                },
+                Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    fn hang_up(&self) {
+        let pid = self.pty.child().id() as libc::pid_t;
+        // SAFETY: plain syscalls on our own child.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+        // Reap it here, so the Pty's drop doesn't wait forever on a program
+        // that ignores SIGHUP.
+        let deadline = Instant::now() + KILL_GRACE;
+        loop {
+            let mut st = 0;
+            let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+            if r != 0 {
+                return;
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut st, 0);
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The program is gone (`code` = its exit status, if known).
+    fn finish(mut self, code: Option<i32>) {
+        let _ = self.pty.deregister(&self.poller);
+        {
+            let _term = self.term.lock();
+            *self.shared.exited.lock().unwrap() = Some(code);
+            *self.shared.status.lock().unwrap() = ActivityStatus::None;
+            self.emit_marker(&Marker::Exited(code));
+        }
+        self.observer.exited(self.id, code);
+    }
+}
