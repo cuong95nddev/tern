@@ -1,0 +1,12 @@
+[package]
+name = "tern-bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+getrandom = "0.4.3"
+libc = "0.2.190"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,9 @@
+[package]
+name = "tern-term"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26"
+polling = "3.8"
+libc = "0.2.190"

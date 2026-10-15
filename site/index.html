@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tern — a fast terminal for coding agents</title>
+<meta name="description" content="A fast native macOS terminal for coding agents like Claude Code, OpenCode and Codex, with a file explorer, diff viewer and the git changes of every repo beside your tabs.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="Tern">
+<meta property="og:description" content="A fast native terminal for coding agents.">
+<meta property="og:image" content="assets/icon.png">
+<link rel="icon" href="assets/favicon.ico" sizes="any">
+<link rel="icon" href="assets/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #000;
+    --panel: #0e0f11;
+    --raise: #16181b;
+    --line: #23262a;
+    --ink: #eceef0;
+    --dim: #8b9097;
+    --faint: #5a5f66;
+    --add: #6fcf8f;
+    --del: #ef7a7a;
+    --sans: "Hanken Grotesk", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 17px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 6px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* nav */
+  nav { display: flex; align-items: center; justify-content: space-between; height: 72px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 18px; text-decoration: none; }
+  .brand img { width: 28px; height: 28px; }
+  .nav-links { display: flex; gap: 28px; font-size: 15px; }
+  .nav-links a { color: var(--dim); text-decoration: none; }
+  .nav-links a:hover { color: var(--ink); }
+
+  /* hero */
+  .hero { text-align: center; padding: 72px 0 56px; }
+  .mark { position: relative; width: 112px; height: 112px; margin: 0 auto 36px; }
+  .mark img { width: 100%; height: 100%; position: relative; z-index: 1; }
+  .streaks { position: absolute; right: 78%; top: 50%; transform: translateY(-50%); display: grid; gap: 7px; justify-items: end; }
+  .streaks i {
+    display: block; height: 3px; border-radius: 3px;
+    background: linear-gradient(90deg, transparent, #c9ccd1);
+    animation: streak 1.1s cubic-bezier(.2,.7,.2,1) both;
+  }
+  .streaks i:nth-child(1) { width: 90px; animation-delay: .05s; }
+  .streaks i:nth-child(2) { width: 150px; animation-delay: 0s; }
+  .streaks i:nth-child(3) { width: 110px; animation-delay: .1s; }
+  @keyframes streak {
+    from { transform: translateX(120px) scaleX(.2); opacity: 0; }
+    60% { opacity: 1; }
+    to { transform: none; opacity: .55; }
+  }
+  h1 {
+    font-weight: 800;
+    font-size: clamp(42px, 7.4vw, 84px);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+    margin: 0 auto 22px;
+    max-width: 14ch;
+    background: linear-gradient(180deg, #fff 30%, #9aa0a8);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { color: var(--dim); font-size: clamp(17px, 2vw, 20px); max-width: 34em; margin: 0 auto 36px; }
+  .ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    height: 48px; padding: 0 22px; border-radius: 12px;
+    font: 600 16px var(--sans); text-decoration: none;
+    border: 1px solid var(--line);
+  }
+  .btn svg { width: 18px; height: 18px; }
+  .btn-primary { background: var(--ink); color: #000; border-color: var(--ink); }
+  .btn-primary:hover { background: #fff; }
+  .btn-ghost:hover { background: var(--raise); }
+  .meta { margin-top: 18px; font-size: 14px; color: var(--faint); }
+
+  /* window mock */
+  .shot { padding: 24px 0 112px; }
+  .win {
+    border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+    background: var(--panel);
+    box-shadow: 0 40px 120px -40px rgba(180,190,205,.18);
+    font: 400 13px/1.6 var(--mono);
+    text-align: left;
+  }
+  .bar { display: flex; align-items: center; gap: 16px; height: 40px; padding: 0 14px; border-bottom: 1px solid var(--line); background: #0a0b0c; }
+  .lights { display: flex; gap: 8px; }
+  .lights b { width: 12px; height: 12px; border-radius: 50%; background: #2b2e33; }
+  .ws { display: flex; gap: 4px; font-family: var(--sans); font-size: 13px; }
+  .ws span { padding: 4px 12px; border-radius: 7px; color: var(--faint); }
+  .ws span.on { background: var(--raise); color: var(--ink); }
+  .body { display: grid; grid-template-columns: 200px minmax(0,1fr) 250px; min-height: 420px; }
+  .side { border-right: 1px solid var(--line); padding: 14px 0; color: var(--dim); }
+  .side h4, .changes h4 { margin: 0 14px 8px; font: 600 12px var(--sans); color: var(--faint); }
+  .tree div { padding: 1px 14px; white-space: nowrap; }
+  .tree .d { color: var(--ink); }
+  .tree .sel { background: var(--raise); color: var(--ink); }
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); font-family: var(--sans); font-size: 13px; }
+  .tabs span { padding: 9px 16px; color: var(--faint); border-right: 1px solid var(--line); }
+  .tabs span.on { color: var(--ink); background: var(--bg); box-shadow: inset 0 -2px 0 var(--ink); }
+  .term { flex: 1; background: var(--bg); padding: 18px 20px; color: #c8ccd2; overflow: hidden; }
+  .term p { margin: 0; white-space: pre-wrap; }
+  .term .p { color: var(--faint); }
+  .term .you { color: var(--ink); }
+  .term .tool { color: var(--ink); }
+  .term .dot { color: var(--add); }
+  .term .mut { color: var(--faint); }
+  .term .gap { height: 12px; }
+  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--ink); vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .changes { border-left: 1px solid var(--line); padding: 14px 0; }
+  .repo { margin: 0 14px 6px; color: var(--ink); font-family: var(--sans); font-weight: 600; font-size: 13px; }
+  .file { display: flex; justify-content: space-between; padding: 1px 14px; color: var(--dim); }
+  .file em { font-style: normal; font-size: 12px; }
+  .file .a { color: var(--add); } .file .r { color: var(--del); }
+  .changes .repo + .file { margin-top: 2px; }
+  .changes .sp { height: 14px; }
+
+  /* features */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; padding-bottom: 112px; }
+  .features h3 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 8px; }
+  .features p { margin: 0; color: var(--dim); }
+
+  /* keys */
+  .keys { border-top: 1px solid var(--line); padding: 96px 0; display: grid; grid-template-columns: 1fr 1.4fr; gap: 64px; align-items: start; }
+  h2 { font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.08; margin: 0 0 14px; }
+  .keys p { color: var(--dim); margin: 0; max-width: 26em; }
+  .klist { list-style: none; margin: 0; padding: 0; }
+  .klist li { display: flex; justify-content: space-between; gap: 24px; padding: 13px 0; border-bottom: 1px solid var(--line); color: var(--dim); }
+  .klist li span:first-child { color: var(--ink); }
+  kbd { font: 500 13px var(--mono); color: var(--ink); background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+
+  /* closing */
+  .end { text-align: center; padding: 104px 0 120px; border-top: 1px solid var(--line); }
+  .end h2 { margin-bottom: 28px; }
+  .cli { display: inline-block; text-align: left; margin-top: 40px; font: 400 14px/1.7 var(--mono); color: var(--dim); }
+  .cli b { color: var(--ink); font-weight: 400; }
+
+  footer { border-top: 1px solid var(--line); }
+  footer .wrap { display: flex; justify-content: space-between; align-items: center; height: 80px; font-size: 14px; color: var(--faint); }
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+
+  @media (max-width: 900px) {
+    .body { grid-template-columns: minmax(0,1fr); }
+    .side, .changes { display: none; }
+    .features { grid-template-columns: 1fr; gap: 32px; padding-bottom: 88px; }
+    .keys { grid-template-columns: 1fr; gap: 32px; padding: 72px 0; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 16px; }
+    .hero { padding: 48px 0 40px; }
+    .nav-links a.hide-sm { display: none; }
+    .btn { width: 100%; justify-content: center; }
+    .ws span:not(.on) { display: none; }
+    .term { font-size: 12px; padding: 14px; }
+    .klist li { font-size: 15px; }
+    footer .wrap { flex-direction: column; justify-content: center; gap: 6px; height: auto; padding: 28px 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .streaks i, .cursor { animation: none; }
+    .streaks i { opacity: .55; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="./"><img src="assets/icon-192.png" alt="">Tern</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="#keys">Shortcuts</a>
+      <a href="https://github.com/cuong95nddev/tern/releases">Releases</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="mark" aria-hidden="true">
+      <div class="streaks"><i></i><i></i><i></i></div>
+      <img src="assets/icon.png" alt="">
+    </div>
+    <h1>The terminal for coding agents</h1>
+    <p class="lede">Run Claude Code, OpenCode, Codex or any CLI agent in a native, GPU-rendered terminal, next to a file explorer, a diff viewer and the git changes of every repo in the folder.</p>
+    <div class="ctas">
+      <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c.02 2.43 2.13 3.24 2.15 3.25-.02.06-.34 1.15-1.11 2.28-.67.98-1.36 1.95-2.45 1.97-1.07.02-1.42-.63-2.64-.63-1.23 0-1.61.61-2.62.65-1.05.04-1.85-1.06-2.52-2.04-1.38-1.99-2.43-5.63-1.02-8.08.7-1.22 1.95-1.99 3.31-2.01 1.03-.02 2.01.7 2.64.7.63 0 1.81-.86 3.06-.73.52.02 1.98.21 2.92 1.59-.08.05-1.74 1.02-1.72 3.05zM14.35 5.04c.56-.68.94-1.62.83-2.56-.81.03-1.79.54-2.37 1.21-.52.6-.98 1.56-.85 2.48.9.07 1.82-.46 2.39-1.13z"/></svg>
+        Download for macOS
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/cuong95nddev/tern/releases">All releases</a>
+    </div>
+    <p class="meta"><span class="js-version">Latest release</span> · Universal (Apple Silicon and Intel) · macOS 12+</p>
+  </header>
+
+  <section class="shot" aria-label="Tern window">
+    <div class="win">
+      <div class="bar">
+        <div class="lights"><b></b><b></b><b></b></div>
+        <div class="ws"><span class="on">tern</span><span>api-server</span><span>dotfiles</span></div>
+      </div>
+      <div class="body">
+        <aside class="side">
+          <h4>Explorer</h4>
+          <div class="tree">
+            <div class="d">▾ crates</div>
+            <div class="d">&nbsp;&nbsp;▾ tern-app</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;▸ assets</div>
+            <div class="d">&nbsp;&nbsp;&nbsp;&nbsp;▾ src</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;changes.rs</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;explorer.rs</div>
+            <div class="sel">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;main_window.rs</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;update.rs</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;Cargo.toml</div>
+            <div>▸ scripts</div>
+            <div>&nbsp;&nbsp;Cargo.toml</div>
+            <div>&nbsp;&nbsp;README.md</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="tabs"><span class="on">claude</span><span>opencode</span><span>main_window.rs</span></div>
+          <div class="term">
+            <p><span class="p">~/ws/tern $</span> <span class="you">claude</span></p>
+            <div class="gap"></div>
+            <p class="you">&gt; check for updates at launch and show them in the workspace bar</p>
+            <div class="gap"></div>
+            <p><span class="dot">⏺</span> <span class="tool">Read</span> <span class="mut">crates/tern-app/src/main_window.rs</span></p>
+            <p><span class="dot">⏺</span> <span class="tool">Write</span> <span class="mut">crates/tern-app/src/update.rs</span></p>
+            <p><span class="dot">⏺</span> <span class="tool">Update</span> <span class="mut">main_window.rs  +18 −1</span></p>
+            <p><span class="dot">⏺</span> <span class="tool">Bash</span> <span class="mut">cargo check -p tern-app</span></p>
+            <p class="mut">  ⎿ Finished `dev` profile in 5.01s</p>
+            <div class="gap"></div>
+            <p>Tern now checks the latest release at launch and every 6 hours, and shows <span class="you">Update to x.y.z</span> in the workspace bar.</p>
+            <div class="gap"></div>
+            <p class="you">&gt; <span class="cursor"></span></p>
+          </div>
+        </div>
+        <aside class="changes">
+          <h4>Changes</h4>
+          <div class="repo">tern</div>
+          <div class="file"><span>update.rs</span><em class="a">+212</em></div>
+          <div class="file"><span>main_window.rs</span><em><span class="a">+18</span> <span class="r">−1</span></em></div>
+          <div class="file"><span>main.rs</span><em><span class="a">+16</span> <span class="r">−4</span></em></div>
+          <div class="file"><span>release.yml</span><em><span class="a">+10</span> <span class="r">−1</span></em></div>
+          <div class="sp"></div>
+          <div class="repo">api-server</div>
+          <div class="file"><span>routes.ts</span><em><span class="a">+4</span> <span class="r">−9</span></em></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div>
+      <h3>Agents next to your code</h3>
+      <p>Agent and shell tabs share a window with a file explorer and a viewer that edits, diffs against HEAD and renders Markdown.</p>
+    </div>
+    <div>
+      <h3>Every repo's changes</h3>
+      <p>The Changes panel lists what changed in every git repo under the folder. Click a file to preview its diff.</p>
+    </div>
+    <div>
+      <h3>Picks up where you left off</h3>
+      <p>Windows, workspaces and tabs come back on launch. Updates install in place and restore the session.</p>
+    </div>
+  </section>
+
+  <section class="keys" id="keys">
+    <div>
+      <h2>Kept on the keyboard</h2>
+      <p>Every panel has a shortcut. The full list is in the README.</p>
+    </div>
+    <ul class="klist">
+      <li><span>New Claude tab</span><kbd>⌘T</kbd></li>
+      <li><span>Open a folder as a workspace</span><kbd>⌘O</kbd></li>
+      <li><span>Toggle explorer</span><kbd>⌘B</kbd></li>
+      <li><span>Toggle Changes panel</span><kbd>⌘⇧G</kbd></li>
+      <li><span>Diff the open file against HEAD</span><kbd>⌘⇧D</kbd></li>
+      <li><span>Open the file in VS Code or Cursor</span><kbd>⌘⇧O</kbd></li>
+    </ul>
+  </section>
+
+  <section class="end">
+    <h2>Try Tern on your next session</h2>
+    <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest">Download for macOS</a>
+    <div>
+      <pre class="cli"><span># optional: open folders from the shell</span>
+<b>tern</b> ~/code/my-project</pre>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Tern</span>
+    <a href="https://github.com/cuong95nddev/tern">github.com/cuong95nddev/tern</a>
+  </div>
+</footer>
+
+<script>
+  // Point the download buttons straight at the latest DMG; the release page stays as the fallback.
+  fetch("https://api.github.com/repos/cuong95nddev/tern/releases/latest")
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(rel => {
+      const dmg = (rel.assets || []).find(a => a.name.endsWith(".dmg"));
+      if (dmg) document.querySelectorAll(".js-download").forEach(a => a.href = dmg.browser_download_url);
+      if (rel.tag_name) document.querySelector(".js-version").textContent = rel.tag_name;
+    })
+    .catch(() => {});
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[package]
+name = "tern-fs"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+ignore = "0.4.33"
+notify = "8.2.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

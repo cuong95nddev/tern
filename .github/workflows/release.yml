@@ -1,0 +1,125 @@
+# Push a tag like v0.1.0 to build a universal macOS DMG and publish it as a
+# GitHub release (the tag must match the version in Cargo.toml).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    # macOS 26: Xcode 26's actool crashes on macOS 15 (its asset agent dies
+    # on a missing AVFCore symbol) when compiling the Icon Composer icon.
+    runs-on: macos-26
+    steps:
+      # Fail before the long build rather than at publish: without the token
+      # the release would fall back to github.token, which cannot write there.
+      - name: Check release repo settings
+        env:
+          RELEASE_REPO: ${{ vars.RELEASE_REPO }}
+          HAS_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
+        run: |
+          if [ -n "$RELEASE_REPO" ] && [ "$HAS_TOKEN" != true ]; then
+            echo "::error::RELEASE_REPO is $RELEASE_REPO but the RELEASE_TOKEN secret is missing"; exit 1
+          fi
+          echo "Releases and update checks: ${RELEASE_REPO:-$GITHUB_REPOSITORY}"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
+      # Signing and notarization run only when the secrets are set (see
+      # README); without them the DMG holds an ad-hoc signed app.
+      - name: Import signing certificate and notary key
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          [ -n "$CERT_P12" ] || { echo "no signing secrets: ad-hoc build"; exit 0; }
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KC_PASS=$(openssl rand -hex 16)
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "TERN_SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_KEY" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            xcrun notarytool store-credentials tern-notary --keychain "$KC" \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+            rm "$RUNNER_TEMP/notary.p8"
+            echo "TERN_NOTARY_PROFILE=tern-notary" >> "$GITHUB_ENV"
+            echo "TERN_NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          fi
+      # Pin actool to the newest Xcode 26 rather than whatever is default, so
+      # the Icon Composer icon compiles (else macOS 26 shows a gray tile).
+      - name: Find Xcode 26 for the app icon
+        run: |
+          x=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this runner"; exit 1; }
+          echo "Compiling the icon with $x"
+          echo "TERN_ICON_XCODE=$x" >> "$GITHUB_ENV"
+      - name: Build DMG
+        id: dmg
+        env:
+          TERN_REQUIRE_ICON: "1"
+          # The repo the app checks for updates (see the publish job).
+          TERN_RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+        # An assignment, not `echo "path=$(…)"`: echo's status would hide
+        # the script failing, leaving the upload an empty path.
+        run: |
+          dmg=$(scripts/release-macos.sh dist)
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tern-macos
+          path: ${{ steps.dmg.outputs.path }}
+
+  publish:
+    needs: macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tern-macos
+          path: dist
+      # With the repository variable RELEASE_REPO (e.g. a public repo, so the
+      # app can check for updates while this one is private) the release is
+      # published there, using RELEASE_TOKEN: a fine-grained token with
+      # Contents read/write on that repo.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          repository: ${{ vars.RELEASE_REPO || github.repository }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          files: dist/*.dmg
+          generate_release_notes: ${{ !vars.RELEASE_REPO }}
+          body: |
+            ## Install (macOS 12+, Apple Silicon and Intel)
+
+            1. Open the DMG and drag **Tern** onto **Applications**.
+            2. Optional `tern` command: put this in `~/.local/bin/tern` and `chmod +x` it:
+               ```sh
+               #!/bin/sh
+               dir=$(cd "${1:-.}" && pwd) || exit 1
+               exec open -a Tern "$dir"
+               ```
