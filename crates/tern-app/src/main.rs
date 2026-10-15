@@ -158,7 +158,9 @@ fn main() {
         .detach();
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
-                cx.quit();
+                // Approved up front: `cx.quit()` terminates from a main-queue
+                // block, where a "later" answer could never come.
+                quit_now(cx);
             } else {
                 // A window closed by the user drops out of the session; the
                 // last one stays, to come back at the next launch.
