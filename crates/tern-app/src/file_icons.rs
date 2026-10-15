@@ -34,6 +34,7 @@ gpui_kit::assets::icon_assets!(
         FolderGit2,
         FolderOpen,
         FolderPlus,
+        GitBranch,
         LayoutGrid,
         StickyNote,
     ]

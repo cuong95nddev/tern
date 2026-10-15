@@ -1716,50 +1716,60 @@ impl Workspace {
 
     fn panel_buttons(&self, cx: &mut Context<Self>) -> Div {
         let ws = cx.entity().downgrade();
+        div().px_1().flex().items_center().gap_0p5().child(
+            Button::new("pane-layout")
+                .xsmall()
+                .ghost()
+                .icon(Icon::new(AssetIcon::LayoutGrid))
+                .selected(self.layout.panes().len() > 1)
+                .tooltip("Pane Layout")
+                .dropdown_menu(move |menu, _, cx| match ws.upgrade() {
+                    Some(this) => Self::pane_layout_items(menu, &ws, this.read(cx)),
+                    None => menu,
+                }),
+        )
+    }
+
+    /// The tool window buttons of one window edge, IntelliJ style: a thin
+    /// column with `top` buttons from the top and `bottom` ones from the
+    /// bottom. Each toggles its panel, so a hidden panel is one click away.
+    fn tool_strip(top: Vec<Button>, bottom: Vec<Button>, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let column = |b: Vec<Button>| div().flex().flex_col().items_center().gap_1().children(b);
         div()
-            .px_1()
+            .w(px(34.))
+            .h_full()
+            .py_1p5()
+            .flex_none()
             .flex()
+            .flex_col()
             .items_center()
-            .gap_0p5()
-            .child(
-                Button::new("pane-layout")
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(AssetIcon::LayoutGrid))
-                    .selected(self.layout.panes().len() > 1)
-                    .tooltip("Pane Layout")
-                    .dropdown_menu(move |menu, _, cx| match ws.upgrade() {
-                        Some(this) => Self::pane_layout_items(menu, &ws, this.read(cx)),
-                        None => menu,
-                    }),
-            )
-            .child(
-                Button::new("toggle-explorer")
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(AssetIcon::PanelLeft))
-                    .selected(self.show_explorer)
-                    .tooltip("Toggle Explorer (⌘B)")
-                    .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx))),
-            )
-            .child(
-                Button::new("toggle-scratches")
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(AssetIcon::StickyNote))
-                    .selected(self.show_scratches)
-                    .tooltip("Toggle Scratches (⌘⇧S)")
-                    .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
-            )
-            .child(
-                Button::new("toggle-changes")
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(AssetIcon::PanelRight))
-                    .selected(self.show_changes)
-                    .tooltip("Toggle Changes (⌘⇧G)")
-                    .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx))),
-            )
+            .justify_between()
+            .bg(theme.title_bar)
+            .child(column(top))
+            .child(column(bottom))
+    }
+
+    fn strip_button(id: &'static str, icon: AssetIcon, on: bool, tooltip: &'static str) -> Button {
+        Button::new(id).small().ghost().icon(Icon::new(icon)).selected(on).tooltip(tooltip)
+    }
+
+    fn left_strip(&self, cx: &mut Context<Self>) -> Div {
+        let top = vec![
+            Self::strip_button("strip-explorer", AssetIcon::Folder, self.show_explorer, "Explorer (⌘B)")
+                .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx))),
+            Self::strip_button("strip-scratches", AssetIcon::StickyNote, self.show_scratches, "Scratches (⌘⇧S)")
+                .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
+        ];
+        Self::tool_strip(top, vec![], cx).border_r_1().border_color(cx.theme().border)
+    }
+
+    fn right_strip(&self, cx: &mut Context<Self>) -> Div {
+        let top = vec![
+            Self::strip_button("strip-changes", AssetIcon::GitBranch, self.show_changes, "Changes (⌘⇧G)")
+                .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx))),
+        ];
+        Self::tool_strip(top, vec![], cx).border_l_1().border_color(cx.theme().border)
     }
 
     /// Where a dragged tab or group goes to the end of pane `pane`, out of any group.
@@ -2650,7 +2660,7 @@ impl Workspace {
     }
 
     /// Pane `pane`'s buttons at the end of its tab strip: split, maximize,
-    /// and, on the top right pane, the side panel toggles.
+    /// and, on the top right pane, the pane layout menu.
     fn pane_buttons(&self, pane: PaneId, cx: &mut Context<Self>) -> Div {
         let multi = self.layout.panes().len() > 1;
         let zoomed = self.zoomed == Some(pane);
@@ -3146,7 +3156,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
         let theme = cx.theme();
-        let (bg, border, muted) = (theme.background, theme.border, theme.muted_foreground);
+        let (bg, border, muted, bar) = (theme.background, theme.border, theme.muted_foreground, theme.title_bar);
         // A drag that ended outside every drop target leaves these behind.
         if !cx.has_active_drag() {
             self.tab_drag = false;
@@ -3177,8 +3187,8 @@ impl Render for Workspace {
             .flex()
             .items_center()
             .gap_4()
-            .border_t_1()
-            .border_color(border)
+            // One frame with the tool strips around the panels.
+            .bg(bar)
             .text_xs()
             .text_color(muted)
             .child(self.root.display().to_string())
@@ -3241,27 +3251,35 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Tab8, w, cx| this.activate_nth(7, w, cx)))
             .on_action(cx.listener(|this, _: &Tab9, w, cx| this.activate_nth(usize::MAX, w, cx)))
             .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("workspace")
-                        .child(
-                            resizable_panel()
-                                .visible(self.show_explorer || self.show_scratches)
-                                // Side panels keep their width; only the center takes freed space.
-                                .flex_none()
-                                .size(px(250.))
-                                .size_range(px(140.)..px(600.))
-                                .child(left),
-                        )
-                        .child(resizable_panel().child(center))
-                        .child(
-                            resizable_panel()
-                                .visible(self.show_changes)
-                                .flex_none()
-                                .size(px(300.))
-                                .size_range(px(180.)..px(700.))
-                                .child(self.changes.clone()),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(self.left_strip(cx))
+                    .child(
+                        div().flex_1().min_w_0().h_full().border_b_1().border_color(border).child(
+                            h_resizable("workspace")
+                                .child(
+                                    resizable_panel()
+                                        .visible(self.show_explorer || self.show_scratches)
+                                        // Side panels keep their width; only the center takes freed space.
+                                        .flex_none()
+                                        .size(px(250.))
+                                        .size_range(px(140.)..px(600.))
+                                        .child(left),
+                                )
+                                .child(resizable_panel().child(center))
+                                .child(
+                                    resizable_panel()
+                                        .visible(self.show_changes)
+                                        .flex_none()
+                                        .size(px(300.))
+                                        .size_range(px(180.)..px(700.))
+                                        .child(self.changes.clone()),
+                                ),
                         ),
-                ),
+                    )
+                    .child(self.right_strip(cx)),
             )
             .child(status)
     }
