@@ -423,6 +423,9 @@ pub struct MainWindow {
     /// Where the window is, for the saved session.
     placement: Option<(String, WindowBounds)>,
     focus: FocusHandle,
+    /// The application menus, drawn by the window off macOS (see `menus`).
+    #[cfg(not(target_os = "macos"))]
+    menu_bar: Entity<gpui_kit::component::menu::AppMenuBar>,
     _subs: Vec<Subscription>,
 }
 
@@ -436,7 +439,7 @@ impl MainWindow {
         // The agent's own menu may have hidden it meanwhile.
         let activation_sub = cx.observe_window_activation(window, |_: &mut Self, window, cx| {
             if window.is_window_active() {
-                crate::set_app_menus(cx);
+                crate::menus::install(cx);
             }
         });
         // The close button asks first when that ends running programs.
@@ -488,6 +491,8 @@ impl MainWindow {
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
+            #[cfg(not(target_os = "macos"))]
+            menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             _subs: vec![bounds_sub, activation_sub],
         }
     }
@@ -968,6 +973,7 @@ impl MainWindow {
 /// (default: the active window, else the first).
 #[cfg(debug_assertions)]
 pub fn control(line: &str, cx: &mut App) -> String {
+    #[cfg(target_os = "macos")]
     if let Some(out) = crate::shot::control(line, cx) {
         return out;
     }
@@ -1022,6 +1028,24 @@ impl Render for MainWindow {
                 .into_any_element(),
             None => self.render_welcome(cx).into_any_element(),
         };
+        #[cfg(not(target_os = "macos"))]
+        let body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(30.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().title_bar)
+                    .child(self.menu_bar.clone()),
+            )
+            .child(div().flex_1().min_h_0().child(body));
         div()
             .id("main-window")
             .key_context("MainWindow")

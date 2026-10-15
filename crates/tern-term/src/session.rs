@@ -237,6 +237,14 @@ pub struct Session {
     tty: std::fs::File,
 }
 
+/// The program as the first word of a Windows command line, which the PTY
+/// leaves unquoted: CreateProcess would try `C:\Program.exe` for an
+/// unquoted `C:\Program Files\PowerShell\7\pwsh.exe`. A path can't hold
+/// a `"`, so quotes are all it needs.
+fn program_word(program: String) -> String {
+    if cfg!(windows) && program.contains([' ', '\t']) && !program.starts_with('"') { format!("\"{program}\"") } else { program }
+}
+
 impl Session {
     pub fn spawn(cfg: SpawnConfig, palette: Palette, sink: EventSink) -> io::Result<Self> {
         let shared =
@@ -259,7 +267,7 @@ impl Session {
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         env.entry("TERM_PROGRAM".into()).or_insert_with(|| "Tern".into());
         let opts = Options {
-            shell: cfg.program.clone().map(|p| Shell::new(p, cfg.args.clone())),
+            shell: cfg.program.clone().map(|p| Shell::new(program_word(p), cfg.args.clone())),
             working_directory: cfg.cwd.clone(),
             drain_on_exit: true,
             env,
@@ -347,6 +355,24 @@ impl Drop for Session {
     fn drop(&mut self) {
         if let Some(s) = self.shared.sender.get() {
             let _ = s.send(Msg::Shutdown);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::program_word;
+
+    #[test]
+    fn program_word_quotes_paths_with_spaces() {
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned();
+        let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned();
+        assert_eq!(program_word(ps.clone()), ps);
+        if cfg!(windows) {
+            assert_eq!(program_word(pwsh.clone()), format!("\"{pwsh}\""));
+            assert_eq!(program_word(format!("\"{pwsh}\"")), format!("\"{pwsh}\""));
+        } else {
+            assert_eq!(program_word(pwsh.clone()), pwsh);
         }
     }
 }

@@ -13,10 +13,12 @@ mod file_tree_view;
 mod handoff;
 mod links;
 mod main_window;
+mod menus;
 mod panes;
 mod platform;
 mod scratch;
 mod scratches_view;
+#[cfg(target_os = "macos")]
 mod shot;
 mod terminal_view;
 #[cfg(target_os = "macos")]
@@ -120,9 +122,10 @@ fn main() {
             })
             .detach();
         }
-        set_app_menus(cx);
+        menus::install(cx);
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
+        #[cfg(target_os = "macos")]
         shot::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
@@ -239,26 +242,6 @@ fn main() {
     });
 }
 
-fn menu_bar_toggle_label(shown: bool) -> &'static str {
-    if shown { "Hide Menu Bar Icon" } else { "Show Menu Bar Icon" }
-}
-
-/// The Tern menu (rebuilt when the menu bar setting may have changed: it
-/// is toggled here, or hidden from the agent's own menu).
-pub fn set_app_menus(cx: &mut App) {
-    let shown = tern_menubar::setting::enabled(&tern_menubar::setting::file());
-    cx.set_menus([Menu::new("Tern").items([
-        MenuItem::action("Check for Updates…", update::CheckForUpdates),
-        MenuItem::action(menu_bar_toggle_label(shown), ToggleMenuBarIcon),
-        MenuItem::separator(),
-        MenuItem::action("Capture Screenshot (⌘⇧2)", shot::CaptureScreenshot),
-        MenuItem::separator(),
-        MenuItem::os_submenu("Services", SystemMenuType::Services),
-        MenuItem::separator(),
-        MenuItem::action("Quit Tern", Quit),
-    ])]);
-}
-
 fn toggle_menu_bar_icon(cx: &mut App) {
     let file = tern_menubar::setting::file();
     let show = !tern_menubar::setting::enabled(&file);
@@ -271,7 +254,7 @@ fn toggle_menu_bar_icon(cx: &mut App) {
     } else {
         tern_menubar::stop()
     }
-    set_app_menus(cx);
+    menus::install(cx);
 }
 
 /// Quit, keeping every open window in the saved session. Programs keep
@@ -390,12 +373,6 @@ mod tests {
         assert_eq!(file_url_path("file:///Users/a/my%20dir/"), Some(PathBuf::from("/Users/a/my dir/")));
         assert_eq!(file_url_path("file://localhost/tmp/x"), Some(PathBuf::from("/tmp/x")));
         assert_eq!(file_url_path("https://x"), None);
-    }
-
-    #[test]
-    fn menu_bar_toggle_label_follows_the_setting() {
-        assert_eq!(super::menu_bar_toggle_label(true), "Hide Menu Bar Icon");
-        assert_eq!(super::menu_bar_toggle_label(false), "Show Menu Bar Icon");
     }
 
     #[test]

@@ -1562,22 +1562,30 @@ fn sanitize_paste(text: &str) -> String {
     text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control())).collect()
 }
 
-/// A path as a shell word: backslash before every char a shell treats
-/// specially, as Ghostty and iTerm2 do for dropped files.
+/// A path as a shell word, for PowerShell (the default shell) and cmd
+/// alike: plain when it holds only safe characters, else double-quoted, as
+/// cmd reads quotes, so `& | < > ^` stay literal there. In PowerShell `$`,
+/// the backtick and the curly double quotes (which it also takes as quotes)
+/// get a backtick, so nothing in a file name expands or ends the string.
 #[cfg(windows)]
 pub(crate) fn escape_path(path: &Path) -> String {
     let s = path.to_string_lossy();
-    // Windows paths can't hold `"`. Single quotes keep PowerShell from
-    // expanding `$` and backticks; else double quotes, which cmd reads too.
-    if s.contains(['$', '`']) {
-        format!("'{}'", s.replace('\'', "''"))
-    } else if s.contains(|c: char| c.is_whitespace() || "&()[]{}^=;!'+,~@%".contains(c)) {
-        format!("\"{s}\"")
-    } else {
-        s.into_owned()
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || "\\/:._-".contains(c)) {
+        return s.into_owned();
     }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if matches!(c, '$' | '`' | '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}') {
+            out.push('`');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
+/// A path as a shell word: backslash before every char a shell treats
+/// specially, as Ghostty and iTerm2 do for dropped files.
 #[cfg(not(windows))]
 pub(crate) fn escape_path(path: &Path) -> String {
     let mut out = String::new();
@@ -1600,7 +1608,8 @@ mod tests {
     fn escapes_dropped_paths() {
         assert_eq!(escape_path(Path::new(r"C:\Users\a\x.png")), r"C:\Users\a\x.png");
         assert_eq!(escape_path(Path::new(r"C:\Users\a\Screen Shot (1).png")), r#""C:\Users\a\Screen Shot (1).png""#);
-        assert_eq!(escape_path(Path::new(r"C:\it's $HOME")), r"'C:\it''s $HOME'");
+        assert_eq!(escape_path(Path::new(r"C:\it's $HOME & x")), r#""C:\it's `$HOME & x""#);
+        assert_eq!(escape_path(Path::new("C:\\a\u{201d};calc;`.png")), "\"C:\\a`\u{201d};calc;``.png\"");
     }
 
     #[test]

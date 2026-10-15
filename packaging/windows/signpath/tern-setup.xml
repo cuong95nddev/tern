@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "tern-setup": the Inno Setup installer
+     (which packs the already signed tern.exe), as the release workflow
+     uploads it. Keep in sync with the copy in SignPath. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="Tern-${version}-windows-x64-setup.exe" product-name="Tern" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

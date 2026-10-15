@@ -222,7 +222,11 @@ pub fn diff_vs_head(path: &Path) -> Option<String> {
     }
     // Untracked (or no HEAD yet): show the whole file as added. Relative to
     // the repo so the patch header names `dir/file`, not an absolute path.
-    let rel = path.strip_prefix(root).unwrap_or(path);
+    // With `/` separators: git takes a Windows `\` as part of the name.
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/").into(),
+        Err(_) => path.as_os_str().to_owned(),
+    };
     let out = git(root).args(base).args(["--no-index", "--", "/dev/null"]).arg(rel).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     (!text.is_empty()).then_some(text)

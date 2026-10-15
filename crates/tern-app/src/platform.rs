@@ -127,16 +127,26 @@ fn shortcut_one(label: &str) -> String {
 }
 
 /// The shell terminals run: `$SHELL` on Unix; on Windows PowerShell 7
-/// (`pwsh`) when installed, else Windows PowerShell.
+/// (`pwsh`) when installed, else Windows PowerShell. On Windows always a full
+/// path: CreateProcess looks for a bare name in Tern's current folder first,
+/// which may be an untrusted project.
 pub fn shell() -> String {
     if cfg!(windows) {
-        let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file()));
-        return if on_path { "pwsh.exe" } else { "powershell.exe" }.to_owned();
+        let pwsh = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("pwsh.exe")).find(|p| p.is_file())
+        });
+        return pwsh.unwrap_or_else(windows_powershell).to_string_lossy().into_owned();
     }
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_owned())
+}
+
+/// Windows PowerShell, which every Windows 10+ has.
+pub fn windows_powershell() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    root.unwrap_or_else(|| r"C:\Windows".into()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
 /// Arguments for an interactive shell: a login shell on Unix.
@@ -148,30 +158,15 @@ pub fn shell_args() -> Vec<String> {
 /// of an interactive session, keeping its exit status.
 pub fn shell_command_args(command: &str) -> Vec<String> {
     if cfg!(windows) {
-        // -EncodedCommand takes the script as base64 UTF-16LE, so no command
-        // line quoting rules get in the way.
-        vec!["-NoLogo".to_owned(), "-EncodedCommand".to_owned(), encode_powershell(&format!("& {command}; exit $LASTEXITCODE"))]
+        // The script as one plain argument: the PTY quotes it by the C
+        // runtime's rules, which PowerShell undoes. Never -EncodedCommand:
+        // antivirus software takes an unsigned app running base64
+        // PowerShell for malware and quarantines Tern (see
+        // `windows_command_is_plain`).
+        vec!["-NoLogo".to_owned(), "-Command".to_owned(), format!("& {command}; exit $LASTEXITCODE")]
     } else {
         vec!["-lic".to_owned(), format!("exec {command}")]
     }
-}
-
-/// `script` as PowerShell's `-EncodedCommand` wants it: base64 of UTF-16LE.
-pub fn encode_powershell(script: &str) -> String {
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    base64(&utf16)
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
-        for i in 0..4 {
-            out.push(if i <= chunk.len() { ABC[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
 }
 
 /// The terminal font: Menlo on macOS; on Windows Cascadia Mono when installed
@@ -193,7 +188,9 @@ pub fn terminal_font(cx: &App) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, shortcut_one, translate};
+    #[cfg(windows)]
+    use super::shell_command_args;
+    use super::{shortcut_one, translate};
 
     #[test]
     fn translates_shortcuts() {
@@ -213,13 +210,31 @@ mod tests {
         assert_eq!(translate("cmd-t", None, true), "cmd-t");
     }
 
+    /// A plain script, not the encoded one antivirus software flags
+    /// (Bitdefender quarantined Tern 0.2.0 for it).
     #[test]
-    fn encodes_base64() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    #[cfg(windows)]
+    fn windows_command_is_plain() {
+        let args = shell_command_args("claude");
+        assert_eq!(args, ["-NoLogo", "-Command", "& claude; exit $LASTEXITCODE"]);
+    }
+
+    /// The script reaches PowerShell intact (quotes, `$`, spaces) and its
+    /// exit status comes back, as the PTY passes it with the same quoting
+    /// rules as `Command`.
+    #[test]
+    #[cfg(windows)]
+    fn powershell_runs_the_command_as_written() {
+        let ps = super::windows_powershell();
+        let out = std::process::Command::new(&ps)
+            .arg("-NoProfile")
+            .args(shell_command_args(r#"Write-Output 'a b' "c`$d" 'it''s' "e ""f""" ; cmd /c exit 3"#))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines, ["a b", "c$d", "it's", r#"e "f""#], "{text}");
+        assert_eq!(out.status.code(), Some(3));
     }
 
     #[test]

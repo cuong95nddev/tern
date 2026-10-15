@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "tern-exe": tern.exe, as the release
+     workflow uploads it (a GitHub artifact is a zip). Keep in sync with the
+     copy in SignPath; the workflow passes `version` (Cargo.toml's). -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="tern.exe" product-name="Tern" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

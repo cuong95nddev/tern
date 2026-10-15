@@ -7,6 +7,10 @@
 #ifndef Version
   #error Pass /DVersion=X.Y.Z
 #endif
+; Version info is numbers only: 0.2.1 for 0.2.1-rc1.
+#ifndef NumVersion
+  #define NumVersion Version
+#endif
 #ifndef StageDir
   #error Pass /DStageDir=<folder with tern.exe>
 #endif
@@ -19,6 +23,12 @@ AppId={{6F1C2B57-7E0A-4C8B-9B1E-3D5A2C9F4E61}
 AppName=Tern
 AppVersion={#Version}
 AppVerName=Tern {#Version}
+; Product name and version on setup.exe too (code signing checks them).
+VersionInfoVersion={#NumVersion}
+VersionInfoProductName=Tern
+VersionInfoProductTextVersion={#Version}
+VersionInfoCompany=Tern
+VersionInfoDescription=Tern Setup
 AppPublisher=Tern
 AppPublisherURL=https://github.com/cuong95nddev/tern
 AppSupportURL=https://github.com/cuong95nddev/tern/issues
@@ -71,10 +81,49 @@ Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Tern\command"; V
 
 [Run]
 Filename: "{app}\tern.exe"; Description: "{cm:LaunchProgram,Tern}"; Flags: nowait postinstall skipifsilent
+; Tern's own updater (/UPDATE): start the new Tern once installed.
+Filename: "{app}\tern.exe"; Flags: nowait runasoriginaluser; Check: IsUpdate
 
 [Code]
 const
   EnvKey = 'Environment';
+  SYNCHRONIZE = $00100000;
+
+function OpenProcess(Access: Cardinal; Inherit: Integer; Pid: Cardinal): Cardinal;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: Cardinal; Milliseconds: Cardinal): Cardinal;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: Cardinal): Integer;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+{ Started by Tern's updater: /UPDATE /WAITPID=<Tern's process id>. }
+function IsUpdate: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/UPDATE') = 0 then
+      Result := True;
+end;
+
+{ The updater starts this installer and quits: wait (up to a minute) for
+  that Tern to exit before replacing its files. }
+function InitializeSetup: Boolean;
+var
+  Pid, Handle: Cardinal;
+begin
+  Result := True;
+  Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
+  if Pid = 0 then
+    exit;
+  Handle := OpenProcess(SYNCHRONIZE, 0, Pid);
+  if Handle <> 0 then
+  begin
+    WaitForSingleObject(Handle, 60000);
+    CloseHandle(Handle);
+  end;
+end;
 
 function PathHas(Paths, Dir: string): Boolean;
 begin

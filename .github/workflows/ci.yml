@@ -26,6 +26,39 @@ jobs:
       - name: Install GPUI build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y $(cat packaging/linux/build-deps.txt)
+      # Antivirus software quarantines an unsigned app that runs encoded or
+      # hidden PowerShell (Bitdefender did, with Tern 0.2.0): keep it out.
+      - name: No encoded or hidden PowerShell
+        if: runner.os == 'Linux'
+        run: |
+          if grep -rniE '"-e(c|n|nc|ncodedcommand)?"|"hidden"|FromBase64String' crates packaging scripts; then
+            echo "::error::encoded or hidden PowerShell: antivirus software flags it (see platform::shell_command_args)"
+            exit 1
+          fi
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+      # Every crate's tests, each failure also as an annotation.
+      - name: cargo test
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          grep -E "^test .* FAILED$|panicked at" test.log | head -40 | sed 's/^/::error::/'
+          grep -A3 "panicked at" test.log | grep -vE "panicked at|^--$|RUST_BACKTRACE" | head -40 | sed 's/^/::error::/'
+          exit $status
+      # The installer script compiles (its [Code] waits for Tern to quit on
+      # an update); a stand-in exe, as building the release one takes long.
+      - name: Compile the installer script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          $stage = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "iss-stage")
+          Set-Content -Path (Join-Path $stage "tern.exe") -Value ""
+          & $iscc /Q "/DVersion=0.0.0" "/DStageDir=$stage" "/DOutputDir=$env:RUNNER_TEMP" packaging\windows\tern.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
