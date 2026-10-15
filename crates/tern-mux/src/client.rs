@@ -289,15 +289,20 @@ impl Connector {
 
 /// Start the daemon from this executable, detached from us.
 fn spawn() -> io::Result<()> {
+    spawn_detached(&["--server"], log_file().as_deref())
+}
+
+/// Run this executable with `args` in its own session (it outlives us;
+/// nobody waits for it), output appended to `log`.
+pub fn spawn_detached(args: &[&str], log: Option<&Path>) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
-    let log = log_file();
-    let (out, err) = match log.as_ref().and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()) {
+    let (out, err) = match log.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()) {
         Some(f) => (std::process::Stdio::from(f.try_clone()?), std::process::Stdio::from(f)),
         None => (std::process::Stdio::null(), std::process::Stdio::null()),
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--server").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    cmd.args(args).stdin(std::process::Stdio::null()).stdout(out).stderr(err);
     if std::env::var_os("RUST_LOG").is_none() {
         cmd.env("RUST_LOG", "info");
     }
@@ -308,16 +313,20 @@ fn spawn() -> io::Result<()> {
             Ok(())
         });
     }
-    // The daemon outlives us; nobody waits for it (it is reparented).
     cmd.spawn().map(drop)
 }
 
-/// `~/Library/Logs/Tern/daemon.log` (`daemon-dev.log` for debug builds).
-pub fn log_file() -> Option<PathBuf> {
+/// `~/Library/Logs/Tern/<name>.log` (`<name>-dev.log` for debug builds).
+pub fn log_path(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let dir = PathBuf::from(home).join("Library/Logs/Tern");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(if cfg!(debug_assertions) { "daemon-dev.log" } else { "daemon.log" }))
+    Some(dir.join(if cfg!(debug_assertions) { format!("{name}-dev.log") } else { format!("{name}.log") }))
+}
+
+/// The daemon's log.
+pub fn log_file() -> Option<PathBuf> {
+    log_path("daemon")
 }
 
 fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {

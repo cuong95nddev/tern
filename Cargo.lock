@@ -6519,6 +6519,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-menubar"
+version = "0.1.2"
+dependencies = [
+ "libc",
+ "log",
+ "semver",
+ "tempfile",
+ "tern-mux",
+ "tern-term",
+]
+
+[[package]]
 name = "tern-mux"
 version = "0.1.0"
 dependencies = [
