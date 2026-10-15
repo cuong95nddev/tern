@@ -10,10 +10,10 @@
 //! On Windows it downloads the release's installer, checks its Authenticode
 //! certificate against the thumbprints in `TERN_WINDOWS_SIGNER` (set at build
 //! time; without them Tern
-//! only points to the release page) and, once Tern quits, runs it silently
-//! over the installed copy and starts Tern again (the system's `curl.exe`
-//! and PowerShell). On Linux Tern only points to the
-//! release page.
+//! only points to the release page) and starts it: once Tern quits it
+//! installs silently over the installed copy and starts Tern again (the
+//! system's `curl.exe`, and PowerShell for the signature). On Linux Tern
+//! only points to the release page.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,6 +73,8 @@ pub fn offered(cx: &App) -> Option<(Release, bool)> {
 pub fn init(cx: &mut App) {
     cx.set_global(Updater::default());
     cx.on_action(|_: &CheckForUpdates, cx| check(true, cx));
+    #[cfg(windows)]
+    sweep_staged();
     // Only an installed app checks by itself, not `cargo run`.
     if installation().is_some() && std::env::var_os("TERN_NO_UPDATE_CHECK").is_none() {
         cx.spawn(async move |cx| {
@@ -368,6 +370,18 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
+/// Drop the folders earlier updates downloaded their installer to (the
+/// installer can't delete itself); one still in use stays.
+#[cfg(windows)]
+fn sweep_staged() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with("tern-update-") && e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Download the installer into a fresh temporary folder; returns its path.
 #[cfg(windows)]
 fn stage(url: &str, _install_dir: &Path) -> Result<PathBuf, String> {
@@ -390,13 +404,15 @@ fn verify_signature(file: &Path) -> Result<(), String> {
     if WINDOWS_SIGNER.is_empty() {
         return Err("this Tern can't verify installers: download the update from the release page.".to_owned());
     }
+    // A plain -Command (never -EncodedCommand, which antivirus software
+    // flags) without double quotes, so the C runtime's quoting has nothing
+    // to escape; a path can't hold a `"`.
     let script = format!(
-        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; \"$($s.Status)`n$($s.SignerCertificate.Thumbprint)\"",
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; $s.Status.ToString(); $s.SignerCertificate.Thumbprint",
         file.to_string_lossy().replace('\'', "''")
     );
     let out = command(crate::platform::windows_powershell())
-        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
-        .arg(crate::platform::encode_powershell(&script))
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| format!("powershell: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -413,29 +429,19 @@ fn verify_signature(file: &Path) -> Result<(), String> {
     }
 }
 
-/// Start a hidden PowerShell that waits for this process to exit, runs the
-/// installer silently over `install_dir` and starts the new Tern.
+/// Start the installer, which waits for this process to exit, installs
+/// silently over the installed copy and starts the new Tern (`/UPDATE` and
+/// `/WAITPID` in packaging/windows/tern.iss). Nothing in between: a hidden
+/// PowerShell started by an unsigned app is what antivirus software flags.
 #[cfg(windows)]
-fn relaunch_after_exit(setup: &Path, install_dir: &Path) -> Result<(), String> {
+fn relaunch_after_exit(setup: &Path, _install_dir: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    let q = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
-    let script = format!(
-        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue\n\
-         Start-Process -FilePath {setup} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait\n\
-         Remove-Item -LiteralPath {dir} -Recurse -Force -ErrorAction SilentlyContinue\n\
-         Start-Process -FilePath {exe}",
-        pid = std::process::id(),
-        setup = q(setup),
-        dir = q(setup.parent().unwrap_or(setup)),
-        exe = q(&install_dir.join("tern.exe")),
-    );
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new(crate::platform::windows_powershell())
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand"])
-        .arg(crate::platform::encode_powershell(&script))
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+    Command::new(setup)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"])
+        .arg(format!("/WAITPID={}", std::process::id()))
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
