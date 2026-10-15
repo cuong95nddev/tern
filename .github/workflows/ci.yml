@@ -28,4 +28,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y $(cat packaging/linux/build-deps.txt)
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+      # Every crate's tests, each failure also as an annotation.
+      - name: cargo test
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          grep -E "^test .* FAILED$|panicked at" test.log | head -40 | sed 's/^/::error::/'
+          grep -A3 "panicked at" test.log | grep -vE "panicked at|^--$|RUST_BACKTRACE" | head -40 | sed 's/^/::error::/'
+          exit $status
