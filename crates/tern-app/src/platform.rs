@@ -127,16 +127,26 @@ fn shortcut_one(label: &str) -> String {
 }
 
 /// The shell terminals run: `$SHELL` on Unix; on Windows PowerShell 7
-/// (`pwsh`) when installed, else Windows PowerShell.
+/// (`pwsh`) when installed, else Windows PowerShell. On Windows always a full
+/// path: CreateProcess looks for a bare name in Tern's current folder first,
+/// which may be an untrusted project.
 pub fn shell() -> String {
     if cfg!(windows) {
-        let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file()));
-        return if on_path { "pwsh.exe" } else { "powershell.exe" }.to_owned();
+        let pwsh = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("pwsh.exe")).find(|p| p.is_file())
+        });
+        return pwsh.unwrap_or_else(windows_powershell).to_string_lossy().into_owned();
     }
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_owned())
+}
+
+/// Windows PowerShell, which every Windows 10+ has.
+pub fn windows_powershell() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    root.unwrap_or_else(|| r"C:\Windows".into()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
 /// Arguments for an interactive shell: a login shell on Unix.

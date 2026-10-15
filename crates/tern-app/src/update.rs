@@ -8,7 +8,8 @@
 //! `curl`, `hdiutil`, `ditto` and `codesign`.
 //!
 //! On Windows it downloads the release's installer, checks its Authenticode
-//! signer against `TERN_WINDOWS_SIGNER` (set at build time; without it Tern
+//! certificate against the thumbprints in `TERN_WINDOWS_SIGNER` (set at build
+//! time; without them Tern
 //! only points to the release page) and, once Tern quits, runs it silently
 //! over the installed copy and starts Tern again (the system's `curl.exe`
 //! and PowerShell). On Linux Tern only points to the
@@ -186,9 +187,10 @@ fn prompt(level: PromptLevel, msg: &str, detail: &str, answers: &[&str], cx: &mu
     window.update(cx, |_, window, cx| window.prompt(level, msg, Some(detail), answers, cx)).ok()
 }
 
-/// The Authenticode subject the Windows installer must be signed by (e.g.
-/// `CN=Example Ltd, O=Example Ltd, C=VN`), set at build time. Without it
-/// Tern can't verify a downloaded installer, so it doesn't run one.
+/// SHA-1 thumbprints (comma separated, as `Get-AuthenticodeSignature` shows
+/// them) of the certificates the Windows installer may be signed with, set
+/// at build time. Without them Tern can't verify a downloaded installer, so
+/// it doesn't run one.
 const WINDOWS_SIGNER: &str = match option_env!("TERN_WINDOWS_SIGNER") {
     Some(s) => s,
     None => "",
@@ -381,17 +383,18 @@ fn stage(url: &str, _install_dir: &Path) -> Result<PathBuf, String> {
     Ok(setup)
 }
 
-/// Require a valid Authenticode signature by `WINDOWS_SIGNER` on `file`.
+/// Require a valid Authenticode signature on `file` by one of the
+/// certificates in `WINDOWS_SIGNER`.
 #[cfg(windows)]
 fn verify_signature(file: &Path) -> Result<(), String> {
     if WINDOWS_SIGNER.is_empty() {
         return Err("this Tern can't verify installers: download the update from the release page.".to_owned());
     }
     let script = format!(
-        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; \"$($s.Status)`n$($s.SignerCertificate.Subject)\"",
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; \"$($s.Status)`n$($s.SignerCertificate.Thumbprint)\"",
         file.to_string_lossy().replace('\'', "''")
     );
-    let out = command("powershell.exe")
+    let out = command(crate::platform::windows_powershell())
         .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
         .arg(crate::platform::encode_powershell(&script))
         .output()
@@ -399,11 +402,13 @@ fn verify_signature(file: &Path) -> Result<(), String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     match (lines.next(), lines.next()) {
-        (Some("Valid"), Some(subject)) if subject == WINDOWS_SIGNER => Ok(()),
-        (status, subject) => Err(format!(
-            "the downloaded installer isn't signed by {WINDOWS_SIGNER} (status {}, signer {})",
+        (Some("Valid"), Some(thumb)) if !thumb.is_empty() && WINDOWS_SIGNER.split(',').any(|t| t.trim().eq_ignore_ascii_case(thumb)) => {
+            Ok(())
+        },
+        (status, thumb) => Err(format!(
+            "the downloaded installer isn't signed by Tern's certificate (status {}, signer {})",
             status.unwrap_or("unknown"),
-            subject.filter(|s| !s.is_empty()).unwrap_or("none")
+            thumb.filter(|s| !s.is_empty()).unwrap_or("none")
         )),
     }
 }
@@ -427,7 +432,7 @@ fn relaunch_after_exit(setup: &Path, install_dir: &Path) -> Result<(), String> {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("powershell.exe")
+    Command::new(crate::platform::windows_powershell())
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand"])
         .arg(crate::platform::encode_powershell(&script))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)

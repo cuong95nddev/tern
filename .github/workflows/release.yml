@@ -116,8 +116,8 @@ jobs:
         id: setup
         env:
           TERN_RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
-          # The installer's Authenticode subject; Tern installs updates only
-          # when it's set (and the installer is signed by it).
+          # Thumbprints of the installer's signing certificates; Tern installs
+          # updates only when set (and the installer is signed by one).
           TERN_WINDOWS_SIGNER: ${{ vars.WINDOWS_SIGNER }}
         run: |
           $setup = scripts/release-windows.ps1 -OutDir dist

@@ -130,8 +130,8 @@ The workflow signs with Developer ID and notarizes when these repository secrets
 
 The app finds the latest release anonymously from github.com's `/releases/latest` redirect (not the rate-limited REST API)
 and expects each platform's file named as the release scripts name them. On Windows, Tern installs an update itself only
-when built with `TERN_WINDOWS_SIGNER` (repository variable `WINDOWS_SIGNER`: the code-signing certificate's subject) and the
-downloaded installer carries a valid Authenticode signature from it; the installer isn't signed yet, so until then Windows
+when built with `TERN_WINDOWS_SIGNER` (repository variable `WINDOWS_SIGNER`: the code-signing certificates' SHA-1 thumbprints, comma separated) and the
+downloaded installer carries a valid Authenticode signature from one of them; the installer isn't signed yet, so until then Windows
 users get the release page. To publish releases to another repo, set the repository
 variable `RELEASE_REPO` and the secret `RELEASE_TOKEN` (a fine-grained token with Contents read/write on it).
 
