@@ -41,7 +41,7 @@ const MAX_CLIPBOARD_STORE: usize = 16 << 20;
 
 pub type EventSink = Arc<dyn Fn(TermEvent) + Send + Sync>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TermSize {
     pub cols: u16,
     pub rows: u16,

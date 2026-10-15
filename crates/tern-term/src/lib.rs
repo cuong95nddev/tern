@@ -7,6 +7,7 @@ pub mod osc;
 pub mod palette;
 pub mod procs;
 pub mod session;
+pub mod snapshot;
 pub mod status;
 
 pub use alacritty_terminal as vt;
