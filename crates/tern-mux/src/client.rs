@@ -20,7 +20,7 @@ use tern_term::vt::sync::FairMutex;
 use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// Gets each hook request: the tab's token and the JSON body.
 pub type HookSink = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
@@ -142,7 +142,10 @@ impl MuxClient {
         // A daemon that accepts but never answers mustn't hang the UI.
         stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
         let mut writer = stream.try_clone()?;
-        proto::write_frame(&mut writer, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into() })?;
+        proto::write_frame(
+            &mut writer,
+            &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), role: Role::Ui },
+        )?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
         let (server_pid, server_version) = match reader.read::<ServerMsg>()? {
             Some(ServerMsg::Hello { major, pid, app_version, .. }) if major == MAJOR => {
@@ -324,6 +327,8 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
         };
         match msg {
             ServerMsg::Hello { .. } => {},
+            // Observer messages (Task 2 handles `Reveal`).
+            ServerMsg::SessionsChanged { .. } | ServerMsg::Reveal { .. } | ServerMsg::Revealed { .. } => {},
             ServerMsg::Attached { req, id, token, pid: _, fd, snapshot } => {
                 let tty = if fd { reader.take_fd().map(File::from) } else { None };
                 let Some(slot) = inner.pending.lock().unwrap().remove(&req) else { continue };

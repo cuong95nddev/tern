@@ -2,7 +2,8 @@
 //!
 //! A frame is a little-endian `u32` length followed by a msgpack message
 //! (struct fields by name, so fields can be added). The first message each
-//! way is `Hello`. A message of a kind the receiver doesn't know is skipped,
+//! way is `Hello`; a client says whether it is a UI or an observer (the menu
+//! bar agent). A message of a kind the receiver doesn't know is skipped,
 //! so a minor version can add kinds; the major is part of the socket name,
 //! so incompatible versions never talk.
 
@@ -16,12 +17,23 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
+use tern_term::status::ActivityStatus;
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::fdpass;
 
 pub const MAJOR: u32 = 1;
-pub const MINOR: u32 = 0;
+pub const MINOR: u32 = 1;
+
+/// What a client is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// Tern's UI (a MINOR 0 client is one).
+    #[default]
+    Ui,
+    /// The menu bar agent: watches and asks, doesn't keep the daemon alive.
+    Observer,
+}
 
 /// Largest frame the daemon accepts (a big paste fits).
 pub const MAX_CLIENT_FRAME: usize = 16 << 20;
@@ -34,6 +46,8 @@ pub enum ClientMsg {
         major: u32,
         minor: u32,
         app_version: String,
+        #[serde(default)]
+        role: Role,
     },
     /// Start a program and attach to it. With `hook`, the daemon gives it a
     /// hook token and replaces `{tern-settings}` in its args with the path of
@@ -65,6 +79,14 @@ pub enum ClientMsg {
     },
     List {
         req: u64,
+    },
+    /// From now on send `SessionsChanged` whenever the list changes (and
+    /// once now).
+    Watch,
+    /// Ask the UI to show session `id`; answered by `Revealed`.
+    Reveal {
+        req: u64,
+        id: u64,
     },
 }
 
@@ -116,15 +138,42 @@ pub enum ServerMsg {
         req: u64,
         list: Vec<SessionInfo>,
     },
+    /// The session list, for a `Watch`er.
+    SessionsChanged {
+        list: Vec<SessionInfo>,
+    },
+    /// Show session `id` (asked by an observer).
+    Reveal {
+        id: u64,
+    },
+    /// `delivered`: a UI got the `Reveal`.
+    Revealed {
+        req: u64,
+        delivered: bool,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: u64,
     pub pid: u32,
     pub exited: bool,
     pub cwd: Option<PathBuf>,
     pub title: Option<String>,
+    #[serde(default)]
+    pub status: ActivityStatus,
+    /// Some UI connection shows it.
+    #[serde(default)]
+    pub attached: bool,
+    /// The first foreground program (for a label when there is no title).
+    #[serde(default)]
+    pub program: Option<String>,
+    /// Spawned with a hook token (a Claude tab).
+    #[serde(default)]
+    pub claude: bool,
+    /// `session_id` of its latest Claude hook event.
+    #[serde(default)]
+    pub claude_session: Option<String>,
 }
 
 /// A snapshot as sent: positional msgpack (cells are most of it; field names
@@ -252,7 +301,7 @@ mod tests {
     #[test]
     fn client_messages_round_trip() {
         let msgs = vec![
-            ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into() },
+            ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into(), role: Role::Ui },
             ClientMsg::Spawn { req: 1, cfg: cfg(), hook: true },
             ClientMsg::Attach { req: 2, id: 7, size: SIZE },
             ClientMsg::Detach { id: 7 },
@@ -344,5 +393,94 @@ mod tests {
         let mut pipe_r = pipe_r;
         pipe_r.read_to_string(&mut got).unwrap();
         assert_eq!(got, "through");
+    }
+
+    #[test]
+    fn minor_1_messages_round_trip() {
+        let msgs = vec![
+            ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into(), role: Role::Observer },
+            ClientMsg::Watch,
+            ClientMsg::Reveal { req: 3, id: 9 },
+        ];
+        let mut buf = vec![];
+        for m in &msgs {
+            write_frame(&mut buf, m).unwrap();
+        }
+        let mut r = Cursor::new(buf);
+        for m in &msgs {
+            assert_eq!(&read_frame::<ClientMsg>(&mut r, MAX_CLIENT_FRAME).unwrap().unwrap(), m);
+        }
+        let info = SessionInfo {
+            id: 1,
+            status: ActivityStatus::Blocked,
+            attached: true,
+            claude: true,
+            claude_session: Some("s".into()),
+            ..Default::default()
+        };
+        let mut buf = vec![];
+        write_frame(&mut buf, &ServerMsg::SessionsChanged { list: vec![info.clone()] }).unwrap();
+        write_frame(&mut buf, &ServerMsg::Revealed { req: 3, delivered: true }).unwrap();
+        let mut r = Cursor::new(buf);
+        assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::SessionsChanged { list }) if list == vec![info]));
+        assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Revealed { req: 3, delivered: true })));
+    }
+
+    /// What a MINOR 0 peer sent and parsed.
+    mod v0 {
+        use serde::{Deserialize, Serialize};
+        use std::path::PathBuf;
+        #[derive(Serialize)]
+        pub enum ClientMsg {
+            Hello { major: u32, minor: u32, app_version: String },
+        }
+        #[derive(Serialize, Deserialize, Debug)]
+        pub struct SessionInfo {
+            pub id: u64,
+            pub pid: u32,
+            pub exited: bool,
+            pub cwd: Option<PathBuf>,
+            pub title: Option<String>,
+        }
+        #[derive(Deserialize, Debug)]
+        pub enum ServerMsg {
+            Sessions { req: u64, list: Vec<SessionInfo> },
+        }
+        /// `ServerMsg::Sessions` as a MINOR 0 daemon encoded it.
+        #[derive(Serialize)]
+        pub enum ServerMsgOut {
+            Sessions { req: u64, list: Vec<SessionInfo> },
+        }
+    }
+
+    #[test]
+    fn minor_0_peers_still_talk() {
+        // An old UI's Hello reads as a UI.
+        let mut buf = vec![];
+        write_frame(&mut buf, &v0::ClientMsg::Hello { major: 1, minor: 0, app_version: "0.1.1".into() }).unwrap();
+        let got = read_frame::<ClientMsg>(&mut Cursor::new(buf), MAX_CLIENT_FRAME).unwrap().unwrap();
+        assert!(matches!(got, ClientMsg::Hello { role: Role::Ui, .. }));
+        // An old daemon's list reads with defaults.
+        let mut buf = vec![];
+        let old = v0::SessionInfo { id: 4, pid: 5, exited: false, cwd: None, title: Some("t".into()) };
+        write_frame(&mut buf, &v0::ServerMsgOut::Sessions { req: 1, list: vec![old] }).unwrap();
+        let got = read_frame::<ServerMsg>(&mut Cursor::new(buf), MAX_SERVER_FRAME).unwrap().unwrap();
+        let ServerMsg::Sessions { list, .. } = got else { panic!("{got:?}") };
+        assert_eq!(list[0].id, 4);
+        assert_eq!(list[0].status, ActivityStatus::None);
+        assert!(!list[0].claude);
+        // A new list reads on an old peer (extra fields ignored).
+        let mut buf = vec![];
+        write_frame(&mut buf, &ServerMsg::Sessions { req: 2, list: vec![SessionInfo { id: 6, claude: true, ..Default::default() }] })
+            .unwrap();
+        let got = read_frame::<v0::ServerMsg>(&mut Cursor::new(buf), MAX_SERVER_FRAME).unwrap().unwrap();
+        let v0::ServerMsg::Sessions { list, .. } = got;
+        assert_eq!(list[0].id, 6);
+        // New kinds are skipped by an old peer.
+        let (a, b) = UnixStream::pair().unwrap();
+        write_frame(&mut &a, &ServerMsg::Reveal { id: 1 }).unwrap();
+        write_frame(&mut &a, &ServerMsg::Sessions { req: 3, list: vec![] }).unwrap();
+        let mut r = FrameReader::new(b, MAX_SERVER_FRAME);
+        assert!(matches!(r.read::<v0::ServerMsg>().unwrap(), Some(v0::ServerMsg::Sessions { req: 3, .. })));
     }
 }

@@ -208,7 +208,7 @@ fn slow_client_is_dropped() {
     let d = daemon(Duration::from_secs(60));
     // A client that attaches to a flood and never reads.
     let mut raw = UnixStream::connect(paths::socket_path(&d.dir)).unwrap();
-    proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into() }).unwrap();
+    proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into(), role: proto::Role::Ui }).unwrap();
     proto::write_frame(&mut raw, &ClientMsg::Spawn { req: 1, cfg: sh("yes 0123456789012345678901234567890123456789"), hook: false })
         .unwrap();
     raw.flush().unwrap();

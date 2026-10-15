@@ -266,6 +266,7 @@ impl Server {
     fn on_msg(self: &Arc<Self>, conn: &Arc<Conn>, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello { .. } => {},
+            ClientMsg::Watch | ClientMsg::Reveal { .. } => {},
             ClientMsg::Spawn { req, cfg, hook } => self.spawn(conn, req, cfg, hook),
             ClientMsg::Attach { req, id, size } => self.attach(conn, req, id, size),
             ClientMsg::Detach { id } => {
