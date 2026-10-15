@@ -13,6 +13,7 @@ mod file_tree_view;
 mod handoff;
 mod links;
 mod main_window;
+mod menus;
 mod panes;
 mod platform;
 mod scratch;
@@ -98,13 +99,7 @@ fn main() {
             })
             .detach();
         }
-        cx.set_menus([Menu::new("Tern").items([
-            MenuItem::action("Check for Updates…", update::CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Quit Tern", Quit),
-        ])]);
+        menus::install(cx);
         update::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));

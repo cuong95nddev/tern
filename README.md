@@ -90,7 +90,7 @@ Tooltips show each platform's keys.
 
 ## Updates
 
-Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the workspace bar (also under **Tern ▸ Check for Updates…**). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
+Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the workspace bar (also under **Tern ▸ Check for Updates…** on macOS, **Help ▸ Check for Updates…** on Windows and Linux). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
 
 ## Building from source
 

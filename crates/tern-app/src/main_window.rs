@@ -239,6 +239,9 @@ pub struct MainWindow {
     /// Where the window is, for the saved session.
     placement: Option<(String, WindowBounds)>,
     focus: FocusHandle,
+    /// The application menus, drawn by the window off macOS (see `menus`).
+    #[cfg(not(target_os = "macos"))]
+    menu_bar: Entity<gpui_kit::component::menu::AppMenuBar>,
     _subs: Vec<Subscription>,
 }
 
@@ -281,6 +284,8 @@ impl MainWindow {
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
+            #[cfg(not(target_os = "macos"))]
+            menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             _subs: vec![bounds_sub],
         }
     }
@@ -809,6 +814,24 @@ impl Render for MainWindow {
                 .into_any_element(),
             None => self.render_welcome(cx).into_any_element(),
         };
+        #[cfg(not(target_os = "macos"))]
+        let body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(30.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().title_bar)
+                    .child(self.menu_bar.clone()),
+            )
+            .child(div().flex_1().min_h_0().child(body));
         div()
             .id("main-window")
             .key_context("MainWindow")
