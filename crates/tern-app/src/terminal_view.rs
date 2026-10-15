@@ -22,6 +22,7 @@ use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
 use tern_term::palette::Palette;
+use tern_term::status::next_status;
 use tern_term::vt::grid::{Dimensions, Scroll};
 use tern_term::vt::index::{Column, Line, Point as GridPoint, Side};
 use tern_term::vt::selection::{Selection, SelectionType};
@@ -51,14 +52,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ActivityStatus {
-    #[default]
-    None,
-    Working,
-    Blocked,
-    Done,
-}
+pub use tern_term::status::ActivityStatus;
 
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
@@ -426,14 +420,10 @@ impl TerminalView {
                 cx.emit(TerminalEvent::Exited { code, quick });
                 cx.notify();
             },
-            TermEvent::Signal(OscSignal::ProgramStatus(st)) => {
-                let status = match st.state.as_str() {
-                    "working" => ActivityStatus::Working,
-                    "blocked" => ActivityStatus::Blocked,
-                    "clear" => ActivityStatus::None,
-                    _ => ActivityStatus::Done,
-                };
-                self.set_status(status, cx);
+            TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
+                if let Some(status) = next_status(self.status, &sig) {
+                    self.set_status(status, cx);
+                }
             },
             TermEvent::Signal(OscSignal::Notify { title, body }) => {
                 cx.emit(TerminalEvent::Notify { title, body });
@@ -443,7 +433,7 @@ impl TerminalView {
     }
 
     fn set_status(&mut self, status: ActivityStatus, cx: &mut Context<Self>) {
-        // A finished "working" turn with no explicit idle state reads as done.
+        // A program that ends mid-turn ("working") reads as done.
         let status = if status == ActivityStatus::None && self.status == ActivityStatus::Working { ActivityStatus::Done } else { status };
         if self.status != status {
             self.status = status;

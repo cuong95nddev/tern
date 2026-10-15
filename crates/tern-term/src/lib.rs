@@ -7,6 +7,7 @@ pub mod osc;
 pub mod palette;
 pub mod procs;
 pub mod session;
+pub mod status;
 
 pub use alacritty_terminal as vt;
 pub use session::{EventSink, Session, SessionTerm, SpawnConfig, TermEvent, TermSize};
