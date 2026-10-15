@@ -27,7 +27,7 @@ jobs:
             echo "::error::RELEASE_REPO is $RELEASE_REPO but the RELEASE_TOKEN secret is missing"; exit 1
           fi
           echo "Releases and update checks: ${RELEASE_REPO:-$GITHUB_REPOSITORY}"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
@@ -87,7 +87,7 @@ jobs:
         run: |
           dmg=$(scripts/release-macos.sh dist)
           echo "path=$dmg" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tern-macos
           path: ${{ steps.dmg.outputs.path }}
@@ -99,7 +99,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tern-macos
           path: dist
@@ -107,7 +107,7 @@ jobs:
       # app can check for updates while this one is private) the release is
       # published there, using RELEASE_TOKEN: a fine-grained token with
       # Contents read/write on that repo.
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           repository: ${{ vars.RELEASE_REPO || github.repository }}
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
