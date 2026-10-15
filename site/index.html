@@ -647,11 +647,14 @@
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(rel => {
       const asset = key => (rel.assets || []).find(a => a.name.endsWith(platforms[key].file));
+      // A platform the latest release has no file for (released later):
+      // the list of releases, where an older one has it.
+      const all = "https://github.com/cuong95nddev/tern/releases";
       const mine = asset(os);
-      if (mine) document.querySelectorAll(".js-download").forEach(a => a.href = mine.browser_download_url);
+      document.querySelectorAll(".js-download").forEach(a => a.href = mine ? mine.browser_download_url : all);
       document.querySelectorAll(".js-os, .js-plat").forEach(a => {
         const f = asset(a.dataset.os);
-        if (f) a.href = f.browser_download_url;
+        a.href = f ? f.browser_download_url : all;
       });
       if (rel.tag_name) document.querySelector(".js-version").textContent = rel.tag_name;
     })
