@@ -302,6 +302,11 @@ impl MainWindow {
         let me = cx.entity().downgrade();
         let confirmed = Rc::new(Cell::new(false));
         window.on_window_should_close(cx, move |window, cx| {
+            // The last window going quits Tern: like ⌘Q, its terminals keep
+            // running and it comes back at the next launch.
+            if windows(cx).len() <= 1 {
+                return true;
+            }
             let jobs = me.upgrade().map(|m| m.read(cx).running(cx)).unwrap_or_default();
             if jobs.is_empty() || confirmed.get() {
                 // Closed by the user: its terminals end with it.

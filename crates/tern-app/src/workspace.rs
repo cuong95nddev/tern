@@ -789,8 +789,9 @@ impl Workspace {
         let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
-        // Reattaching runs no `--resume`, so its quick exit says nothing.
-        let resuming = session.is_some() && mux.is_none();
+        // Cleared when it reattaches to a running Claude (`Ready`): only a
+        // `--resume` it starts says something by exiting at once.
+        let resuming = session.is_some();
         let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
@@ -1424,9 +1425,12 @@ impl Workspace {
     fn on_terminal_event(&mut self, view: &Entity<TerminalView>, ev: &TerminalEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             TerminalEvent::TitleChanged => cx.notify(),
-            TerminalEvent::Ready { token, .. } => {
+            TerminalEvent::Ready { token, attached } => {
                 if let Some(t) = self.term_tab_mut(view) {
                     t.token = token.clone();
+                    if *attached {
+                        t.resuming = false;
+                    }
                 }
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
@@ -3220,7 +3224,13 @@ impl Render for Workspace {
             .text_xs()
             .text_color(muted)
             .child(self.root.display().to_string())
-            .child(if self.services.mux.connected() { "background: ✓" } else { "background: unavailable" });
+            .child(match self.services.mux.server_version() {
+                // An update's new UI keeps talking to the old daemon until
+                // its terminals end.
+                Some(v) if v != env!("CARGO_PKG_VERSION") => format!("background: Tern {v} (updates once its terminals end)"),
+                Some(_) => "background: ✓".to_owned(),
+                None => "background: unavailable".to_owned(),
+            });
 
         div()
             .key_context("Workspace")

@@ -70,9 +70,11 @@ pub enum TerminalEvent {
         code: Option<i32>,
         quick: bool,
     },
-    /// The background session is known (see `mux_id`), with its hook token.
+    /// The background session is known (see `mux_id`), with its hook token;
+    /// `attached`: it was already running (no new program started).
     Ready {
         token: Option<String>,
+        attached: bool,
     },
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
@@ -173,6 +175,8 @@ pub struct TerminalView {
     /// Reattaching after the connection to the daemon was lost: if the
     /// session is gone, say so rather than start a new program.
     reattaching: bool,
+    /// The last start attached to a running session (vs. spawned one).
+    attaching: bool,
     config: TerminalConfig,
     focus: FocusHandle,
     title: SharedString,
@@ -245,6 +249,7 @@ impl TerminalView {
             hook,
             attach,
             reattaching: false,
+            attaching: false,
             config,
             focus: cx.focus_handle(),
             title: title.clone(),
@@ -310,6 +315,7 @@ impl TerminalView {
             s.close();
         }
         self.started = Instant::now();
+        self.attaching = self.attach.is_some();
         let open = match self.attach.take() {
             Some(id) => Open::Attach { id },
             None => Open::Spawn { cfg: cfg.clone(), hook: self.hook },
@@ -481,7 +487,7 @@ impl TerminalView {
                 // not notified again.
                 self.status = status;
                 self.reattaching = false;
-                cx.emit(TerminalEvent::Ready { token });
+                cx.emit(TerminalEvent::Ready { token, attached: self.attaching });
                 cx.emit(TerminalEvent::TitleChanged);
                 cx.notify();
             },
