@@ -79,7 +79,7 @@ impl Dimensions for TermSize {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpawnConfig {
     /// `None` = user's login shell.
     pub program: Option<String>,
