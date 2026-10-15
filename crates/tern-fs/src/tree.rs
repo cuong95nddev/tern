@@ -127,6 +127,37 @@ impl FileTree {
         before != self.rows
     }
 
+    /// Fold every folder back to the root's children.
+    pub fn collapse_all(&mut self) {
+        self.expanded = HashSet::from([self.root.clone()]);
+        self.rebuild_rows();
+    }
+
+    /// `from` was renamed or moved to `to`: carry its expanded folders over
+    /// and reload both parents.
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        let opened: Vec<PathBuf> = self.expanded.iter().filter_map(|p| p.strip_prefix(from).ok().map(|r| to.join(r))).collect();
+        self.expanded.retain(|p| !p.starts_with(from));
+        self.children.retain(|p, _| !p.starts_with(from));
+        for p in opened {
+            if p.is_dir() {
+                self.load_dir(&p);
+                self.expanded.insert(p);
+            }
+        }
+        for parent in [from.parent(), to.parent()].into_iter().flatten() {
+            if self.children.contains_key(parent) {
+                self.load_dir(parent);
+            }
+        }
+        self.rebuild_rows();
+    }
+
+    /// The visible row showing `path`.
+    pub fn row_of(&self, path: &Path) -> Option<usize> {
+        self.rows.iter().position(|r| &*r.entry.path == path)
+    }
+
     pub fn refresh_all(&mut self) {
         let dirs: Vec<PathBuf> = self.children.keys().cloned().collect();
         for d in dirs {
@@ -247,5 +278,17 @@ mod tests {
         assert!(!names(&t).contains(&"new.rs".to_string()));
         // Change in an unloaded dir is a no-op.
         assert!(!t.apply_changes([d.path().join("src/zzz.rs").as_path()]));
+    }
+
+    #[test]
+    fn moved_keeps_expanded_folders() {
+        let d = fixture();
+        let mut t = FileTree::new(d.path());
+        t.reveal(&d.path().join("src/nested/x.rs"));
+        fs::rename(d.path().join("src"), d.path().join("lib")).unwrap();
+        t.moved(&d.path().join("src"), &d.path().join("lib"));
+        assert_eq!(names(&t), vec!["lib", "  nested", "    x.rs", "  main.rs", ".gitignore", "b.txt", "README.md"]);
+        t.collapse_all();
+        assert_eq!(names(&t), vec!["lib", ".gitignore", "b.txt", "README.md"]);
     }
 }

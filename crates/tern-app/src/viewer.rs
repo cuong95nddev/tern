@@ -235,6 +235,9 @@ impl Viewer {
                         this.message = None;
                         this.image = None;
                         this.loading = true;
+                        // Restoring the cursor focuses the editor; a reload
+                        // must not take focus from where it is.
+                        let focused = window.focused(cx);
                         this.editor.update(cx, |ed, cx| {
                             if ed.value().as_ref() != text {
                                 let cursor = ed.cursor_position();
@@ -243,6 +246,9 @@ impl Viewer {
                                 ed.set_cursor_position(cursor, window, cx);
                             }
                         });
+                        if let Some(f) = focused {
+                            window.focus(&f, cx);
+                        }
                         if let Some(pos) = this.go_to.take() {
                             this.mode = Mode::Edit;
                             this.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
@@ -349,6 +355,16 @@ impl Viewer {
         if !spawned {
             let _ = Command::new("open").args(["-a", "Visual Studio Code"]).arg(&path).spawn();
         }
+    }
+
+    /// The open file was renamed or moved to `path`: follow it, keeping
+    /// unsaved edits.
+    pub fn set_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let lang = language_for(&path);
+        self.editor.update(cx, |ed, cx| ed.set_highlighter(lang, cx));
+        self.path = Some(path);
+        self.reload(window, cx);
+        cx.notify();
     }
 
     pub fn path(&self) -> Option<&Path> {

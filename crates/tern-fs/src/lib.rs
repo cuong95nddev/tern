@@ -2,6 +2,7 @@
 //! watcher, git status. No UI deps.
 
 pub mod git;
+pub mod ops;
 pub mod tree;
 pub mod watch;
 

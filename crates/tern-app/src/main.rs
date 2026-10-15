@@ -61,6 +61,7 @@ fn main() {
         Theme::change(ThemeMode::Dark, None, cx);
         terminal_view::bind_keys(cx);
         viewer::bind_keys(cx);
+        file_tree_view::bind_keys(cx);
         scratch::bind_keys(cx);
         workspace::bind_keys(cx);
         main_window::bind_keys(cx);

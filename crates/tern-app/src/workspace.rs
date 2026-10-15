@@ -463,7 +463,15 @@ impl Workspace {
         let scratches = cx.new(ScratchesView::new);
 
         let tree_sub = cx.subscribe_in(&tree, window, |this, _, ev: &FileTreeEvent, window, cx| match ev {
-            FileTreeEvent::OpenFile { path, pin } => this.open_file(path.clone(), *pin, window, cx),
+            FileTreeEvent::OpenFile { path, pin } => {
+                this.open_file(path.clone(), *pin, window, cx);
+                // A preview keeps the keyboard in the explorer, as in VS Code.
+                if !pin {
+                    window.focus(&this.tree.focus_handle(cx), cx);
+                }
+            },
+            FileTreeEvent::Moved { from, to } => this.file_moved(from, to, window, cx),
+            FileTreeEvent::Deleted(paths) => this.files_deleted(paths, window, cx),
             FileTreeEvent::Changed(paths) => {
                 this.changes.update(cx, |c, cx| c.files_changed(paths, cx));
                 this.files_changed(paths, window, cx);
@@ -1290,6 +1298,38 @@ impl Workspace {
         for d in diffs.into_iter().chain(preview) {
             d.update(cx, |d, cx| d.files_changed(paths, cx));
         }
+    }
+
+    /// Point file tabs showing `from` (or something inside it) at `to`.
+    fn file_moved(&mut self, from: &Path, to: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        for t in &self.tabs {
+            if let CenterTab::File { view, .. } = t
+                && let Some(rest) = view.read(cx).path().and_then(|p| p.strip_prefix(from).ok())
+            {
+                let path = to.join(rest);
+                view.update(cx, |v, cx| v.set_path(path, window, cx));
+            }
+        }
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
+    /// Close the file and diff tabs of trashed `paths`, except files with
+    /// unsaved edits (saving brings them back).
+    fn files_deleted(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let gone = |t: &CenterTab| {
+            let dirty = matches!(t, CenterTab::File { view, .. } if view.read(cx).is_dirty());
+            !dirty && !matches!(t, CenterTab::Scratch { .. }) && t.file_path(cx).is_some_and(|f| paths.iter().any(|p| f.starts_with(p)))
+        };
+        let doomed: HashSet<EntityId> = self.tabs.iter().filter(|t| gone(t)).map(CenterTab::entity_id).collect();
+        if doomed.is_empty() {
+            return;
+        }
+        // Closing the last tab would close the workspace.
+        if doomed.len() == self.tabs.len() {
+            self.add_tab(TabKind::Claude, window, cx);
+        }
+        self.close_where(|_, t| doomed.contains(&t.entity_id()), window, cx);
     }
 
     /// Open `path` in a center tab, or switch to the tab already showing it.
@@ -2907,6 +2947,7 @@ impl Workspace {
                     _ => format!("error: unknown command {name:?}"),
                 }
             },
+            "tree" => format!("{} focused={}", self.tree.read(cx).debug_state(cx), self.tree.focus_handle(cx).contains_focused(window, cx)),
             cmd if cmd.starts_with("scratch-new ") => {
                 self.new_scratch(cmd["scratch-new ".len()..].trim(), window, cx);
                 "ok".into()

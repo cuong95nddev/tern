@@ -6485,6 +6485,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "notify",
+ "objc2-foundation 0.3.2",
  "tempfile",
 ]
 

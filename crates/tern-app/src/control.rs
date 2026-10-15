@@ -127,6 +127,8 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             let Some(k) = parts.next() else { return Some("error: key KEYSTROKE".into()) };
             match Keystroke::parse(k) {
                 Ok(ks) => {
+                    // Dispatch on the current focus, not a stale frame's.
+                    window.draw(cx).clear(cx);
                     let handled = window.dispatch_keystroke(ks, cx);
                     Some(format!("ok handled={handled}"))
                 },

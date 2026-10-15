@@ -11,6 +11,7 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        ChevronsDownUp,
         CircleArrowDown,
         Columns2,
         Database,
@@ -24,6 +25,7 @@ gpui_kit::assets::icon_assets!(
         FileKey,
         FileLock,
         FileMusic,
+        FilePlus,
         FileSpreadsheet,
         FileTerminal,
         FileVideoCamera,
