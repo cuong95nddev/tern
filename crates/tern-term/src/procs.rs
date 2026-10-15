@@ -1,13 +1,29 @@
 //! What runs in a PTY's foreground: the processes of its foreground process
-//! group, named so the UI can tell which program a shell is running.
+//! group (on Windows, which has none: the shell and the processes below it),
+//! named so the UI can tell which program a shell is running.
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+
+/// Adds the lowercase file stem of `arg` to `names` once.
+fn push_stem(names: &mut Vec<String>, arg: &str) {
+    if let Some(stem) = Path::new(arg).file_stem() {
+        let stem = stem.to_string_lossy().to_ascii_lowercase();
+        if !names.contains(&stem) {
+            names.push(stem);
+        }
+    }
+}
 
 /// Names of the programs in `tty`'s foreground process group: each one's
 /// executable and, for interpreters (`node cli.js`), its script. Lowercase
 /// file stems, e.g. `["node", "codex"]`. Empty when it can't be read.
+#[cfg(unix)]
 pub fn foreground_programs(tty: &File) -> Vec<String> {
     let pgid = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
     if pgid <= 0 {
@@ -17,12 +33,7 @@ pub fn foreground_programs(tty: &File) -> Vec<String> {
     for argv in group_argvs(pgid) {
         // The executable, then the first non-flag argument (a script).
         for arg in argv.iter().take(1).chain(argv.iter().skip(1).find(|a| !a.starts_with('-'))) {
-            if let Some(stem) = Path::new(arg).file_stem() {
-                let stem = stem.to_string_lossy().to_ascii_lowercase();
-                if !names.contains(&stem) {
-                    names.push(stem);
-                }
-            }
+            push_stem(&mut names, arg);
         }
     }
     names
@@ -85,13 +96,14 @@ fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
         .collect()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn group_argvs(_pgid: i32) -> Vec<Vec<String>> {
     Vec::new()
 }
 
 /// The working directory of `tty`'s foreground process group leader (the
 /// shell, or the program it runs), to resolve the relative paths it prints.
+#[cfg(unix)]
 pub fn foreground_cwd(tty: &File) -> Option<PathBuf> {
     let pgid = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
     if pgid <= 0 {
@@ -122,7 +134,159 @@ fn cwd(pid: libc::pid_t) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn cwd(_pid: i32) -> Option<PathBuf> {
     None
+}
+
+/// Names of the programs running in the console of `shell` (the PTY's
+/// child): the shell's executable and those of the processes below it,
+/// shallowest first, plus the script of an interpreter (`node codex.js`).
+/// Lowercase file stems, as on Unix.
+#[cfg(windows)]
+pub fn foreground_programs(shell: u32) -> Vec<String> {
+    let mut names = Vec::new();
+    for (pid, exe) in win::descendants(shell) {
+        push_stem(&mut names, &exe);
+        if is_interpreter(&exe)
+            && let Some(script) = win::command_line(pid).and_then(|argv| script_arg(&argv))
+        {
+            push_stem(&mut names, &script);
+        }
+    }
+    names.retain(|n| n != "conhost" && n != "openconsole");
+    names
+}
+
+/// Reading another process's working directory on Windows means reading
+/// its memory; links then resolve against the tab's own folder.
+#[cfg(windows)]
+pub fn foreground_cwd(_shell: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Programs whose first non-flag argument names the real program.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_interpreter(exe: &str) -> bool {
+    let name = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_ascii_lowercase();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(stem, "node" | "bun" | "deno" | "python" | "python3" | "pythonw" | "py" | "ruby")
+}
+
+/// The script an interpreter's `argv` runs: its first argument that isn't a flag.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn script_arg(argv: &[String]) -> Option<String> {
+    argv.iter().skip(1).find(|a| !a.starts_with('-')).cloned()
+}
+
+#[cfg(windows)]
+mod win {
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, LocalFree, UNICODE_STRING};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    /// `root` and every process below it with its executable name, breadth first.
+    pub fn descendants(root: u32) -> Vec<(u32, String)> {
+        let procs = snapshot();
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut exes = HashMap::new();
+        for (pid, ppid, exe) in procs {
+            // The idle process is its own parent.
+            if pid != ppid {
+                children.entry(ppid).or_default().push(pid);
+            }
+            exes.insert(pid, exe);
+        }
+        let mut out = Vec::new();
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(pid) = queue.pop_front() {
+            let Some(exe) = exes.remove(&pid) else { continue };
+            out.push((pid, exe));
+            queue.extend(children.get(&pid).into_iter().flatten());
+        }
+        out
+    }
+
+    /// Every process: `(pid, parent pid, executable file name)`.
+    fn snapshot() -> Vec<(u32, u32, String)> {
+        let mut out = Vec::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                out.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..len])));
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+        }
+        out
+    }
+
+    /// `pid`'s command line, split as the C runtime does.
+    pub fn command_line(pid: u32) -> Option<Vec<String>> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            // A UNICODE_STRING followed by its text; ask for the size first.
+            let mut len = 0u32;
+            NtQueryInformationProcess(h, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut len);
+            let mut buf = vec![0u64; (len as usize).div_ceil(8).max(4)];
+            let size = (buf.len() * 8) as u32;
+            let status = NtQueryInformationProcess(h, ProcessCommandLineInformation, buf.as_mut_ptr().cast::<c_void>(), size, &mut len);
+            CloseHandle(h);
+            if status < 0 {
+                return None;
+            }
+            let us = &*buf.as_ptr().cast::<UNICODE_STRING>();
+            if us.Buffer.is_null() || us.Length == 0 {
+                return None;
+            }
+            let mut wide = std::slice::from_raw_parts(us.Buffer, us.Length as usize / 2).to_vec();
+            wide.push(0);
+            let mut argc = 0;
+            let argv = CommandLineToArgvW(wide.as_ptr(), &mut argc);
+            if argv.is_null() {
+                return None;
+            }
+            let args = (0..argc.max(0) as usize)
+                .map(|i| {
+                    let p = *argv.add(i);
+                    let n = (0..).take_while(|&j| *p.add(j) != 0).count();
+                    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+                })
+                .collect();
+            LocalFree(argv.cast());
+            Some(args)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_interpreter, script_arg};
+
+    #[test]
+    fn interpreter_scripts() {
+        assert!(is_interpreter(r"C:\Program Files\nodejs\node.exe"));
+        assert!(is_interpreter("node"));
+        assert!(!is_interpreter("claude.exe"));
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(script_arg(&argv(&["node", "--no-warnings", r"C:\x\codex.js", "-m"])), Some(r"C:\x\codex.js".into()));
+        assert_eq!(script_arg(&argv(&["node"])), None);
+    }
 }

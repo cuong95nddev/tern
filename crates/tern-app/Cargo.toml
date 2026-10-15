@@ -1,9 +1,13 @@
 [package]
 name = "tern-app"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 
+[build-dependencies]
+embed-resource = "3.0"
+
 [dependencies]
+dunce = "1"
 env_logger = "0.11.11"
 flume = "0.12.0"
 gpui-kit = { version = "=0.7.3", features = ["tree-sitter-rust", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-python", "tree-sitter-go", "tree-sitter-bash", "tree-sitter-yaml", "tree-sitter-css", "tree-sitter-html", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-swift", "tree-sitter-diff"] }
@@ -18,6 +22,6 @@ log = "0.4.34"
 semver = "1"
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
-tern-menubar = { version = "0.1.2", path = "../tern-menubar" }
+tern-menubar = { version = "0.2.0", path = "../tern-menubar" }
 tern-mux = { version = "0.1.0", path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }

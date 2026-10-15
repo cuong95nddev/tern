@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff_pane::language_for;
+use crate::platform::bind;
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(400);
 
@@ -34,13 +35,12 @@ pub const KINDS: &[(&str, &str)] = &[
 actions!(scratch, [SaveScratch]);
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("cmd-s", SaveScratch, Some("Scratch"))]);
+    cx.bind_keys([bind("cmd-s", SaveScratch, Some("Scratch"))]);
 }
 
-/// `~/Library/Application Support/dev.tern/scratches`, shared by all projects.
+/// `scratches` in Tern's data folder (see `dirs::data`), shared by all projects.
 pub fn dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join("Library/Application Support/dev.tern/scratches")
+    crate::dirs::data().join("scratches")
 }
 
 /// Create the next free `scratch.EXT`, `scratch_1.EXT`, ... in `dir`.

@@ -30,6 +30,7 @@ use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::DiffPane;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
+use crate::platform::bind;
 use crate::scratch::{self, Scratch};
 use crate::scratches_view::{ScratchesEvent, ScratchesView};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
@@ -75,34 +76,39 @@ actions!(
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-t", NewClaudeTab, None),
-        KeyBinding::new("cmd-shift-t", NewShellTab, None),
-        KeyBinding::new("cmd-n", NewScratch, None),
-        KeyBinding::new("cmd-w", CloseTab, None),
-        KeyBinding::new("cmd-shift-]", NextTab, None),
-        KeyBinding::new("cmd-shift-[", PrevTab, None),
-        KeyBinding::new("cmd-b", ToggleExplorer, None),
-        KeyBinding::new("cmd-shift-g", ToggleChanges, None),
-        KeyBinding::new("cmd-shift-s", ToggleScratches, None),
-        KeyBinding::new("cmd-j", FocusTerminal, None),
-        KeyBinding::new("cmd-\\", SplitRight, None),
-        KeyBinding::new("cmd-shift-\\", SplitDown, None),
-        KeyBinding::new("cmd-|", SplitDown, None),
-        KeyBinding::new("cmd-shift-enter", ToggleZoomPane, None),
-        KeyBinding::new("ctrl-cmd-left", FocusPaneLeft, None),
-        KeyBinding::new("ctrl-cmd-right", FocusPaneRight, None),
-        KeyBinding::new("ctrl-cmd-up", FocusPaneUp, None),
-        KeyBinding::new("ctrl-cmd-down", FocusPaneDown, None),
-        KeyBinding::new("cmd-1", Tab1, None),
-        KeyBinding::new("cmd-2", Tab2, None),
-        KeyBinding::new("cmd-3", Tab3, None),
-        KeyBinding::new("cmd-4", Tab4, None),
-        KeyBinding::new("cmd-5", Tab5, None),
-        KeyBinding::new("cmd-6", Tab6, None),
-        KeyBinding::new("cmd-7", Tab7, None),
-        KeyBinding::new("cmd-8", Tab8, None),
-        KeyBinding::new("cmd-9", Tab9, None),
+        bind("cmd-t", NewClaudeTab, None),
+        bind("cmd-shift-t", NewShellTab, None),
+        bind("cmd-n", NewScratch, None),
+        bind("cmd-w", CloseTab, None),
+        bind("cmd-shift-]", NextTab, None),
+        bind("cmd-shift-[", PrevTab, None),
+        bind("cmd-b", ToggleExplorer, None),
+        bind("cmd-shift-g", ToggleChanges, None),
+        bind("cmd-shift-s", ToggleScratches, None),
+        bind("cmd-j", FocusTerminal, None),
+        bind("cmd-\\", SplitRight, None),
+        bind("cmd-shift-\\", SplitDown, None),
+        bind("cmd-shift-enter", ToggleZoomPane, None),
+        bind("ctrl-cmd-left", FocusPaneLeft, None),
+        bind("ctrl-cmd-right", FocusPaneRight, None),
+        bind("ctrl-cmd-up", FocusPaneUp, None),
+        bind("ctrl-cmd-down", FocusPaneDown, None),
+        bind("cmd-1", Tab1, None),
+        bind("cmd-2", Tab2, None),
+        bind("cmd-3", Tab3, None),
+        bind("cmd-4", Tab4, None),
+        bind("cmd-5", Tab5, None),
+        bind("cmd-6", Tab6, None),
+        bind("cmd-7", Tab7, None),
+        bind("cmd-8", Tab8, None),
+        bind("cmd-9", Tab9, None),
     ]);
+    if cfg!(target_os = "macos") {
+        // Shift-\ is | on US layouts; elsewhere Ctrl+Shift+\ already splits right.
+        cx.bind_keys([bind("cmd-|", SplitDown, None)]);
+    } else {
+        cx.bind_keys([bind("ctrl-tab", NextTab, None), bind("ctrl-shift-tab", PrevTab, None)]);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -462,8 +468,14 @@ fn tab_layout_items(mut menu: PopupMenu) -> PopupMenu {
     menu
 }
 
+/// `s` as one word of the shell Claude tabs run in (see `platform::shell`).
 fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
+    if cfg!(windows) {
+        // PowerShell: only `'` is special inside single quotes.
+        format!("'{}'", s.replace('\'', "''"))
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 impl Workspace {
@@ -733,11 +745,11 @@ impl Workspace {
     }
 
     fn spawn_config(&self, kind: TabKind, resume: Option<&str>) -> (SpawnConfig, &'static str) {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let shell = crate::platform::shell();
         let mut env = std::collections::HashMap::new();
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
         let (args, title) = match kind {
-            TabKind::Shell => (vec!["-l".to_owned()], "shell"),
+            TabKind::Shell => (crate::platform::shell_args(), "shell"),
             TabKind::Claude => {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
@@ -749,9 +761,9 @@ impl Workspace {
                 // A conversation that can't be resumed (deleted, ...) ends
                 // Claude at once: the tab then starts a new one (see
                 // `on_terminal_event`), not on every failed exit.
-                let cmd = match resume {
-                    Some(id) => format!("exec {claude} --resume {}", shell_quote(id)),
-                    None => format!("exec {claude}"),
+                let claude = match resume {
+                    Some(id) => format!("{claude} --resume {}", shell_quote(id)),
+                    None => claude,
                 };
                 // Hooks post to 127.0.0.1; keep them off the user's proxy.
                 let no_proxy = ["NO_PROXY", "no_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
@@ -761,7 +773,7 @@ impl Workspace {
                 };
                 env.insert("NO_PROXY".into(), no_proxy.clone());
                 env.insert("no_proxy".into(), no_proxy);
-                (vec!["-lic".to_owned(), cmd], "claude")
+                (crate::platform::shell_command_args(&claude), "claude")
             },
         };
         (
@@ -1678,13 +1690,16 @@ impl Workspace {
     }
 
     fn close_button(&self, i: usize, cx: &mut Context<Self>) -> Button {
-        Button::new(("close-tab", i)).xsmall().ghost().icon(IconName::Close).tooltip("Close (⌘W)").on_click(cx.listener(
-            move |this, _, window, cx| {
+        Button::new(("close-tab", i))
+            .xsmall()
+            .ghost()
+            .icon(IconName::Close)
+            .tooltip(format!("Close ({})", crate::platform::shortcut("⌘W")))
+            .on_click(cx.listener(move |this, _, window, cx| {
                 // Don't let the tab's own click activate it.
                 cx.stop_propagation();
                 this.request_close_tab(i, window, cx);
-            },
-        ))
+            }))
     }
 
     /// Tab `i` in a horizontal bar: right-click menu, drag to reorder (or
@@ -1851,24 +1866,39 @@ impl Workspace {
             .child(column(bottom))
     }
 
-    fn strip_button(id: &'static str, icon: AssetIcon, on: bool, tooltip: &'static str) -> Button {
+    fn strip_button(id: &'static str, icon: AssetIcon, on: bool, tooltip: impl Into<SharedString>) -> Button {
         Button::new(id).small().ghost().icon(Icon::new(icon)).selected(on).tooltip(tooltip)
     }
 
     fn left_strip(&self, cx: &mut Context<Self>) -> Div {
         let top = vec![
-            Self::strip_button("strip-explorer", AssetIcon::Folder, self.show_explorer, "Explorer (⌘B)")
-                .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx))),
-            Self::strip_button("strip-scratches", AssetIcon::StickyNote, self.show_scratches, "Scratches (⌘⇧S)")
-                .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
+            Self::strip_button(
+                "strip-explorer",
+                AssetIcon::Folder,
+                self.show_explorer,
+                format!("Explorer ({})", crate::platform::shortcut("⌘B")),
+            )
+            .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx))),
+            Self::strip_button(
+                "strip-scratches",
+                AssetIcon::StickyNote,
+                self.show_scratches,
+                format!("Scratches ({})", crate::platform::shortcut("⌘⇧S")),
+            )
+            .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
         ];
         Self::tool_strip(top, vec![], cx).border_r_1().border_color(cx.theme().border)
     }
 
     fn right_strip(&self, cx: &mut Context<Self>) -> Div {
         let top = vec![
-            Self::strip_button("strip-changes", AssetIcon::GitBranch, self.show_changes, "Changes (⌘⇧G)")
-                .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx))),
+            Self::strip_button(
+                "strip-changes",
+                AssetIcon::GitBranch,
+                self.show_changes,
+                format!("Changes ({})", crate::platform::shortcut("⌘⇧G")),
+            )
+            .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx))),
         ];
         Self::tool_strip(top, vec![], cx).border_l_1().border_color(cx.theme().border)
     }
@@ -2217,7 +2247,7 @@ impl Workspace {
             menu = menu.item(item("Open File", Self::open_tab_file));
         }
         if path.is_some() {
-            menu = menu.item(item("Copy Path", Self::copy_tab_path)).item(item("Reveal in Finder", Self::reveal_tab_file));
+            menu = menu.item(item("Copy Path", Self::copy_tab_path)).item(item(crate::platform::REVEAL, Self::reveal_tab_file));
         }
         menu = menu
             .separator()
@@ -2775,7 +2805,7 @@ impl Workspace {
                     .xsmall()
                     .ghost()
                     .icon(Icon::new(AssetIcon::Columns2))
-                    .tooltip("Split Right (⌘\\)")
+                    .tooltip(format!("Split Right ({})", crate::platform::shortcut("⌘\\")))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.focus_pane_state(pane);
                         let ix = this.pane_active_ix(pane).unwrap_or(this.active);
@@ -2789,7 +2819,11 @@ impl Workspace {
                         .ghost()
                         .icon(Icon::new(if zoomed { AssetIcon::Minimize2 } else { AssetIcon::Maximize2 }))
                         .selected(zoomed)
-                        .tooltip(if zoomed { "Restore Panes (⌘⇧↩)" } else { "Maximize Pane (⌘⇧↩)" })
+                        .tooltip(if zoomed {
+                            format!("Restore Panes ({})", crate::platform::shortcut("⌘⇧↩"))
+                        } else {
+                            format!("Maximize Pane ({})", crate::platform::shortcut("⌘⇧↩"))
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.focus_pane(pane, window, cx);
                             this.toggle_zoom(cx);

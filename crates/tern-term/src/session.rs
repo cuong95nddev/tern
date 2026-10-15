@@ -6,7 +6,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,14 +156,11 @@ impl EventListener for Listener {
     }
 }
 
-/// PTY wrapper that taps reads through the OSC scanner.
+/// PTY wrapper that taps reads through the OSC scanner. It is its own reader
+/// so a probe reply can go out through the PTY's writer, whatever the backend
+/// (a file descriptor on Unix, ConPTY pipes on Windows).
 struct TapPty {
     inner: Pty,
-    reader: TapReader,
-}
-
-struct TapReader {
-    file: File,
     scanner: OscScanner,
     shared: Arc<Shared>,
     /// Rate limit for probe replies: if the tty echoes our reply back as output
@@ -174,20 +170,19 @@ struct TapReader {
 
 const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
-impl Read for TapReader {
+impl Read for TapPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.file.read(buf)?;
+        let n = self.inner.reader().read(buf)?;
         let shared = &self.shared;
-        let file = &self.file;
+        let writer = self.inner.writer();
         let last = &mut self.last_probe_reply;
         self.scanner.feed(&buf[..n], |sig| {
             if sig == OscSignal::ProgramStatusProbe {
                 let now = Instant::now();
                 if last.is_none_or(|t| now.duration_since(t) >= PROBE_REPLY_MIN_INTERVAL) {
                     *last = Some(now);
-                    // Fixed bytes, tiny write on a non-blocking fd, ordering preserved.
-                    let mut f = file;
-                    let _ = f.write_all(PROGRAM_STATUS_PROBE_REPLY);
+                    // Fixed bytes, tiny non-blocking write, ordering preserved.
+                    let _ = writer.write_all(PROGRAM_STATUS_PROBE_REPLY);
                 }
             }
             (shared.sink)(TermEvent::Signal(sig));
@@ -197,8 +192,8 @@ impl Read for TapReader {
 }
 
 impl EventedReadWrite for TapPty {
-    type Reader = TapReader;
-    type Writer = File;
+    type Reader = Self;
+    type Writer = <Pty as EventedReadWrite>::Writer;
 
     unsafe fn register(&mut self, poll: &Arc<Poller>, ev: PollEvent, mode: PollMode) -> io::Result<()> {
         unsafe { self.inner.register(poll, ev, mode) }
@@ -212,11 +207,11 @@ impl EventedReadWrite for TapPty {
         self.inner.deregister(poll)
     }
 
-    fn reader(&mut self) -> &mut TapReader {
-        &mut self.reader
+    fn reader(&mut self) -> &mut Self {
+        self
     }
 
-    fn writer(&mut self) -> &mut File {
+    fn writer(&mut self) -> &mut Self::Writer {
         self.inner.writer()
     }
 }
@@ -238,7 +233,8 @@ pub struct Session {
     shared: Arc<Shared>,
     pid: u32,
     /// The PTY, to ask who runs in its foreground.
-    tty: File,
+    #[cfg(unix)]
+    tty: std::fs::File,
 }
 
 impl Session {
@@ -267,17 +263,27 @@ impl Session {
             working_directory: cfg.cwd.clone(),
             drain_on_exit: true,
             env,
+            // Quote arguments for the child's command line (MSVCRT rules).
+            #[cfg(windows)]
+            escape_args: true,
         };
         let pty = tty::new(&opts, cfg.size.window_size(), 0)?;
-        let pid = pty.child().id();
-        let tty = pty.file().try_clone()?;
-        let reader =
-            TapReader { file: pty.file().try_clone()?, scanner: OscScanner::new(), shared: shared.clone(), last_probe_reply: None };
-        let event_loop = EventLoop::new(term.clone(), listener, TapPty { inner: pty, reader }, true, false)?;
+        #[cfg(unix)]
+        let (pid, tty) = (pty.child().id(), pty.file().try_clone()?);
+        #[cfg(windows)]
+        let pid = pty.child_watcher().pid().map_or(0, |p| p.get());
+        let tap = TapPty { inner: pty, scanner: OscScanner::new(), shared: shared.clone(), last_probe_reply: None };
+        let event_loop = EventLoop::new(term.clone(), listener, tap, true, false)?;
         let _ = shared.sender.set(event_loop.channel());
         event_loop.spawn();
 
-        Ok(Self { term, shared, pid, tty })
+        Ok(Self {
+            term,
+            shared,
+            pid,
+            #[cfg(unix)]
+            tty,
+        })
     }
 
     /// The VT state. Lock briefly (render prep only).
@@ -322,12 +328,18 @@ impl Session {
 
     /// See [`crate::procs::foreground_programs`].
     pub fn foreground_programs(&self) -> Vec<String> {
-        crate::procs::foreground_programs(&self.tty)
+        #[cfg(unix)]
+        return crate::procs::foreground_programs(&self.tty);
+        #[cfg(windows)]
+        return crate::procs::foreground_programs(self.pid);
     }
 
     /// See [`crate::procs::foreground_cwd`].
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
-        crate::procs::foreground_cwd(&self.tty)
+        #[cfg(unix)]
+        return crate::procs::foreground_cwd(&self.tty);
+        #[cfg(windows)]
+        return crate::procs::foreground_cwd(self.pid);
     }
 }
 

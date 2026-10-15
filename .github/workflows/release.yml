@@ -1,5 +1,6 @@
-# Push a tag like v0.1.0 to build a universal macOS DMG and publish it as a
-# GitHub release (the tag must match the version in Cargo.toml).
+# Push a tag like v0.1.0 to build a universal macOS DMG, a Windows installer
+# and a Linux archive and publish them as a GitHub release (the tag must
+# match the version in Cargo.toml).
 name: Release
 
 on:
@@ -92,8 +93,68 @@ jobs:
           name: tern-macos
           path: ${{ steps.dmg.outputs.path }}
 
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
+      - name: Install Inno Setup
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build installer
+        id: setup
+        env:
+          TERN_RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+          # The installer's Authenticode subject; Tern installs updates only
+          # when it's set (and the installer is signed by it).
+          TERN_WINDOWS_SIGNER: ${{ vars.WINDOWS_SIGNER }}
+        run: |
+          $setup = scripts/release-windows.ps1 -OutDir dist
+          "path=$setup" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tern-windows
+          path: ${{ steps.setup.outputs.path }}
+
+  linux:
+    # The oldest supported runner, so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
+      - name: Install GPUI build dependencies
+        run: sudo apt-get update && sudo apt-get install -y $(cat packaging/linux/build-deps.txt)
+      - name: Build archive
+        id: tar
+        env:
+          TERN_RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+        run: |
+          tar=$(scripts/release-linux.sh dist)
+          echo "path=$tar" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tern-linux
+          path: ${{ steps.tar.outputs.path }}
+
   publish:
-    needs: macos
+    needs: [macos, windows, linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -101,7 +162,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: tern-macos
+          pattern: tern-*
+          merge-multiple: true
           path: dist
       # With the repository variable RELEASE_REPO (e.g. a public repo, so the
       # app can check for updates while this one is private) the release is
@@ -111,7 +173,10 @@ jobs:
         with:
           repository: ${{ vars.RELEASE_REPO || github.repository }}
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/*-setup.exe
+            dist/*.tar.gz
           generate_release_notes: ${{ !vars.RELEASE_REPO }}
           body: |
             ## Install (macOS 12+, Apple Silicon and Intel)
@@ -123,3 +188,17 @@ jobs:
                dir=$(cd "${1:-.}" && pwd) || exit 1
                exec open -a Tern "$dir"
                ```
+
+            ## Install (Windows 10 1809+ / 11, x64)
+
+            Run `Tern-*-windows-x64-setup.exe`. It installs for your user (no admin
+            rights), adds Tern to the Start menu and, optionally, the `tern` command
+            to PATH and "Open in Tern" to the folder context menu. The installer
+            isn't code-signed yet: SmartScreen asks first (More info ▸ Run anyway).
+
+            ## Install (Linux x86_64)
+
+            ```sh
+            tar xzf Tern-*-linux-x86_64.tar.gz
+            Tern-*/install.sh   # tern in ~/.local/bin, menu entry and icon
+            ```

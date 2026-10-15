@@ -20,6 +20,7 @@ use gpui_kit::*;
 use tern_fs::{ChangeBatch, FileTree, FsWatcher, GitStatus, ops};
 
 use crate::file_icons;
+use crate::platform::bind;
 
 const ROW_HEIGHT: f32 = 22.;
 const INDENT: f32 = 14.;
@@ -55,24 +56,24 @@ actions!(
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("FileTree && !Input");
     cx.bind_keys([
-        KeyBinding::new("enter", Rename, ctx),
-        KeyBinding::new("f2", Rename, ctx),
-        KeyBinding::new("cmd-backspace", Delete, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("cmd-c", CopyEntries, ctx),
-        KeyBinding::new("cmd-x", CutEntries, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-alt-c", CopyPath, ctx),
-        KeyBinding::new("cmd-alt-shift-c", CopyRelativePath, ctx),
-        KeyBinding::new("cmd-alt-r", RevealInFinder, ctx),
-        KeyBinding::new("up", SelectPrev, ctx),
-        KeyBinding::new("down", SelectNext, ctx),
-        KeyBinding::new("left", CollapseEntry, ctx),
-        KeyBinding::new("right", ExpandEntry, ctx),
-        KeyBinding::new("space", OpenEntry, ctx),
-        KeyBinding::new("cmd-down", OpenEntryPinned, ctx),
+        bind("enter", Rename, ctx),
+        bind("f2", Rename, ctx),
+        bind("cmd-backspace", Delete, ctx),
+        bind("delete", Delete, ctx),
+        bind("cmd-c", CopyEntries, ctx),
+        bind("cmd-x", CutEntries, ctx),
+        bind("cmd-v", Paste, ctx),
+        bind("cmd-alt-c", CopyPath, ctx),
+        bind("cmd-alt-shift-c", CopyRelativePath, ctx),
+        bind("cmd-alt-r", RevealInFinder, ctx),
+        bind("up", SelectPrev, ctx),
+        bind("down", SelectNext, ctx),
+        bind("left", CollapseEntry, ctx),
+        bind("right", ExpandEntry, ctx),
+        bind("space", OpenEntry, ctx),
+        bind("cmd-down", OpenEntryPinned, ctx),
         // The name field lets escape through when it has nothing to undo.
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        bind("escape", Cancel, Some(CONTEXT)),
     ]);
 }
 
@@ -741,7 +742,7 @@ impl FileTreeView {
             .menu("New File…", Box::new(NewFile))
             .menu("New Folder…", Box::new(NewFolder))
             .separator()
-            .menu("Reveal in Finder", Box::new(RevealInFinder))
+            .menu(crate::platform::REVEAL, Box::new(RevealInFinder))
             .separator();
         let menu = if on_entry { menu.menu("Cut", Box::new(CutEntries)).menu("Copy", Box::new(CopyEntries)) } else { menu };
         let menu = menu
@@ -866,7 +867,7 @@ impl Render for FileTreeView {
         let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
         let me = cx.entity().downgrade();
         let root = self.root().to_path_buf();
-        let header_button = |id: &'static str, icon: Icon, tip: &'static str| Button::new(id).xsmall().ghost().icon(icon).tooltip(tip);
+        let header_button = |id: &'static str, icon: Icon, tip: SharedString| Button::new(id).xsmall().ghost().icon(icon).tooltip(tip);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -904,29 +905,33 @@ impl Render for FileTreeView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child(div().flex_1().truncate().child(root_name))
-                    .child(header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…").on_click(cx.listener(
+                    .child(header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into()).on_click(cx.listener(
                         |this, _, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(false, window, cx);
                         },
                     )))
-                    .child(header_button("new-folder", Icon::new(AssetIcon::FolderPlus), "New Folder…").on_click(cx.listener(
+                    .child(header_button("new-folder", Icon::new(AssetIcon::FolderPlus), "New Folder…".into()).on_click(cx.listener(
                         |this, _, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(true, window, cx);
                         },
                     )))
                     .child(
-                        header_button("refresh-explorer", Icon::new(IconName::RefreshCw), "Refresh Explorer")
+                        header_button("refresh-explorer", Icon::new(IconName::RefreshCw), "Refresh Explorer".into())
                             .on_click(cx.listener(|this, _, window, cx| this.on_refresh(&Refresh, window, cx))),
                     )
                     .child(
-                        header_button("collapse-all", Icon::new(AssetIcon::ChevronsDownUp), "Collapse Folders in Explorer")
+                        header_button("collapse-all", Icon::new(AssetIcon::ChevronsDownUp), "Collapse Folders in Explorer".into())
                             .on_click(cx.listener(|this, _, window, cx| this.on_collapse_all(&CollapseAll, window, cx))),
                     )
                     .child(
-                        header_button("hide-explorer", Icon::new(IconName::Close), "Hide Explorer (⌘B)")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Hide))),
+                        header_button(
+                            "hide-explorer",
+                            Icon::new(IconName::Close),
+                            format!("Hide Explorer ({})", crate::platform::shortcut("⌘B")).into(),
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Hide))),
                     ),
             )
             .child(

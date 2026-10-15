@@ -1,3 +1,6 @@
+// The scripts below need a POSIX shell.
+#![cfg(unix)]
+
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 

@@ -4,7 +4,8 @@
 # the .icns, macOS `iconutil`.
 #   scripts/gen-icons.sh
 # Outputs under assets/icon/: macos/ (Tern.icns, Tern.icon), ios/ (AppIcon.appiconset),
-# android/ (res/ for an Android project, plus the Play Store icon), web/.
+# android/ (res/ for an Android project, plus the Play Store icon), web/,
+# windows/ (tern.ico), linux/ (hicolor PNGs).
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -140,5 +141,18 @@ png "$TMP/full.png" 180 "$WEB/apple-touch-icon.png"
 png "$TMP/mac.png" 192 "$WEB/icon-192.png"
 png "$TMP/mac.png" 512 "$WEB/icon-512.png"
 padded "$TMP/glyph.png" 512 0.70 "$BG" "$WEB/icon-maskable-512.png"
+
+# Windows: the tile edge to edge, as Windows icons are drawn.
+WIN="$DIR/windows"
+rm -rf "$WIN" && mkdir -p "$WIN"
+magick "$TMP/tile.png" -resize 256x256 -background none -gravity center -extent 256x256 \
+    -define icon:auto-resize=256,64,48,40,32,24,20,16 "$WIN/tern.ico"
+
+# Linux: hicolor theme sizes (scripts/release-linux.sh installs them).
+LNX="$DIR/linux"
+rm -rf "$LNX" && mkdir -p "$LNX"
+for s in 32 48 64 128 256 512; do
+    png "$TMP/mac.png" "$s" "$LNX/tern-$s.png"
+done
 
 echo "Icons written to $DIR"

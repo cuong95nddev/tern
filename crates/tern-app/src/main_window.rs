@@ -16,6 +16,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::platform::bind;
 use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 
@@ -23,10 +24,10 @@ actions!(window, [CloseWorkspace, NextWorkspace, PrevWorkspace, NewWindow]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-shift-w", CloseWorkspace, None),
-        KeyBinding::new("cmd-alt-right", NextWorkspace, None),
-        KeyBinding::new("cmd-alt-left", PrevWorkspace, None),
-        KeyBinding::new("cmd-shift-n", NewWindow, None),
+        bind("cmd-shift-w", CloseWorkspace, None),
+        bind("cmd-alt-right", NextWorkspace, None),
+        bind("cmd-alt-left", PrevWorkspace, None),
+        bind("cmd-shift-n", NewWindow, None),
     ]);
 }
 
@@ -302,6 +303,8 @@ pub fn open_window(content: Content, at: Option<(DisplayId, WindowBounds)>, cx: 
             window_bounds: Some(window_bounds),
             display_id,
             titlebar: Some(TitlebarOptions { title: Some("Tern".into()), ..Default::default() }),
+            // Matches the Linux desktop entry (packaging/linux), for its icon.
+            app_id: Some("dev.tern.Tern".into()),
             ..Default::default()
         },
         cx,
@@ -343,7 +346,7 @@ pub fn open_folder(root: PathBuf, cx: &mut App) {
             let _ = handle.update(cx, |_, window, cx| main.update(cx, |m, cx| m.open_folder(root, window, cx)));
         },
         None => {
-            let root = root.canonicalize().unwrap_or(root);
+            let root = dunce::canonicalize(&root).unwrap_or(root);
             window_state::push_recent(&root);
             open_window(Content::Workspaces(vec![window_state::SavedWorkspace::fresh(root)], 0), None, cx)
         },
@@ -505,7 +508,7 @@ impl MainWindow {
     /// Open `root` as a new workspace here, unless some window already has
     /// it open: then that one comes forward.
     pub fn open_folder(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let root = root.canonicalize().unwrap_or(root);
+        let root = dunce::canonicalize(&root).unwrap_or(root);
         window_state::push_recent(&root);
         if let Some(ix) = self.slots.iter().position(|s| s.ws.read(cx).root() == root) {
             return self.activate(ix, window, cx);
@@ -711,14 +714,19 @@ impl MainWindow {
                         .when(busy, |d| d.child(div().text_color(warn).child("●"))),
                 )
                 .label(name)
-                .suffix(div().pr_1().child(
-                    Button::new(("close-ws", i)).xsmall().ghost().icon(IconName::Close).tooltip("Close Workspace (⌘⇧W)").on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.request_close(i, window, cx);
-                        }),
+                .suffix(
+                    div().pr_1().child(
+                        Button::new(("close-ws", i))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip(format!("Close Workspace ({})", crate::platform::shortcut("⌘⇧W")))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.request_close(i, window, cx);
+                            })),
                     ),
-                ))
+                )
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(i)))
                 .on_drag(drag, move |d, _, _, cx| {
                     let id = d.ws;
@@ -753,7 +761,7 @@ impl MainWindow {
                             .xsmall()
                             .ghost()
                             .icon(Icon::new(AssetIcon::FolderPlus))
-                            .tooltip("Open Workspace… (⌘O)")
+                            .tooltip(format!("Open Workspace… ({})", crate::platform::shortcut("⌘O")))
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
                     )
                     .child(div().flex_1())
@@ -814,14 +822,14 @@ impl MainWindow {
             .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy.display().to_string()));
             }))
-            .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+            .item(PopupMenuItem::new(crate::platform::REVEAL).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
     }
 
     fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, fg, hover, border) = (theme.muted_foreground, theme.foreground, theme.list_hover, theme.border);
         let recent = window_state::recent_folders();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::dirs::home();
         let pretty = move |p: &Path| match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
             Some(rel) => format!("~/{}", rel.display()),
             None => p.display().to_string(),
@@ -844,7 +852,7 @@ impl MainWindow {
                 .child(div().text_xs().text_color(muted).overflow_hidden().text_ellipsis().child(shown))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_folder(path.clone(), window, cx)))
         }));
-        let key = |k: &'static str, what: &'static str| {
+        let key = |k: String, what: &'static str| {
             div().flex().justify_between().gap_8().child(div().text_color(muted).child(what)).child(div().text_color(fg).child(k))
         };
         div().size_full().flex().items_center().justify_center().child(
@@ -882,10 +890,10 @@ impl MainWindow {
                         .flex_col()
                         .gap_1()
                         .text_sm()
-                        .child(key("⌘O", "Open workspace"))
-                        .child(key("⌘⇧N", "New window"))
-                        .child(key("⌘⇧W", "Close workspace"))
-                        .child(key("⌘⌥← ⌘⌥→", "Switch workspace")),
+                        .child(key(crate::platform::shortcut("⌘O"), "Open workspace"))
+                        .child(key(crate::platform::shortcut("⌘⇧N"), "New window"))
+                        .child(key(crate::platform::shortcut("⌘⇧W"), "Close workspace"))
+                        .child(key(crate::platform::shortcut("⌘⌥← ⌘⌥→"), "Switch workspace")),
                 ),
         )
     }

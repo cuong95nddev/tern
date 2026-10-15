@@ -35,23 +35,27 @@ use tern_term::{SpawnConfig, TermEvent, TermSize};
 
 use crate::agents::Agent;
 use crate::links::{self, Link};
+use crate::platform::bind;
 
 actions!(terminal, [Copy, Paste, Clear, ScrollPageUp, ScrollPageDown, SelectAll]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-        KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-        KeyBinding::new("cmd-k", Clear, Some("Terminal")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
-        KeyBinding::new("shift-pageup", ScrollPageUp, Some("Terminal")),
-        KeyBinding::new("shift-pagedown", ScrollPageDown, Some("Terminal")),
+        bind("cmd-c", Copy, Some("Terminal")),
+        bind("cmd-v", Paste, Some("Terminal")),
+        bind("cmd-k", Clear, Some("Terminal")),
+        bind("cmd-a", SelectAll, Some("Terminal")),
+        bind("shift-pageup", ScrollPageUp, Some("Terminal")),
+        bind("shift-pagedown", ScrollPageDown, Some("Terminal")),
         // The root binds tab / shift-tab to move focus, and bindings run
         // before `key_down`: unbind them here so the shell gets the key
         // (completion, accepting a suggestion).
-        KeyBinding::new("tab", NoAction, Some("Terminal")),
-        KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
+        bind("tab", NoAction, Some("Terminal")),
+        bind("shift-tab", NoAction, Some("Terminal")),
     ]);
+    if !cfg!(target_os = "macos") {
+        cx.bind_keys([bind("ctrl-insert", Copy, Some("Terminal")), bind("shift-insert", Paste, Some("Terminal"))]);
+    }
 }
 
 pub use tern_term::status::ActivityStatus;
@@ -430,7 +434,24 @@ impl TerminalView {
         let shell = self.spawn_cfg.program.as_deref().and_then(|p| Path::new(p).file_name()).and_then(|n| n.to_str()).unwrap_or("");
         s.foreground_programs().into_iter().find(|p| {
             let p = p.trim_start_matches('-');
-            p != shell && !matches!(p, "login" | "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "csh" | "ksh" | "nu")
+            p != shell
+                && !matches!(
+                    p,
+                    "login"
+                        | "zsh"
+                        | "bash"
+                        | "fish"
+                        | "sh"
+                        | "dash"
+                        | "tcsh"
+                        | "csh"
+                        | "ksh"
+                        | "nu"
+                        | "pwsh"
+                        | "powershell"
+                        | "cmd"
+                        | "wsl"
+                )
         })
     }
 
@@ -622,6 +643,11 @@ impl TerminalView {
         if ks.modifiers.platform || self.marked_text.is_some() {
             return;
         }
+        // AltGr (Ctrl+Alt on Windows) or a dead key makes a character: let
+        // it arrive as text input.
+        if cfg!(windows) && ev.prefer_character_input {
+            return;
+        }
         if self.exited.is_some() && ks.key == "enter" {
             self.start(cx);
             cx.stop_propagation();
@@ -794,7 +820,7 @@ impl TerminalView {
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         if ev.button == MouseButton::Left
-            && ev.modifiers.platform
+            && ev.modifiers.secondary()
             && let Some(link) = self.link_at(ev.position)
         {
             self.open_link(link.target, cx);
@@ -831,7 +857,7 @@ impl TerminalView {
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.mouse_pos = Some(ev.position);
-        self.update_hover(ev.modifiers.platform && ev.pressed_button.is_none(), cx);
+        self.update_hover(ev.modifiers.secondary() && ev.pressed_button.is_none(), cx);
         // Motion is reported once per cell: with a button held (1002/1003),
         // or with none (1003).
         let cell = self.grid_point(ev.position).map(|(c, r, _)| (c, r));
@@ -881,10 +907,10 @@ impl TerminalView {
     }
 
     fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if ev.modifiers.platform && self.hover_link.is_none() {
+        if ev.modifiers.secondary() && self.hover_link.is_none() {
             self.resolved.take();
         }
-        self.update_hover(ev.modifiers.platform, cx);
+        self.update_hover(ev.modifiers.secondary(), cx);
     }
 
     fn hover_changed(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -1538,6 +1564,21 @@ fn sanitize_paste(text: &str) -> String {
 
 /// A path as a shell word: backslash before every char a shell treats
 /// specially, as Ghostty and iTerm2 do for dropped files.
+#[cfg(windows)]
+pub(crate) fn escape_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    // Windows paths can't hold `"`. Single quotes keep PowerShell from
+    // expanding `$` and backticks; else double quotes, which cmd reads too.
+    if s.contains(['$', '`']) {
+        format!("'{}'", s.replace('\'', "''"))
+    } else if s.contains(|c: char| c.is_whitespace() || "&()[]{}^=;!'+,~@%".contains(c)) {
+        format!("\"{s}\"")
+    } else {
+        s.into_owned()
+    }
+}
+
+#[cfg(not(windows))]
 pub(crate) fn escape_path(path: &Path) -> String {
     let mut out = String::new();
     for c in path.to_string_lossy().chars() {
@@ -1555,6 +1596,15 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    #[cfg(windows)]
+    fn escapes_dropped_paths() {
+        assert_eq!(escape_path(Path::new(r"C:\Users\a\x.png")), r"C:\Users\a\x.png");
+        assert_eq!(escape_path(Path::new(r"C:\Users\a\Screen Shot (1).png")), r#""C:\Users\a\Screen Shot (1).png""#);
+        assert_eq!(escape_path(Path::new(r"C:\it's $HOME")), r"'C:\it''s $HOME'");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
     fn escapes_dropped_paths() {
         assert_eq!(escape_path(Path::new("/Users/a/Screen Shot (1).png")), r"/Users/a/Screen\ Shot\ \(1\).png");
         assert_eq!(escape_path(Path::new("/tmp/it's $HOME")), r"/tmp/it\'s\ \$HOME");

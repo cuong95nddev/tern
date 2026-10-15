@@ -171,10 +171,13 @@ pub fn trash(path: &Path) -> io::Result<()> {
     NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| err(e.localizedDescription().to_string()))
 }
 
-/// No Trash to use here: delete for good.
+/// Move `path` to the Recycle Bin (Windows) or the freedesktop Trash (Linux).
 #[cfg(not(target_os = "macos"))]
 pub fn trash(path: &Path) -> io::Result<()> {
-    if path.symlink_metadata()?.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
+    if !exists(path) {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} does not exist", path.display())));
+    }
+    trash::delete(path).map_err(|e| err(e.to_string()))
 }
 
 /// Drop paths inside another path of the list, so a folder and its contents

@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff_pane::{DiffPane, language_for};
+use crate::platform::bind;
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -20,10 +21,10 @@ actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-s", Save, Some("Viewer")),
-        KeyBinding::new("cmd-shift-d", ToggleDiff, None),
-        KeyBinding::new("cmd-shift-v", TogglePreview, None),
-        KeyBinding::new("cmd-shift-o", OpenExternal, None),
+        bind("cmd-s", Save, Some("Viewer")),
+        bind("cmd-shift-d", ToggleDiff, None),
+        bind("cmd-shift-v", TogglePreview, None),
+        bind("cmd-shift-o", OpenExternal, None),
     ]);
 }
 
@@ -350,10 +351,22 @@ impl Viewer {
         let Some(path) = self.path.clone() else { return };
         let line = self.editor.read(cx).cursor_position().line + 1;
         let target = format!("{}:{line}", path.display());
-        // Prefer the `code` CLI (jumps to line); fall back to Cursor, then the app bundle.
-        let spawned = ["code", "cursor"].iter().any(|bin| Command::new(bin).arg("-g").arg(&target).spawn().is_ok());
+        // Prefer the `code` CLI (jumps to line); fall back to Cursor, then the
+        // app bundle (macOS) or the file's default app. On Windows the CLIs
+        // are batch files, which need their extension.
+        let clis: &[&str] = if cfg!(windows) { &["code.cmd", "cursor.cmd"] } else { &["code", "cursor"] };
+        let spawned = clis.iter().any(|bin| {
+            let mut c = Command::new(bin);
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000); // CREATE_NO_WINDOW
+            c.arg("-g").arg(&target).spawn().is_ok()
+        });
         if !spawned {
-            let _ = Command::new("open").args(["-a", "Visual Studio Code"]).arg(&path).spawn();
+            if cfg!(target_os = "macos") {
+                let _ = Command::new("open").args(["-a", "Visual Studio Code"]).arg(&path).spawn();
+            } else {
+                cx.open_with_system(&path);
+            }
         }
     }
 
@@ -432,7 +445,7 @@ impl Render for Viewer {
                         .ghost()
                         .selected(self.mode == Mode::Preview)
                         .label(if self.mode == Mode::Preview { "Edit" } else { "Preview" })
-                        .tooltip("Toggle Markdown preview (⌘⇧V)")
+                        .tooltip(format!("Toggle Markdown preview ({})", crate::platform::shortcut("⌘⇧V")))
                         .on_click(cx.listener(|this, _, w, cx| this.toggle_preview(&TogglePreview, w, cx))),
                 )
             })
@@ -451,7 +464,7 @@ impl Render for Viewer {
                     .xsmall()
                     .ghost()
                     .label("VS Code")
-                    .tooltip("Open in VS Code (⌘⇧O)")
+                    .tooltip(format!("Open in VS Code ({})", crate::platform::shortcut("⌘⇧O")))
                     .on_click(cx.listener(|this, _, w, cx| this.open_external(&OpenExternal, w, cx))),
             );
 
@@ -507,7 +520,7 @@ impl Render for Viewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, PathBuf, image_format, is_markdown, link_target, normalize};
+    use super::{Path, PathBuf, image_format, is_markdown, normalize};
 
     #[test]
     fn normalize_resolves_dots() {
@@ -517,7 +530,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn links_stay_inside_the_root() {
+        use super::link_target;
         let base = std::env::temp_dir().join(format!("tern-viewer-links-{}", std::process::id()));
         let (root, outside) = (base.join("root"), base.join("outside"));
         std::fs::create_dir_all(root.join("docs")).unwrap();
