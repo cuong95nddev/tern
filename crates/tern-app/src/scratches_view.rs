@@ -196,7 +196,7 @@ impl Render for ScratchesView {
                     .xsmall()
                     .ghost()
                     .icon(IconName::Close)
-                    .tooltip("Hide Scratches (⌘⇧S)")
+                    .tooltip(format!("Hide Scratches ({})", crate::platform::shortcut("⌘⇧S")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ScratchesEvent::Hide))),
             );
         let body: AnyElement = if self.files.is_empty() {
@@ -210,7 +210,7 @@ impl Render for ScratchesView {
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child("No scratch files")
-                .child(div().text_xs().child("⌘N to create one"))
+                .child(div().text_xs().child(format!("{} to create one", crate::platform::shortcut("⌘N"))))
                 .into_any_element()
         } else {
             div()
@@ -237,7 +237,7 @@ impl Render for ScratchesView {
                             cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
                             None
                         }))
-                        .item(item("Reveal in Finder", |p, cx| {
+                        .item(item(crate::platform::REVEAL, |p, cx| {
                             cx.reveal_path(p);
                             None
                         }))

@@ -146,6 +146,12 @@ fn git(root: &Path) -> Command {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(root);
+    #[cfg(windows)]
+    {
+        // A GUI app's console children would each flash a console window.
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     c
 }
 

@@ -30,8 +30,11 @@
 //!   term-paste-path P1|P2   paste paths as a file drop does
 //!   @N CMD           send CMD to window N instead of the active one
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
@@ -39,8 +42,16 @@ use gpui_kit::*;
 
 pub type Request = (String, flume::Sender<String>);
 
+/// No Unix sockets here: the control socket is a Unix-only debug aid.
+#[cfg(not(unix))]
+pub fn listen(_path: PathBuf) -> Option<flume::Receiver<Request>> {
+    log::warn!("TERN_CONTROL needs a Unix socket; ignored");
+    None
+}
+
 /// Start listening on `path` (from `TERN_CONTROL`); requests arrive on the
 /// receiver.
+#[cfg(unix)]
 pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
     // Replace a stale socket, never another kind of file.
     if let Ok(m) = std::fs::symlink_metadata(&path) {

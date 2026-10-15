@@ -143,17 +143,29 @@ impl HookServer {
 ///
 /// `dir` must be (or become) a 0700 directory owned by the current user; the
 /// file is created exclusively without following symlinks. Remove it with
-/// [`remove_claude_settings`] when the tab closes.
+/// [`remove_claude_settings`] when the tab closes. On Windows `dir` is under
+/// the user's local app data, which only they can read.
 pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
-    let uid = unsafe { libc::getuid() };
-    if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not private"));
-    }
     let path = dir.join(format!("claude-settings-{token}.json"));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let meta = std::fs::symlink_metadata(dir)?;
+        let uid = unsafe { libc::getuid() };
+        if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not private"));
+        }
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?
+    };
+    #[cfg(not(unix))]
+    let mut f = {
+        std::fs::create_dir_all(dir)?;
+        if !std::fs::symlink_metadata(dir)?.is_dir() {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not a directory"));
+        }
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?
+    };
     f.write_all(claude_settings_json(hook_url).as_bytes())?;
     Ok(path)
 }
@@ -185,8 +197,29 @@ pub fn sweep_run_dirs(root: &std::path::Path) {
     }
 }
 
+#[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+#[cfg(windows)]
+fn process_alive(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid <= 0 {
+        return false;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if h.is_null() {
+            // Gone, or not ours to open (then it isn't a Tern of this user).
+            return false;
+        }
+        let mut code = 0u32;
+        let alive = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(h);
+        alive
+    }
 }
 
 /// Settings JSON passed to `claude --settings` for a tab.
@@ -258,7 +291,7 @@ fn handle(stream: TcpStream, tokens: &Mutex<HashSet<String>>, sink: &HookSink) -
     Ok(())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -320,11 +353,14 @@ mod tests {
 
     #[test]
     fn settings_file_private_and_removed() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("run");
         let p = write_claude_settings(&dir, "abc", "http://127.0.0.1:1/hook/abc").unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(write_claude_settings(&dir, "abc", "x").is_err(), "must not overwrite");
         remove_claude_settings(&dir, "abc");
         assert!(!p.exists());

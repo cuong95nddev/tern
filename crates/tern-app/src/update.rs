@@ -1,9 +1,18 @@
 //! Updates from GitHub releases: Tern checks the latest release at launch and
 //! every few hours, and the workspace bar then shows an update button (also
-//! Tern ▸ Check for Updates…). Installing downloads the release's DMG, copies
-//! its Tern.app next to the running one, and after Tern quits a small shell
-//! script swaps the bundles and reopens it, which restores the session.
-//! Uses the system's `curl`, `hdiutil`, `ditto` and `codesign`.
+//! Tern ▸ Check for Updates…).
+//!
+//! On macOS installing downloads the release's DMG, copies its Tern.app next
+//! to the running one, and after Tern quits a small shell script swaps the
+//! bundles and reopens it, which restores the session. Uses the system's
+//! `curl`, `hdiutil`, `ditto` and `codesign`.
+//!
+//! On Windows it downloads the release's installer, checks its Authenticode
+//! signer against `TERN_WINDOWS_SIGNER` (set at build time; without it Tern
+//! only points to the release page) and, once Tern quits, runs it silently
+//! over the installed copy and starts Tern again (the system's `curl.exe`
+//! and PowerShell). On Linux Tern only points to the
+//! release page.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,7 +34,8 @@ actions!(tern, [CheckForUpdates]);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: semver::Version,
-    pub dmg_url: String,
+    /// The DMG (macOS), installer (Windows) or archive (Linux).
+    pub asset_url: String,
     pub page_url: String,
 }
 
@@ -63,7 +73,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(Updater::default());
     cx.on_action(|_: &CheckForUpdates, cx| check(true, cx));
     // Only an installed app checks by itself, not `cargo run`.
-    if app_bundle().is_some() && std::env::var_os("TERN_NO_UPDATE_CHECK").is_none() {
+    if installation().is_some() && std::env::var_os("TERN_NO_UPDATE_CHECK").is_none() {
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             loop {
@@ -112,18 +122,18 @@ pub fn check(manual: bool, cx: &mut App) {
 /// Ask whether to install release `r`.
 pub fn offer(r: Release, cx: &mut App) {
     let msg = format!("Tern {} is available", r.version);
-    let blocked = app_bundle().and_then(|b| install_blocker(&b));
-    let detail = match app_bundle() {
+    let installed = installation().filter(|_| CAN_INSTALL);
+    let blocked = installed.as_deref().and_then(install_blocker);
+    let detail = match installed {
         Some(_) if blocked.is_some() => format!("You have {}. {}", current_version(), blocked.as_deref().unwrap_or_default()),
         Some(_) => format!(
             "You have {}. Tern will restart to install it; your windows and workspaces come back, but running terminals are closed.",
             current_version()
         ),
-        None => {
-            format!("You have {}. This copy isn't an installed Tern.app, so download the update from the release page.", current_version())
-        },
+        None if !CAN_INSTALL => format!("You have {}. Download the update from the release page.", current_version()),
+        None => format!("You have {}. This copy isn't an installed Tern, so download the update from the release page.", current_version()),
     };
-    let installable = app_bundle().is_some() && blocked.is_none();
+    let installable = installed.is_some() && blocked.is_none();
     let answers: &[&str] = if installable { &["Update and Restart", "Release Notes", "Later"] } else { &["Release Notes", "Later"] };
     let Some(answer) = prompt(PromptLevel::Info, &msg, &detail, answers, cx) else { return };
     cx.spawn(async move |cx| {
@@ -139,10 +149,10 @@ pub fn offer(r: Release, cx: &mut App) {
 }
 
 fn install(r: Release, cx: &mut App) {
-    let Some(bundle) = app_bundle() else { return };
+    let Some(bundle) = installation() else { return };
     set_state(State::Installing(r.clone()), cx);
     cx.spawn(async move |cx| {
-        let url = r.dmg_url.clone();
+        let url = r.asset_url.clone();
         let target = bundle.clone();
         let staged = cx.background_spawn(async move { stage(&url, &target) }).await;
         cx.update(|cx| match staged.and_then(|staged| relaunch_after_exit(&staged, &bundle)) {
@@ -176,30 +186,96 @@ fn prompt(level: PromptLevel, msg: &str, detail: &str, answers: &[&str], cx: &mu
     window.update(cx, |_, window, cx| window.prompt(level, msg, Some(detail), answers, cx)).ok()
 }
 
-/// The running Tern.app, if this is one (and not a build in `target/`).
-fn app_bundle() -> Option<PathBuf> {
-    bundle_of(&std::env::current_exe().ok()?.canonicalize().ok()?)
+/// The Authenticode subject the Windows installer must be signed by (e.g.
+/// `CN=Example Ltd, O=Example Ltd, C=VN`), set at build time. Without it
+/// Tern can't verify a downloaded installer, so it doesn't run one.
+const WINDOWS_SIGNER: &str = match option_env!("TERN_WINDOWS_SIGNER") {
+    Some(s) => s,
+    None => "",
+};
+
+/// Whether Tern can install an update itself here: on macOS (the app's
+/// signature is checked), on Windows only when the installer's signer is known.
+const CAN_INSTALL: bool = cfg!(target_os = "macos") || (cfg!(windows) && !WINDOWS_SIGNER.is_empty());
+
+/// The installed Tern this process runs from, `None` for a build in
+/// `target/`: the Tern.app bundle (macOS), the folder the installer put it in
+/// (Windows: it holds the uninstaller) or the executable (Linux).
+fn installation() -> Option<PathBuf> {
+    let exe = dunce::canonicalize(std::env::current_exe().ok()?).ok()?;
+    if cfg!(target_os = "macos") {
+        bundle_of(&exe)
+    } else if cfg!(windows) {
+        exe.parent().filter(|d| d.join("unins000.exe").is_file()).map(Path::to_owned)
+    } else {
+        (!exe.components().any(|c| c.as_os_str() == "target")).then_some(exe)
+    }
+}
+
+/// `program` without a console window of its own (on Windows a GUI app's
+/// console children would each flash one).
+fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    c
+}
+
+/// The system's curl: macOS and Windows 10+ ship one.
+fn curl_path() -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join(r"System32\curl.exe")
+    } else if cfg!(target_os = "macos") {
+        "/usr/bin/curl".into()
+    } else {
+        "curl".into()
+    }
+}
+
+/// The release asset this platform installs from.
+fn asset_name(version: &semver::Version) -> String {
+    // The names scripts/release-{macos.sh,windows.ps1,linux.sh} give them.
+    if cfg!(target_os = "macos") {
+        format!("Tern-{version}-macos-universal.dmg")
+    } else if cfg!(windows) {
+        format!("Tern-{version}-windows-x64-setup.exe")
+    } else {
+        format!("Tern-{version}-linux-x86_64.tar.gz")
+    }
 }
 
 /// Why Tern can't replace `bundle` in place: macOS runs it from a random
 /// read-only copy (App Translocation, when it was never moved out of the
 /// download), or it runs from the DMG or another folder it can't write.
 fn install_blocker(bundle: &Path) -> Option<String> {
+    if cfg!(windows) {
+        // The folder itself: the installer replaces the files in it.
+        return (!writable(bundle))
+            .then(|| format!("Tern can't write to {}: download the update from the release page.", bundle.display()));
+    }
     if is_translocated(bundle) {
         return Some("Move Tern to the Applications folder and open it from there to install updates.".to_owned());
     }
     let dir = bundle.parent()?;
-    let probe = dir.join(format!(".tern-write-test-{}", std::process::id()));
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            None
-        },
-        Err(_) if bundle.starts_with("/Volumes") => {
+    match writable(dir) {
+        true => None,
+        false if bundle.starts_with("/Volumes") => {
             Some("Tern is running from its disk image: drag it to the Applications folder and open it from there.".to_owned())
         },
-        Err(_) => Some(format!("Tern can't write to {}: download the update from the release page.", dir.display())),
+        false => Some(format!("Tern can't write to {}: download the update from the release page.", dir.display())),
     }
+}
+
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".tern-write-test-{}", std::process::id()));
+    let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 fn is_translocated(bundle: &Path) -> bool {
@@ -214,8 +290,9 @@ fn bundle_of(exe: &Path) -> Option<PathBuf> {
     ok.then(|| bundle.to_owned())
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn curl() -> Command {
-    let mut c = Command::new("/usr/bin/curl");
+    let mut c = command(curl_path());
     c.args(["-fsSL", "--connect-timeout", "15", "-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))]);
     // HTTPS only, also after redirects; give up on a stalled download (under
     // 1 KB/s for 30 s) or one that takes over 15 minutes.
@@ -223,7 +300,7 @@ fn curl() -> Command {
     c
 }
 
-/// The latest published release, if it has a DMG. Reads the redirect of
+/// The latest published release, if it has this platform's asset. Reads the redirect of
 /// github.com's /releases/latest (which skips drafts and prereleases) rather
 /// than the REST API, whose anonymous limit of 60 requests an hour is shared
 /// by everyone behind the same IP address.
@@ -231,20 +308,29 @@ fn fetch_latest() -> Result<Option<Release>, String> {
     let latest = format!("https://github.com/{REPO}/releases/latest");
     let Some(tag) = parse_latest_redirect(&head(&latest)?)? else { return Ok(None) };
     let Ok(version) = semver::Version::parse(tag.trim_start_matches('v')) else { return Ok(None) };
-    // The name scripts/release-macos.sh gives the DMG.
-    let dmg_url = format!("https://github.com/{REPO}/releases/download/{tag}/Tern-{version}-macos-universal.dmg");
-    // A release whose DMG is missing (or still uploading) isn't offered yet.
-    if !matches!(head(&dmg_url)?.0, 200 | 302) {
+    let asset_url = format!("https://github.com/{REPO}/releases/download/{tag}/{}", asset_name(&version));
+    // A release whose asset is missing (or still uploading) isn't offered yet.
+    if !matches!(head(&asset_url)?.0, 200 | 302) {
         return Ok(None);
     }
     let page_url = format!("https://github.com/{REPO}/releases/tag/{tag}");
-    Ok(Some(Release { version, dmg_url, page_url }))
+    Ok(Some(Release { version, asset_url, page_url }))
 }
 
 /// The HTTP status of `url` and where it redirects, without following it.
 fn head(url: &str) -> Result<(u16, String), String> {
-    let out = Command::new("/usr/bin/curl")
-        .args(["-sSI", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "--connect-timeout", "15", "--max-time", "30"])
+    let out = command(curl_path())
+        .args([
+            "-sSI",
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "-w",
+            "%{http_code} %{redirect_url}",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "30",
+        ])
         .args(["--proto", "=https"])
         .args(["-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))])
         .arg(url)
@@ -269,6 +355,7 @@ fn parse_latest_redirect((code, location): &(u16, String)) -> Result<Option<Stri
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn run(cmd: &mut Command) -> Result<(), String> {
     let out = cmd.output().map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
     if out.status.success() {
@@ -279,8 +366,92 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
+/// Download the installer into a fresh temporary folder; returns its path.
+#[cfg(windows)]
+fn stage(url: &str, _install_dir: &Path) -> Result<PathBuf, String> {
+    let tmp = std::env::temp_dir().join(format!("tern-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let setup = tmp.join("Tern-setup.exe");
+    let verified = run(curl().arg("-o").arg(&setup).arg(url)).and_then(|()| verify_signature(&setup));
+    if let Err(e) = verified {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    Ok(setup)
+}
+
+/// Require a valid Authenticode signature by `WINDOWS_SIGNER` on `file`.
+#[cfg(windows)]
+fn verify_signature(file: &Path) -> Result<(), String> {
+    if WINDOWS_SIGNER.is_empty() {
+        return Err("this Tern can't verify installers: download the update from the release page.".to_owned());
+    }
+    let script = format!(
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; \"$($s.Status)`n$($s.SignerCertificate.Subject)\"",
+        file.to_string_lossy().replace('\'', "''")
+    );
+    let out = command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        .arg(crate::platform::encode_powershell(&script))
+        .output()
+        .map_err(|e| format!("powershell: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    match (lines.next(), lines.next()) {
+        (Some("Valid"), Some(subject)) if subject == WINDOWS_SIGNER => Ok(()),
+        (status, subject) => Err(format!(
+            "the downloaded installer isn't signed by {WINDOWS_SIGNER} (status {}, signer {})",
+            status.unwrap_or("unknown"),
+            subject.filter(|s| !s.is_empty()).unwrap_or("none")
+        )),
+    }
+}
+
+/// Start a hidden PowerShell that waits for this process to exit, runs the
+/// installer silently over `install_dir` and starts the new Tern.
+#[cfg(windows)]
+fn relaunch_after_exit(setup: &Path, install_dir: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let q = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    let script = format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue\n\
+         Start-Process -FilePath {setup} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait\n\
+         Remove-Item -LiteralPath {dir} -Recurse -Force -ErrorAction SilentlyContinue\n\
+         Start-Process -FilePath {exe}",
+        pid = std::process::id(),
+        setup = q(setup),
+        dir = q(setup.parent().unwrap_or(setup)),
+        exe = q(&install_dir.join("tern.exe")),
+    );
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand"])
+        .arg(crate::platform::encode_powershell(&script))
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("couldn't start the installer: {e}"))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn stage(_: &str, _: &Path) -> Result<PathBuf, String> {
+    Err("Tern can't install updates here: download the update from the release page.".to_owned())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn relaunch_after_exit(_: &Path, _: &Path) -> Result<(), String> {
+    Err("unsupported".to_owned())
+}
+
 /// Download the DMG and copy its Tern.app beside `bundle` (same volume, so
 /// the swap is a rename). Returns the staged copy.
+#[cfg(target_os = "macos")]
 fn stage(dmg_url: &str, bundle: &Path) -> Result<PathBuf, String> {
     let tmp = std::env::temp_dir().join(format!("tern-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -312,6 +483,7 @@ fn stage(dmg_url: &str, bundle: &Path) -> Result<PathBuf, String> {
 /// What the new app's signature must satisfy: Tern's bundle id and, when the
 /// running app is Developer ID signed, an Apple-issued certificate of the same
 /// team (an ad-hoc build has no signer to pin, so then only the id).
+#[cfg(target_os = "macos")]
 fn signer_requirement(bundle: &Path) -> String {
     let id = r#"identifier "dev.tern""#;
     match team_id(bundle) {
@@ -321,11 +493,13 @@ fn signer_requirement(bundle: &Path) -> String {
 }
 
 /// The Team ID that signed `bundle`, if any.
+#[cfg(target_os = "macos")]
 fn team_id(bundle: &Path) -> Option<String> {
     let out = Command::new("/usr/bin/codesign").arg("-dv").arg(bundle).output().ok()?;
     parse_team_id(&String::from_utf8_lossy(&out.stderr))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_team_id(info: &str) -> Option<String> {
     let team = info.lines().find_map(|l| l.strip_prefix("TeamIdentifier="))?.trim();
     (!team.is_empty() && team != "not set" && team.chars().all(|c| c.is_ascii_alphanumeric())).then(|| team.to_owned())
@@ -333,6 +507,7 @@ fn parse_team_id(info: &str) -> Option<String> {
 
 /// Start a detached script that waits for this process to exit, swaps
 /// `staged` into `bundle` (putting the old one back if that fails) and opens it.
+#[cfg(target_os = "macos")]
 fn relaunch_after_exit(staged: &Path, bundle: &Path) -> Result<(), String> {
     use std::os::unix::process::CommandExt as _;
     const SCRIPT: &str = r#"

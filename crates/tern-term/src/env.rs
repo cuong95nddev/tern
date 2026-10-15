@@ -53,7 +53,8 @@ pub unsafe fn prepare_process_env() {
         unsafe { std::env::remove_var(key) };
     }
     let unset = |k: &str| std::env::var_os(k).is_none_or(|v| v.is_empty());
-    if unset("LANG") && unset("LC_ALL") && unset("LC_CTYPE") {
+    // Windows programs don't read a locale from the environment.
+    if cfg!(unix) && unset("LANG") && unset("LC_ALL") && unset("LC_CTYPE") {
         let exists = |name: &str| Path::new("/usr/share/locale").join(name).exists();
         let locale = utf8_locale(&system_locale().unwrap_or_default(), exists);
         unsafe {

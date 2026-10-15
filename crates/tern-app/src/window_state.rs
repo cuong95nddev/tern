@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use gpui_kit::*;
 
 fn file() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join("Library/Application Support/dev.tern/window")
+    crate::dirs::data().join("window")
 }
 
 /// One line: `<display uuid> <x> <y> <w> <h> <windowed|maximized|fullscreen>`,
@@ -433,6 +432,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[cfg(unix)]
     fn atomic_write_replaces_and_keeps_mode() {
         use std::os::unix::fs::PermissionsExt;
         let d = std::env::temp_dir().join(format!("tern-atomic-{}", std::process::id()));

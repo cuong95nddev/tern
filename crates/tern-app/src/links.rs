@@ -165,8 +165,8 @@ fn split_line_col(s: &str) -> (&str, Option<u32>, Option<u32>) {
 /// repo it `cd`'d into) is looked up in the base's subfolders, two deep.
 pub fn resolve(path: &str, bases: &[PathBuf]) -> Option<PathBuf> {
     let expanded = match path.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
-        None if path == "~" => PathBuf::from(std::env::var_os("HOME")?),
+        Some(rest) => crate::dirs::home()?.join(rest),
+        None if path == "~" => crate::dirs::home()?,
         None => PathBuf::from(path),
     };
     if expanded.is_absolute() {

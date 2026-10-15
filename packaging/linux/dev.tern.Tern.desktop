@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tern
+GenericName=Terminal
+Comment=A fast, native terminal for coding agents
+Exec=tern %F
+Icon=dev.tern.Tern
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+MimeType=inode/directory;
+StartupWMClass=dev.tern.Tern

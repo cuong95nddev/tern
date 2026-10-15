@@ -1,0 +1,10 @@
+libxkbcommon-x11-dev
+libwayland-dev
+libx11-xcb-dev
+libfontconfig-dev
+libfreetype-dev
+libvulkan-dev
+libasound2-dev
+libssl-dev
+libzstd-dev
+clang

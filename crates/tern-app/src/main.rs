@@ -1,16 +1,24 @@
+// A release build is a GUI app on Windows: no console window of its own.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod agents;
 mod changes_view;
 #[cfg(debug_assertions)]
 mod control;
 mod diff_pane;
+mod dirs;
 mod file_icons;
 mod file_tree_view;
+#[cfg(not(target_os = "macos"))]
+mod handoff;
 mod links;
 mod main_window;
 mod panes;
+mod platform;
 mod scratch;
 mod scratches_view;
 mod terminal_view;
+#[cfg(target_os = "macos")]
 mod terminate;
 mod update;
 mod viewer;
@@ -41,7 +49,8 @@ fn main() {
     // windows come back, plus the cwd when started from a shell (from Finder
     // or the Dock the cwd is `/`); with no session, the last folder or the
     // welcome page.
-    let arg: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
+    // Absolute, as a running Tern it may be handed to has another cwd.
+    let arg: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from).map(|p| std::path::absolute(&p).unwrap_or(p));
     let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some());
     // One Tern at a time shares the saved session: a second one hands its
     // folder to the first and exits.
@@ -49,6 +58,8 @@ fn main() {
         forward_to_running(arg.or(shell_cwd));
         return;
     };
+    #[cfg(not(target_os = "macos"))]
+    let handoff = handoff::listen();
 
     // Folders handed over by the OS (`open -a Tern <dir>`, a folder dropped
     // on the Dock icon), also while running.
@@ -66,24 +77,27 @@ fn main() {
         scratch::bind_keys(cx);
         workspace::bind_keys(cx);
         main_window::bind_keys(cx);
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-o", OpenFolder, None)]);
+        cx.bind_keys([platform::bind("cmd-q", Quit, None), platform::bind("cmd-o", OpenFolder, None)]);
         cx.on_action(|_: &Quit, cx| quit(cx));
         // Quitting from the Dock, AppleScript or logout asks first too.
-        let (terminate_tx, terminate_rx) = flume::unbounded();
-        terminate::install(terminate_tx);
-        cx.spawn(async move |cx| {
-            while terminate_rx.recv_async().await.is_ok() {
-                cx.update(|cx| {
-                    confirm_quit(cx, |ok, cx| {
-                        if ok {
-                            cx.default_global::<main_window::Session>().quitting = true;
-                        }
-                        terminate::reply(ok);
-                    })
-                });
-            }
-        })
-        .detach();
+        #[cfg(target_os = "macos")]
+        {
+            let (terminate_tx, terminate_rx) = flume::unbounded();
+            terminate::install(terminate_tx);
+            cx.spawn(async move |cx| {
+                while terminate_rx.recv_async().await.is_ok() {
+                    cx.update(|cx| {
+                        confirm_quit(cx, |ok, cx| {
+                            if ok {
+                                cx.default_global::<main_window::Session>().quitting = true;
+                            }
+                            terminate::reply(ok);
+                        })
+                    });
+                }
+            })
+            .detach();
+        }
         cx.set_menus([Menu::new("Tern").items([
             MenuItem::action("Check for Updates…", update::CheckForUpdates),
             MenuItem::separator(),
@@ -95,7 +109,7 @@ fn main() {
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
         cx.on_action(|_: &main_window::NewWindow, cx| main_window::open_window(Content::Welcome, None, cx));
-        let services = workspace::services(TerminalConfig::default());
+        let services = workspace::services(TerminalConfig { font_family: platform::terminal_font(cx), ..TerminalConfig::default() });
 
         // One receiver for hook events, fanned out to every workspace.
         let hook_events = services.hook_events.clone();
@@ -143,6 +157,27 @@ fn main() {
             }
         })
         .detach();
+        // Folders handed over by a later `tern <dir>` (see `handoff`).
+        #[cfg(not(target_os = "macos"))]
+        if let Some(rx) = handoff {
+            cx.spawn(async move |cx| {
+                while let Ok(folder) = rx.recv_async().await {
+                    cx.update(|cx| {
+                        match folder.filter(|p| p.is_dir()) {
+                            Some(path) => main_window::open_folder(path, cx),
+                            // No folder: bring a window forward.
+                            None => {
+                                if let Some(w) = cx.windows().first() {
+                                    let _ = w.update(cx, |_, window, _| window.activate_window());
+                                }
+                            },
+                        }
+                        cx.activate(true);
+                    });
+                }
+            })
+            .detach();
+        }
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -187,6 +222,7 @@ fn confirm_quit(cx: &mut App, done: impl FnOnce(bool, &mut App) + 'static) {
 
 fn quit_now(cx: &mut App) {
     cx.default_global::<main_window::Session>().quitting = true;
+    #[cfg(target_os = "macos")]
     terminate::approve();
     cx.quit()
 }
@@ -195,23 +231,28 @@ fn quit_now(cx: &mut App) {
 /// `Ok(None)` if it can't be taken for another reason (Tern runs anyway).
 /// Debug builds use their own, to run beside the installed app.
 fn lock_instance() -> Result<Option<std::fs::File>, ()> {
-    use std::os::fd::AsRawFd;
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/tmp".into());
-    let dir = home.join("Library/Caches/dev.tern");
+    let dir = dirs::cache();
     let _ = std::fs::create_dir_all(&dir);
     let name = if cfg!(debug_assertions) { "dev.lock" } else { "tern.lock" };
     let Ok(file) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(name)) else { return Ok(None) };
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(Some(file));
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(()),
+        Err(_) => Ok(None),
     }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::EWOULDBLOCK) => Err(()),
-        _ => Ok(None),
+}
+
+/// Hand `folder` to the Tern already running, which brings it forward.
+#[cfg(not(target_os = "macos"))]
+fn forward_to_running(folder: Option<PathBuf>) {
+    if let Err(e) = handoff::send(folder) {
+        eprintln!("tern: already running; couldn't reach it: {e}");
     }
 }
 
 /// Hand `folder` to the Tern already running (it gets it as an open-URL
 /// event), or just bring it forward.
+#[cfg(target_os = "macos")]
 fn forward_to_running(folder: Option<PathBuf>) {
     if cfg!(debug_assertions) {
         eprintln!("tern: a debug Tern is already running");
@@ -246,11 +287,21 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
             i += 1;
         }
     }
-    use std::os::unix::ffi::OsStringExt;
-    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    }
+    // `file:///C:/x` holds a drive path.
+    #[cfg(windows)]
+    {
+        let s = String::from_utf8(out).ok()?;
+        let s = s.strip_prefix('/').filter(|r| r.as_bytes().get(1) == Some(&b':')).unwrap_or(&s);
+        Some(PathBuf::from(s.replace('/', "\\")))
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::file_url_path;
     use std::path::PathBuf;

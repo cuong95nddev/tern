@@ -257,7 +257,7 @@ impl Render for ChangesView {
                     .xsmall()
                     .ghost()
                     .icon(IconName::Close)
-                    .tooltip("Hide Changes (⌘⇧G)")
+                    .tooltip(format!("Hide Changes ({})", crate::platform::shortcut("⌘⇧G")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Hide))),
             );
         let body: AnyElement = if self.repos.is_empty() {
