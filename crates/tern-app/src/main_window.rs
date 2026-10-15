@@ -375,6 +375,12 @@ impl MainWindow {
             this.placement = window_state::placement(window, cx);
             this.changed(cx);
         });
+        // The agent's own menu may have hidden it meanwhile.
+        let activation_sub = cx.observe_window_activation(window, |_: &mut Self, window, cx| {
+            if window.is_window_active() {
+                crate::set_app_menus(cx);
+            }
+        });
         // The close button asks first when that ends running programs.
         let me = cx.entity().downgrade();
         let confirmed = Rc::new(Cell::new(false));
@@ -424,7 +430,7 @@ impl MainWindow {
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
-            _subs: vec![bounds_sub],
+            _subs: vec![bounds_sub, activation_sub],
         }
     }
 

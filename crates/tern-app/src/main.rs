@@ -24,7 +24,7 @@ use gpui_kit::*;
 use main_window::Content;
 use terminal_view::TerminalConfig;
 
-actions!(tern, [Quit, OpenFolder]);
+actions!(tern, [Quit, OpenFolder, ToggleMenuBarIcon]);
 
 /// Process-wide services every window shares.
 struct AppServices(workspace::Services);
@@ -101,13 +101,8 @@ fn main() {
             }
         })
         .detach();
-        cx.set_menus([Menu::new("Tern").items([
-            MenuItem::action("Check for Updates…", update::CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Quit Tern", Quit),
-        ])]);
+        set_app_menus(cx);
+        cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
@@ -136,6 +131,10 @@ fn main() {
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).
         let scripted = cfg!(debug_assertions) && control_socket.is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
+        // The menu bar agent outlives us; a newer one replaces an older one.
+        if !scripted && tern_menubar::setting::enabled(&tern_menubar::setting::file()) {
+            tern_menubar::launch();
+        }
         #[cfg(debug_assertions)]
         if let Some(rx) = control_socket.and_then(control::listen) {
             cx.spawn(async move |cx| {
@@ -197,6 +196,39 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+fn menu_bar_toggle_label(shown: bool) -> &'static str {
+    if shown { "Hide Menu Bar Icon" } else { "Show Menu Bar Icon" }
+}
+
+/// The Tern menu (rebuilt when the menu bar setting may have changed: it
+/// is toggled here, or hidden from the agent's own menu).
+pub fn set_app_menus(cx: &mut App) {
+    let shown = tern_menubar::setting::enabled(&tern_menubar::setting::file());
+    cx.set_menus([Menu::new("Tern").items([
+        MenuItem::action("Check for Updates…", update::CheckForUpdates),
+        MenuItem::action(menu_bar_toggle_label(shown), ToggleMenuBarIcon),
+        MenuItem::separator(),
+        MenuItem::os_submenu("Services", SystemMenuType::Services),
+        MenuItem::separator(),
+        MenuItem::action("Quit Tern", Quit),
+    ])]);
+}
+
+fn toggle_menu_bar_icon(cx: &mut App) {
+    let file = tern_menubar::setting::file();
+    let show = !tern_menubar::setting::enabled(&file);
+    if let Err(e) = tern_menubar::setting::set_enabled(&file, show) {
+        log::warn!("can't save the menu bar setting: {e}");
+        return;
+    }
+    if show {
+        tern_menubar::launch()
+    } else {
+        tern_menubar::stop()
+    }
+    set_app_menus(cx);
 }
 
 /// Quit, keeping every open window in the saved session. Programs keep
@@ -299,6 +331,12 @@ mod tests {
         assert_eq!(file_url_path("file:///Users/a/my%20dir/"), Some(PathBuf::from("/Users/a/my dir/")));
         assert_eq!(file_url_path("file://localhost/tmp/x"), Some(PathBuf::from("/tmp/x")));
         assert_eq!(file_url_path("https://x"), None);
+    }
+
+    #[test]
+    fn menu_bar_toggle_label_follows_the_setting() {
+        assert_eq!(super::menu_bar_toggle_label(true), "Hide Menu Bar Icon");
+        assert_eq!(super::menu_bar_toggle_label(false), "Show Menu Bar Icon");
     }
 
     #[test]

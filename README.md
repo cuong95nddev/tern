@@ -65,6 +65,8 @@ Terminals run in a small background process (`tern --server`, started by Tern), 
 
 The background process quits by itself once no tab is left. Its log is `~/Library/Logs/Tern/daemon.log`; `pkill -f 'MacOS/tern --server'` ends it and everything running in it.
 
+A menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
+
 ## Updates
 
 Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the workspace bar (also under **Tern ▸ Check for Updates…**). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
@@ -78,7 +80,7 @@ cargo run --release -p tern-app -- /path/to/project
 scripts/install-macos.sh      # /Applications/Tern.app plus a `tern` command in ~/.local/bin
 ```
 
-Crates: `tern-term` (VT core, snapshots), `tern-mux` (background daemon: PTYs, protocol, client), `tern-fs` (tree, watcher, git),
+Crates: `tern-term` (VT core, snapshots), `tern-mux` (background daemon: PTYs, protocol, client), `tern-menubar` (menu bar agent), `tern-fs` (tree, watcher, git),
 `tern-bridge` (Claude Code hook receiver), `tern-app` (UI).
 
 The app icon lives in `assets/icon/source.png`; `scripts/gen-icons.sh` (ImageMagick) regenerates every size from it into `assets/icon/`: macOS `.icns` and an Icon Composer `Tern.icon` (compiled by the install script with Xcode's `actool`, so macOS 26 shows it full-size instead of shrunk into a gray tile), iOS `AppIcon.appiconset` (with dark and tinted looks), Android `res/` (legacy, round, adaptive and monochrome launcher icons, Play Store 512) and web favicons/PWA icons.
