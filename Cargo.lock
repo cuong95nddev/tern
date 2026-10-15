@@ -6525,6 +6525,7 @@ name = "tern-menubar"
 version = "0.1.2"
 dependencies = [
  "dispatch2",
+ "env_logger",
  "libc",
  "log",
  "objc2 0.6.5",

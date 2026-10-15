@@ -209,8 +209,10 @@ fn end_session(id: u64) {
     alert.setInformativeText(ns_string!("The program running in this terminal stops."));
     alert.addButtonWithTitle(ns_string!("End"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
-    // An accessory app's alert would open behind other apps.
-    NSApplication::sharedApplication(mtm).activate();
+    // An accessory app's alert would open behind other apps. (`activate`
+    // is macOS 14+; this one works on every version Tern supports.)
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     if alert.runModal() == NSAlertFirstButtonReturn
         && let Some(w) = watcher()
     {

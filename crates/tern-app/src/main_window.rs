@@ -194,26 +194,44 @@ pub fn reveal_session(id: u64, cx: &mut App) {
         },
         RevealTarget::AdoptIntoActive | RevealTarget::NewWindow => {
             let Some(info) = info else { return };
-            let target = |cx: &mut App| {
-                let wins = windows(cx);
-                cx.active_window().and_then(|a| wins.iter().find(|(h, _)| *h == a).cloned()).or_else(|| wins.last().cloned())
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            // The active window, else the first (as `open_folder` picks).
+            let target = cx.active_window().and_then(|a| wins.iter().find(|(h, _)| *h == a).cloned()).or_else(|| wins.first().cloned());
+            let Some((handle, main)) = target else {
+                // No window: one at its folder, holding just it.
+                open_window(Content::Workspaces(vec![adoption_workspace(&info, &home)], 0), None, cx);
+                cx.activate(true);
+                return;
             };
-            let has_ws = target(cx).is_some_and(|(_, m)| m.read(cx).active_ws().is_some());
-            if !has_ws {
-                // No window, or a welcome page: open its folder there first.
-                let root = info.cwd.clone().unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default());
-                open_folder(root, cx);
-            }
-            let Some((handle, main)) = target(cx) else { return };
             let _ = handle.update(cx, |_, window, cx| {
-                if let Some(ws) = main.read(cx).active_ws().cloned() {
-                    ws.update(cx, |w, cx| w.adopt_session(&info, window, cx));
-                }
+                main.update(cx, |m, cx| match m.active_ws().cloned() {
+                    Some(ws) => ws.update(cx, |w, cx| w.adopt_session(&info, window, cx)),
+                    // A welcome page: a workspace at its folder, holding just it.
+                    None => {
+                        let services = cx.global::<AppServices>().0.clone();
+                        let ws = cx.new(|cx| Workspace::new(adoption_workspace(&info, &home), services, window, cx));
+                        m.insert(ws, None, window, cx);
+                    },
+                });
                 window.activate_window();
             });
         },
     }
     cx.activate(true);
+}
+
+/// A workspace at session `s`'s folder (`home` without one) whose only tab
+/// shows it: no default Claude tab beside it.
+pub fn adoption_workspace(s: &tern_mux::proto::SessionInfo, home: &Path) -> window_state::SavedWorkspace {
+    let tab = if s.claude {
+        window_state::SavedTab::Claude { name: None, session: s.claude_session.clone(), mux: Some(s.id) }
+    } else {
+        window_state::SavedTab::Shell { name: s.title.clone(), mux: Some(s.id) }
+    };
+    window_state::SavedWorkspace {
+        tabs: vec![tab],
+        ..window_state::SavedWorkspace::fresh(s.cwd.clone().unwrap_or_else(|| home.to_owned()))
+    }
 }
 
 /// What a new window starts with.
@@ -992,7 +1010,9 @@ impl Render for MainWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{RevealTarget, reveal_target};
+    use super::{RevealTarget, adoption_workspace, reveal_target};
+    use crate::window_state::SavedTab;
+    use tern_mux::proto::SessionInfo;
 
     #[test]
     fn reveal_target_focuses_the_tab_showing_it() {
@@ -1006,6 +1026,19 @@ mod tests {
         let tabs = vec![vec![vec![Some(1)]]];
         assert_eq!(reveal_target(&tabs, 9, true), RevealTarget::AdoptIntoActive);
         assert_eq!(reveal_target(&[], 9, true), RevealTarget::NewWindow);
+    }
+
+    #[test]
+    fn adoption_workspace_holds_just_the_session() {
+        // No default Claude tab: the workspace opens with the session alone.
+        let shell = SessionInfo { id: 7, cwd: Some("/p".into()), title: Some("vim".into()), ..Default::default() };
+        let w = adoption_workspace(&shell, "/home".as_ref());
+        assert_eq!(w.folder, std::path::Path::new("/p"));
+        assert_eq!(w.tabs, [SavedTab::Shell { name: Some("vim".into()), mux: Some(7) }]);
+        let claude = SessionInfo { id: 8, claude: true, claude_session: Some("s".into()), ..Default::default() };
+        let w = adoption_workspace(&claude, "/home".as_ref());
+        assert_eq!(w.folder, std::path::Path::new("/home"));
+        assert_eq!(w.tabs, [SavedTab::Claude { name: None, session: Some("s".into()), mux: Some(8) }]);
     }
 
     #[test]

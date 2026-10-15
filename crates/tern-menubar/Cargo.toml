@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+env_logger = "0.11.11"
 libc = "0.2.190"
 log = "0.4.34"
 semver = "1"

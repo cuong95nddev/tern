@@ -295,8 +295,12 @@ fn spawn() -> io::Result<()> {
 /// Run this executable with `args` in its own session (it outlives us;
 /// nobody waits for it), output appended to `log`.
 pub fn spawn_detached(args: &[&str], log: Option<&Path>) -> io::Result<()> {
+    spawn_detached_exe(&std::env::current_exe()?, args, log)
+}
+
+/// `spawn_detached` for another executable.
+pub fn spawn_detached_exe(exe: &Path, args: &[&str], log: Option<&Path>) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe()?;
     let (out, err) = match log.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()) {
         Some(f) => (std::process::Stdio::from(f.try_clone()?), std::process::Stdio::from(f)),
         None => (std::process::Stdio::null(), std::process::Stdio::null()),

@@ -5,6 +5,8 @@
 
 #[cfg(target_os = "macos")]
 mod app;
+use std::path::{Path, PathBuf};
+
 pub mod instance;
 pub mod link;
 pub mod model;
@@ -34,11 +36,25 @@ pub fn run() -> ! {
     app::run(tern_mux::paths::mux_dir())
 }
 
+/// The agent's executable in an app bundle whose main executable is
+/// `app_exe`: a helper app of its own, so LaunchServices doesn't take the
+/// running agent for Tern (`open -b dev.tern`, `tern://` URLs, the Dock).
+pub fn helper_exe(app_exe: &Path) -> PathBuf {
+    let contents = app_exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
+    contents.join("Helpers/Tern Menu Bar.app/Contents/MacOS/tern-menubar")
+}
+
 /// Start the agent, detached (it outlives the UI). It sorts out by itself
-/// whether another one stays.
+/// whether another one stays. Outside a bundle (dev builds) it is this
+/// executable with `--menubar`.
 pub fn launch() {
     let log = tern_mux::client::log_path("menubar");
-    if let Err(e) = tern_mux::client::spawn_detached(&["--menubar"], log.as_deref()) {
+    let helper = std::env::current_exe().map(|e| helper_exe(&e)).ok().filter(|h| h.is_file());
+    let r = match &helper {
+        Some(h) => tern_mux::client::spawn_detached_exe(h, &[], log.as_deref()),
+        None => tern_mux::client::spawn_detached(&["--menubar"], log.as_deref()),
+    };
+    if let Err(e) = r {
         log::warn!("can't start the menu bar agent: {e}");
     }
 }
@@ -48,5 +64,18 @@ pub fn stop() {
     if let Some(pid) = instance::holder(&instance::lock_path()) {
         // SAFETY: plain kill.
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn helper_sits_inside_the_app_bundle() {
+        assert_eq!(
+            super::helper_exe(Path::new("/Applications/Tern.app/Contents/MacOS/tern")),
+            Path::new("/Applications/Tern.app/Contents/Helpers/Tern Menu Bar.app/Contents/MacOS/tern-menubar")
+        );
     }
 }
