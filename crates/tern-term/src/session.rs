@@ -38,7 +38,11 @@ pub enum TermEvent {
     Signal(OscSignal),
     /// A daemon session is running (spawned or attached): its id, its hook
     /// token and the status it had.
-    Ready { id: u64, token: Option<String>, status: ActivityStatus },
+    Ready {
+        id: u64,
+        token: Option<String>,
+        status: ActivityStatus,
+    },
     /// The daemon couldn't start the program.
     SpawnError(String),
     /// The daemon has no session with that id.

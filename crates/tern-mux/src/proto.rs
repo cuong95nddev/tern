@@ -30,39 +30,92 @@ pub const MAX_SERVER_FRAME: usize = 256 << 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMsg {
-    Hello { major: u32, minor: u32, app_version: String },
+    Hello {
+        major: u32,
+        minor: u32,
+        app_version: String,
+    },
     /// Start a program and attach to it. With `hook`, the daemon gives it a
     /// hook token and replaces `{tern-settings}` in its args with the path of
     /// a Claude settings file pointing at its hook server.
-    Spawn { req: u64, cfg: SpawnConfig, hook: bool },
-    Attach { req: u64, id: u64, size: TermSize },
-    Detach { id: u64 },
-    Input { id: u64, bytes: Vec<u8> },
-    Resize { id: u64, size: TermSize },
-    /// Start a new program in an exited (or running) session, keeping its
-    /// id and hook token.
-    Respawn { req: u64, id: u64, cfg: SpawnConfig },
+    Spawn {
+        req: u64,
+        cfg: SpawnConfig,
+        hook: bool,
+    },
+    Attach {
+        req: u64,
+        id: u64,
+        size: TermSize,
+    },
+    Detach {
+        id: u64,
+    },
+    Input {
+        id: u64,
+        bytes: Vec<u8>,
+    },
+    Resize {
+        id: u64,
+        size: TermSize,
+    },
     /// End the program and forget the session.
-    Close { id: u64 },
-    List { req: u64 },
+    Close {
+        id: u64,
+    },
+    List {
+        req: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMsg {
-    Hello { major: u32, minor: u32, app_version: String, pid: u32 },
-    /// Reply to `Spawn`, `Attach` and `Respawn`. When `fd` is set, the PTY's
+    Hello {
+        major: u32,
+        minor: u32,
+        app_version: String,
+        pid: u32,
+    },
+    /// Reply to `Spawn` and `Attach`. When `fd` is set, the PTY's
     /// master fd came with the frame (for foreground-process queries only).
     /// `snapshot` is [`pack_snapshot`]'s output.
-    Attached { req: u64, id: u64, token: Option<String>, pid: u32, fd: bool, snapshot: Vec<u8> },
-    NotFound { req: u64, id: u64 },
-    Error { req: u64, message: String },
-    Output { id: u64, bytes: Vec<u8> },
-    Marker { id: u64, marker: Marker },
+    Attached {
+        req: u64,
+        id: u64,
+        token: Option<String>,
+        pid: u32,
+        fd: bool,
+        snapshot: Vec<u8>,
+    },
+    NotFound {
+        req: u64,
+        id: u64,
+    },
+    Error {
+        req: u64,
+        message: String,
+    },
+    Output {
+        id: u64,
+        bytes: Vec<u8>,
+    },
+    Marker {
+        id: u64,
+        marker: Marker,
+    },
     /// A Claude Code hook request for `token` (JSON body).
-    Hook { token: String, body: Vec<u8> },
+    Hook {
+        token: String,
+        body: Vec<u8>,
+    },
     /// Another connection attached to `id`.
-    Detached { id: u64 },
-    Sessions { req: u64, list: Vec<SessionInfo> },
+    Detached {
+        id: u64,
+    },
+    Sessions {
+        req: u64,
+        list: Vec<SessionInfo>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,7 +258,6 @@ mod tests {
             ClientMsg::Detach { id: 7 },
             ClientMsg::Input { id: 7, bytes: b"ls\r".to_vec() },
             ClientMsg::Resize { id: 7, size: SIZE },
-            ClientMsg::Respawn { req: 3, id: 7, cfg: cfg() },
             ClientMsg::Close { id: 7 },
             ClientMsg::List { req: 4 },
         ];
@@ -225,7 +277,9 @@ mod tests {
         write_frame(&mut buf, &ServerMsg::Marker { id: 1, marker: Marker::Resized(SIZE) }).unwrap();
         write_frame(&mut buf, &ServerMsg::Output { id: 1, bytes: b"\x1b[1mhi".to_vec() }).unwrap();
         let mut r = Cursor::new(buf);
-        assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Marker { id: 1, marker: Marker::Resized(s) }) if s == SIZE));
+        assert!(
+            matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Marker { id: 1, marker: Marker::Resized(s) }) if s == SIZE)
+        );
         assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Output { bytes, .. }) if bytes == b"\x1b[1mhi"));
     }
 

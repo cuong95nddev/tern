@@ -2813,12 +2813,18 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap_3()
+            .px_4()
+            .overflow_hidden()
             .text_sm()
             .text_color(muted)
-            .child("Drag a tab here, or open one")
+            .child(div().text_center().child("Drag a tab here, or open one"))
             .child(
+                // Wraps in a narrow pane rather than spilling into the neighbour.
                 div()
+                    .max_w_full()
                     .flex()
+                    .flex_wrap()
+                    .justify_center()
                     .gap_2()
                     .child(
                         Button::new(("pane-claude", pane as usize))

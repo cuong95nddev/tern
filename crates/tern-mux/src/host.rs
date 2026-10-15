@@ -19,17 +19,17 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
-use tern_term::vt::sync::FairMutex;
-use tern_term::vt::term::{Config, Osc52, Term};
-use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
-use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tern_term::mirror::Marker;
 use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY};
 use tern_term::palette::Palette;
 use tern_term::snapshot::{self, Snapshot};
 use tern_term::status::{ActivityStatus, next_status};
+use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
+use tern_term::vt::sync::FairMutex;
+use tern_term::vt::term::{Config, Osc52, Term};
+use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::proto::SessionInfo;
@@ -152,8 +152,7 @@ impl Host {
         });
         let cell = Arc::new(OnceLock::new());
         let listener = Listener { shared: shared.clone(), palette: Arc::new(Palette::default()), term: cell.clone() };
-        let config =
-            Config { scrolling_history: cfg.scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
+        let config = Config { scrolling_history: cfg.scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &cfg.size, listener)));
         let _ = cell.set(term.clone());
 
@@ -216,18 +215,25 @@ impl Host {
     /// Start sending to `sub`; returns the state it starts from. Replaces a
     /// previous subscriber.
     pub fn attach(&self, sub: Arc<dyn Subscriber>) -> Snapshot {
+        let mut out = None;
+        self.attach_with(sub, |s| out = Some(s));
+        out.unwrap()
+    }
+
+    /// [`Self::attach`], handing the snapshot to `f` while the terminal is
+    /// still locked: whatever `f` queues goes before the bytes that follow.
+    pub fn attach_with(&self, sub: Arc<dyn Subscriber>, f: impl FnOnce(Snapshot)) {
         let mut term = self.term.lock();
         let title = self.shared.title.lock().unwrap().clone();
-        let snap = snapshot::capture(&mut term, self.size(), title, self.status());
+        f(snapshot::capture(&mut term, self.size(), title, self.status()));
         *self.shared.subscriber.lock().unwrap() = Some(sub);
-        snap
     }
 
     /// Stop sending to `sub` (if it is still the one attached).
     pub fn detach(&self, sub: &Arc<dyn Subscriber>) {
         let _term = self.term.lock();
         let mut cur = self.shared.subscriber.lock().unwrap();
-        if cur.as_ref().is_some_and(|c| Arc::ptr_eq(c, sub)) {
+        if cur.as_ref().is_some_and(|c| std::ptr::addr_eq(Arc::as_ptr(c), Arc::as_ptr(sub))) {
             *cur = None;
         }
     }
