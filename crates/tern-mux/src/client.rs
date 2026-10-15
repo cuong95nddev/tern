@@ -24,6 +24,8 @@ use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, 
 
 /// Gets each hook request: the tab's token and the JSON body.
 pub type HookSink = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
+/// Gets each request to show a session (from the menu bar agent).
+pub type RevealSink = Arc<dyn Fn(u64) + Send + Sync>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -71,6 +73,7 @@ struct Inner {
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
     lists: Mutex<HashMap<u64, mpsc::Sender<Vec<SessionInfo>>>>,
     hooks: HookSink,
+    reveal: RevealSink,
     server_pid: u32,
     server_version: String,
 }
@@ -114,7 +117,7 @@ impl Drop for Closer {
 impl MuxClient {
     /// Connect to the daemon in `dir`, starting it first when `spawn_daemon`
     /// and none runs.
-    pub fn connect(dir: &Path, spawn_daemon: bool, hooks: HookSink) -> io::Result<Self> {
+    pub fn connect(dir: &Path, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> io::Result<Self> {
         let sock = paths::socket_path(dir);
         let stream = match UnixStream::connect(&sock) {
             Ok(s) => s,
@@ -164,6 +167,7 @@ impl MuxClient {
             sessions: Mutex::default(),
             lists: Mutex::default(),
             hooks,
+            reveal,
             server_pid,
             server_version,
         });
@@ -242,12 +246,13 @@ pub struct Connector {
     dir: PathBuf,
     spawn_daemon: bool,
     hooks: HookSink,
+    reveal: RevealSink,
     cur: Mutex<Option<MuxClient>>,
 }
 
 impl Connector {
-    pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink) -> Self {
-        Self { dir, spawn_daemon, hooks, cur: Mutex::new(None) }
+    pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> Self {
+        Self { dir, spawn_daemon, hooks, reveal, cur: Mutex::new(None) }
     }
 
     pub fn get(&self) -> io::Result<MuxClient> {
@@ -255,7 +260,7 @@ impl Connector {
         if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
             return Ok(c.clone());
         }
-        let c = MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone())?;
+        let c = MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone(), self.reveal.clone())?;
         *cur = Some(c.clone());
         Ok(c)
     }
@@ -266,7 +271,7 @@ impl Connector {
         if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
             return Some(c.clone());
         }
-        let c = MuxClient::connect(&self.dir, false, self.hooks.clone()).ok()?;
+        let c = MuxClient::connect(&self.dir, false, self.hooks.clone(), self.reveal.clone()).ok()?;
         *cur = Some(c.clone());
         Some(c)
     }
@@ -327,8 +332,9 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
         };
         match msg {
             ServerMsg::Hello { .. } => {},
-            // Observer messages (Task 2 handles `Reveal`).
-            ServerMsg::SessionsChanged { .. } | ServerMsg::Reveal { .. } | ServerMsg::Revealed { .. } => {},
+            ServerMsg::Reveal { id } => (inner.reveal)(id),
+            // For observers.
+            ServerMsg::SessionsChanged { .. } | ServerMsg::Revealed { .. } => {},
             ServerMsg::Attached { req, id, token, pid: _, fd, snapshot } => {
                 let tty = if fd { reader.take_fd().map(File::from) } else { None };
                 let Some(slot) = inner.pending.lock().unwrap().remove(&req) else { continue };

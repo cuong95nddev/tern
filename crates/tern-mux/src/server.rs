@@ -7,6 +7,9 @@
 //! that stops reading never stalls a program. A session that falls behind is
 //! detached alone (its tab reattaches from a snapshot); a connection that
 //! falls behind as a whole is dropped (every tab reattaches).
+//!
+//! Observers (the menu bar agent) watch the session list and ask for a
+//! session to be shown; they don't keep the daemon alive.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -27,7 +30,7 @@ use tern_term::{SpawnConfig, TermSize};
 
 use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, ServerMsg};
+use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// Queued output a client may fall behind by, over all its sessions, before
 /// it is dropped.
@@ -37,6 +40,8 @@ pub const MAX_QUEUED_SESSION: usize = 64 << 20;
 /// Hook requests kept for a session while no client is attached.
 const MAX_QUEUED_HOOKS: usize = 64;
 const SETTINGS_PLACEHOLDER: &str = "{tern-settings}";
+/// How often a watcher's list is checked for changes (also coalesces bursts).
+pub const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct ServeOpts {
     /// Exit after this long with no sessions and no client.
@@ -89,11 +94,16 @@ struct Session {
     owner: Option<Weak<Conn>>,
     /// Hook requests that came while no one was attached.
     hooks: VecDeque<Vec<u8>>,
+    /// `session_id` of its latest Claude hook event.
+    claude_session: Option<String>,
 }
 
 struct State {
     sessions: HashMap<u64, Session>,
+    /// UI connections (observers don't count).
     clients: usize,
+    /// UI connections, oldest first (`Reveal` goes to the newest).
+    uis: Vec<Weak<Conn>>,
     /// When the daemon last had neither sessions nor clients.
     idle_since: Option<Instant>,
 }
@@ -138,7 +148,7 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
             })
             .flatten();
         Server {
-            state: Mutex::new(State { sessions: HashMap::new(), clients: 0, idle_since: Some(Instant::now()) }),
+            state: Mutex::new(State { sessions: HashMap::new(), clients: 0, uis: Vec::new(), idle_since: Some(Instant::now()) }),
             hooks,
             run_dir,
             notifications: opts.notifications,
@@ -229,16 +239,17 @@ impl Server {
         let conn = Conn::start(stream.try_clone()?, self.max_queued, self.max_queued_session)?;
         conn.send(ServerMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), pid: std::process::id() });
         let mut reader = FrameReader::new(stream, proto::MAX_CLIENT_FRAME);
-        match reader.read::<ClientMsg>()? {
-            Some(ClientMsg::Hello { major, .. }) if major == MAJOR => {},
+        let role = match reader.read::<ClientMsg>()? {
+            Some(ClientMsg::Hello { major, role, .. }) if major == MAJOR => role,
             other => {
                 conn.close();
                 return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}")));
             },
-        }
-        {
+        };
+        if role == Role::Ui {
             let mut st = self.state.lock().unwrap();
             st.clients += 1;
+            st.uis.push(Arc::downgrade(&conn));
             Self::update_idle(&mut st);
         }
         let result = (|| {
@@ -252,7 +263,10 @@ impl Server {
         })();
         conn.close();
         let mut st = self.state.lock().unwrap();
-        st.clients -= 1;
+        if role == Role::Ui {
+            st.clients -= 1;
+            st.uis.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
+        }
         for s in st.sessions.values_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {
                 s.owner = None;
@@ -266,7 +280,14 @@ impl Server {
     fn on_msg(self: &Arc<Self>, conn: &Arc<Conn>, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello { .. } => {},
-            ClientMsg::Watch | ClientMsg::Reveal { .. } => {},
+            ClientMsg::Watch => self.watch(conn),
+            ClientMsg::Reveal { req, id } => {
+                let ui = self.state.lock().unwrap().uis.iter().rev().filter_map(Weak::upgrade).find(|c| !c.dead.load(Ordering::Acquire));
+                if let Some(ui) = &ui {
+                    ui.send(ServerMsg::Reveal { id });
+                }
+                conn.send(ServerMsg::Revealed { req, delivered: ui.is_some() });
+            },
             ClientMsg::Spawn { req, cfg, hook } => self.spawn(conn, req, cfg, hook),
             ClientMsg::Attach { req, id, size } => self.attach(conn, req, id, size),
             ClientMsg::Detach { id } => {
@@ -289,11 +310,44 @@ impl Server {
                 }
             },
             ClientMsg::Close { id } => self.close(id),
-            ClientMsg::List { req } => {
-                let list = self.state.lock().unwrap().sessions.values().map(|s| s.host.info()).collect();
-                conn.send(ServerMsg::Sessions { req, list });
-            },
+            ClientMsg::List { req } => conn.send(ServerMsg::Sessions { req, list: self.list() }),
         }
+    }
+
+    /// Every session, by id (a stable order: watchers compare lists).
+    /// Built outside the state lock: `info` asks the OS about processes.
+    fn list(&self) -> Vec<SessionInfo> {
+        let sessions: Vec<_> =
+            self.state.lock().unwrap().sessions.values().map(|s| (s.host.clone(), s.token.is_some(), s.claude_session.clone())).collect();
+        let mut list: Vec<_> =
+            sessions.into_iter().map(|(h, claude, claude_session)| SessionInfo { claude, claude_session, ..h.info() }).collect();
+        list.sort_by_key(|i| i.id);
+        list
+    }
+
+    /// Send `conn` the session list now and whenever it changes (checked
+    /// every `WATCH_INTERVAL`, which also coalesces bursts).
+    fn watch(self: &Arc<Self>, conn: &Arc<Conn>) {
+        if conn.watching.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (server, conn) = (Arc::downgrade(self), Arc::downgrade(conn));
+        let _ = std::thread::Builder::new().name("watch".into()).spawn(move || {
+            let mut last = None;
+            loop {
+                let (Some(server), Some(conn)) = (server.upgrade(), conn.upgrade()) else { return };
+                if conn.dead.load(Ordering::Acquire) {
+                    return;
+                }
+                let list = server.list();
+                if last.as_ref() != Some(&list) {
+                    conn.send(ServerMsg::SessionsChanged { list: list.clone() });
+                    last = Some(list);
+                }
+                drop((server, conn));
+                std::thread::sleep(WATCH_INTERVAL);
+            }
+        });
     }
 
     fn host(&self, id: u64) -> Option<Arc<Host>> {
@@ -340,7 +394,10 @@ impl Server {
         log::info!("session {id}: started pid {}", host.pid());
         {
             let mut st = self.state.lock().unwrap();
-            st.sessions.insert(id, Session { host: host.clone(), token: token.clone(), owner: None, hooks: VecDeque::new() });
+            st.sessions.insert(
+                id,
+                Session { host: host.clone(), token: token.clone(), owner: None, hooks: VecDeque::new(), claude_session: None },
+            );
             Self::update_idle(&mut st);
         }
         self.attach_host(conn, req, id, None);
@@ -429,6 +486,9 @@ impl Server {
         let body = serde_json::to_vec(&ev.raw).unwrap_or_default();
         let mut st = self.state.lock().unwrap();
         let Some(s) = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str())) else { return };
+        if let Some(id) = &ev.session_id {
+            s.claude_session = Some(id.clone());
+        }
         match s.owner.as_ref().and_then(Weak::upgrade) {
             Some(conn) => conn.send(ServerMsg::Hook { token: ev.token, body }),
             None => {
@@ -502,6 +562,8 @@ pub(crate) struct Conn {
     /// until they attach again.
     lagging: Mutex<HashSet<u64>>,
     dead: AtomicBool,
+    /// A `watch` thread serves it.
+    watching: AtomicBool,
     stream: UnixStream,
 }
 
@@ -518,6 +580,7 @@ impl Conn {
             per_session: per_session.clone(),
             lagging: Mutex::new(HashSet::new()),
             dead: AtomicBool::new(false),
+            watching: AtomicBool::new(false),
             stream: stream.try_clone()?,
         });
         let weak = Arc::downgrade(&conn);

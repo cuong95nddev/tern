@@ -3330,6 +3330,6 @@ pub fn services(terminal: TerminalConfig) -> Services {
             let _ = tx.send(ev);
         }
     });
-    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks));
+    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, Arc::new(|_| {})));
     Services { mux, hook_events: rx, terminal }
 }

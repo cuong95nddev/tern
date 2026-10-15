@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tern_mux::client::{MuxClient, Open, RemoteSession};
 use tern_mux::paths;
-use tern_mux::proto::{self, ClientMsg, MAJOR, MINOR};
+use tern_mux::proto::{self, ClientMsg, MAJOR, MINOR, ServerMsg};
 use tern_mux::server::{ServeOpts, serve};
 use tern_term::vt::grid::Dimensions;
 use tern_term::vt::index::Line;
@@ -38,7 +38,29 @@ fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize) -> 
 }
 
 fn client(dir: &Path) -> MuxClient {
-    MuxClient::connect(dir, false, Arc::new(|_, _| {})).unwrap()
+    MuxClient::connect(dir, false, Arc::new(|_, _| {}), Arc::new(|_| {})).unwrap()
+}
+
+/// A raw observer connection: Hello as an observer, read the daemon's Hello.
+fn observer(dir: &Path) -> (UnixStream, proto::FrameReader) {
+    let mut raw = UnixStream::connect(paths::socket_path(dir)).unwrap();
+    proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into(), role: proto::Role::Observer })
+        .unwrap();
+    let mut r = proto::FrameReader::new(raw.try_clone().unwrap(), proto::MAX_SERVER_FRAME);
+    assert!(matches!(r.read::<ServerMsg>().unwrap(), Some(ServerMsg::Hello { minor: 1, .. })));
+    raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    (raw, r)
+}
+
+/// The next `SessionsChanged` list.
+fn next_list(r: &mut proto::FrameReader) -> Vec<proto::SessionInfo> {
+    loop {
+        match r.read::<ServerMsg>().unwrap() {
+            Some(ServerMsg::SessionsChanged { list }) => return list,
+            Some(_) => continue,
+            None => panic!("connection ended"),
+        }
+    }
 }
 
 fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
@@ -242,7 +264,7 @@ fn slow_client_is_dropped() {
 #[test]
 fn connector_keeps_one_connection() {
     let d = daemon(Duration::from_secs(60));
-    let conn = tern_mux::client::Connector::new(d.dir.clone(), false, Arc::new(|_, _| {}));
+    let conn = tern_mux::client::Connector::new(d.dir.clone(), false, Arc::new(|_, _| {}), Arc::new(|_| {}));
     assert!(!conn.connected());
     let (sink, ev) = sink();
     let s = conn.get().unwrap().open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink);
@@ -256,7 +278,7 @@ fn connector_keeps_one_connection() {
 #[test]
 fn connector_without_daemon_fails() {
     let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
-    let conn = tern_mux::client::Connector::new(tmp.path().to_owned(), false, Arc::new(|_, _| {}));
+    let conn = tern_mux::client::Connector::new(tmp.path().to_owned(), false, Arc::new(|_, _| {}), Arc::new(|_| {}));
     assert!(conn.get().is_err());
 }
 
@@ -436,4 +458,109 @@ fn another_majors_daemon_does_not_block_this_one() {
         max_queued_session: usize::MAX,
     };
     serve(&dir, opts).unwrap();
+}
+
+#[test]
+fn observer_does_not_keep_the_daemon_alive() {
+    let mut d = daemon(Duration::from_millis(300));
+    let (_raw, _r) = observer(&d.dir);
+    let t = d.thread.take().unwrap();
+    wait_until("idle exit with an observer connected", || t.is_finished());
+    t.join().unwrap().unwrap();
+}
+
+#[test]
+fn watch_gets_the_list_and_its_changes() {
+    let d = daemon(Duration::from_secs(60));
+    let (mut raw, mut r) = observer(&d.dir);
+    proto::write_frame(&mut raw, &ClientMsg::Watch).unwrap();
+    assert!(next_list(&mut r).is_empty());
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("read x; exit 3"), hook: true }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    let list = loop {
+        let l = next_list(&mut r);
+        if l.iter().any(|i| i.id == id && i.attached) {
+            break l;
+        }
+    };
+    assert!(list[0].claude, "spawned with a hook token");
+    s.write(b"\n".to_vec());
+    while !next_list(&mut r).iter().any(|i| i.id == id && i.exited) {}
+    drop(s); // detach
+    while next_list(&mut r).iter().any(|i| i.id == id && i.attached) {}
+    c.close(id);
+    while !next_list(&mut r).is_empty() {}
+}
+
+#[test]
+fn watch_pushes_only_changes() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let mut held = vec![];
+    for _ in 0..5 {
+        let (sink, ev) = sink();
+        held.push((c.open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink), ev));
+    }
+    for (_, ev) in &held {
+        wait_until("ready", || ready_id(ev).is_some());
+    }
+    let (mut raw, mut r) = observer(&d.dir);
+    proto::write_frame(&mut raw, &ClientMsg::Watch).unwrap();
+    let first = next_list(&mut r);
+    assert_eq!(first.len(), 5);
+    assert!(first.windows(2).all(|w| w[0].id < w[1].id), "sorted by id");
+    // Nothing changes for > 4 intervals: no push.
+    raw.set_read_timeout(Some(Duration::from_millis(1200))).unwrap();
+    let err = r.read::<ServerMsg>().unwrap_err();
+    assert!(matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{err}");
+    for (s, _) in held {
+        s.close();
+    }
+}
+
+#[test]
+fn reveal_goes_to_the_live_ui() {
+    let d = daemon(Duration::from_secs(60));
+    let (mut raw, mut r) = observer(&d.dir);
+    let revealed = |r: &mut proto::FrameReader| loop {
+        if let Some(ServerMsg::Revealed { req: 1, delivered }) = r.read::<ServerMsg>().unwrap() {
+            return delivered;
+        }
+    };
+    // No UI.
+    proto::write_frame(&mut raw, &ClientMsg::Reveal { req: 1, id: 42 }).unwrap();
+    assert!(!revealed(&mut r));
+    // An old UI, gone; a new one, connected.
+    let old = client(&d.dir);
+    drop(old);
+    let got = Arc::new(Mutex::new(vec![]));
+    let g = got.clone();
+    let new = MuxClient::connect(&d.dir, false, Arc::new(|_, _| {}), Arc::new(move |id| g.lock().unwrap().push(id))).unwrap();
+    std::thread::sleep(Duration::from_millis(100)); // the daemon saw the old one go
+    proto::write_frame(&mut raw, &ClientMsg::Reveal { req: 1, id: 42 }).unwrap();
+    assert!(revealed(&mut r));
+    wait_until("reveal reached the UI", || *got.lock().unwrap() == [42]);
+    drop(new);
+    std::thread::sleep(Duration::from_millis(100));
+    proto::write_frame(&mut raw, &ClientMsg::Reveal { req: 1, id: 42 }).unwrap();
+    assert!(!revealed(&mut r));
+}
+
+#[test]
+fn claude_session_comes_from_hooks() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    // Post a hook like Claude Code does, using the URL in the settings file.
+    let script = r#"url=$(sed -n 's/.*"url": *"\([^"]*\)".*/\1/p' {tern-settings} | head -1); curl -s -X POST -H 'content-type: application/json' -d '{"hook_event_name":"Stop","session_id":"abc-123"}' "$url" >/dev/null; read x"#;
+    let s = c.open(Open::Spawn { cfg: sh(script), hook: true }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    wait_until("claude_session", || {
+        c.list().unwrap().iter().any(|i| i.id == id && i.claude && i.claude_session.as_deref() == Some("abc-123"))
+    });
+    s.close();
 }
