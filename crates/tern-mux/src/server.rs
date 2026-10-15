@@ -14,8 +14,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,6 +31,7 @@ use tern_term::{SpawnConfig, TermSize};
 use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
 use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::{UnixListener, UnixStream};
 
 /// Queued output a client may fall behind by, over all its sessions, before
 /// it is dropped.
@@ -40,6 +41,12 @@ pub const MAX_QUEUED_SESSION: usize = 64 << 20;
 /// Hook requests kept for a session while no client is attached.
 const MAX_QUEUED_HOOKS: usize = 64;
 const SETTINGS_PLACEHOLDER: &str = "{tern-settings}";
+/// The PTY a client gets with `Attached`, for its foreground-process
+/// queries. Windows passes none: the client asks by the shell's pid.
+#[cfg(unix)]
+type PassedPty = OwnedFd;
+#[cfg(windows)]
+type PassedPty = std::convert::Infallible;
 /// How often a watcher's list is checked for changes (also coalesces bursts).
 pub const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -61,6 +68,7 @@ pub struct ServeOpts {
 /// `tern --server`: serve until idle.
 pub fn run() -> ! {
     // SAFETY: plain signal dispositions, set before any thread starts.
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -219,17 +227,32 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
 
 fn lock(path: &Path) -> io::Result<File> {
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
-    // SAFETY: flock on an fd we own.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let e = io::Error::last_os_error();
-        return Err(if e.raw_os_error() == Some(libc::EWOULDBLOCK) { io::ErrorKind::AddrInUse.into() } else { e });
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::ErrorKind::AddrInUse.into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
-    Ok(file)
 }
 
 /// Single-quote `s` for sh.
+#[cfg(unix)]
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Single-quote `s` for PowerShell, which Claude tabs run in on Windows. It
+/// takes the curly quotes U+2018–U+201B for `'` too: double them all.
+#[cfg(windows)]
+fn shell_quote(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}'..='\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 fn random_id() -> u64 {
@@ -442,8 +465,12 @@ impl Server {
         }
         // Closed on exec: programs spawned meanwhile mustn't inherit it.
         // SAFETY: dup of an fd the host keeps open.
+        #[cfg(unix)]
         let fd = unsafe { libc::fcntl(host.master_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        #[cfg(unix)]
         let fd = (fd >= 0).then(|| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
+        #[cfg(windows)]
+        let fd: Option<PassedPty> = None;
         let pid = host.pid();
         let sub: Arc<dyn Subscriber> = conn.clone();
         // The reply is queued under the terminal lock, before any output
@@ -566,7 +593,7 @@ enum Out {
     Frame(Vec<u8>, Option<u64>),
     /// Packed off the reader's thread (it can take a while for a big
     /// scrollback), then sent with the PTY fd.
-    Attached { req: u64, id: u64, token: Option<String>, pid: u32, fd: Option<OwnedFd>, snapshot: Box<Snapshot> },
+    Attached { req: u64, id: u64, token: Option<String>, pid: u32, fd: Option<PassedPty>, snapshot: Box<Snapshot> },
 }
 
 pub(crate) struct Conn {
@@ -701,7 +728,10 @@ fn writer(
                 Out::Attached { req, id, token, pid, fd, snapshot } => {
                     let msg = ServerMsg::Attached { req, id, token, pid, fd: fd.is_some(), snapshot: proto::pack_snapshot(&snapshot)? };
                     match &fd {
+                        #[cfg(unix)]
                         Some(fd) => proto::write_frame_with_fd(&stream, &msg, fd)?,
+                        #[cfg(windows)]
+                        Some(never) => match *never {},
                         None => proto::write_frame(&mut stream, &msg)?,
                     }
                 },
@@ -714,5 +744,24 @@ fn writer(
     }
     if let Some(c) = conn.upgrade() {
         c.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    #[cfg(unix)]
+    fn quotes_for_sh() {
+        assert_eq!(shell_quote("/a b/it's"), r"'/a b/it'\''s'");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn quotes_for_powershell() {
+        assert_eq!(shell_quote(r"C:\a b\it's"), r"'C:\a b\it''s'");
+        // PowerShell ends a single-quoted string at a curly quote too.
+        assert_eq!(shell_quote("x\u{2019}; calc"), "'x\u{2019}\u{2019}; calc'");
     }
 }

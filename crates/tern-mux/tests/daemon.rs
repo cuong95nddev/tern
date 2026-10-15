@@ -1,3 +1,6 @@
+// The scripts are sh; `windows.rs` covers Windows.
+#![cfg(unix)]
+
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;

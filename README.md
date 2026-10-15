@@ -93,11 +93,16 @@ Tooltips show each platform's keys.
 
 ## Background sessions
 
-Terminals run in a small background process (`tern --server`, started by Tern), so quitting Tern, an update or a crash doesn't stop them: at the next launch every tab comes back attached to the same program, with its screen and scrollback. While Tern is closed, a Claude turn that finishes or needs approval still posts a notification. Closing a tab, a workspace or a window ends its programs.
+Terminals run in a small background process (`tern --server`, started by Tern), so quitting Tern, an update or a crash doesn't stop them: at the next launch every tab comes back attached to the same program, with its screen and scrollback. While Tern is closed, a Claude turn that finishes or needs approval still posts a notification (macOS). Closing a tab, a workspace or a window ends its programs.
 
-The background process quits by itself once no tab is left. Its log is `~/Library/Logs/Tern/daemon.log`; `pkill -f 'MacOS/tern --server'` ends it and everything running in it.
+The background process quits by itself once no tab is left. Its log is `daemon.log` in `~/Library/Logs/Tern` (macOS),
+`~/.local/state/tern` (Linux) or `%LOCALAPPDATA%\Tern\logs` (Windows). To end it and everything running in it:
+`pkill -f 'tern --server'` (macOS, Linux), or end `tern-server-x.y.z.exe` in Task Manager (Windows, where it runs from a copy
+in `%LOCALAPPDATA%\Tern\mux`, so updates can replace `tern.exe` while it runs).
 
-A menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
+On Windows it talks over an AF_UNIX socket and runs programs in ConPTY; who runs in a tab is found from the shell's pid.
+
+On macOS, a menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
 
 ## Updates
 
@@ -120,7 +125,7 @@ On Linux install GPUI's build dependencies first (Debian/Ubuntu names in `packag
 From macOS, `cargo xwin check --target x86_64-pc-windows-msvc --workspace` type-checks the Windows build
 ([cargo-xwin](https://github.com/rust-cross/cargo-xwin), plus Homebrew `llvm` on PATH for `llvm-rc`).
 
-Crates: `tern-term` (VT core, snapshots), `tern-mux` (background daemon: PTYs, protocol, client; macOS), `tern-menubar` (menu bar agent; macOS), `tern-fs` (tree, watcher, git),
+Crates: `tern-term` (VT core, snapshots), `tern-mux` (background daemon: PTYs, protocol, client), `tern-menubar` (menu bar agent; macOS), `tern-fs` (tree, watcher, git),
 `tern-bridge` (Claude Code hook receiver), `tern-app` (UI).
 
 The app icon lives in `assets/icon/source.png`; `scripts/gen-icons.sh` (ImageMagick) regenerates every size from it into `assets/icon/`: macOS `.icns` and an Icon Composer `Tern.icon` (compiled by the install script with Xcode's `actool`, so macOS 26 shows it full-size instead of shrunk into a gray tile), iOS `AppIcon.appiconset` (with dark and tinted looks), Android `res/` (legacy, round, adaptive and monochrome launcher icons, Play Store 512), web favicons/PWA icons, the Windows `tern.ico` (linked into `tern.exe` by `crates/tern-app/build.rs`) and Linux hicolor PNGs.

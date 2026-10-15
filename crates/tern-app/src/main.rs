@@ -51,6 +51,7 @@ fn main() {
         tern_mux::server::run();
     }
     // The menu bar agent (started by the UI): lists background terminals.
+    #[cfg(target_os = "macos")]
     if std::env::args().nth(1).as_deref() == Some("--menubar") {
         tern_menubar::run();
     }
@@ -155,7 +156,7 @@ fn main() {
         let scripted = cfg!(debug_assertions) && control_socket.is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
         // The menu bar agent outlives us; a newer one replaces an older one.
-        if !scripted && tern_menubar::setting::enabled(&tern_menubar::setting::file()) {
+        if cfg!(target_os = "macos") && !scripted && tern_menubar::setting::enabled(&tern_menubar::setting::file()) {
             tern_menubar::launch();
         }
         #[cfg(debug_assertions)]

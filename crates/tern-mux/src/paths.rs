@@ -1,16 +1,53 @@
 //! Where the daemon listens, and who may talk to it.
 
 use std::io;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+use crate::UnixStream;
 use crate::proto::MAJOR;
 
+fn home() -> PathBuf {
+    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None }).unwrap_or_else(std::env::temp_dir)
+}
+
+/// An XDG base directory: the variable when it holds an absolute path, else
+/// `fallback` under the home folder.
+#[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
+fn xdg(var: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(fallback))
+}
+
+/// `%LOCALAPPDATA%\Tern`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn local_app_data() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(home).join("Tern")
+}
+
+/// Files Tern can lose (as `tern-app`'s `dirs::cache`).
 fn caches() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/tmp".into());
-    home.join("Library/Caches/dev.tern")
+    if cfg!(target_os = "macos") {
+        home().join("Library/Caches/dev.tern")
+    } else if cfg!(windows) {
+        local_app_data()
+    } else {
+        xdg("XDG_CACHE_HOME", ".cache").join("tern")
+    }
+}
+
+/// Where the daemon and the menu bar agent log.
+pub fn logs() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home().join("Library/Logs/Tern")
+    } else if cfg!(windows) {
+        local_app_data().join("logs")
+    } else {
+        xdg("XDG_STATE_HOME", ".local/state").join("tern")
+    }
 }
 
 /// The daemon's directory. Debug builds have their own daemon, so a dev
@@ -37,6 +74,7 @@ pub fn lock_path(dir: &Path) -> PathBuf {
 }
 
 /// Create `dir` (0700), or check that it is a directory only we can use.
+#[cfg(unix)]
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let meta = std::fs::symlink_metadata(dir)?;
@@ -48,8 +86,15 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Create `dir`. It is under `%LOCALAPPDATA%`, which only the user (and
+/// administrators) can open, and its socket inherits that.
+#[cfg(windows)]
+pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
 /// Whether the process at the other end of `s` runs as us.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn peer_uid_ok(s: &UnixStream) -> bool {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: getpeereid writes the two ids of a connected Unix socket.
@@ -67,11 +112,19 @@ pub fn peer_uid_ok(s: &UnixStream) -> bool {
     r == 0 && cred.uid == unsafe { libc::getuid() }
 }
 
+/// Whether the process at the other end of `s` runs as us. Windows' AF_UNIX
+/// has no peer credentials; the socket's folder keeps other users out.
+#[cfg(windows)]
+pub fn peer_uid_ok(_: &UnixStream) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn private_dir_is_created_and_checked() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("mux");

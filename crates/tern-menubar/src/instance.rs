@@ -4,7 +4,6 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -31,12 +30,11 @@ fn open(path: &Path) -> io::Result<File> {
 }
 
 fn try_lock(f: &File) -> io::Result<bool> {
-    // SAFETY: flock on an fd we own.
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(true);
+    match f.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
-    let e = io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::EWOULDBLOCK) { Ok(false) } else { Err(e) }
 }
 
 fn write_holder(mut f: &File, pid: u32, version: &str) -> io::Result<()> {
@@ -101,7 +99,7 @@ mod tests {
     /// Hold `path` as another agent would: locked, with `<pid> <version>`.
     fn hold(path: &Path, pid: u32, version: &str) -> std::fs::File {
         let f = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path).unwrap();
-        assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        f.try_lock().unwrap();
         write_holder(&f, pid, version).unwrap();
         f
     }
