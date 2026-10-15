@@ -23,6 +23,7 @@ use polling::{Event as PollEvent, PollMode, Poller};
 
 use crate::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY};
 use crate::palette::Palette;
+use crate::status::ActivityStatus;
 
 /// Events delivered to the UI. `Wakeup` is coalesced: at most one is pending
 /// until the consumer calls [`Session::take_wakeup`].
@@ -35,6 +36,15 @@ pub enum TermEvent {
     ClipboardStore(String),
     Exit(Option<i32>),
     Signal(OscSignal),
+    /// A daemon session is running (spawned or attached): its id, its hook
+    /// token and the status it had.
+    Ready { id: u64, token: Option<String>, status: ActivityStatus },
+    /// The daemon couldn't start the program.
+    SpawnError(String),
+    /// The daemon has no session with that id.
+    NotFound,
+    /// The connection to the daemon is gone.
+    ServerLost,
 }
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;

@@ -429,6 +429,8 @@ impl TerminalView {
                 cx.emit(TerminalEvent::Notify { title, body });
             },
             TermEvent::Signal(OscSignal::ProgramStatusProbe) => {},
+            // Daemon sessions only.
+            TermEvent::Ready { .. } | TermEvent::SpawnError(_) | TermEvent::NotFound | TermEvent::ServerLost => {},
         }
     }
 

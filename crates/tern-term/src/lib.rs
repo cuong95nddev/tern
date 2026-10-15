@@ -2,6 +2,7 @@
 
 pub mod env;
 pub mod keys;
+pub mod mirror;
 pub mod mouse;
 pub mod osc;
 pub mod palette;

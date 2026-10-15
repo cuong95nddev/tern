@@ -1,0 +1,213 @@
+//! The UI's copy of a terminal that runs in the daemon.
+//!
+//! It parses the bytes the daemon's terminal parsed, in the same order and
+//! with the same resizes ([`Marker`]), so its grid matches the daemon's. It
+//! never answers the program (device attributes, color and size queries, the
+//! OSC 7501 probe): the daemon does, once. Title, bell and clipboard events
+//! come from here, as they did from an in-process session.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::{Config, Osc52, Term};
+use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+use serde::{Deserialize, Serialize};
+
+use crate::osc::{OscScanner, OscSignal};
+use crate::session::{EventSink, TermEvent, TermSize};
+use crate::snapshot::{self, Snapshot};
+
+const MAX_CLIPBOARD_STORE: usize = 16 << 20;
+
+/// Something that happened in the daemon's terminal between two runs of
+/// bytes, applied by the mirror at the same point of the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Marker {
+    /// The terminal and its PTY were resized.
+    Resized(TermSize),
+    /// A synchronized update (DEC 2026) ended on its timeout.
+    SyncFlush,
+    /// The program exited.
+    Exited(Option<i32>),
+}
+
+pub type MirrorTerm = Term<MirrorListener>;
+
+#[derive(Clone)]
+pub struct MirrorListener {
+    wake: Arc<AtomicBool>,
+    sink: EventSink,
+}
+
+impl MirrorListener {
+    fn wakeup(&self) {
+        if !self.wake.swap(true, Ordering::AcqRel) {
+            (self.sink)(TermEvent::Wakeup);
+        }
+    }
+}
+
+impl EventListener for MirrorListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Wakeup => self.wakeup(),
+            Event::Title(t) => (self.sink)(TermEvent::Title(t)),
+            Event::ResetTitle => (self.sink)(TermEvent::ResetTitle),
+            Event::Bell => (self.sink)(TermEvent::Bell),
+            Event::ClipboardStore(_, text) if text.len() <= MAX_CLIPBOARD_STORE => (self.sink)(TermEvent::ClipboardStore(text)),
+            // Replies to the program come from the daemon.
+            _ => {},
+        }
+    }
+}
+
+pub struct Mirror {
+    term: Arc<FairMutex<MirrorTerm>>,
+    parser: Processor<StdSyncHandler>,
+    scanner: OscScanner,
+    listener: MirrorListener,
+    size: TermSize,
+    scrollback: usize,
+}
+
+fn config(scrollback: usize) -> Config {
+    Config { scrolling_history: scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() }
+}
+
+impl Mirror {
+    pub fn new(size: TermSize, scrollback: usize, sink: EventSink) -> Self {
+        let listener = MirrorListener { wake: Arc::new(AtomicBool::new(false)), sink };
+        let term = Arc::new(FairMutex::new(Term::new(config(scrollback), &size, listener.clone())));
+        Self { term, parser: Processor::new(), scanner: OscScanner::new(), listener, size, scrollback }
+    }
+
+    pub fn term(&self) -> &Arc<FairMutex<MirrorTerm>> {
+        &self.term
+    }
+
+    /// Set while a redraw is pending; the UI clears it when it draws.
+    pub fn wake_flag(&self) -> &Arc<AtomicBool> {
+        &self.listener.wake
+    }
+
+    pub fn size(&self) -> TermSize {
+        self.size
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        {
+            let mut term = self.term.lock();
+            self.parser.advance(&mut *term, bytes);
+        }
+        let sink = &self.listener.sink;
+        self.scanner.feed(bytes, |sig| {
+            if sig != OscSignal::ProgramStatusProbe {
+                sink(TermEvent::Signal(sig));
+            }
+        });
+        // Bytes held for a synchronized update show when it ends.
+        if self.parser.sync_bytes_count() < bytes.len() {
+            self.listener.wakeup();
+        }
+    }
+
+    pub fn marker(&mut self, marker: &Marker) {
+        match *marker {
+            Marker::Resized(size) => {
+                self.size = size;
+                self.term.lock().resize(size);
+                self.listener.wakeup();
+            },
+            Marker::SyncFlush => {
+                self.parser.stop_sync(&mut *self.term.lock());
+                self.listener.wakeup();
+            },
+            Marker::Exited(code) => (self.listener.sink)(TermEvent::Exit(code)),
+        }
+    }
+
+    /// Replace the terminal's state with `snap`.
+    pub fn install(&mut self, snap: &Snapshot) {
+        let mut parser = Processor::new();
+        let mut term = Term::new(config(self.scrollback), &snap.size, self.listener.clone());
+        snapshot::restore(snap, &mut term, &mut parser);
+        *self.term.lock() = term;
+        self.parser = parser;
+        self.scanner = OscScanner::new();
+        self.size = snap.size;
+        if let Some(t) = &snap.title {
+            (self.listener.sink)(TermEvent::Title(t.clone()));
+        }
+        self.listener.wakeup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::status::ActivityStatus;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::Line;
+
+    const SIZE: TermSize = TermSize { cols: 30, rows: 5, cell_width: 8, cell_height: 16 };
+
+    fn mirror() -> (Mirror, Arc<Mutex<Vec<TermEvent>>>) {
+        let events = Arc::new(Mutex::new(vec![]));
+        let ev = events.clone();
+        (Mirror::new(SIZE, 100, Arc::new(move |e| ev.lock().unwrap().push(e))), events)
+    }
+
+    fn text<L: EventListener>(term: &Term<L>) -> Vec<String> {
+        let g = term.grid();
+        (0..g.screen_lines() as i32).map(|l| g[Line(l)].into_iter().map(|c| c.c).collect::<String>().trim_end().to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_like_a_plain_term() {
+        let (mut m, events) = mirror();
+        let bytes = b"hello\r\n\x1b[1mbold\x1b[0m\r\n\x1b]2;title\x07";
+        m.feed(bytes);
+        let mut plain = Term::new(Config::default(), &SIZE, VoidListener);
+        Processor::<StdSyncHandler>::new().advance(&mut plain, bytes);
+        assert_eq!(text(&*m.term().lock()), text(&plain));
+        let ev = events.lock().unwrap();
+        assert!(ev.iter().any(|e| matches!(e, TermEvent::Wakeup)));
+        assert!(ev.iter().any(|e| matches!(e, TermEvent::Title(t) if t == "title")));
+    }
+
+    #[test]
+    fn never_answers_the_program() {
+        let (mut m, events) = mirror();
+        // Device attributes, cursor position, color query, OSC 7501 probe.
+        m.feed(b"\x1b[c\x1b[6n\x1b]11;?\x07\x1b]7501;?\x07");
+        let ev = events.lock().unwrap();
+        assert!(ev.iter().all(|e| matches!(e, TermEvent::Wakeup)), "{ev:?}");
+    }
+
+    #[test]
+    fn markers_apply_in_order() {
+        let (mut m, events) = mirror();
+        m.marker(&Marker::Resized(TermSize { cols: 50, ..SIZE }));
+        assert_eq!(m.term().lock().columns(), 50);
+        assert_eq!(m.size().cols, 50);
+        m.marker(&Marker::Exited(Some(3)));
+        assert!(events.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(3)))));
+    }
+
+    #[test]
+    fn install_shows_the_snapshot() {
+        let mut src = Term::new(Config::default(), &SIZE, VoidListener);
+        Processor::<StdSyncHandler>::new().advance(&mut src, b"from the daemon");
+        let snap = snapshot::capture(&mut src, SIZE, Some("t".into()), ActivityStatus::None);
+        let (mut m, events) = mirror();
+        m.feed(b"old");
+        m.install(&snap);
+        assert_eq!(text(&*m.term().lock())[0], "from the daemon");
+        assert!(events.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Title(t) if t == "t")));
+    }
+}
