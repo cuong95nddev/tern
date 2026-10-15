@@ -63,9 +63,7 @@ pub fn peer_uid_ok(s: &UnixStream) -> bool {
     // SAFETY: ucred is plain data; SO_PEERCRED fills it for a connected Unix socket.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let r = unsafe {
-        libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
-    };
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len) };
     r == 0 && cred.uid == unsafe { libc::getuid() }
 }
 
