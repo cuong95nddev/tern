@@ -38,14 +38,7 @@ pub fn wants(mode: TermMode, action: MouseAction, button: MouseButton) -> bool {
 }
 
 /// Encode a mouse event at 0-based `(col, row)`.
-pub fn encode(
-    mode: TermMode,
-    action: MouseAction,
-    button: MouseButton,
-    mods: MouseMods,
-    col: usize,
-    row: usize,
-) -> Option<Vec<u8>> {
+pub fn encode(mode: TermMode, action: MouseAction, button: MouseButton, mods: MouseMods, col: usize, row: usize) -> Option<Vec<u8>> {
     if !wants(mode, action, button) {
         return None;
     }
@@ -95,19 +88,13 @@ mod tests {
         let m = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
         assert!(encode(m, MouseAction::Motion, MouseButton::Left, Default::default(), 0, 0).is_none());
         let m = m | TermMode::MOUSE_DRAG;
-        assert_eq!(
-            encode(m, MouseAction::Motion, MouseButton::Left, Default::default(), 0, 0).unwrap(),
-            b"\x1b[<32;1;1M"
-        );
+        assert_eq!(encode(m, MouseAction::Motion, MouseButton::Left, Default::default(), 0, 0).unwrap(), b"\x1b[<32;1;1M");
     }
 
     #[test]
     fn legacy_encoding() {
         let m = TermMode::MOUSE_REPORT_CLICK;
-        assert_eq!(
-            encode(m, MouseAction::Press, MouseButton::Left, Default::default(), 0, 0).unwrap(),
-            vec![0x1b, b'[', b'M', 32, 33, 33]
-        );
+        assert_eq!(encode(m, MouseAction::Press, MouseButton::Left, Default::default(), 0, 0).unwrap(), vec![0x1b, b'[', b'M', 32, 33, 33]);
     }
 
     #[test]

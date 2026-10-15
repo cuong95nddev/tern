@@ -49,12 +49,7 @@ pub struct TermSize {
 
 impl TermSize {
     fn window_size(self) -> WindowSize {
-        WindowSize {
-            num_lines: self.rows,
-            num_cols: self.cols,
-            cell_width: self.cell_width,
-            cell_height: self.cell_height,
-        }
+        WindowSize { num_lines: self.rows, num_cols: self.cols, cell_width: self.cell_width, cell_height: self.cell_height }
     }
 }
 
@@ -130,9 +125,7 @@ impl EventListener for Listener {
                     .term
                     .get()
                     .and_then(|t| t.try_lock_unfair().map(|t| sh.palette.indexed(t.colors(), idx)))
-                    .unwrap_or_else(|| {
-                        sh.palette.indexed(&Default::default(), idx)
-                    });
+                    .unwrap_or_else(|| sh.palette.indexed(&Default::default(), idx));
                 sh.write(fmt(rgb).into_bytes());
             },
             Event::TextAreaSizeRequest(fmt) => {
@@ -232,13 +225,8 @@ pub struct Session {
 
 impl Session {
     pub fn spawn(cfg: SpawnConfig, palette: Palette, sink: EventSink) -> io::Result<Self> {
-        let shared = Arc::new(Shared {
-            wake_pending: AtomicBool::new(false),
-            sender: OnceLock::new(),
-            size: Mutex::new(cfg.size),
-            palette,
-            sink,
-        });
+        let shared =
+            Arc::new(Shared { wake_pending: AtomicBool::new(false), sender: OnceLock::new(), size: Mutex::new(cfg.size), palette, sink });
         let term_cell = Arc::new(OnceLock::new());
         let listener = Listener { shared: shared.clone(), term: term_cell.clone() };
 
@@ -265,12 +253,8 @@ impl Session {
         let pty = tty::new(&opts, cfg.size.window_size(), 0)?;
         let pid = pty.child().id();
         let tty = pty.file().try_clone()?;
-        let reader = TapReader {
-            file: pty.file().try_clone()?,
-            scanner: OscScanner::new(),
-            shared: shared.clone(),
-            last_probe_reply: None,
-        };
+        let reader =
+            TapReader { file: pty.file().try_clone()?, scanner: OscScanner::new(), shared: shared.clone(), last_probe_reply: None };
         let event_loop = EventLoop::new(term.clone(), listener, TapPty { inner: pty, reader }, true, false)?;
         let _ = shared.sender.set(event_loop.channel());
         event_loop.spawn();

@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::Selectable as _;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -322,14 +322,17 @@ fn active_outline(color: Hsla) -> (impl IntoElement, impl IntoElement) {
             let mask = ContentMask {
                 bounds: Bounds::from_corners(point(mask.left() - px(1.), mask.top()), point(mask.right() + px(1.), mask.bottom())),
             };
-            let outline = canvas(|_, _, _| {}, move |_, _, window, _| {
-                let Some(right) = right.get() else { return };
-                let bounds = Bounds::from_corners(point(b.left() - px(1.), b.top()), point(right + px(1.), b.bottom()));
-                let corners = Corners { top_left: px(8.), top_right: px(8.), ..Default::default() };
-                let w = px(2.);
-                let edges = Edges { top: w, left: w, right: w, bottom: px(0.) };
-                window.paint_quad(quad(bounds, corners, transparent_black(), edges, color, BorderStyle::Solid));
-            });
+            let outline = canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let Some(right) = right.get() else { return };
+                    let bounds = Bounds::from_corners(point(b.left() - px(1.), b.top()), point(right + px(1.), b.bottom()));
+                    let corners = Corners { top_left: px(8.), top_right: px(8.), ..Default::default() };
+                    let w = px(2.);
+                    let edges = Edges { top: w, left: w, right: w, bottom: px(0.) };
+                    window.paint_quad(quad(bounds, corners, transparent_black(), edges, color, BorderStyle::Solid));
+                },
+            );
             let mut outline = outline.into_any_element();
             outline.layout_as_root(AvailableSpace::min_size(), window, cx);
             window.defer_draw(outline, b.origin, 0, Some(mask));
@@ -425,8 +428,7 @@ pub enum WorkspaceEvent {
 impl EventEmitter<WorkspaceEvent> for Workspace {}
 
 /// Common `claude` flags, toggled from the new-tab menu.
-const CLAUDE_FLAGS: [(&str, &str); 2] =
-    [("Skip Permissions", "--dangerously-skip-permissions"), ("Chrome", "--chrome")];
+const CLAUDE_FLAGS: [(&str, &str); 2] = [("Skip Permissions", "--dangerously-skip-permissions"), ("Chrome", "--chrome")];
 
 /// The tab layout choices (scroll, wrap, vertical), for every window.
 fn tab_layout_items(mut menu: PopupMenu) -> PopupMenu {
@@ -599,9 +601,7 @@ impl Workspace {
             .iter()
             .map(|g| SavedGroup { name: g.name.to_string(), color: GROUP_COLORS[g.color].0.into(), collapsed: g.collapsed })
             .collect();
-        let tab_groups = (0..self.tabs.len())
-            .map(|i| self.group_of(i).and_then(|g| self.groups.iter().position(|x| x.id == g)))
-            .collect();
+        let tab_groups = (0..self.tabs.len()).map(|i| self.group_of(i).and_then(|g| self.groups.iter().position(|x| x.id == g))).collect();
         let order = self.layout.panes();
         let (panes, tab_panes, pane_active) = if order.len() > 1 {
             (
@@ -1196,16 +1196,12 @@ impl Workspace {
                 .margin_top(vp.height * 0.06)
                 .title(title.clone())
                 .content(move |c, window, _| c.child(div().h(window.viewport_size().height * 0.7).child(body.clone())))
-                .footer(
-                    div().flex().justify_end().child(
-                        Button::new("open-in-tab").small().primary().label("Open in Tab").on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = ws.update(cx, |this, cx| this.open_diff_tab(pane.clone(), window, cx));
-                            },
-                        ),
-                    ),
-                )
+                .footer(div().flex().justify_end().child(Button::new("open-in-tab").small().primary().label("Open in Tab").on_click(
+                    move |_, window, cx| {
+                        window.close_dialog(cx);
+                        let _ = ws.update(cx, |this, cx| this.open_diff_tab(pane.clone(), window, cx));
+                    },
+                )))
         });
     }
 
@@ -1248,10 +1244,8 @@ impl Workspace {
     /// Unless `pin`, it replaces the file in the preview tab (VS Code's
     /// single click); `pin` keeps the tab it ends up in (double click).
     fn open_file(&mut self, path: PathBuf, pin: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self
-            .tabs
-            .iter()
-            .position(|t| matches!(t, CenterTab::File { view, .. } if view.read(cx).path() == Some(path.as_path())));
+        let existing =
+            self.tabs.iter().position(|t| matches!(t, CenterTab::File { view, .. } if view.read(cx).path() == Some(path.as_path())));
         let reuse = existing.or_else(|| self.preview_ix(cx));
         if let Some(ix) = reuse {
             if let CenterTab::File { view, .. } = &self.tabs[ix] {
@@ -1297,9 +1291,10 @@ impl Workspace {
         match ev {
             TerminalEvent::TitleChanged | TerminalEvent::Exited => cx.notify(),
             TerminalEvent::StatusChanged(status) => {
-                let is_active_tab = self.shown_panes().into_iter().any(|p| {
-                    self.pane_active_ix(p).and_then(|i| self.tabs[i].term()).is_some_and(|t| &t.view == view)
-                });
+                let is_active_tab = self
+                    .shown_panes()
+                    .into_iter()
+                    .any(|p| self.pane_active_ix(p).and_then(|i| self.tabs[i].term()).is_some_and(|t| &t.view == view));
                 if !window.is_window_active() || !is_active_tab {
                     let (title, body) = match status {
                         ActivityStatus::Blocked => ("Claude needs your input", "Waiting for permission or an answer"),
@@ -1414,11 +1409,7 @@ impl Workspace {
         let agent = t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude));
         Some(match agent {
             Some(a) => a.icon(theme).into_any_element(),
-            None => Icon::new(AssetIcon::SquareTerminal)
-                .text_color(theme.muted_foreground)
-                .small()
-                .flex_shrink_0()
-                .into_any_element(),
+            None => Icon::new(AssetIcon::SquareTerminal).text_color(theme.muted_foreground).small().flex_shrink_0().into_any_element(),
         })
     }
 
@@ -1480,12 +1471,7 @@ impl Workspace {
             .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
             .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab(d.tab, i, join, window, cx)))
             .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| this.move_group(d.group, i, cx)))
-            .suffix(
-                tab_side()
-                    .pr_1()
-                    .children(end)
-                    .child(self.close_button(i, cx)),
-            )
+            .suffix(tab_side().pr_1().children(end).child(self.close_button(i, cx)))
     }
 
     /// Group `g`'s chip in a horizontal bar: click to collapse, right-click
@@ -1522,11 +1508,11 @@ impl Workspace {
                     let args = window_state::claude_args();
                     for (label, flag) in CLAUDE_FLAGS {
                         menu = menu.item(
-                            PopupMenuItem::new(format!("{label}  {flag}"))
-                                .checked(window_state::has_flag(&args, flag))
-                                .on_click(move |_, _, _| {
+                            PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
+                                move |_, _, _| {
                                     window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
-                                }),
+                                },
+                            ),
                         );
                     }
                     let ws = ws3.clone();
@@ -1541,11 +1527,9 @@ impl Workspace {
                 .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
                     for (label, ext) in scratch::KINDS {
                         let ws = ws.clone();
-                        menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(
-                            move |_, window, cx| {
-                                let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
-                            },
-                        ));
+                        menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
+                            let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
+                        }));
                     }
                     menu
                 })
@@ -1684,7 +1668,8 @@ impl Workspace {
             })
             .collect();
         // Right after the last tab, like a browser's new-tab button.
-        let end_space = self.end_drop_zone("term-bar-end", pane, cx).flex_1().px_1().flex().items_center().child(self.new_tab_button(pane, cx));
+        let end_space =
+            self.end_drop_zone("term-bar-end", pane, cx).flex_1().px_1().flex().items_center().child(self.new_tab_button(pane, cx));
         let panels = self.pane_buttons(pane, cx);
         let bar = if window_state::tab_layout() == TabLayout::Wrap {
             // Reveal the active tab again once tabs scroll.
@@ -1692,7 +1677,9 @@ impl Workspace {
             let tabs = items.into_iter().enumerate().map(|(n, (slot, tab))| {
                 div().id(("wrapped-tab", n)).child(match slot {
                     Slot::Group(g) => tab.on_click(cx.listener(move |this, _, window, cx| this.toggle_group(g, window, cx))),
-                    Slot::Tab(i) => tab.selected(Some(i) == shown).on_click(cx.listener(move |this, _, window, cx| this.activate(i, window, cx))),
+                    Slot::Tab(i) => {
+                        tab.selected(Some(i) == shown).on_click(cx.listener(move |this, _, window, cx| this.activate(i, window, cx)))
+                    },
                 })
             });
             div()
@@ -1701,15 +1688,7 @@ impl Workspace {
                 .bg(tab_bar_bg)
                 .border_b_1()
                 .border_color(border)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_wrap()
-                        .children(tabs)
-                        .child(end_space.h(px(30.)).min_w(px(32.))),
-                )
+                .child(div().flex_1().min_w_0().flex().flex_wrap().children(tabs).child(end_space.h(px(30.)).min_w(px(32.))))
                 .child(panels.h(px(30.)))
                 .into_any_element()
         } else {
@@ -1747,16 +1726,14 @@ impl Workspace {
                 .child(bar)
                 // A thin bar along the strip's bottom edge while hovered, like VS Code's.
                 .when(overflows, |this| {
-                    this.child(
-                        Scrollbar::horizontal(&scroll).id(("tab-scrollbar", pane as usize)).mode(ScrollbarMode::Hover).styles(|s| {
-                            s.track(|t| t.width(px(4.)))
-                                .track_hover(|t| t.width(px(4.)))
-                                .track_active(|t| t.width(px(4.)))
-                                .thumb(|t| t.width(px(3.)).inset(px(0.)))
-                                .thumb_hover(|t| t.width(px(4.)).inset(px(0.)))
-                                .thumb_active(|t| t.width(px(4.)).inset(px(0.)))
-                        }),
-                    )
+                    this.child(Scrollbar::horizontal(&scroll).id(("tab-scrollbar", pane as usize)).mode(ScrollbarMode::Hover).styles(|s| {
+                        s.track(|t| t.width(px(4.)))
+                            .track_hover(|t| t.width(px(4.)))
+                            .track_active(|t| t.width(px(4.)))
+                            .thumb(|t| t.width(px(3.)).inset(px(0.)))
+                            .thumb_hover(|t| t.width(px(4.)).inset(px(0.)))
+                            .thumb_active(|t| t.width(px(4.)).inset(px(0.)))
+                    }))
                 })
                 .into_any_element()
         };
@@ -1945,10 +1922,7 @@ impl Workspace {
             .item(item("Close Others", Self::close_others).disabled(siblings.len() < 2))
             .item(item("Close to the Right", Self::close_to_right).disabled(siblings.last().is_none_or(|&l| l <= ix)))
             // Terminals stay, so this never empties the window.
-            .item(
-                item("Close File Tabs", Self::close_file_tabs)
-                    .disabled(this.tabs.iter().all(is_file) || !this.tabs.iter().any(is_file)),
-            )
+            .item(item("Close File Tabs", Self::close_file_tabs).disabled(this.tabs.iter().all(is_file) || !this.tabs.iter().any(is_file)))
             .separator()
             .item(item("Add Tab to New Group", Self::add_to_new_group));
         let own = this.group_of(ix);
@@ -2033,7 +2007,8 @@ impl Workspace {
     fn close_others(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(keep) = self.tabs.get(ix).map(CenterTab::entity_id) else { return };
         let pane = self.pane_of(ix);
-        let doomed: HashSet<EntityId> = self.pane_tabs(pane).into_iter().map(|i| self.tabs[i].entity_id()).filter(|id| *id != keep).collect();
+        let doomed: HashSet<EntityId> =
+            self.pane_tabs(pane).into_iter().map(|i| self.tabs[i].entity_id()).filter(|id| *id != keep).collect();
         self.close_where(|_, t| doomed.contains(&t.entity_id()), window, cx);
         if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == keep) {
             self.activate(ix, window, cx);
@@ -2093,14 +2068,7 @@ impl Workspace {
 
     /// A dialog titled `title` asking for a name, starting from `current`;
     /// `apply` takes what was typed (and closes the dialog when it is good).
-    fn ask_name(
-        &mut self,
-        title: &'static str,
-        current: SharedString,
-        apply: ApplyName,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn ask_name(&mut self, title: &'static str, current: SharedString, apply: ApplyName, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         let on_enter = apply.clone();
         self._rename = Some(cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| {
@@ -2116,26 +2084,17 @@ impl Workspace {
                 input.focus_handle(cx).focus(window, cx);
             }
             let (field, input, ws, apply) = (input.clone(), input.clone(), ws.clone(), apply.clone());
-            dialog
-                .w(px(420.))
-                .title(title)
-                .content(move |c, _, _| c.child(Input::new(&field)))
-                .footer(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("rename-cancel")
-                                .small()
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(Button::new("rename-ok").small().primary().label("OK").on_click(move |_, window, cx| {
-                            let name = input.read(cx).value().to_string();
-                            let _ = ws.update(cx, |this, cx| apply(this, &name, window, cx));
-                        })),
-                )
+            dialog.w(px(420.)).title(title).content(move |c, _, _| c.child(Input::new(&field))).footer(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Button::new("rename-cancel").small().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("rename-ok").small().primary().label("OK").on_click(move |_, window, cx| {
+                        let name = input.read(cx).value().to_string();
+                        let _ = ws.update(cx, |this, cx| apply(this, &name, window, cx));
+                    })),
+            )
         });
     }
 
@@ -2507,7 +2466,10 @@ impl Workspace {
     }
 
     /// A drag's start. While a tab is dragged, the panes show where it can go.
-    fn start_drag<T: Clone + Render>(&self, cx: &mut Context<Self>) -> impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<T> + 'static {
+    fn start_drag<T: Clone + Render>(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<T> + 'static {
         let ws = cx.entity().downgrade();
         move |d, _, _, cx| {
             if std::any::TypeId::of::<T>() == std::any::TypeId::of::<DraggedTab>() {
@@ -2631,11 +2593,7 @@ impl Workspace {
         let inner = if window_state::tab_layout() == TabLayout::Vertical {
             h_resizable(SharedString::from(format!("vertical-tabs-split-{pane}")))
                 .child(
-                    resizable_panel()
-                        .flex_none()
-                        .size(px(220.))
-                        .size_range(px(140.)..px(480.))
-                        .child(self.render_vertical_tabs(pane, cx)),
+                    resizable_panel().flex_none().size(px(220.)).size_range(px(140.)..px(480.)).child(self.render_vertical_tabs(pane, cx)),
                 )
                 .child(resizable_panel().child(body))
                 .into_any_element()
@@ -2685,8 +2643,18 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(Button::new(("pane-claude", pane as usize)).small().label("New Claude Tab").on_click(cx.listener(new(TabKind::Claude))))
-                    .child(Button::new(("pane-shell", pane as usize)).small().label("New Shell Tab").on_click(cx.listener(new(TabKind::Shell))))
+                    .child(
+                        Button::new(("pane-claude", pane as usize))
+                            .small()
+                            .label("New Claude Tab")
+                            .on_click(cx.listener(new(TabKind::Claude))),
+                    )
+                    .child(
+                        Button::new(("pane-shell", pane as usize))
+                            .small()
+                            .label("New Shell Tab")
+                            .on_click(cx.listener(new(TabKind::Shell))),
+                    )
                     .child(
                         Button::new(("pane-close-empty", pane as usize))
                             .small()
@@ -2749,16 +2717,23 @@ impl Workspace {
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
-                        let g = self.group_of(i).and_then(|g| self.groups.iter().position(|x| x.id == g)).map(|g| format!("@{g}:")).unwrap_or_default();
+                        let g = self
+                            .group_of(i)
+                            .and_then(|g| self.groups.iter().position(|x| x.id == g))
+                            .map(|g| format!("@{g}:"))
+                            .unwrap_or_default();
                         g + &match t {
-                        CenterTab::Term(t) => format!("term:{}", t.rename.clone().unwrap_or_else(|| t.view.read(cx).title().to_string().into())),
-                        CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state()),
-                        CenterTab::Diff(d) => format!("diff:{}", d.read(cx).path().display()),
-                        CenterTab::Scratch { view: s, .. } => {
-                            let s = s.read(cx);
-                            format!("scratch:{}{}", s.path().display(), if s.is_dirty() { "*" } else { "" })
-                        },
-                    }})
+                            CenterTab::Term(t) => {
+                                format!("term:{}", t.rename.clone().unwrap_or_else(|| t.view.read(cx).title().to_string().into()))
+                            },
+                            CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state()),
+                            CenterTab::Diff(d) => format!("diff:{}", d.read(cx).path().display()),
+                            CenterTab::Scratch { view: s, .. } => {
+                                let s = s.read(cx);
+                                format!("scratch:{}{}", s.path().display(), if s.is_dirty() { "*" } else { "" })
+                            },
+                        }
+                    })
                     .collect();
                 let groups: Vec<String> = self
                     .groups

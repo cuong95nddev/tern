@@ -15,7 +15,10 @@ pub enum OscSignal {
     /// `OSC 7501 ; ?` — the program asks whether we speak the protocol.
     ProgramStatusProbe,
     ProgramStatus(ProgramStatus),
-    Notify { title: Option<String>, body: String },
+    Notify {
+        title: Option<String>,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -227,10 +230,13 @@ mod tests {
     #[test]
     fn notifications() {
         let out = scan(&[b"\x1b]9;Done!\x07\x1b]777;notify;Claude;Need input\x07\x1b]9;4;1;50\x07"]);
-        assert_eq!(out, vec![
-            OscSignal::Notify { title: None, body: "Done!".into() },
-            OscSignal::Notify { title: Some("Claude".into()), body: "Need input".into() },
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                OscSignal::Notify { title: None, body: "Done!".into() },
+                OscSignal::Notify { title: Some("Claude".into()), body: "Need input".into() },
+            ]
+        );
     }
 
     #[test]

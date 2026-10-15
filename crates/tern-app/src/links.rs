@@ -236,7 +236,10 @@ mod tests {
 
     #[test]
     fn paths() {
-        assert_eq!(at("⎿ Read(crates/a/src/main.rs)", "main"), Some(("crates/a/src/main.rs".into(), path("crates/a/src/main.rs", None, None))));
+        assert_eq!(
+            at("⎿ Read(crates/a/src/main.rs)", "main"),
+            Some(("crates/a/src/main.rs".into(), path("crates/a/src/main.rs", None, None)))
+        );
         assert_eq!(at("Updated `src/lib.rs:42` and", "lib"), Some(("src/lib.rs:42".into(), path("src/lib.rs", Some(42), None))));
         assert_eq!(at("error at src/x.rs:3:14: oops", "x.rs"), Some(("src/x.rs:3:14".into(), path("src/x.rs", Some(3), Some(14)))));
         assert_eq!(at("in ~/ws/Tiếng việt.md.", "ws"), Some(("~/ws/Tiếng".into(), path("~/ws/Tiếng", None, None))));

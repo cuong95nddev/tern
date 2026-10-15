@@ -21,13 +21,7 @@ fn encode(display: &str, bounds: WindowBounds) -> String {
         WindowBounds::Maximized(b) => ("maximized", b),
         WindowBounds::Fullscreen(b) => ("fullscreen", b),
     };
-    format!(
-        "{display} {} {} {} {} {kind}\n",
-        b.origin.x.as_f32(),
-        b.origin.y.as_f32(),
-        b.size.width.as_f32(),
-        b.size.height.as_f32()
-    )
+    format!("{display} {} {} {} {} {kind}\n", b.origin.x.as_f32(), b.origin.y.as_f32(), b.size.width.as_f32(), b.size.height.as_f32())
 }
 
 fn decode(line: &str) -> Option<(String, WindowBounds)> {
@@ -64,7 +58,10 @@ pub fn resolve(uuid: &str, bounds: WindowBounds, cx: &App) -> Option<(DisplayId,
     };
     // Keep at least the title bar on screen (display sizes may have changed).
     let screen = display.bounds().size;
-    let visible = b.origin.x < screen.width - px(100.) && b.origin.x + b.size.width > px(100.) && b.origin.y >= px(0.) && b.origin.y < screen.height - px(40.);
+    let visible = b.origin.x < screen.width - px(100.)
+        && b.origin.x + b.size.width > px(100.)
+        && b.origin.y >= px(0.)
+        && b.origin.y < screen.height - px(40.);
     visible.then(|| (display.id(), bounds))
 }
 
@@ -253,7 +250,16 @@ pub struct SavedWorkspace {
 impl SavedWorkspace {
     /// A folder opened fresh, with the default tabs.
     pub fn fresh(folder: PathBuf) -> Self {
-        Self { folder, tabs: vec![], tab_groups: vec![], groups: vec![], active: 0, panes: String::new(), tab_panes: vec![], pane_active: vec![] }
+        Self {
+            folder,
+            tabs: vec![],
+            tab_groups: vec![],
+            groups: vec![],
+            active: 0,
+            panes: String::new(),
+            tab_panes: vec![],
+            pane_active: vec![],
+        }
     }
 }
 
@@ -397,8 +403,8 @@ pub fn load_session() -> Vec<SavedWindow> {
 #[cfg(test)]
 mod tests {
     use super::{SavedGroup, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag, toggle_flag};
-    use std::path::PathBuf;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+    use std::path::PathBuf;
 
     #[test]
     fn round_trip() {

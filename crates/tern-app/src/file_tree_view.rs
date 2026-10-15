@@ -131,9 +131,7 @@ impl FileTreeView {
     /// scrollable width.
     fn widest_row(&self) -> usize {
         let width = |r: &tern_fs::tree::Row| r.depth as f32 * INDENT + r.entry.name.chars().count() as f32 * 7.;
-        (0..self.tree.rows().len())
-            .max_by(|&a, &b| width(&self.tree.rows()[a]).total_cmp(&width(&self.tree.rows()[b])))
-            .unwrap_or(0)
+        (0..self.tree.rows().len()).max_by(|&a, &b| width(&self.tree.rows()[a]).total_cmp(&width(&self.tree.rows()[b]))).unwrap_or(0)
     }
 
     fn render_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -154,11 +152,8 @@ impl FileTreeView {
                     None => fg,
                 };
                 let name = &*row.entry.name;
-                let (icon, icon_color) = if row.entry.is_dir {
-                    file_icons::dir_icon(name, row.expanded, theme)
-                } else {
-                    file_icons::file_icon(name, theme)
-                };
+                let (icon, icon_color) =
+                    if row.entry.is_dir { file_icons::dir_icon(name, row.expanded, theme) } else { file_icons::file_icon(name, theme) };
                 let chevron = row.entry.is_dir.then_some(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight });
                 Some(
                     div()
@@ -194,12 +189,7 @@ impl FileTreeView {
 impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let root_name = self
-            .tree
-            .root()
-            .file_name()
-            .map(|n| n.to_string_lossy().to_uppercase())
-            .unwrap_or_default();
+        let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
         div()
             .track_focus(&self.focus)
             .size_full()

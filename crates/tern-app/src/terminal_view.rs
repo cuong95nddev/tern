@@ -63,11 +63,18 @@ pub enum ActivityStatus {
 pub enum TerminalEvent {
     TitleChanged,
     StatusChanged(ActivityStatus),
-    Notify { title: Option<String>, body: String },
+    Notify {
+        title: Option<String>,
+        body: String,
+    },
     Bell,
     Exited,
     /// ⌘-click on a path that exists; absolute.
-    OpenPath { path: PathBuf, line: Option<u32>, col: Option<u32> },
+    OpenPath {
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
 }
 
 /// What ⌘-click would open, and the cells (grid coordinates, inclusive)
@@ -297,11 +304,7 @@ impl TerminalView {
 
     fn set_status(&mut self, status: ActivityStatus, cx: &mut Context<Self>) {
         // A finished "working" turn with no explicit idle state reads as done.
-        let status = if status == ActivityStatus::None && self.status == ActivityStatus::Working {
-            ActivityStatus::Done
-        } else {
-            status
-        };
+        let status = if status == ActivityStatus::None && self.status == ActivityStatus::Working { ActivityStatus::Done } else { status };
         if self.status != status {
             self.status = status;
             cx.emit(TerminalEvent::StatusChanged(status));
@@ -432,7 +435,14 @@ impl TerminalView {
         MouseMods { shift: m.shift, alt: m.alt, ctrl: m.control }
     }
 
-    fn report_mouse(&mut self, action: MouseAction, button: mouse::MouseButton, pos: Point<Pixels>, mods: &Modifiers, cx: &mut Context<Self>) -> bool {
+    fn report_mouse(
+        &mut self,
+        action: MouseAction,
+        button: mouse::MouseButton,
+        pos: Point<Pixels>,
+        mods: &Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mode = self.mode();
         // Shift bypasses mouse reporting so users can still select text.
         if mods.shift || !mouse::wants(mode, action, button) {
@@ -706,7 +716,13 @@ impl Render for TerminalView {
 }
 
 impl EntityInputHandler for TerminalView {
-    fn text_for_range(&mut self, range: Range<usize>, actual: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        actual: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
         let text = self.marked_text.as_deref().unwrap_or("");
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let r = range.start.min(utf16.len())..range.end.min(utf16.len());
@@ -736,7 +752,14 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    fn replace_and_mark_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.marked_text = (!text.is_empty()).then(|| text.to_owned());
         cx.notify();
     }
@@ -832,7 +855,12 @@ impl<'a> RowBuilder<'a> {
             strikethrough: style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) }),
         };
         match self.runs.last_mut() {
-            Some(last) if last.font == run.font && last.color == run.color && last.underline == run.underline && last.strikethrough == run.strikethrough => {
+            Some(last)
+                if last.font == run.font
+                    && last.color == run.color
+                    && last.underline == run.underline
+                    && last.strikethrough == run.strikethrough =>
+            {
                 last.len += run.len
             },
             _ => self.runs.push(run),
@@ -848,10 +876,7 @@ impl<'a> RowBuilder<'a> {
         let text: SharedString = std::mem::take(&mut self.text).into();
         let line = ts.shape_line(text, self.font_size, &self.runs, Some(self.cell.width));
         self.runs.clear();
-        out.push(TextSegment {
-            origin: point(self.origin_x + self.cell.width * self.start_col as f32, self.y),
-            line,
-        });
+        out.push(TextSegment { origin: point(self.origin_x + self.cell.width * self.start_col as f32, self.y), line });
     }
 }
 
@@ -867,14 +892,28 @@ impl Element for TerminalElement {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
         let mut style = gpui_kit::Style::default();
         style.size.width = relative(1.).into();
         style.size.height = relative(1.).into();
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Frame {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Frame {
         self.view.update(cx, |view, _| {
             let m = view.ensure_metrics(window);
             view.last_origin = bounds.origin;
@@ -887,7 +926,16 @@ impl Element for TerminalElement {
         })
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), frame: &mut Frame, window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        frame: &mut Frame,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -1043,10 +1091,7 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
     }
 
     // Cursor.
-    let cursor_origin = point(
-        bounds.origin.x + m.width * cursor.point.column.0 as f32,
-        bounds.origin.y + m.height * cursor_vp_line as f32,
-    );
+    let cursor_origin = point(bounds.origin.x + m.width * cursor.point.column.0 as f32, bounds.origin.y + m.height * cursor_vp_line as f32);
     let cursor_cell = Bounds::new(cursor_origin, size(m.width, m.height));
     view.last_cursor = Some(cursor_cell);
     let cursor_color = rgb_to_hsla(cursor_rgb);
@@ -1054,10 +1099,9 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
         frame.cursor = Some(match (focused, cursor.shape) {
             (true, CursorShape::Block) => fill(cursor_cell, cursor_color),
             (_, CursorShape::Beam) => fill(Bounds::new(cursor_origin, size(px(2.), m.height)), cursor_color),
-            (_, CursorShape::Underline) => fill(
-                Bounds::new(point(cursor_origin.x, cursor_origin.y + m.height - px(2.)), size(m.width, px(2.))),
-                cursor_color,
-            ),
+            (_, CursorShape::Underline) => {
+                fill(Bounds::new(point(cursor_origin.x, cursor_origin.y + m.height - px(2.)), size(m.width, px(2.))), cursor_color)
+            },
             _ => outline(cursor_cell, cursor_color, BorderStyle::Solid),
         });
     }
@@ -1098,9 +1142,7 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
 /// content can't inject escape sequences, end a bracketed paste early, or send
 /// signals like Ctrl-C/Ctrl-D.
 fn sanitize_paste(text: &str) -> String {
-    text.chars()
-        .filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control()))
-        .collect()
+    text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control())).collect()
 }
 
 #[cfg(test)]

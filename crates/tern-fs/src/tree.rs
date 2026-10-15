@@ -33,13 +33,8 @@ pub struct FileTree {
 impl FileTree {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        let mut t = Self {
-            root: root.clone(),
-            show_hidden: true,
-            children: HashMap::new(),
-            expanded: HashSet::from([root.clone()]),
-            rows: vec![],
-        };
+        let mut t =
+            Self { root: root.clone(), show_hidden: true, children: HashMap::new(), expanded: HashSet::from([root.clone()]), rows: vec![] };
         t.load_dir(&root);
         t.rebuild_rows();
         t
@@ -147,9 +142,7 @@ impl FileTree {
 
     fn load_dir(&mut self, dir: &Path) {
         let mut entries = read_dir_filtered(dir, self.show_hidden);
-        entries.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then_with(|| natural_lower(&a.name).cmp(&natural_lower(&b.name)))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| natural_lower(&a.name).cmp(&natural_lower(&b.name))));
         self.children.insert(dir.to_path_buf(), entries);
     }
 
@@ -191,13 +184,8 @@ pub fn read_dir_filtered(dir: &Path, show_hidden: bool) -> Vec<Entry> {
         .filter_map(Result::ok)
         .filter(|e| e.depth() == 1)
         .map(|e| {
-            let is_dir = e.file_type().is_some_and(|t| t.is_dir())
-                || (e.path_is_symlink() && e.path().is_dir());
-            Entry {
-                name: e.file_name().to_string_lossy().into(),
-                path: e.path().into(),
-                is_dir,
-            }
+            let is_dir = e.file_type().is_some_and(|t| t.is_dir()) || (e.path_is_symlink() && e.path().is_dir());
+            Entry { name: e.file_name().to_string_lossy().into(), path: e.path().into(), is_dir }
         })
         .collect()
 }

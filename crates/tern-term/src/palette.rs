@@ -68,9 +68,7 @@ impl Palette {
                 let idx = n as usize;
                 if idx < 16 {
                     self.indexed[idx]
-                } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
-                    .contains(&idx)
-                {
+                } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&idx) {
                     dim(self.indexed[idx - NamedColor::DimBlack as usize])
                 } else {
                     self.foreground
@@ -80,13 +78,7 @@ impl Palette {
     }
 
     pub fn indexed(&self, overrides: &Colors, idx: usize) -> Rgb {
-        overrides[idx].unwrap_or_else(|| {
-            if idx < 256 {
-                self.indexed[idx]
-            } else {
-                self.named_by_index(overrides, idx)
-            }
-        })
+        overrides[idx].unwrap_or_else(|| if idx < 256 { self.indexed[idx] } else { self.named_by_index(overrides, idx) })
     }
 
     fn named_by_index(&self, overrides: &Colors, idx: usize) -> Rgb {

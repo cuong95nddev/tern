@@ -81,18 +81,18 @@ pub fn file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
     let lower = name.to_ascii_lowercase();
     let muted = theme.muted_foreground;
     match lower.as_str() {
-        "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "bun.lockb" | "poetry.lock"
-        | "uv.lock" | "go.sum" | "gemfile.lock" => return (IconName::FileLock, muted),
+        "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "bun.lockb" | "poetry.lock" | "uv.lock" | "go.sum"
+        | "gemfile.lock" => return (IconName::FileLock, muted),
         "dockerfile" | "containerfile" | "makefile" | "justfile" | "cmakelists.txt" => {
             return (IconName::FileCog, theme.cyan);
-        }
+        },
         ".gitignore" | ".gitattributes" | ".gitmodules" | ".dockerignore" => return (IconName::FileCog, orange()),
         ".env" | ".editorconfig" | ".npmrc" => return (IconName::FileCog, muted),
         _ if lower.starts_with("license") || lower.starts_with("copying") => {
             return (IconName::FileBadge, theme.yellow);
-        }
+        },
         _ if lower.starts_with(".env.") => return (IconName::FileCog, muted),
-        _ => {}
+        _ => {},
     }
     let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     match ext {
@@ -102,15 +102,13 @@ pub fn file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
         "py" | "pyi" => (IconName::FileCode, theme.blue),
         "go" => (IconName::FileCode, theme.cyan),
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "m" | "mm" => (IconName::FileCode, theme.blue),
-        "java" | "kt" | "kts" | "scala" | "swift" | "rb" | "php" | "lua" | "zig" | "dart" | "ex" | "exs"
-        | "hs" | "ml" | "cs" | "fs" | "vue" | "svelte" => (IconName::FileCode, theme.magenta),
+        "java" | "kt" | "kts" | "scala" | "swift" | "rb" | "php" | "lua" | "zig" | "dart" | "ex" | "exs" | "hs" | "ml" | "cs" | "fs"
+        | "vue" | "svelte" => (IconName::FileCode, theme.magenta),
         "html" | "htm" | "xml" => (IconName::FileCode, orange()),
         "css" | "scss" | "sass" | "less" => (IconName::FileCode, theme.cyan),
         "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" => (IconName::FileTerminal, theme.green),
         "json" | "jsonc" | "json5" => (IconName::FileBraces, theme.yellow),
-        "toml" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "plist" => {
-            (IconName::FileCog, muted)
-        }
+        "toml" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "plist" => (IconName::FileCog, muted),
         "lock" => (IconName::FileLock, muted),
         "md" | "mdx" | "markdown" | "rst" | "adoc" => (IconName::FileText, theme.blue),
         "txt" | "log" => (IconName::FileText, muted),
@@ -118,14 +116,10 @@ pub fn file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
         "csv" | "tsv" | "xls" | "xlsx" | "ods" => (IconName::FileSpreadsheet, theme.green),
         "diff" | "patch" => (IconName::FileDiff, theme.green),
         "sql" | "db" | "sqlite" | "sqlite3" => (IconName::Database, theme.magenta),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "icns" | "svg" | "avif" | "tiff" => {
-            (IconName::FileImage, theme.magenta)
-        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "icns" | "svg" | "avif" | "tiff" => (IconName::FileImage, theme.magenta),
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => (IconName::FileMusic, theme.red),
         "mp4" | "mov" | "mkv" | "webm" | "avi" => (IconName::FileVideoCamera, theme.red),
-        "zip" | "tar" | "gz" | "tgz" | "xz" | "bz2" | "zst" | "7z" | "rar" | "jar" | "dmg" => {
-            (IconName::FileArchive, theme.yellow)
-        }
+        "zip" | "tar" | "gz" | "tgz" | "xz" | "bz2" | "zst" | "7z" | "rar" | "jar" | "dmg" => (IconName::FileArchive, theme.yellow),
         "pem" | "key" | "crt" | "cer" | "pub" | "p12" | "gpg" | "asc" => (IconName::FileKey, theme.yellow),
         _ => (IconName::File, muted),
     }

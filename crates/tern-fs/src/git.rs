@@ -153,10 +153,7 @@ fn git(root: &Path) -> Command {
 /// Fails closed: if the config can't be read, assume it does. Reading config
 /// never executes anything.
 pub fn repo_defines_commands(root: &Path) -> bool {
-    let Ok(out) = git(root)
-        .args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"])
-        .output()
-    else {
+    let Ok(out) = git(root).args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]).output() else {
         return true;
     };
     // Exit 1 = no matching key; anything else non-zero is an error.

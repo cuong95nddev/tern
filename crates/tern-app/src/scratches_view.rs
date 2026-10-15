@@ -217,15 +217,10 @@ impl Render for ScratchesView {
                 .id("scratch-list")
                 .flex_1()
                 .min_h_0()
-                .child(
-                    uniform_list("scratches", self.files.len(), cx.processor(Self::render_rows))
-                        .track_scroll(&self.scroll)
-                        .size_full(),
-                )
+                .child(uniform_list("scratches", self.files.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).size_full())
                 .context_menu(move |menu, _, cx| {
                     let Some(this) = me.upgrade() else { return menu };
-                    let Some(path) = this.read(cx).menu_ix.and_then(|ix| this.read(cx).files.get(ix)).map(|f| f.0.clone())
-                    else {
+                    let Some(path) = this.read(cx).menu_ix.and_then(|ix| this.read(cx).files.get(ix)).map(|f| f.0.clone()) else {
                         return menu;
                     };
                     let item = |label: &'static str, f: fn(&Path, &mut App) -> Option<ScratchesEvent>| {
@@ -251,14 +246,7 @@ impl Render for ScratchesView {
                 })
                 .into_any_element()
         };
-        div()
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .child(header)
-            .child(body)
+        div().track_focus(&self.focus).size_full().flex().flex_col().bg(theme.sidebar).child(header).child(body)
     }
 }
 

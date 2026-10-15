@@ -65,10 +65,7 @@ impl HookEvent {
                 paths.push(PathBuf::from(p));
             }
         }
-        if let Some(files) = raw
-            .pointer("/tool_response/bashEditDiff/changedFiles")
-            .and_then(Value::as_array)
-        {
+        if let Some(files) = raw.pointer("/tool_response/bashEditDiff/changedFiles").and_then(Value::as_array) {
             for f in files.iter().filter_map(Value::as_str) {
                 let p = PathBuf::from(f);
                 paths.push(match (&cwd, p.is_absolute()) {
@@ -156,12 +153,7 @@ pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str)
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not private"));
     }
     let path = dir.join(format!("claude-settings-{token}.json"));
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?;
     f.write_all(claude_settings_json(hook_url).as_bytes())?;
     Ok(path)
 }
@@ -220,9 +212,7 @@ fn handle(stream: TcpStream, tokens: &Mutex<HashSet<String>>, sink: &HookSink) -
     let mut parts = request_line.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let token = path.strip_prefix("/hook/").map(str::to_owned);
-    let authorized = token
-        .as_ref()
-        .is_some_and(|t| tokens.lock().unwrap().iter().any(|k| constant_time_eq(k.as_bytes(), t.as_bytes())));
+    let authorized = token.as_ref().is_some_and(|t| tokens.lock().unwrap().iter().any(|k| constant_time_eq(k.as_bytes(), t.as_bytes())));
 
     let mut out = stream;
     if method != "POST" || !authorized || content_length > MAX_BODY {
@@ -252,7 +242,8 @@ mod tests {
 
     fn post(port: u16, path: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(s, "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        write!(s, "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+            .unwrap();
         let mut resp = String::new();
         s.read_to_string(&mut resp).unwrap();
         resp

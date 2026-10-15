@@ -92,8 +92,7 @@ impl ChangesView {
                     let list = if rediscover || known.is_empty() { tern_fs::git::find_repos(&root) } else { known };
                     // One git process per repo, in parallel.
                     std::thread::scope(|s| {
-                        let handles: Vec<_> =
-                            list.iter().map(|r| s.spawn(|| tern_fs::git::repo_changes(r, &root))).collect();
+                        let handles: Vec<_> = list.iter().map(|r| s.spawn(|| tern_fs::git::repo_changes(r, &root))).collect();
                         handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
                     })
                 })
@@ -181,21 +180,13 @@ impl ChangesView {
                         row.pl_1()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(
-                                Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                    .size_3p5()
-                                    .text_color(muted),
+                                Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size_3p5().text_color(muted),
                             )
                             .child(div().flex_shrink_0().text_color(fg).child(self.repo_label(&repo.root)))
-                            .when_some(branch, |d, b| {
-                                d.child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(b))
-                            })
+                            .when_some(branch, |d, b| d.child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(b)))
                             .when(repo.branch.is_none(), |d| d.child(div().flex_1()))
                             .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .text_color(if repo.error.is_some() { danger } else { muted })
-                                    .child(detail),
+                                div().flex_shrink_0().text_xs().text_color(if repo.error.is_some() { danger } else { muted }).child(detail),
                             )
                             .into_any_element()
                     },
@@ -269,18 +260,8 @@ impl Render for ChangesView {
                 .child(if self.refreshing { "Scanning…" } else { "No git repositories" })
                 .into_any_element()
         } else {
-            uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows))
-                .track_scroll(&self.scroll)
-                .flex_1()
-                .into_any_element()
+            uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1().into_any_element()
         };
-        div()
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .child(header)
-            .child(body)
+        div().track_focus(&self.focus).size_full().flex().flex_col().bg(theme.sidebar).child(header).child(body)
     }
 }

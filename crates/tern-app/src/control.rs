@@ -87,19 +87,10 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             let modifiers = Modifiers::default();
             window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers }), cx);
             window.dispatch_event(
-                PlatformInput::MouseDown(MouseDownEvent {
-                    button,
-                    position,
-                    modifiers,
-                    click_count: 1,
-                    first_mouse: false,
-                }),
+                PlatformInput::MouseDown(MouseDownEvent { button, position, modifiers, click_count: 1, first_mouse: false }),
                 cx,
             );
-            window.dispatch_event(
-                PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count: 1 }),
-                cx,
-            );
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count: 1 }), cx);
             Some("ok".into())
         },
         // Press at X1 Y1, move there to X2 Y2 in steps (redrawing, so drop

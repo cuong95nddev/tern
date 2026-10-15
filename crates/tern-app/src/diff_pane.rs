@@ -9,11 +9,7 @@ use gpui_kit::component::highlighter::Language;
 use gpui_kit::*;
 
 pub fn language_for(path: &Path) -> SharedString {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .or_else(|| path.file_name().and_then(|n| n.to_str()))
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).or_else(|| path.file_name().and_then(|n| n.to_str())).unwrap_or("");
     Language::from_str(ext).name().into()
 }
 
@@ -33,8 +29,7 @@ impl Focusable for DiffPane {
 
 impl DiffPane {
     pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut this =
-            Self { path, diff: None, message: Some("Loading…".into()), focus: cx.focus_handle(), _load: None };
+        let mut this = Self { path, diff: None, message: Some("Loading…".into()), focus: cx.focus_handle(), _load: None };
         this.reload(cx);
         this
     }

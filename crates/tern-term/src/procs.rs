@@ -61,11 +61,7 @@ fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
     let rest = &buf[4..];
     let exec_end = rest.iter().position(|&b| b == 0)?;
     let args_start = exec_end + rest[exec_end..].iter().position(|&b| b != 0)?;
-    let args = rest[args_start..]
-        .split(|&b| b == 0)
-        .take(argc.min(2))
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
+    let args = rest[args_start..].split(|&b| b == 0).take(argc.min(2)).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     Some(args)
 }
 
@@ -82,12 +78,8 @@ fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
         })
         .filter_map(|pid| {
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-            let args: Vec<String> = cmdline
-                .split(|&b| b == 0)
-                .filter(|a| !a.is_empty())
-                .take(2)
-                .map(|a| String::from_utf8_lossy(a).into_owned())
-                .collect();
+            let args: Vec<String> =
+                cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(2).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
             (!args.is_empty()).then_some(args)
         })
         .collect()

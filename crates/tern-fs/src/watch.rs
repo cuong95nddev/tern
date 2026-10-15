@@ -25,11 +25,7 @@ pub struct FsWatcher {
 impl FsWatcher {
     /// Watch `root` recursively. `on_batch` runs on a background thread at most
     /// once per `debounce` window.
-    pub fn new(
-        root: &Path,
-        debounce: Duration,
-        on_batch: impl Fn(ChangeBatch) + Send + 'static,
-    ) -> notify::Result<Self> {
+    pub fn new(root: &Path, debounce: Duration, on_batch: impl Fn(ChangeBatch) + Send + 'static) -> notify::Result<Self> {
         let (tx, rx) = mpsc::channel::<notify::Event>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
@@ -37,10 +33,7 @@ impl FsWatcher {
             }
         })?;
         watcher.watch(root, RecursiveMode::Recursive)?;
-        thread::Builder::new()
-            .name("fs-debounce".into())
-            .spawn(move || debounce_loop(rx, debounce, on_batch))
-            .expect("spawn fs-debounce");
+        thread::Builder::new().name("fs-debounce".into()).spawn(move || debounce_loop(rx, debounce, on_batch)).expect("spawn fs-debounce");
         Ok(Self { _watcher: watcher })
     }
 }

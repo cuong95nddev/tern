@@ -117,7 +117,9 @@ pub fn offer(r: Release, cx: &mut App) {
             "You have {}. Tern will restart to install it; your windows and workspaces come back, but running terminals are closed.",
             current_version()
         ),
-        None => format!("You have {}. This copy isn't an installed Tern.app, so download the update from the release page.", current_version()),
+        None => {
+            format!("You have {}. This copy isn't an installed Tern.app, so download the update from the release page.", current_version())
+        },
     };
     let installable = app_bundle().is_some();
     let answers: &[&str] = if installable { &["Update and Restart", "Release Notes", "Later"] } else { &["Release Notes", "Later"] };
@@ -265,9 +267,8 @@ fn stage(dmg_url: &str, bundle: &Path) -> Result<PathBuf, String> {
             run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(signer_requirement(bundle)).arg(&app))?;
             let staged = bundle.with_file_name(".Tern-update.app");
             let _ = std::fs::remove_dir_all(&staged);
-            run(Command::new("/usr/bin/ditto").arg(&app).arg(&staged)).map_err(|e| {
-                format!("{e}\n\nTern can't write to {}.", bundle.parent().unwrap_or(bundle).display())
-            })?;
+            run(Command::new("/usr/bin/ditto").arg(&app).arg(&staged))
+                .map_err(|e| format!("{e}\n\nTern can't write to {}.", bundle.parent().unwrap_or(bundle).display()))?;
             Ok(staged)
         })();
         let _ = run(Command::new("/usr/bin/hdiutil").args(["detach", "-force"]).arg(&mnt));

@@ -17,9 +17,13 @@ fn spawn(program: &str, args: &[&str]) -> (Session, mpsc::Receiver<TermEvent>) {
         size: TermSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
         scrollback: 1000,
     };
-    let s = Session::spawn(cfg, Palette::default(), Arc::new(move |e| {
-        let _ = tx.send(e);
-    }))
+    let s = Session::spawn(
+        cfg,
+        Palette::default(),
+        Arc::new(move |e| {
+            let _ = tx.send(e);
+        }),
+    )
     .unwrap();
     (s, rx)
 }

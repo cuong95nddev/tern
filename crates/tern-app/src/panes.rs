@@ -221,10 +221,7 @@ impl Layout {
     /// The pane at the top right, where the window-wide buttons go.
     pub fn top_right(&self) -> PaneId {
         let rects = self.rects();
-        rects
-            .iter()
-            .min_by(|x, y| x.1[1].total_cmp(&y.1[1]).then((y.1[0] + y.1[2]).total_cmp(&(x.1[0] + x.1[2]))))
-            .map_or(0, |(p, _)| *p)
+        rects.iter().min_by(|x, y| x.1[1].total_cmp(&y.1[1]).then((y.1[0] + y.1[2]).total_cmp(&(x.1[0] + x.1[2])))).map_or(0, |(p, _)| *p)
     }
 
     /// `h(0,v(1,2))`: splits by axis, panes by their place in `order`.

@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
-use terminal_view::TerminalConfig;
 use main_window::Content;
+use terminal_view::TerminalConfig;
 
 actions!(tern, [Quit, OpenFolder]);
 
@@ -81,9 +81,7 @@ fn main() {
 
         // Scripted debug runs leave the real session alone (unless
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).
-        let scripted = cfg!(debug_assertions)
-            && std::env::var_os("TERN_CONTROL").is_some()
-            && std::env::var_os("TERN_SESSION").is_none();
+        let scripted = cfg!(debug_assertions) && std::env::var_os("TERN_CONTROL").is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
         #[cfg(debug_assertions)]
         if let Some(rx) = control::listen() {

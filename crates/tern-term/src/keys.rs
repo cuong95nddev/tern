@@ -58,11 +58,7 @@ pub fn encode(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Optio
 }
 
 fn csi_u(code: u32, mods: Mods) -> Vec<u8> {
-    if mods.any() {
-        format!("\x1b[{code};{}u", mods.param()).into_bytes()
-    } else {
-        format!("\x1b[{code}u").into_bytes()
-    }
+    if mods.any() { format!("\x1b[{code};{}u", mods.param()).into_bytes() } else { format!("\x1b[{code}u").into_bytes() }
 }
 
 fn encode_kitty(key: Key, mods: Mods, text: Option<&str>, all: bool) -> Option<Vec<u8>> {
@@ -104,9 +100,7 @@ fn encode_legacy(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Op
             vec![0x1b, b'[', c]
         }
     };
-    let tilde = |n: u8| -> Vec<u8> {
-        if mods.any() { format!("\x1b[{n};{m}~").into_bytes() } else { format!("\x1b[{n}~").into_bytes() }
-    };
+    let tilde = |n: u8| -> Vec<u8> { if mods.any() { format!("\x1b[{n};{m}~").into_bytes() } else { format!("\x1b[{n}~").into_bytes() } };
 
     Some(match key {
         Key::Enter => with_alt(vec![b'\r']),

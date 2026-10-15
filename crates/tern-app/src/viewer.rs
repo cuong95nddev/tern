@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
-use gpui_kit::base::Selectable as _;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,9 +36,7 @@ enum Mode {
 }
 
 fn is_markdown(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| ["md", "markdown", "mdx"].iter().any(|m| e.eq_ignore_ascii_case(m)))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["md", "markdown", "mdx"].iter().any(|m| e.eq_ignore_ascii_case(m)))
 }
 
 fn image_format(path: &Path) -> Option<ImageFormat> {
@@ -347,9 +345,7 @@ impl Viewer {
         let line = self.editor.read(cx).cursor_position().line + 1;
         let target = format!("{}:{line}", path.display());
         // Prefer the `code` CLI (jumps to line); fall back to Cursor, then the app bundle.
-        let spawned = ["code", "cursor"].iter().any(|bin| {
-            Command::new(bin).arg("-g").arg(&target).spawn().is_ok()
-        });
+        let spawned = ["code", "cursor"].iter().any(|bin| Command::new(bin).arg("-g").arg(&target).spawn().is_ok());
         if !spawned {
             let _ = Command::new("open").args(["-a", "Visual Studio Code"]).arg(&path).spawn();
         }
@@ -365,11 +361,7 @@ impl Viewer {
 
     /// What a rebuilt viewer needs to show the same thing.
     pub fn state(&self, cx: &App) -> ViewerState {
-        ViewerState {
-            path: self.path.clone(),
-            mode: self.mode,
-            unsaved: self.dirty.then(|| self.editor.read(cx).value().to_string()),
-        }
+        ViewerState { path: self.path.clone(), mode: self.mode, unsaved: self.dirty.then(|| self.editor.read(cx).value().to_string()) }
     }
 
     /// Show `state` (from another viewer), unsaved edits included.
@@ -402,11 +394,7 @@ impl Viewer {
 impl Render for Viewer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let name = self
-            .path
-            .as_ref()
-            .map(|p| p.strip_prefix(&self.root).unwrap_or(p).display().to_string())
-            .unwrap_or_default();
+        let name = self.path.as_ref().map(|p| p.strip_prefix(&self.root).unwrap_or(p).display().to_string()).unwrap_or_default();
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
         let is_image = self.image.is_some();
@@ -454,14 +442,7 @@ impl Render for Viewer {
         let body: AnyElement = if diff_mode && let Some(diff) = &self.diff {
             div().flex_1().min_h_0().child(diff.clone()).into_any_element()
         } else if let Some(msg) = &self.message {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme.muted_foreground)
-                .child(msg.clone())
-                .into_any_element()
+            div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(msg.clone()).into_any_element()
         } else if let Some(image) = &self.image {
             let muted = theme.muted_foreground;
             div()
@@ -475,9 +456,7 @@ impl Render for Viewer {
                     img(image.clone())
                         .size_full()
                         .object_fit(ObjectFit::ScaleDown)
-                        .with_fallback(move || {
-                            div().text_color(muted).child("Cannot decode image").into_any_element()
-                        }),
+                        .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element()),
                 )
                 .into_any_element()
         } else if self.mode == Mode::Preview {
@@ -485,24 +464,13 @@ impl Render for Viewer {
             div()
                 .flex_1()
                 .min_h_0()
-                .child(
-                    TextView::new(&self.preview)
-                        .scrollable(true)
-                        .size_full()
-                        .px_4()
-                        .py_2()
-                        .on_link_click(move |url, _, _, cx| {
-                            let url = url.clone();
-                            let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
-                        }),
-                )
+                .child(TextView::new(&self.preview).scrollable(true).size_full().px_4().py_2().on_link_click(move |url, _, _, cx| {
+                    let url = url.clone();
+                    let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
+                }))
                 .into_any_element()
         } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .child(Editor::new(&self.editor).bordered(false).h_full())
-                .into_any_element()
+            div().flex_1().min_h_0().child(Editor::new(&self.editor).bordered(false).h_full()).into_any_element()
         };
 
         div()

@@ -148,10 +148,7 @@ pub fn open_window(content: Content, at: Option<(DisplayId, WindowBounds)>, cx: 
 /// Open `root` in the active window as a new workspace tab (or focus it
 /// wherever it is already open); a new window when no window is open.
 pub fn open_folder(root: PathBuf, cx: &mut App) {
-    let target = cx
-        .active_window()
-        .and_then(|a| windows(cx).into_iter().find(|(h, _)| *h == a))
-        .or_else(|| windows(cx).into_iter().next());
+    let target = cx.active_window().and_then(|a| windows(cx).into_iter().find(|(h, _)| *h == a)).or_else(|| windows(cx).into_iter().next());
     match target {
         Some((handle, main)) => {
             let _ = handle.update(cx, |_, window, cx| main.update(cx, |m, cx| m.open_folder(root, window, cx)));
@@ -166,12 +163,7 @@ pub fn open_folder(root: PathBuf, cx: &mut App) {
 
 /// Ask for a folder and open it as a workspace.
 pub fn prompt_open_folder(cx: &mut App) {
-    let rx = cx.prompt_for_paths(PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: Some("Open".into()),
-    });
+    let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
     cx.spawn(async move |cx| {
         let picked = rx.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next());
         if let Some(dir) = picked {
@@ -423,8 +415,7 @@ impl MainWindow {
         order.extend(unlisted);
         let display_id = display.id();
         let target = order.into_iter().find(|h| {
-            h.update(cx, |_, w, cx| w.display(cx).is_some_and(|d| d.id() == display_id) && w.bounds().contains(&at))
-                .unwrap_or(false)
+            h.update(cx, |_, w, cx| w.display(cx).is_some_and(|d| d.id() == display_id) && w.bounds().contains(&at)).unwrap_or(false)
         });
         match target {
             Some(target) => self.move_to(ix, target, window, cx),
@@ -458,19 +449,14 @@ impl MainWindow {
                         .when(busy, |d| d.child(div().text_color(warn).child("●"))),
                 )
                 .label(name)
-                .suffix(
-                    div().pr_1().child(
-                        Button::new(("close-ws", i))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .tooltip("Close Workspace (⌘⇧W)")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close(i, window, cx);
-                            })),
+                .suffix(div().pr_1().child(
+                    Button::new(("close-ws", i)).xsmall().ghost().icon(IconName::Close).tooltip("Close Workspace (⌘⇧W)").on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close(i, window, cx);
+                        }),
                     ),
-                )
+                ))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(i)))
                 .on_drag(drag, move |d, _, _, cx| {
                     let id = d.ws;
@@ -597,12 +583,7 @@ impl MainWindow {
                 .on_click(cx.listener(move |this, _, window, cx| this.open_folder(path.clone(), window, cx)))
         }));
         let key = |k: &'static str, what: &'static str| {
-            div()
-                .flex()
-                .justify_between()
-                .gap_8()
-                .child(div().text_color(muted).child(what))
-                .child(div().text_color(fg).child(k))
+            div().flex().justify_between().gap_8().child(div().text_color(muted).child(what)).child(div().text_color(fg).child(k))
         };
         div().size_full().flex().items_center().justify_center().child(
             div()
@@ -628,14 +609,7 @@ impl MainWindow {
                     ),
                 )
                 .when(!window_state::recent_folders().is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_sm().text_color(muted).child("Recent"))
-                            .child(recent_list),
-                    )
+                    d.child(div().flex().flex_col().gap_1().child(div().text_sm().text_color(muted).child("Recent")).child(recent_list))
                 })
                 .child(
                     div()
