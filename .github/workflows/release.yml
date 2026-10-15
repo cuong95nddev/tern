@@ -253,6 +253,9 @@ jobs:
             dist/*-setup.exe
             dist/*.tar.gz
           generate_release_notes: ${{ !vars.RELEASE_REPO }}
+          # v1.2.3-rc1: a prerelease, which /releases/latest (the update
+          # check) skips.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             ## Install (macOS 12+, Apple Silicon and Intel)
 

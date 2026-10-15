@@ -9,6 +9,8 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$ROOT/target/bundle"}
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
+# Bundle versions are numbers only: 0.2.1 for 0.2.1-rc1.
+BUNDLE_VERSION=${VERSION%%[-+]*}
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
@@ -60,8 +62,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIconFile</key><string>Tern</string>
     <key>CFBundleIconName</key><string>Tern</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
-    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
+    <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>CFBundleDocumentTypes</key>

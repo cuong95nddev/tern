@@ -27,7 +27,7 @@ try {
     if (-not (Test-Path $Iscc)) { throw "Inno Setup 6 (iscc) not found" }
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $OutDir = (Resolve-Path $OutDir).Path
-    & $Iscc /Q "/DVersion=$Version" "/DStageDir=$Stage" "/DOutputDir=$OutDir" (Join-Path $Root "packaging\windows\tern.iss") | Out-Host
+    & $Iscc /Q "/DVersion=$Version" "/DNumVersion=$(($Version -split '[-+]')[0])" "/DStageDir=$Stage" "/DOutputDir=$OutDir" (Join-Path $Root "packaging\windows\tern.iss") | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
 } finally {
     Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue

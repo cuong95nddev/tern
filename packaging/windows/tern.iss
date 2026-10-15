@@ -7,6 +7,10 @@
 #ifndef Version
   #error Pass /DVersion=X.Y.Z
 #endif
+; Version info is numbers only: 0.2.1 for 0.2.1-rc1.
+#ifndef NumVersion
+  #define NumVersion Version
+#endif
 #ifndef StageDir
   #error Pass /DStageDir=<folder with tern.exe>
 #endif
@@ -20,7 +24,7 @@ AppName=Tern
 AppVersion={#Version}
 AppVerName=Tern {#Version}
 ; Product name and version on setup.exe too (code signing checks them).
-VersionInfoVersion={#Version}
+VersionInfoVersion={#NumVersion}
 VersionInfoProductName=Tern
 VersionInfoProductTextVersion={#Version}
 VersionInfoCompany=Tern
