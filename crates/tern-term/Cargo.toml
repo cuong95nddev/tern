@@ -6,10 +6,10 @@ edition.workspace = true
 [dependencies]
 alacritty_terminal = "0.26"
 polling = "3.8"
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
-serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Wdk_System_Threading", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell"] }

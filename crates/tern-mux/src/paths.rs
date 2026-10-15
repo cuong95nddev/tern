@@ -49,11 +49,24 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Whether the process at the other end of `s` runs as us.
+#[cfg(not(target_os = "linux"))]
 pub fn peer_uid_ok(s: &UnixStream) -> bool {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: getpeereid writes the two ids of a connected Unix socket.
     let r = unsafe { libc::getpeereid(s.as_raw_fd(), &mut uid, &mut gid) };
     r == 0 && uid == unsafe { libc::getuid() }
+}
+
+/// Whether the process at the other end of `s` runs as us.
+#[cfg(target_os = "linux")]
+pub fn peer_uid_ok(s: &UnixStream) -> bool {
+    // SAFETY: ucred is plain data; SO_PEERCRED fills it for a connected Unix socket.
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let r = unsafe {
+        libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
+    };
+    r == 0 && cred.uid == unsafe { libc::getuid() }
 }
 
 #[cfg(test)]
