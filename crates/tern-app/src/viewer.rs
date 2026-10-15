@@ -152,6 +152,19 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// The file a relative Markdown link in `dir` points to (`/x` is relative to
+/// `root`), if it is a file inside `root`. Containment is checked on the
+/// resolved path, so a symlink in the workspace can't lead outside it; the
+/// returned path stays lexical, to match the same file opened from the tree.
+fn link_target(root: &Path, dir: &Path, target: &str) -> Option<PathBuf> {
+    let path = normalize(&match target.strip_prefix('/') {
+        Some(rest) => root.join(rest),
+        None => dir.join(target),
+    });
+    let real = path.canonicalize().ok()?;
+    (path.starts_with(root) && real.starts_with(root.canonicalize().ok()?) && real.is_file()).then_some(path)
+}
+
 impl Viewer {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(false));
@@ -314,8 +327,7 @@ impl Viewer {
             return;
         }
         let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) else { return };
-        let path = normalize(&if let Some(rest) = target.strip_prefix('/') { self.root.join(rest) } else { dir.join(target) });
-        if path.starts_with(&self.root) && path.is_file() {
+        if let Some(path) = link_target(&self.root, dir, target) {
             cx.emit(ViewerEvent::OpenFile(path));
         }
     }
@@ -511,13 +523,35 @@ impl Render for Viewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, PathBuf, image_format, is_markdown, normalize};
+    use super::{Path, PathBuf, image_format, is_markdown, link_target, normalize};
 
     #[test]
     fn normalize_resolves_dots() {
         assert_eq!(normalize(Path::new("/r/docs/../README.md")), PathBuf::from("/r/README.md"));
         assert_eq!(normalize(Path::new("/r/./a/./b.md")), PathBuf::from("/r/a/b.md"));
         assert_eq!(normalize(Path::new("/r/../../x")), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn links_stay_inside_the_root() {
+        let base = std::env::temp_dir().join(format!("tern-viewer-links-{}", std::process::id()));
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+        std::fs::write(outside.join("secret.txt"), "").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("secret.txt")).unwrap();
+        let docs = root.join("docs");
+
+        assert_eq!(link_target(&root, &docs, "../README.md"), Some(root.join("README.md")));
+        assert_eq!(link_target(&root, &docs, "/README.md"), Some(root.join("README.md")));
+        assert_eq!(link_target(&root, &docs, "../../outside/secret.txt"), None);
+        assert_eq!(link_target(&root, &docs, "../out/secret.txt"), None);
+        assert_eq!(link_target(&root, &docs, "/secret.txt"), None);
+        assert_eq!(link_target(&root, &docs, "missing.md"), None);
+        assert_eq!(link_target(&root, &docs, ".."), None);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
