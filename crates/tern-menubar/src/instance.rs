@@ -91,7 +91,8 @@ pub fn holder(path: &Path) -> Option<u32> {
     read_holder(path).map(|(pid, _)| pid)
 }
 
-#[cfg(test)]
+// Windows' locks keep others from reading the file; the agent is macOS only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::Mutex;

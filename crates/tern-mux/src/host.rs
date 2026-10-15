@@ -31,13 +31,18 @@ use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
 use tern_term::vt::sync::FairMutex;
 use tern_term::vt::term::{Config, Osc52, Term};
 use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+#[cfg(windows)]
+use tern_term::vt::tty::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
 use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::proto::SessionInfo;
 
-/// alacritty's poll keys for the PTY and its child-exit pipe.
+/// alacritty's poll keys for the PTY and its child-exit pipe: crate-private
+/// on Unix, public (and other values) on Windows.
+#[cfg(unix)]
 const PTY_READ_WRITE_TOKEN: usize = 0;
+#[cfg(unix)]
 const PTY_CHILD_EVENT_TOKEN: usize = 1;
 const READ_BUFFER: usize = 64 << 10;
 /// The most bytes parsed in one go under the lock before letting an attach in.
