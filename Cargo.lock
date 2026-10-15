@@ -6461,6 +6461,7 @@ dependencies = [
  "flume",
  "futures",
  "gpui-kit",
+ "libc",
  "log",
  "semver",
  "tern-bridge",
@@ -6493,6 +6494,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "libc",
+ "objc2-foundation 0.3.2",
  "polling",
 ]
 

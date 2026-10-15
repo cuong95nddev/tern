@@ -37,6 +37,8 @@ pub enum TermEvent {
     Signal(OscSignal),
 }
 
+const MAX_CLIPBOARD_STORE: usize = 16 << 20;
+
 pub type EventSink = Arc<dyn Fn(TermEvent) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +119,9 @@ impl EventListener for Listener {
             Event::Title(t) => (sh.sink)(TermEvent::Title(t)),
             Event::ResetTitle => (sh.sink)(TermEvent::ResetTitle),
             Event::Bell => (sh.sink)(TermEvent::Bell),
-            Event::ClipboardStore(_, text) => (sh.sink)(TermEvent::ClipboardStore(text)),
+            // A program can't flood the clipboard (OSC 52).
+            Event::ClipboardStore(_, text) if text.len() <= MAX_CLIPBOARD_STORE => (sh.sink)(TermEvent::ClipboardStore(text)),
+            Event::ClipboardStore(..) => {},
             Event::ColorRequest(idx, fmt) => {
                 // Called from inside the parser while the term lock is held, so
                 // read overrides through a try_lock and fall back to the palette.

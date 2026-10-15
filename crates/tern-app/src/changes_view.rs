@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -14,6 +15,7 @@ use tern_fs::GitStatus;
 use tern_fs::git::RepoChanges;
 
 const ROW_HEIGHT: f32 = 22.;
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub enum ChangesEvent {
@@ -40,6 +42,9 @@ pub struct ChangesView {
     refreshing: bool,
     /// `Some(rediscover)` if another refresh was requested meanwhile.
     pending: Option<bool>,
+    /// When the last refresh started: runs are at least
+    /// [`MIN_REFRESH_INTERVAL`] apart, however busy the disk.
+    last_refresh: Option<Instant>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _task: Option<Task<()>>,
@@ -63,6 +68,7 @@ impl ChangesView {
             selected: None,
             refreshing: false,
             pending: None,
+            last_refresh: None,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _task: None,
@@ -84,9 +90,14 @@ impl ChangesView {
             return;
         }
         self.refreshing = true;
+        let wait = self.last_refresh.map_or(Duration::ZERO, |t| MIN_REFRESH_INTERVAL.saturating_sub(t.elapsed()));
+        self.last_refresh = Some(Instant::now() + wait);
         let root = self.root.clone();
         let known: Vec<PathBuf> = self.repos.iter().map(|r| r.root.clone()).collect();
         self._task = Some(cx.spawn(async move |this, cx| {
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
             let repos = cx
                 .background_spawn(async move {
                     let list = if rediscover || known.is_empty() { tern_fs::git::find_repos(&root) } else { known };

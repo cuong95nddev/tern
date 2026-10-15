@@ -42,7 +42,9 @@ pub struct RepoChanges {
 
 const MAX_SCAN_DEPTH: usize = 4;
 const MAX_SCAN_DIRS: usize = 20_000;
-const SKIP_DIRS: &[&str] = &["node_modules", "target", ".venv", "venv", "__pycache__", "vendor", "dist", "build", ".build", "Pods"];
+/// Heavy build / dependency dirs: not searched for repos, and changes
+/// inside them are not watched.
+pub const SKIP_DIRS: &[&str] = &["node_modules", "target", ".venv", "venv", "__pycache__", "vendor", "dist", "build", ".build", "Pods"];
 
 /// Git repositories relevant to `root`: the repo containing `root` (if any)
 /// plus repos nested below it (up to [`MAX_SCAN_DEPTH`] levels; heavy build

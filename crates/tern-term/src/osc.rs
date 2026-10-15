@@ -152,9 +152,12 @@ fn parse_osc(payload: &[u8]) -> Option<OscSignal> {
             }
             Some(OscSignal::ProgramStatus(parse_program_status(rest)?))
         },
-        // OSC 9 ; body  (iTerm2 growl). OSC 9 ; 4 ; ... is ConEmu progress — ignore.
+        // OSC 9 ; body  (iTerm2 growl). OSC 9 ; <n> ; ... are ConEmu
+        // commands (4 = progress, 9 = cwd, ...) — ignore.
         "9" => {
-            if rest.starts_with("4;") || rest.is_empty() {
+            let head = rest.split(';').next().unwrap_or_default();
+            let conemu = !head.is_empty() && head.len() <= 2 && head.bytes().all(|b| b.is_ascii_digit());
+            if rest.is_empty() || conemu {
                 return None;
             }
             Some(OscSignal::Notify { title: None, body: rest.to_owned() })
@@ -229,7 +232,7 @@ mod tests {
 
     #[test]
     fn notifications() {
-        let out = scan(&[b"\x1b]9;Done!\x07\x1b]777;notify;Claude;Need input\x07\x1b]9;4;1;50\x07"]);
+        let out = scan(&[b"\x1b]9;Done!\x07\x1b]777;notify;Claude;Need input\x07\x1b]9;4;1;50\x07\x1b]9;9;/tmp\x07\x1b]9;1\x07"]);
         assert_eq!(
             out,
             vec![

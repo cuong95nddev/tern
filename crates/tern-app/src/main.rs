@@ -32,12 +32,22 @@ impl Global for AppServices {}
 
 fn main() {
     env_logger::init();
+    // Read before the environment is cleaned for terminals.
+    let control_socket = std::env::var_os("TERN_CONTROL").map(PathBuf::from);
+    // SAFETY: no other thread runs yet.
+    unsafe { tern_term::env::prepare_process_env() };
     // A folder argument opens just that folder. Otherwise the last session's
     // windows come back, plus the cwd when started from a shell (from Finder
     // or the Dock the cwd is `/`); with no session, the last folder or the
     // welcome page.
     let arg: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
     let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some());
+    // One Tern at a time shares the saved session: a second one hands its
+    // folder to the first and exits.
+    let Ok(_lock) = lock_instance() else {
+        forward_to_running(arg.or(shell_cwd));
+        return;
+    };
 
     // Folders handed over by the OS (`open -a Tern <dir>`, a folder dropped
     // on the Dock icon), also while running.
@@ -81,10 +91,10 @@ fn main() {
 
         // Scripted debug runs leave the real session alone (unless
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).
-        let scripted = cfg!(debug_assertions) && std::env::var_os("TERN_CONTROL").is_some() && std::env::var_os("TERN_SESSION").is_none();
+        let scripted = cfg!(debug_assertions) && control_socket.is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
         #[cfg(debug_assertions)]
-        if let Some(rx) = control::listen() {
+        if let Some(rx) = control_socket.and_then(control::listen) {
             cx.spawn(async move |cx| {
                 while let Ok((line, reply)) = rx.recv_async().await {
                     let _ = reply.send(cx.update(|cx| main_window::control(&line, cx)));
@@ -129,10 +139,65 @@ fn main() {
     });
 }
 
-/// Quit, keeping every open window in the saved session.
+/// Quit, keeping every open window in the saved session; ask first when
+/// that ends running programs.
 pub fn quit(cx: &mut App) {
+    let jobs = main_window::running(cx);
+    let window = cx.active_window().or_else(|| cx.windows().first().copied());
+    let (Some(window), false) = (window, jobs.is_empty()) else { return quit_now(cx) };
+    let detail = format!("Still running: {}. Quitting ends {}.", jobs.join(", "), if jobs.len() == 1 { "it" } else { "them" });
+    let Ok(answer) =
+        window.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Quit Tern?", Some(&detail), &["Quit", "Cancel"], cx))
+    else {
+        return quit_now(cx);
+    };
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            cx.update(quit_now);
+        }
+    })
+    .detach();
+}
+
+fn quit_now(cx: &mut App) {
     cx.default_global::<main_window::Session>().quitting = true;
     cx.quit()
+}
+
+/// Take the lock held while this Tern runs: `Err` if another holds it,
+/// `Ok(None)` if it can't be taken for another reason (Tern runs anyway).
+/// Debug builds use their own, to run beside the installed app.
+fn lock_instance() -> Result<Option<std::fs::File>, ()> {
+    use std::os::fd::AsRawFd;
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/tmp".into());
+    let dir = home.join("Library/Caches/dev.tern");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = if cfg!(debug_assertions) { "dev.lock" } else { "tern.lock" };
+    let Ok(file) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(name)) else { return Ok(None) };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EWOULDBLOCK) => Err(()),
+        _ => Ok(None),
+    }
+}
+
+/// Hand `folder` to the Tern already running (it gets it as an open-URL
+/// event), or just bring it forward.
+fn forward_to_running(folder: Option<PathBuf>) {
+    if cfg!(debug_assertions) {
+        eprintln!("tern: a debug Tern is already running");
+        return;
+    }
+    let mut open = std::process::Command::new("/usr/bin/open");
+    open.args(["-b", "dev.tern"]);
+    if let Some(folder) = folder {
+        open.arg(folder);
+    }
+    if let Err(e) = open.status() {
+        eprintln!("tern: already running; couldn't reach it: {e}");
+    }
 }
 
 /// The path of a `file://` URL, percent-decoded.

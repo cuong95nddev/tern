@@ -12,12 +12,13 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::*;
-use tern_term::keys::{self, Key, Mods};
+use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
 use tern_term::palette::Palette;
@@ -26,7 +27,7 @@ use tern_term::vt::index::{Column, Line, Point as GridPoint, Side};
 use tern_term::vt::selection::{Selection, SelectionType};
 use tern_term::vt::term::TermMode;
 use tern_term::vt::term::cell::Flags;
-use tern_term::vt::vte::ansi::{CursorShape, Rgb};
+use tern_term::vt::vte::ansi::{ClearMode, CursorShape, Handler, Rgb};
 use tern_term::{Session, SpawnConfig, TermEvent, TermSize};
 
 use crate::agents::Agent;
@@ -68,7 +69,11 @@ pub enum TerminalEvent {
         body: String,
     },
     Bell,
-    Exited,
+    /// The process ended; `quick` when it ran only a few seconds.
+    Exited {
+        code: Option<i32>,
+        quick: bool,
+    },
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
         path: PathBuf,
@@ -92,18 +97,62 @@ struct HoverLink {
     target: Target,
 }
 
+/// Which Option keys act as Meta (ESC prefix); the others compose
+/// characters, so layouts that type `@ [ { |` with Option keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum OptionAsMeta {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalConfig {
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub line_height: f32,
-    /// Treat Option as Meta (ESC prefix) instead of composing characters.
-    pub option_as_meta: bool,
+    pub option_as_meta: OptionAsMeta,
 }
 
 impl Default for TerminalConfig {
     fn default() -> Self {
-        Self { font_family: "Menlo".into(), font_size: px(13.), line_height: 1.25, option_as_meta: true }
+        Self { font_family: "Menlo".into(), font_size: px(13.), line_height: 1.25, option_as_meta: OptionAsMeta::Left }
+    }
+}
+
+/// Which Option keys are down now, `(left, right)`.
+#[cfg(target_os = "macos")]
+fn option_keys() -> (bool, bool) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceFlagsState(state: i32) -> u64;
+    }
+    // kCGEventSourceStateHIDSystemState; NX_DEVICE{L,R}ALTKEYMASK.
+    let flags = unsafe { CGEventSourceFlagsState(1) };
+    (flags & 0x20 != 0, flags & 0x40 != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn option_keys() -> (bool, bool) {
+    (true, false)
+}
+
+impl OptionAsMeta {
+    /// Whether the Option key held for this keystroke acts as Meta.
+    fn applies(self) -> bool {
+        let (left, right) = match option_keys() {
+            // Unknown side: treat as the left key.
+            (false, false) => (true, false),
+            sides => sides,
+        };
+        match self {
+            Self::None => false,
+            Self::Left => left,
+            Self::Right => right,
+            Self::Both => true,
+        }
     }
 }
 
@@ -122,6 +171,22 @@ pub struct TerminalView {
     default_title: SharedString,
     status: ActivityStatus,
     exited: Option<Option<i32>>,
+    /// Why the process couldn't start.
+    spawn_error: Option<String>,
+    /// When the process started.
+    started: Instant,
+    /// The process starts at the first layout, with the pane's real size,
+    /// or shortly after when the tab isn't shown.
+    spawned: bool,
+    /// Whether the program was last told it has focus (DECSET 1004).
+    reported_focus: bool,
+    /// The window the focus listeners are registered with.
+    focus_window: Option<AnyWindowHandle>,
+    _focus_subs: Vec<Subscription>,
+    /// Pending PTY resize while a split is dragged.
+    _resize: Option<Task<()>>,
+    /// The cell the last mouse motion was reported for.
+    last_motion: Option<(usize, usize)>,
     marked_text: Option<String>,
     metrics: Option<CellMetrics>,
     /// Content origin + cursor rect from the last prepaint (for mouse + IME).
@@ -164,6 +229,14 @@ impl TerminalView {
             default_title: title,
             status: ActivityStatus::None,
             exited: None,
+            spawn_error: None,
+            started: Instant::now(),
+            spawned: false,
+            reported_focus: false,
+            focus_window: None,
+            _focus_subs: vec![],
+            _resize: None,
+            last_motion: None,
             marked_text: None,
             metrics: None,
             last_origin: Point::default(),
@@ -179,6 +252,11 @@ impl TerminalView {
             _watch: Task::ready(()),
         };
         this._watch = cx.spawn(async move |this, cx| {
+            // A tab that isn't shown never lays out: start it anyway.
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+            if this.update(cx, |view, cx| view.start_once(cx)).is_err() {
+                return;
+            }
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this.update(cx, |view, cx| view.detect_agent(cx)).is_err() {
@@ -186,11 +264,19 @@ impl TerminalView {
                 }
             }
         });
-        this.start(cx);
         this
     }
 
-    fn start(&mut self, cx: &mut Context<Self>) {
+    fn start_once(&mut self, cx: &mut Context<Self>) {
+        if !self.spawned {
+            self.start(cx);
+        }
+    }
+
+    /// Start (or restart) the process.
+    pub fn start(&mut self, cx: &mut Context<Self>) {
+        self.spawned = true;
+        self.reported_focus = false;
         let (tx, rx) = flume::unbounded::<TermEvent>();
         let sink = Arc::new(move |e| {
             let _ = tx.send(e);
@@ -200,14 +286,17 @@ impl TerminalView {
             cfg.size = s.size();
         }
         self.session = None;
+        self.started = Instant::now();
         match Session::spawn(cfg, Palette::default(), sink) {
             Ok(s) => {
                 self.session = Some(s);
                 self.exited = None;
+                self.spawn_error = None;
             },
             Err(err) => {
                 log::error!("failed to spawn terminal: {err}");
                 self.exited = Some(None);
+                self.spawn_error = Some(err.to_string());
             },
         }
         self._pump = Some(cx.spawn(async move |this, cx| {
@@ -237,6 +326,56 @@ impl TerminalView {
 
     pub fn agent(&self) -> Option<Agent> {
         self.agent
+    }
+
+    /// The visible screen's text, trailing blanks trimmed (control socket).
+    #[cfg(debug_assertions)]
+    pub fn debug_screen(&self) -> String {
+        let Some(s) = &self.session else { return String::new() };
+        let term = s.term().lock();
+        let grid = term.grid();
+        let mut lines: Vec<String> = (0..grid.screen_lines() as i32)
+            .map(|l| grid[Line(l)].into_iter().map(|c| if c.c == '\0' { ' ' } else { c.c }).collect::<String>().trim_end().to_owned())
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines.join("\\n")
+    }
+
+    /// Size, whether the program was told it has focus, and how it exited.
+    #[cfg(debug_assertions)]
+    pub fn debug_info(&self) -> String {
+        let size = self.session.as_ref().map(|s| s.size());
+        format!(
+            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={}",
+            self.reported_focus,
+            self.mode().contains(TermMode::FOCUS_IN_OUT),
+            self.exited,
+            self.spawn_error,
+            self.session.as_ref().map_or(0, |s| s.term().lock().grid().history_size()),
+        )
+    }
+
+    /// Paste `paths` as a drop would (control socket).
+    #[cfg(debug_assertions)]
+    pub fn debug_paste_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        self.paste_paths(paths, cx);
+    }
+
+    /// Run `cfg` from the next (re)start on.
+    pub fn set_spawn_config(&mut self, cfg: SpawnConfig) {
+        self.spawn_cfg = cfg;
+    }
+
+    /// The program running in the foreground when it isn't the shell.
+    pub fn foreground_job(&self) -> Option<String> {
+        let s = self.session.as_ref().filter(|_| self.exited.is_none())?;
+        let shell = self.spawn_cfg.program.as_deref().and_then(|p| Path::new(p).file_name()).and_then(|n| n.to_str()).unwrap_or("");
+        s.foreground_programs().into_iter().find(|p| {
+            let p = p.trim_start_matches('-');
+            p != shell && !matches!(p, "login" | "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "csh" | "ksh" | "nu")
+        })
     }
 
     fn detect_agent(&mut self, cx: &mut Context<Self>) {
@@ -283,7 +422,8 @@ impl TerminalView {
             TermEvent::Exit(code) => {
                 self.exited = Some(code);
                 self.set_status(ActivityStatus::None, cx);
-                cx.emit(TerminalEvent::Exited);
+                let quick = self.started.elapsed() < Duration::from_secs(5);
+                cx.emit(TerminalEvent::Exited { code, quick });
                 cx.notify();
             },
             TermEvent::Signal(OscSignal::ProgramStatus(st)) => {
@@ -318,30 +458,45 @@ impl TerminalView {
         }
     }
 
+    /// Tell the program whether it has focus (DECSET 1004): this pane is
+    /// focused, shown and the window is active.
+    fn sync_focus(&mut self, window: &mut Window, _: &mut Context<Self>) {
+        let focused = self.focus.is_focused(window) && window.is_window_active();
+        if focused == self.reported_focus {
+            return;
+        }
+        self.reported_focus = focused;
+        if self.mode().contains(TermMode::FOCUS_IN_OUT)
+            && let Some(s) = &self.session
+        {
+            s.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+        }
+    }
+
+    fn watch_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        if self.focus_window == Some(handle) {
+            return;
+        }
+        self.focus_window = Some(handle);
+        self._focus_subs = vec![
+            cx.on_focus(&self.focus, window, Self::sync_focus),
+            cx.on_blur(&self.focus, window, Self::sync_focus),
+            cx.observe_window_activation(window, Self::sync_focus),
+        ];
+    }
+
     fn mode(&self) -> TermMode {
         self.session.as_ref().map(|s| *s.term().lock().mode()).unwrap_or(TermMode::empty())
     }
 
     // ---- keyboard -------------------------------------------------------
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let ks = &ev.keystroke;
-        if ks.modifiers.platform || self.marked_text.is_some() {
-            return;
-        }
-        if let Some(code) = self.exited
-            && ks.key == "enter"
-        {
-            let _ = code;
-            self.start(cx);
-            cx.stop_propagation();
-            return;
-        }
+    /// The key a keystroke encodes as, or `None` for text that goes
+    /// through the input handler (IMEs, dead keys).
+    fn map_key(ks: &Keystroke, meta: bool, all_keys: bool) -> Option<Key> {
         let m = ks.modifiers;
-        let alt_meta = m.alt && self.config.option_as_meta;
-        let mods = Mods { shift: m.shift, alt: alt_meta, ctrl: m.control, meta: false };
-
-        let key = match ks.key.as_str() {
+        match ks.key.as_str() {
             "enter" => Some(Key::Enter),
             "tab" => Some(Key::Tab),
             "backspace" => Some(Key::Backspace),
@@ -356,17 +511,53 @@ impl TerminalView {
             "pagedown" => Some(Key::PageDown),
             "insert" => Some(Key::Insert),
             "delete" => Some(Key::Delete),
-            "space" if m.control || alt_meta => Some(Key::Char(' ')),
+            "space" if m.control || meta || all_keys => Some(Key::Char(' ')),
             k if k.len() > 1 && k.starts_with('f') => k[1..].parse().ok().map(Key::F),
-            k if (m.control || alt_meta) && k.chars().count() == 1 => k.chars().next().map(Key::Char),
+            // With "report all keys" (Kitty flag 8) text keys are key events too.
+            k if (m.control || meta || all_keys) && k.chars().count() == 1 => k.chars().next().map(Key::Char),
             _ => None,
-        };
-        let Some(key) = key else { return }; // printable → IME / insertText path
-        let mode = self.mode();
-        let text = ks.key_char.as_deref().filter(|_| !alt_meta);
-        if let Some(bytes) = keys::encode(key, mods, text, mode) {
-            self.write_input(bytes, cx);
+        }
+    }
+
+    fn key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        if ks.modifiers.platform || self.marked_text.is_some() {
+            return;
+        }
+        if self.exited.is_some() && ks.key == "enter" {
+            self.start(cx);
             cx.stop_propagation();
+            return;
+        }
+        let kind = if ev.is_held { KeyEventKind::Repeat } else { KeyEventKind::Press };
+        if self.send_key(ks, kind, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn key_up(&mut self, ev: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        if ks.modifiers.platform || self.marked_text.is_some() || self.exited.is_some() {
+            return;
+        }
+        if self.mode().contains(TermMode::REPORT_EVENT_TYPES) {
+            self.send_key(ks, KeyEventKind::Release, cx);
+        }
+    }
+
+    fn send_key(&mut self, ks: &Keystroke, kind: KeyEventKind, cx: &mut Context<Self>) -> bool {
+        let m = ks.modifiers;
+        let meta = m.alt && self.config.option_as_meta.applies();
+        let mods = Mods { shift: m.shift, alt: meta, ctrl: m.control, meta: false };
+        let mode = self.mode();
+        let Some(key) = Self::map_key(ks, meta, mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)) else { return false };
+        let text = ks.key_char.as_deref().filter(|_| !meta);
+        match keys::encode_event(key, mods, text, mode, kind) {
+            Some(bytes) => {
+                self.write_input(bytes, cx);
+                true
+            },
+            None => false,
         }
     }
 
@@ -378,8 +569,40 @@ impl TerminalView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
-        self.paste_text(&text, cx);
+        let Some(item) = cx.read_from_clipboard() else { return };
+        // Files copied in Finder: their paths, not the name Finder also
+        // puts on the clipboard as text.
+        let paths: Vec<PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                ClipboardEntry::ExternalPaths(p) => Some(p.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !paths.is_empty() {
+            return self.paste_paths(&paths, cx);
+        }
+        match item.text() {
+            Some(text) => self.paste_text(&text, cx),
+            // No text (e.g. an image): an empty bracketed paste, as iTerm2
+            // sends, tells Claude Code to read the image from the clipboard.
+            None if self.mode().contains(TermMode::BRACKETED_PASTE) => self.write_input(b"\x1b[200~\x1b[201~".to_vec(), cx),
+            None => {},
+        }
+    }
+
+    /// Paste shell-escaped paths, space separated (a file drop or Finder
+    /// copy); Claude Code attaches the images among them.
+    fn paste_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let text = paths.iter().map(|p| escape_path(p)).collect::<Vec<_>>().join(" ");
+        self.paste_text(&format!("{text} "), cx);
+    }
+
+    fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.paste_paths(paths.paths(), cx);
     }
 
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -393,9 +616,21 @@ impl TerminalView {
         self.write_input(bytes, cx);
     }
 
+    /// ⌘K: drop the scrollback and the screen, then a form feed so the
+    /// shell (or TUI) redraws its prompt.
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
-        // Form feed; shells/TUIs redraw. Scrollback is kept (safe default).
+        if let Some(s) = &self.session {
+            let mut term = s.term().lock();
+            if !term.mode().contains(TermMode::ALT_SCREEN) {
+                // Clearing the screen scrolls it into the scrollback: drop
+                // that after.
+                term.clear_screen(ClearMode::All);
+                term.clear_screen(ClearMode::Saved);
+                term.goto(0, 0);
+            }
+        }
         self.write_input(vec![0x0c], cx);
+        cx.notify();
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -475,6 +710,7 @@ impl TerminalView {
         };
         if self.report_mouse(MouseAction::Press, button, ev.position, &ev.modifiers, cx) {
             self.mouse_button_down = Some(button);
+            self.last_motion = self.grid_point(ev.position).map(|(c, r, _)| (c, r));
             return;
         }
         if button != mouse::MouseButton::Left {
@@ -498,9 +734,20 @@ impl TerminalView {
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.mouse_pos = Some(ev.position);
         self.update_hover(ev.modifiers.platform && ev.pressed_button.is_none(), cx);
+        // Motion is reported once per cell: with a button held (1002/1003),
+        // or with none (1003).
+        let cell = self.grid_point(ev.position).map(|(c, r, _)| (c, r));
         if let Some(button) = self.mouse_button_down {
-            if ev.pressed_button.is_some() {
+            if ev.pressed_button.is_some() && cell != self.last_motion {
+                self.last_motion = cell;
                 self.report_mouse(MouseAction::Motion, button, ev.position, &ev.modifiers, cx);
+            }
+            return;
+        }
+        if ev.pressed_button.is_none() && self.mode().contains(TermMode::MOUSE_MOTION) {
+            if cell != self.last_motion {
+                self.last_motion = cell;
+                self.report_mouse(MouseAction::Motion, mouse::MouseButton::None, ev.position, &ev.modifiers, cx);
             }
             return;
         }
@@ -519,6 +766,8 @@ impl TerminalView {
 
     fn mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(button) = self.mouse_button_down.take() {
+            // Released outside the pane: report it at the nearest cell, so
+            // the program doesn't think the button is still down.
             self.report_mouse(MouseAction::Release, button, ev.position, &ev.modifiers, cx);
             return;
         }
@@ -665,6 +914,31 @@ impl TerminalView {
         }
     }
 
+    /// Fit the terminal to `size`. The first layout starts the process at
+    /// that size; later changes wait for 30 ms without another one, so
+    /// dragging a split doesn't reflow the program on every frame.
+    fn resize(&mut self, size: TermSize, cx: &mut Context<Self>) {
+        if !self.spawned {
+            self.spawn_cfg.size = size;
+            self.start(cx);
+            return;
+        }
+        let Some(s) = &self.session else { return };
+        if s.size() == size {
+            self._resize = None;
+            return;
+        }
+        self._resize = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(30)).await;
+            let _ = this.update(cx, |view, cx| {
+                if let Some(s) = &view.session {
+                    s.resize(size);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     fn ensure_metrics(&mut self, window: &mut Window) -> CellMetrics {
         if let Some(m) = self.metrics {
             return m;
@@ -680,16 +954,18 @@ impl TerminalView {
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(s) = &self.session {
             s.take_wakeup();
         }
+        self.watch_focus(window, cx);
         let bg = rgb_to_hsla(Palette::default().background);
         div()
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear))
@@ -705,6 +981,10 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_drop(cx.listener(Self::drop_paths))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             .size_full()
@@ -814,7 +1094,8 @@ struct Style {
     fg: Hsla,
     bold: bool,
     italic: bool,
-    underline: bool,
+    /// Underline color, and whether it is curly.
+    underline: Option<(Hsla, bool)>,
     strike: bool,
 }
 
@@ -851,7 +1132,7 @@ impl<'a> RowBuilder<'a> {
             font: f,
             color: style.fg,
             background_color: None,
-            underline: style.underline.then(|| UnderlineStyle { thickness: px(1.), color: Some(style.fg), wavy: false }),
+            underline: style.underline.map(|(color, wavy)| UnderlineStyle { thickness: px(1.), color: Some(color), wavy }),
             strikethrough: style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) }),
         };
         match self.runs.last_mut() {
@@ -914,14 +1195,16 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Frame {
-        self.view.update(cx, |view, _| {
+        self.view.update(cx, |view, cx| {
             let m = view.ensure_metrics(window);
             view.last_origin = bounds.origin;
             let cols = ((bounds.size.width / m.width) as u16).max(2);
             let rows = ((bounds.size.height / m.height) as u16).max(1);
-            if let Some(s) = &view.session {
-                s.resize(TermSize { cols, rows, cell_width: f32::from(m.width) as u16, cell_height: f32::from(m.height) as u16 });
-            }
+            // Cell size in device pixels, for programs that draw images.
+            let scale = window.scale_factor();
+            let cell = |p: Pixels| (f32::from(p) * scale).round() as u16;
+            let size = TermSize { cols, rows, cell_width: cell(m.width), cell_height: cell(m.height) };
+            view.resize(size, cx);
             build_frame(view, bounds, m, window)
         })
     }
@@ -1060,11 +1343,14 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
         if is_cursor {
             fg_h = rgb_to_hsla(default_bg);
         }
-        if flags.contains(Flags::HIDDEN) || cell.c == ' ' || cell.c == '\0' {
+        let linked = link.as_ref().is_some_and(|r| r.contains(&indexed.point));
+        let lined = flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) || linked;
+        // Blank cells only matter when they carry a line.
+        if flags.contains(Flags::HIDDEN) || ((cell.c == ' ' || cell.c == '\0') && !lined) {
             continue;
         }
         buf.clear();
-        buf.push(cell.c);
+        buf.push(if cell.c == '\0' { ' ' } else { cell.c });
         if let Some(zw) = cell.zerowidth() {
             buf.extend(zw.iter());
         }
@@ -1072,7 +1358,10 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
             fg: fg_h,
             bold: flags.contains(Flags::BOLD),
             italic: flags.contains(Flags::ITALIC),
-            underline: flags.intersects(Flags::ALL_UNDERLINES) || link.as_ref().is_some_and(|r| r.contains(&indexed.point)),
+            underline: (flags.intersects(Flags::ALL_UNDERLINES) || linked).then(|| {
+                let color = cell.underline_color().map_or(fg_h, |c| rgb_to_hsla(palette.resolve(colors, c)));
+                (color, flags.contains(Flags::UNDERCURL))
+            }),
             strike: flags.contains(Flags::STRIKEOUT),
         };
         let b = builder.as_mut().unwrap();
@@ -1125,9 +1414,12 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
     }
 
     if let Some(code) = view.exited {
-        let msg = match code {
-            Some(c) => format!("[process exited with code {c}] — press Enter to restart"),
-            None => "[process exited] — press Enter to restart".to_owned(),
+        let msg = match (code, &view.spawn_error) {
+            (_, Some(err)) => {
+                format!("[could not start {}: {err}] — press Enter to retry", view.spawn_cfg.program.as_deref().unwrap_or("shell"))
+            },
+            (Some(c), None) => format!("[process exited with code {c}] — press Enter to restart"),
+            (None, None) => "[process exited] — press Enter to restart".to_owned(),
         };
         let color = rgb_to_hsla(palette.dim_foreground);
         let run = TextRun { len: msg.len(), font: base_font.clone(), color, background_color: None, underline: None, strikethrough: None };
@@ -1145,9 +1437,30 @@ fn sanitize_paste(text: &str) -> String {
     text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control())).collect()
 }
 
+/// A path as a shell word: backslash before every char a shell treats
+/// specially, as Ghostty and iTerm2 do for dropped files.
+fn escape_path(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.to_string_lossy().chars() {
+        if c.is_whitespace() || "\\'\"()[]{}<>|&;$!?*#`".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_paste;
+    use super::{escape_path, sanitize_paste};
+    use std::path::Path;
+
+    #[test]
+    fn escapes_dropped_paths() {
+        assert_eq!(escape_path(Path::new("/Users/a/Screen Shot (1).png")), r"/Users/a/Screen\ Shot\ \(1\).png");
+        assert_eq!(escape_path(Path::new("/tmp/it's $HOME")), r"/tmp/it\'s\ \$HOME");
+        assert_eq!(escape_path(Path::new("/tmp/Tiếng Việt.txt")), r"/tmp/Tiếng\ Việt.txt");
+    }
 
     #[test]
     fn paste_strips_controls() {

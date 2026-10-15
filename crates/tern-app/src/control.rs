@@ -24,6 +24,10 @@
 //!   windows / ws     list windows / this window's workspaces
 //!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
 //!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window
+//!   term-type TEXT   type into the active terminal (`\n` Enter, `\e` Esc, `\a` BEL)
+//!   term-screen      the active terminal's visible text
+//!   term-info        its size, focus reporting, exit; tabs that rang; what runs
+//!   term-paste-path P1|P2   paste paths as a file drop does
 //!   @N CMD           send CMD to window N instead of the active one
 
 use std::io::{BufRead, BufReader, Write};
@@ -35,9 +39,9 @@ use gpui_kit::*;
 
 pub type Request = (String, flume::Sender<String>);
 
-/// Start listening if `TERN_CONTROL` is set; requests arrive on the receiver.
-pub fn listen() -> Option<flume::Receiver<Request>> {
-    let path = PathBuf::from(std::env::var_os("TERN_CONTROL")?);
+/// Start listening on `path` (from `TERN_CONTROL`); requests arrive on the
+/// receiver.
+pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
     // Replace a stale socket, never another kind of file.
     if let Ok(m) = std::fs::symlink_metadata(&path) {
         if !m.file_type().is_socket() {

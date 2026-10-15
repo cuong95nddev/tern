@@ -1,8 +1,9 @@
 //! Keyboard encoding: UI-agnostic key events → bytes for the PTY.
 //!
-//! Supports legacy xterm encoding and the Kitty keyboard protocol
-//! ("disambiguate" and "report all keys as escape codes" flags), which Claude
-//! Code enables so that e.g. Shift+Enter is distinguishable from Enter.
+//! Supports legacy xterm encoding and the Kitty keyboard protocol (all five
+//! flags: disambiguate, event types, alternate keys, all keys as escape codes,
+//! associated text), which Claude Code enables so that e.g. Shift+Enter is
+//! distinguishable from Enter.
 
 use alacritty_terminal::term::TermMode;
 
@@ -46,38 +47,123 @@ impl Mods {
     }
 }
 
+/// Press, auto-repeat or release (the last two only matter to the Kitty
+/// protocol's "report event types" flag).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyEventKind {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
 /// Encode a key press. `text` is what the platform would insert (already
 /// shifted/composed), if anything.
 pub fn encode(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Option<Vec<u8>> {
-    let kitty_all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
-    let kitty = kitty_all || mode.contains(TermMode::DISAMBIGUATE_ESC_CODES);
-    if kitty && let Some(b) = encode_kitty(key, mods, text, kitty_all) {
-        return Some(b);
+    encode_event(key, mods, text, mode, KeyEventKind::Press)
+}
+
+/// Encode a key event. Releases are only reported when the program asked
+/// for them (Kitty flag 2); without the Kitty protocol a repeat is a press.
+pub fn encode_event(key: Key, mods: Mods, text: Option<&str>, mode: TermMode, kind: KeyEventKind) -> Option<Vec<u8>> {
+    let all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    let kitty = all || mode.contains(TermMode::DISAMBIGUATE_ESC_CODES);
+    let events = kitty && mode.contains(TermMode::REPORT_EVENT_TYPES);
+    if kind == KeyEventKind::Release && !events {
+        return None;
     }
-    encode_legacy(key, mods, text, mode)
+    if !kitty {
+        return encode_legacy(key, mods, text, mode);
+    }
+    // Plain text and unmodified Enter/Tab/Backspace stay legacy unless all
+    // keys are reported; those never report a release.
+    let textual = matches!(key, Key::Char(_)) && !mods.ctrl && !mods.alt && !mods.meta;
+    let plain = matches!(key, Key::Enter | Key::Tab | Key::Backspace) && !mods.any();
+    if !all && (textual || plain) {
+        return if kind == KeyEventKind::Release { None } else { encode_legacy(key, mods, text, mode) };
+    }
+    Some(encode_kitty(key, mods, text, mode, kind))
 }
 
-fn csi_u(code: u32, mods: Mods) -> Vec<u8> {
-    if mods.any() { format!("\x1b[{code};{}u", mods.param()).into_bytes() } else { format!("\x1b[{code}u").into_bytes() }
+/// `CSI number[:alternate] ; mods[:event] ; text terminator`, leaving out
+/// trailing fields that hold defaults.
+fn encode_kitty(key: Key, mods: Mods, text: Option<&str>, mode: TermMode, kind: KeyEventKind) -> Vec<u8> {
+    let (number, term) = match key {
+        Key::Escape => (27, 'u'),
+        Key::Enter => (13, 'u'),
+        Key::Tab => (9, 'u'),
+        Key::Backspace => (127, 'u'),
+        Key::Char(c) => (c.to_lowercase().next().unwrap_or(c) as u32, 'u'),
+        Key::Up => (1, 'A'),
+        Key::Down => (1, 'B'),
+        Key::Right => (1, 'C'),
+        Key::Left => (1, 'D'),
+        Key::Home => (1, 'H'),
+        Key::End => (1, 'F'),
+        Key::Insert => (2, '~'),
+        Key::Delete => (3, '~'),
+        Key::PageUp => (5, '~'),
+        Key::PageDown => (6, '~'),
+        Key::F(1) => (1, 'P'),
+        Key::F(2) => (1, 'Q'),
+        // CSI R would read as a cursor position report.
+        Key::F(3) => (13, '~'),
+        Key::F(4) => (1, 'S'),
+        Key::F(n @ 5..=12) => (f_tilde(n), '~'),
+        Key::F(n) => (57376 + n.saturating_sub(13) as u32, 'u'),
+    };
+    let mut first = number.to_string();
+    if let Key::Char(c) = key
+        && mode.contains(TermMode::REPORT_ALTERNATE_KEYS)
+        && mods.shift
+        && c.is_lowercase()
+    {
+        first.push_str(&format!(":{}", c.to_uppercase().next().unwrap_or(c) as u32));
+    }
+    let event = match kind {
+        KeyEventKind::Press => 1,
+        KeyEventKind::Repeat => 2,
+        KeyEventKind::Release => 3,
+    };
+    let event = if mode.contains(TermMode::REPORT_EVENT_TYPES) { event } else { 1 };
+    let text: Option<String> = text
+        .filter(|_| mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) && kind != KeyEventKind::Release && term == 'u')
+        .filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+        .map(|t| t.chars().map(|c| (c as u32).to_string()).collect::<Vec<_>>().join(":"));
+    let mut fields = vec![first];
+    if mods.any() || event != 1 || text.is_some() {
+        fields.push(if event == 1 { mods.param().to_string() } else { format!("{}:{event}", mods.param()) });
+    }
+    if let Some(t) = text {
+        fields.push(t);
+    }
+    // `CSI 1 A` is just `CSI A`.
+    if fields.len() == 1 && term != 'u' && term != '~' {
+        fields.clear();
+    }
+    format!("\x1b[{}{term}", fields.join(";")).into_bytes()
 }
 
-fn encode_kitty(key: Key, mods: Mods, text: Option<&str>, all: bool) -> Option<Vec<u8>> {
-    match key {
-        Key::Escape => Some(csi_u(27, mods)),
-        Key::Enter if all || mods.any() => Some(csi_u(13, mods)),
-        Key::Tab if all || mods.any() => Some(csi_u(9, mods)),
-        Key::Backspace if all || mods.any() => Some(csi_u(127, mods)),
-        Key::Char(c) => {
-            // Plain/shifted text stays text unless reporting all keys.
-            let textual = !mods.ctrl && !mods.alt && !mods.meta;
-            if textual && !all {
-                return None;
-            }
-            let _ = text;
-            Some(csi_u(c.to_ascii_lowercase() as u32, mods))
-        },
-        // Functional keys use the legacy CSI forms, which kitty keeps.
-        _ => None,
+fn f_tilde(n: u8) -> u32 {
+    match n {
+        5 => 15,
+        6 => 17,
+        7 => 18,
+        8 => 19,
+        9 => 20,
+        10 => 21,
+        11 => 23,
+        12 => 24,
+        // VT220 / xterm codes for F13–F20.
+        13 => 25,
+        14 => 26,
+        15 => 28,
+        16 => 29,
+        17 => 31,
+        18 => 32,
+        19 => 33,
+        20 => 34,
+        _ => 0,
     }
 }
 
@@ -123,19 +209,9 @@ fn encode_legacy(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Op
             let c = b"PQRS"[(n - 1) as usize];
             if mods.any() { format!("\x1b[1;{m}{}", c as char).into_bytes() } else { vec![0x1b, b'O', c] }
         },
-        Key::F(n) => {
-            let code = match n {
-                5 => 15,
-                6 => 17,
-                7 => 18,
-                8 => 19,
-                9 => 20,
-                10 => 21,
-                11 => 23,
-                12 => 24,
-                _ => return None,
-            };
-            tilde(code)
+        Key::F(n) => match f_tilde(n) {
+            0 => return None,
+            code => tilde(code as u8),
         },
         Key::Char(c) => {
             if mods.ctrl {
@@ -144,6 +220,9 @@ fn encode_legacy(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Op
             } else if let Some(t) = text.filter(|t| !t.is_empty()) {
                 with_alt(t.as_bytes().to_vec())
             } else if mods.alt {
+                // Option as Meta: the platform text is the Option-composed
+                // char, so shift the base key ourselves (Alt+Shift+a = ESC A).
+                let c = if mods.shift { c.to_uppercase().next().unwrap_or(c) } else { c };
                 let mut buf = [0u8; 4];
                 with_alt(c.encode_utf8(&mut buf).as_bytes().to_vec())
             } else {
@@ -224,5 +303,60 @@ mod tests {
         let m = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC;
         assert_eq!(encode(Key::Enter, NONE, None, m).unwrap(), b"\x1b[13u");
         assert_eq!(encode(Key::Char('a'), NONE, Some("a"), m).unwrap(), b"\x1b[97u");
+    }
+
+    #[test]
+    fn alt_shift_letter_keeps_shift() {
+        let alt_shift = Mods { alt: true, shift: true, ..NONE };
+        assert_eq!(legacy(Key::Char('a'), alt_shift, None), b"\x1bA");
+        // Shifted punctuation arrives as the shifted key already.
+        assert_eq!(legacy(Key::Char('!'), ALT, None), b"\x1b!");
+    }
+
+    #[test]
+    fn legacy_f13_to_f20() {
+        assert_eq!(legacy(Key::F(13), NONE, None), b"\x1b[25~");
+        assert_eq!(legacy(Key::F(20), CTRL, None), b"\x1b[34;5~");
+        assert!(encode(Key::F(21), NONE, None, TermMode::empty()).is_none());
+    }
+
+    #[test]
+    fn release_needs_event_types() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES;
+        assert!(encode_event(Key::Char('c'), CTRL, None, m, KeyEventKind::Release).is_none());
+        assert!(encode_event(Key::Up, NONE, None, TermMode::empty(), KeyEventKind::Release).is_none());
+        assert_eq!(encode_event(Key::Up, NONE, None, TermMode::empty(), KeyEventKind::Repeat).unwrap(), b"\x1b[A");
+    }
+
+    #[test]
+    fn kitty_event_types() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES;
+        assert_eq!(encode_event(Key::Char('c'), CTRL, None, m, KeyEventKind::Release).unwrap(), b"\x1b[99;5:3u");
+        assert_eq!(encode_event(Key::Escape, NONE, None, m, KeyEventKind::Repeat).unwrap(), b"\x1b[27;1:2u");
+        assert_eq!(encode_event(Key::Up, NONE, None, m, KeyEventKind::Release).unwrap(), b"\x1b[1;1:3A");
+        assert_eq!(encode_event(Key::Up, NONE, None, m, KeyEventKind::Press).unwrap(), b"\x1b[A");
+        // Text and plain Enter stay legacy and report no release.
+        assert!(encode_event(Key::Char('a'), NONE, Some("a"), m, KeyEventKind::Release).is_none());
+        assert!(encode_event(Key::Enter, NONE, None, m, KeyEventKind::Release).is_none());
+    }
+
+    #[test]
+    fn kitty_functional_keys() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(encode(Key::Left, CTRL, None, m).unwrap(), b"\x1b[1;5D");
+        assert_eq!(encode(Key::Delete, SHIFT, None, m).unwrap(), b"\x1b[3;2~");
+        assert_eq!(encode(Key::F(3), NONE, None, m | TermMode::REPORT_ALL_KEYS_AS_ESC).unwrap(), b"\x1b[13~");
+        assert_eq!(encode(Key::F(13), NONE, None, m | TermMode::REPORT_ALL_KEYS_AS_ESC).unwrap(), b"\x1b[57376u");
+    }
+
+    #[test]
+    fn kitty_alternate_keys_and_text() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES
+            | TermMode::REPORT_ALL_KEYS_AS_ESC
+            | TermMode::REPORT_ALTERNATE_KEYS
+            | TermMode::REPORT_ASSOCIATED_TEXT;
+        assert_eq!(encode(Key::Char('a'), SHIFT, Some("A"), m).unwrap(), b"\x1b[97:65;2;65u");
+        assert_eq!(encode(Key::Char('a'), NONE, Some("a"), m).unwrap(), b"\x1b[97;1;97u");
+        assert_eq!(encode(Key::Enter, NONE, Some("\n"), m).unwrap(), b"\x1b[13u");
     }
 }

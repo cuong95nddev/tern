@@ -53,6 +53,19 @@ impl Agent {
         })
     }
 
+    /// The product name, for notification titles.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
+            Self::OpenCode => "OpenCode",
+            Self::Cursor => "Cursor Agent",
+            Self::Grok => "Grok",
+            Self::Pi => "Pi",
+        }
+    }
+
     /// The logo's asset path. Black-and-white logos come in a variant per
     /// theme; the others keep their brand colors in both.
     fn logo(self, dark: bool) -> &'static str {

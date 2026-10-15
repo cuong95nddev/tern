@@ -112,7 +112,9 @@ pub fn check(manual: bool, cx: &mut App) {
 /// Ask whether to install release `r`.
 pub fn offer(r: Release, cx: &mut App) {
     let msg = format!("Tern {} is available", r.version);
+    let blocked = app_bundle().and_then(|b| install_blocker(&b));
     let detail = match app_bundle() {
+        Some(_) if blocked.is_some() => format!("You have {}. {}", current_version(), blocked.as_deref().unwrap_or_default()),
         Some(_) => format!(
             "You have {}. Tern will restart to install it; your windows and workspaces come back, but running terminals are closed.",
             current_version()
@@ -121,7 +123,7 @@ pub fn offer(r: Release, cx: &mut App) {
             format!("You have {}. This copy isn't an installed Tern.app, so download the update from the release page.", current_version())
         },
     };
-    let installable = app_bundle().is_some();
+    let installable = app_bundle().is_some() && blocked.is_none();
     let answers: &[&str] = if installable { &["Update and Restart", "Release Notes", "Later"] } else { &["Release Notes", "Later"] };
     let Some(answer) = prompt(PromptLevel::Info, &msg, &detail, answers, cx) else { return };
     cx.spawn(async move |cx| {
@@ -179,6 +181,31 @@ fn app_bundle() -> Option<PathBuf> {
     bundle_of(&std::env::current_exe().ok()?.canonicalize().ok()?)
 }
 
+/// Why Tern can't replace `bundle` in place: macOS runs it from a random
+/// read-only copy (App Translocation, when it was never moved out of the
+/// download), or it runs from the DMG or another folder it can't write.
+fn install_blocker(bundle: &Path) -> Option<String> {
+    if is_translocated(bundle) {
+        return Some("Move Tern to the Applications folder and open it from there to install updates.".to_owned());
+    }
+    let dir = bundle.parent()?;
+    let probe = dir.join(format!(".tern-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            None
+        },
+        Err(_) if bundle.starts_with("/Volumes") => {
+            Some("Tern is running from its disk image: drag it to the Applications folder and open it from there.".to_owned())
+        },
+        Err(_) => Some(format!("Tern can't write to {}: download the update from the release page.", dir.display())),
+    }
+}
+
+fn is_translocated(bundle: &Path) -> bool {
+    bundle.components().any(|c| c.as_os_str() == "AppTranslocation")
+}
+
 fn bundle_of(exe: &Path) -> Option<PathBuf> {
     let macos = exe.parent()?;
     let contents = macos.parent()?;
@@ -190,6 +217,9 @@ fn bundle_of(exe: &Path) -> Option<PathBuf> {
 fn curl() -> Command {
     let mut c = Command::new("/usr/bin/curl");
     c.args(["-fsSL", "--connect-timeout", "15", "-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))]);
+    // HTTPS only, also after redirects; give up on a stalled download (under
+    // 1 KB/s for 30 s) or one that takes over 15 minutes.
+    c.args(["--proto", "=https", "--proto-redir", "=https", "--speed-limit", "1024", "--speed-time", "30", "--max-time", "900"]);
     c
 }
 
@@ -214,7 +244,8 @@ fn fetch_latest() -> Result<Option<Release>, String> {
 /// The HTTP status of `url` and where it redirects, without following it.
 fn head(url: &str) -> Result<(u16, String), String> {
     let out = Command::new("/usr/bin/curl")
-        .args(["-sSI", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "--connect-timeout", "15"])
+        .args(["-sSI", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "--connect-timeout", "15", "--max-time", "30"])
+        .args(["--proto", "=https"])
         .args(["-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))])
         .arg(url)
         .output()
@@ -328,8 +359,14 @@ open "$3"
 
 #[cfg(test)]
 mod tests {
-    use super::{bundle_of, parse_latest_redirect, parse_team_id};
+    use super::{bundle_of, is_translocated, parse_latest_redirect, parse_team_id};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn detects_app_translocation() {
+        assert!(is_translocated(Path::new("/private/var/folders/x/T/AppTranslocation/1234-ABCD/d/Tern.app")));
+        assert!(!is_translocated(Path::new("/Applications/Tern.app")));
+    }
 
     #[test]
     fn finds_the_app_bundle() {

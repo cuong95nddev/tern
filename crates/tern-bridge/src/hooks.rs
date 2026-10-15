@@ -162,6 +162,33 @@ pub fn remove_claude_settings(dir: &std::path::Path, token: &str) {
     let _ = std::fs::remove_file(dir.join(format!("claude-settings-{token}.json")));
 }
 
+/// Drop what earlier Tern processes left in `root` (the parent of every
+/// process's own run dir, named by its pid): the dirs of processes no longer
+/// running, and 0.1.0's loose settings files once they are a day old.
+pub fn sweep_run_dirs(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            if let Ok(pid) = name.parse::<i32>()
+                && !process_alive(pid)
+            {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        } else if name.starts_with("claude-settings-")
+            && name.ends_with(".json")
+            && e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > Duration::from_secs(86_400)))
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+fn process_alive(pid: i32) -> bool {
+    pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
 /// Settings JSON passed to `claude --settings` for a tab.
 pub fn claude_settings_json(hook_url: &str) -> String {
     let handler = serde_json::json!([{ "type": "http", "url": hook_url, "timeout": 5 }]);
@@ -237,6 +264,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sweeps_dead_run_dirs() {
+        let root = std::env::temp_dir().join(format!("tern-sweep-{}", std::process::id()));
+        let me = root.join(std::process::id().to_string());
+        // No process has pid i32::MAX.
+        let dead = root.join(i32::MAX.to_string());
+        std::fs::create_dir_all(&me).unwrap();
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(root.join("claude-settings-new.json"), "{}").unwrap();
+        super::sweep_run_dirs(&root);
+        assert!(me.exists());
+        assert!(!dead.exists());
+        assert!(root.join("claude-settings-new.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
     use std::sync::mpsc;
 

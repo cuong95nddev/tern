@@ -4,7 +4,9 @@
 //! join it, or anywhere else to give it a window of its own; the tab's menu
 //! does the same.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -14,7 +16,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::workspace::{Workspace, WorkspaceEvent};
+use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 
 actions!(window, [CloseWorkspace, NextWorkspace, PrevWorkspace, NewWindow]);
@@ -35,6 +37,11 @@ struct Registry(Vec<(AnyWindowHandle, WeakEntity<MainWindow>)>);
 impl Global for Registry {}
 
 /// Live windows, dropping entries for closed ones.
+/// Everything quitting would end, across windows.
+pub fn running(cx: &mut App) -> Vec<String> {
+    windows(cx).into_iter().flat_map(|(_, m)| m.read(cx).running(cx)).collect()
+}
+
 fn windows(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<MainWindow>)> {
     let open = cx.windows();
     let reg = cx.default_global::<Registry>();
@@ -239,6 +246,24 @@ impl MainWindow {
             this.placement = window_state::placement(window, cx);
             this.changed(cx);
         });
+        // The close button asks first when that ends running programs.
+        let me = cx.entity().downgrade();
+        let confirmed = Rc::new(Cell::new(false));
+        window.on_window_should_close(cx, move |window, cx| {
+            let jobs = me.upgrade().map(|m| m.read(cx).running(cx)).unwrap_or_default();
+            if jobs.is_empty() || confirmed.get() {
+                return true;
+            }
+            let Some(me) = me.upgrade() else { return true };
+            let confirmed = confirmed.clone();
+            me.update(cx, |_, cx| {
+                confirm_close(jobs, "this window", window, cx, move |_, window, _| {
+                    confirmed.set(true);
+                    window.remove_window();
+                })
+            });
+            false
+        });
         cx.on_release(|this: &mut Self, cx| {
             for slot in &this.slots {
                 slot.ws.update(cx, |w, cx| w.shutdown(cx));
@@ -357,11 +382,38 @@ impl MainWindow {
         }
     }
 
-    fn close_others(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(keep) = self.slots.get(ix).map(|s| s.ws.entity_id()) else { return };
-        while let Some(other) = self.slots.iter().position(|s| s.ws.entity_id() != keep) {
-            self.close(other, window, cx);
+    /// Close workspace `ix`, asking first when that ends running programs.
+    fn request_close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = self.slots.get(ix).map(|s| s.ws.clone()) else { return };
+        let jobs = ws.read(cx).running(cx);
+        if jobs.is_empty() {
+            return self.close(ix, window, cx);
         }
+        confirm_close(jobs, "this workspace", window, cx, move |this: &mut Self, window, cx| {
+            if let Some(ix) = this.position(ws.entity_id()) {
+                this.close(ix, window, cx);
+            }
+        });
+    }
+
+    fn request_close_others(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(keep) = self.slots.get(ix).map(|s| s.ws.entity_id()) else { return };
+        let jobs: Vec<String> = self.slots.iter().filter(|s| s.ws.entity_id() != keep).flat_map(|s| s.ws.read(cx).running(cx)).collect();
+        let close_others = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            while let Some(other) = this.slots.iter().position(|s| s.ws.entity_id() != keep) {
+                this.close(other, window, cx);
+            }
+        };
+        if jobs.is_empty() {
+            close_others(self, window, cx);
+        } else {
+            confirm_close(jobs, "the other workspaces", window, cx, close_others);
+        }
+    }
+
+    /// What closing this window would end.
+    fn running(&self, cx: &App) -> Vec<String> {
+        self.slots.iter().flat_map(|s| s.ws.read(cx).running(cx)).collect()
     }
 
     /// Move workspace `ix` to a new window (at `at`, else cascaded).
@@ -453,7 +505,7 @@ impl MainWindow {
                     Button::new(("close-ws", i)).xsmall().ghost().icon(IconName::Close).tooltip("Close Workspace (⌘⇧W)").on_click(
                         cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.close(i, window, cx);
+                            this.request_close(i, window, cx);
                         }),
                     ),
                 ))
@@ -534,8 +586,8 @@ impl MainWindow {
             })
         };
         let mut menu = menu
-            .item(item("Close Workspace", Self::close))
-            .item(item("Close Other Workspaces", Self::close_others).disabled(single))
+            .item(item("Close Workspace", Self::request_close))
+            .item(item("Close Other Workspaces", Self::request_close_others).disabled(single))
             .separator()
             .item(item("Move to New Window", |this, ix, window, cx| this.detach(ix, None, window, cx)).disabled(single));
         let me_id = me.entity_id();
@@ -759,7 +811,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|_, _: &NewWindow, _, cx| open_window(Content::Welcome, None, cx)))
             .on_action(cx.listener(|this, _: &CloseWorkspace, window, cx| {
                 if !this.slots.is_empty() {
-                    this.close(this.active, window, cx);
+                    this.request_close(this.active, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NextWorkspace, window, cx| {

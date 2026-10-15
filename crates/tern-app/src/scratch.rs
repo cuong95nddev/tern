@@ -143,7 +143,7 @@ impl Scratch {
             return;
         }
         let text = self.editor.read(cx).value().to_string();
-        match std::fs::write(&self.path, text) {
+        match crate::window_state::write_atomic(&self.path, text.as_bytes()) {
             Ok(()) => {
                 self.dirty = false;
                 self.message = None;

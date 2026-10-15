@@ -125,7 +125,33 @@ fn write(path: &std::path::Path, text: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, text);
+    if let Err(e) = write_atomic(path, text.as_bytes()) {
+        log::warn!("can't save {}: {e}", path.display());
+    }
+}
+
+/// Replace `path`'s contents all at once: write a temp file beside it, then
+/// rename it over, so a crash or a full disk never leaves half a file. A
+/// symlink is followed, and the file keeps its permissions.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.tern-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            f.set_permissions(meta.permissions())?;
+        }
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn claude_args_file() -> PathBuf {
@@ -405,6 +431,21 @@ mod tests {
     use super::{SavedGroup, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag, toggle_flag};
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
     use std::path::PathBuf;
+
+    #[test]
+    fn atomic_write_replaces_and_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("tern-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("f.txt");
+        super::write_atomic(&p, b"one").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        super::write_atomic(&p, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn round_trip() {

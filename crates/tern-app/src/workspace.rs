@@ -8,6 +8,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::Selectable as _;
@@ -118,6 +119,13 @@ struct TermTab {
     token: Option<String>,
     /// The Claude conversation running here (from hooks), to resume it.
     session: Option<String>,
+    /// Started with `--resume`: if that fails at once, start a new one.
+    resuming: bool,
+    /// When the tab last showed a notification, to drop a second one for
+    /// the same event (OSC 9 and the status change of one turn).
+    notified: Option<Instant>,
+    /// Rang the bell while not shown; cleared when shown.
+    rang: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -697,6 +705,7 @@ impl Workspace {
     fn spawn_config(&self, kind: TabKind, token: Option<&str>, resume: Option<&str>) -> (SpawnConfig, &'static str) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut env = std::collections::HashMap::new();
+        env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
         let (args, title) = match kind {
             TabKind::Shell => (vec!["-l".to_owned()], "shell"),
             TabKind::Claude => {
@@ -710,12 +719,21 @@ impl Workspace {
                 // The user's own arguments, as typed (shell syntax).
                 let args = window_state::claude_args();
                 let claude = if args.is_empty() { format!("claude{settings}") } else { format!("claude {args}{settings}") };
-                // A conversation that can't be resumed (deleted, ...) falls back to a new one.
+                // A conversation that can't be resumed (deleted, ...) ends
+                // Claude at once: the tab then starts a new one (see
+                // `on_terminal_event`), not on every failed exit.
                 let cmd = match resume {
-                    Some(id) => format!("{claude} --resume {} || exec {claude}", shell_quote(id)),
+                    Some(id) => format!("exec {claude} --resume {}", shell_quote(id)),
                     None => format!("exec {claude}"),
                 };
-                env.insert("TERN_TAB_TOKEN".into(), token.unwrap_or_default().to_owned());
+                // Hooks post to 127.0.0.1; keep them off the user's proxy.
+                let no_proxy = ["NO_PROXY", "no_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
+                let no_proxy = match no_proxy {
+                    Some(v) => format!("{v},127.0.0.1,localhost"),
+                    None => "127.0.0.1,localhost".to_owned(),
+                };
+                env.insert("NO_PROXY".into(), no_proxy.clone());
+                env.insert("no_proxy".into(), no_proxy);
                 (vec!["-lic".to_owned(), cmd], "claude")
             },
         };
@@ -747,7 +765,9 @@ impl Workspace {
         let view = cx.new(|cx| TerminalView::new(cfg, title, config, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
-        let ix = self.push_tab(CenterTab::Term(TermTab { view, rename, kind, token, session, _subs: vec![sub] }));
+        let resuming = session.is_some();
+        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
+        let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
 
@@ -814,6 +834,37 @@ impl Workspace {
             window.push_notification(format!("Delete failed: {e}"), cx);
         }
         self.scratches.update(cx, |s, cx| s.refresh(cx));
+    }
+
+    /// What closing tab `ix` would end: a Claude turn in progress (an idle
+    /// conversation resumes at the next launch), or a program a shell runs.
+    fn running_in(&self, ix: usize, cx: &App) -> Option<String> {
+        let t = self.tabs.get(ix)?.term()?;
+        let v = t.view.read(cx);
+        match t.kind {
+            TabKind::Claude => {
+                matches!(v.status(), ActivityStatus::Working | ActivityStatus::Blocked).then(|| "Claude, mid-turn".to_owned())
+            },
+            TabKind::Shell => v.foreground_job(),
+        }
+    }
+
+    /// Everything closing this workspace would end (see `running_in`).
+    pub fn running(&self, cx: &App) -> Vec<String> {
+        (0..self.tabs.len()).filter_map(|i| self.running_in(i, cx)).collect()
+    }
+
+    /// Close tab `ix`, asking first when that ends a running program.
+    fn request_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.tabs.get(ix).map(CenterTab::entity_id) else { return };
+        match self.running_in(ix, cx) {
+            None => self.close_tab(ix, window, cx),
+            Some(job) => confirm_close(vec![job], "this tab", window, cx, move |this: &mut Self, window, cx| {
+                if let Some(ix) = this.tabs.iter().position(|t| t.entity_id() == id) {
+                    this.close_tab(ix, window, cx);
+                }
+            }),
+        }
     }
 
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1164,7 +1215,8 @@ impl Workspace {
             self.focused = self.pane_of(ix);
             self.pane_active.insert(self.focused, self.tabs[ix].entity_id());
             self.sync_panes();
-            if let Some(t) = self.tabs[ix].term() {
+            if let CenterTab::Term(t) = &mut self.tabs[ix] {
+                t.rang = false;
                 t.view.update(cx, |v, cx| v.clear_done_status(cx));
             }
             self.focus_active(window, cx);
@@ -1287,32 +1339,96 @@ impl Workspace {
         }
     }
 
+    /// Whether `view` is the tab shown in one of the panes.
+    fn is_shown(&self, view: &Entity<TerminalView>) -> bool {
+        self.shown_panes().into_iter().any(|p| self.pane_active_ix(p).and_then(|i| self.tabs[i].term()).is_some_and(|t| &t.view == view))
+    }
+
+    fn term_tab_mut(&mut self, view: &Entity<TerminalView>) -> Option<&mut TermTab> {
+        self.tabs.iter_mut().find_map(|t| match t {
+            CenterTab::Term(t) if &t.view == view => Some(t),
+            _ => None,
+        })
+    }
+
+    /// Show a notification for `view`'s tab unless it showed one moments
+    /// ago (Claude Code sends OSC 9 and a status change for one event).
+    fn notify_for(&mut self, view: &Entity<TerminalView>, title: &str, body: &str, cx: &mut Context<Self>) {
+        let Some(tab) = self.term_tab_mut(view) else { return };
+        if tab.notified.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+            return;
+        }
+        tab.notified = Some(Instant::now());
+        notify_system(title, body, cx);
+    }
+
     fn on_terminal_event(&mut self, view: &Entity<TerminalView>, ev: &TerminalEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
-            TerminalEvent::TitleChanged | TerminalEvent::Exited => cx.notify(),
+            TerminalEvent::TitleChanged => cx.notify(),
+            TerminalEvent::Exited { code, quick } => {
+                // `claude --resume` failing at once: the conversation is
+                // gone; start a new one in its place.
+                let restart = match self.term_tab_mut(view) {
+                    Some(t) if t.resuming && *quick && code.is_some_and(|c| c != 0) => {
+                        t.resuming = false;
+                        t.session = None;
+                        Some(t.token.clone())
+                    },
+                    Some(t) => {
+                        t.resuming = false;
+                        None
+                    },
+                    None => None,
+                };
+                if let Some(token) = restart {
+                    let (cfg, _) = self.spawn_config(TabKind::Claude, token.as_deref(), None);
+                    view.update(cx, |v, cx| {
+                        v.set_spawn_config(cfg);
+                        v.start(cx);
+                    });
+                    cx.emit(WorkspaceEvent::TabsChanged);
+                }
+                cx.notify();
+            },
             TerminalEvent::StatusChanged(status) => {
-                let is_active_tab = self
-                    .shown_panes()
-                    .into_iter()
-                    .any(|p| self.pane_active_ix(p).and_then(|i| self.tabs[i].term()).is_some_and(|t| &t.view == view));
-                if !window.is_window_active() || !is_active_tab {
+                if !window.is_window_active() || !self.is_shown(view) {
                     let (title, body) = match status {
                         ActivityStatus::Blocked => ("Claude needs your input", "Waiting for permission or an answer"),
                         ActivityStatus::Done => ("Claude finished", "The turn is complete"),
                         _ => ("", ""),
                     };
                     if !title.is_empty() {
-                        notify_system(title, body, cx);
+                        self.notify_for(view, title, body, cx);
                     }
                 }
                 cx.notify();
             },
             TerminalEvent::Notify { title, body } => {
-                if !window.is_window_active() {
-                    notify_system(title.as_deref().unwrap_or("Claude Code"), body, cx);
+                if !window.is_window_active() || !self.is_shown(view) {
+                    let title = match title {
+                        Some(t) if !t.is_empty() => t.clone(),
+                        _ => {
+                            let v = view.read(cx);
+                            v.agent().map_or_else(|| v.title().to_string(), |a| a.name().to_owned())
+                        },
+                    };
+                    self.notify_for(view, &title, body, cx);
                 }
             },
-            TerminalEvent::Bell => {},
+            TerminalEvent::Bell => {
+                let shown = self.is_shown(view);
+                if shown && window.is_window_active() {
+                    window.play_system_bell();
+                    return;
+                }
+                if !shown && let Some(t) = self.term_tab_mut(view) {
+                    t.rang = true;
+                }
+                if !window.is_window_active() {
+                    window.request_attention();
+                }
+                cx.notify();
+            },
             TerminalEvent::OpenPath { path, line, col } => {
                 if path.is_dir() && !path.starts_with(&self.root) {
                     return cx.reveal_path(path);
@@ -1384,6 +1500,7 @@ impl Workspace {
             ActivityStatus::Working => ("● ", theme.warning),
             ActivityStatus::Blocked => ("! ", theme.danger),
             ActivityStatus::Done => ("✓ ", theme.success),
+            ActivityStatus::None if t.rang => ("🔔 ", theme.warning),
             ActivityStatus::None => ("", theme.success),
         };
         let mut label = t.rename.as_ref().map_or_else(|| v.title().to_string(), |r| r.to_string());
@@ -1424,7 +1541,7 @@ impl Workspace {
             move |this, _, window, cx| {
                 // Don't let the tab's own click activate it.
                 cx.stop_propagation();
-                this.close_tab(i, window, cx);
+                this.request_close_tab(i, window, cx);
             },
         ))
     }
@@ -1993,14 +2110,24 @@ impl Workspace {
             .item(item("Close Group", Self::close_group).disabled(this.group_tabs(g).is_some_and(|r| r.len() == this.tabs.len())))
     }
 
-    /// Close every tab `close` picks, last first. Refuses to close them all.
+    /// Close every tab `close` picks, last first, asking first when that
+    /// ends running programs. Refuses to close them all.
     fn close_where(&mut self, close: impl Fn(usize, &CenterTab) -> bool, window: &mut Window, cx: &mut Context<Self>) {
-        let doomed: Vec<usize> = self.tabs.iter().enumerate().filter(|(i, t)| close(*i, t)).map(|(i, _)| i).collect();
+        let doomed: HashSet<EntityId> = self.tabs.iter().enumerate().filter(|(i, t)| close(*i, t)).map(|(_, t)| t.entity_id()).collect();
         if doomed.len() == self.tabs.len() {
             return;
         }
-        for ix in doomed.into_iter().rev() {
-            self.close_tab(ix, window, cx);
+        let jobs: Vec<String> =
+            (0..self.tabs.len()).filter(|&i| doomed.contains(&self.tabs[i].entity_id())).filter_map(|i| self.running_in(i, cx)).collect();
+        let close_now = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            while let Some(ix) = this.tabs.iter().rposition(|t| doomed.contains(&t.entity_id())) {
+                this.close_tab(ix, window, cx);
+            }
+        };
+        if jobs.is_empty() {
+            close_now(self, window, cx);
+        } else {
+            confirm_close(jobs, "these tabs", window, cx, close_now);
         }
     }
 
@@ -2755,6 +2882,31 @@ impl Workspace {
                     if self.show_scratches { self.scratches.read(cx).len() as isize } else { -1 }
                 )
             },
+            cmd if cmd.starts_with("term-") => {
+                let Some(view) = self.tabs.get(self.active).and_then(CenterTab::term).map(|t| t.view.clone()) else {
+                    return "error: the active tab is no terminal".into();
+                };
+                let (name, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+                match name {
+                    // `\n` = Enter, `\e` = Escape, `\a` = BEL.
+                    "term-type" => {
+                        let bytes = arg.replace("\\n", "\r").replace("\\e", "\x1b").replace("\\a", "\x07").into_bytes();
+                        view.update(cx, |v, cx| v.write_input(bytes, cx));
+                        "ok".into()
+                    },
+                    "term-screen" => view.read(cx).debug_screen(),
+                    "term-info" => {
+                        let rang: Vec<bool> = self.tabs.iter().filter_map(CenterTab::term).map(|t| t.rang).collect();
+                        format!("{} rang={rang:?} running={:?}", view.read(cx).debug_info(), self.running(cx))
+                    },
+                    "term-paste-path" => {
+                        let paths: Vec<PathBuf> = arg.split('|').map(PathBuf::from).collect();
+                        view.update(cx, |v, cx| v.debug_paste_paths(&paths, cx));
+                        "ok".into()
+                    },
+                    _ => format!("error: unknown command {name:?}"),
+                }
+            },
             cmd if cmd.starts_with("scratch-new ") => {
                 self.new_scratch(cmd["scratch-new ".len()..].trim(), window, cx);
                 "ok".into()
@@ -2911,6 +3063,24 @@ impl Workspace {
     }
 }
 
+/// Ask before closing `what` while `jobs` run in it; `then` closes it.
+pub fn confirm_close<T: 'static>(
+    jobs: Vec<String>,
+    what: &str,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    then: impl FnOnce(&mut T, &mut Window, &mut Context<T>) + 'static,
+) {
+    let detail = format!("Still running: {}. Closing ends {}.", jobs.join(", "), if jobs.len() == 1 { "it" } else { "them" });
+    let answer = window.prompt(PromptLevel::Warning, &format!("Close {what}?"), Some(&detail), &["Close", "Cancel"], cx);
+    cx.spawn_in(window, async move |this, cx| {
+        if answer.await == Ok(0) {
+            let _ = this.update_in(cx, |this, window, cx| then(this, window, cx));
+        }
+    })
+    .detach();
+}
+
 fn notify_system(title: &str, body: &str, cx: &mut App) {
     cx.show_system_notification(SystemNotification {
         tag: "tern".into(),
@@ -2992,7 +3162,7 @@ impl Render for Workspace {
                 if this.pane_tabs(this.focused).is_empty() {
                     this.close_pane(this.focused, w, cx);
                 } else {
-                    this.close_tab(this.active, w, cx);
+                    this.request_close_tab(this.active, w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.split(this.active, Edge::Right, w, cx)))
@@ -3064,5 +3234,9 @@ pub fn services(terminal: TerminalConfig) -> Services {
     .map_err(|e| log::warn!("hook server unavailable: {e}"))
     .ok();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    Services { hooks, hook_events: rx, run_dir: PathBuf::from(home).join("Library/Caches/dev.tern/run"), terminal }
+    // Each process keeps its tabs' settings files in its own dir, so one
+    // never sweeps another's (a dev build runs next to the installed app).
+    let runs = PathBuf::from(home).join("Library/Caches/dev.tern/run");
+    tern_bridge::sweep_run_dirs(&runs);
+    Services { hooks, hook_events: rx, run_dir: runs.join(std::process::id().to_string()), terminal }
 }

@@ -1,5 +1,6 @@
 //! Terminal core: PTY session, VT state, key encoding, OSC taps. No UI deps.
 
+pub mod env;
 pub mod keys;
 pub mod mouse;
 pub mod osc;

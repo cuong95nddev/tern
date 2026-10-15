@@ -1,6 +1,7 @@
 //! Recursive FSEvents watcher with debouncing. Emits batches of changed paths.
 //! `.git/` internals (of the root repo and any nested repo) are dropped except
-//! the files that change git status.
+//! the files that change git status, and so is everything inside heavy build
+//! dirs ([`crate::git::SKIP_DIRS`]: `node_modules`, `target`, ...).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -33,12 +34,16 @@ impl FsWatcher {
             }
         })?;
         watcher.watch(root, RecursiveMode::Recursive)?;
-        thread::Builder::new().name("fs-debounce".into()).spawn(move || debounce_loop(rx, debounce, on_batch)).expect("spawn fs-debounce");
+        let root = root.to_owned();
+        thread::Builder::new()
+            .name("fs-debounce".into())
+            .spawn(move || debounce_loop(&root, rx, debounce, on_batch))
+            .expect("spawn fs-debounce");
         Ok(Self { _watcher: watcher })
     }
 }
 
-fn debounce_loop(rx: mpsc::Receiver<notify::Event>, window: Duration, on_batch: impl Fn(ChangeBatch)) {
+fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duration, on_batch: impl Fn(ChangeBatch)) {
     loop {
         // Block for the first event.
         let Ok(first) = rx.recv() else { return };
@@ -52,7 +57,7 @@ fn debounce_loop(rx: mpsc::Receiver<notify::Event>, window: Duration, on_batch: 
             for p in ev.paths {
                 if let Some(rel) = git_internal(&p) {
                     git_changed |= is_git_status_file(rel);
-                } else {
+                } else if !in_skipped_dir(root, &p) {
                     paths.insert(p);
                 }
             }
@@ -86,6 +91,14 @@ fn git_internal(p: &Path) -> Option<&Path> {
     None
 }
 
+/// Whether `p` is inside (not just named) a skipped dir below `root`.
+fn in_skipped_dir(root: &Path, p: &Path) -> bool {
+    let Ok(rel) = p.strip_prefix(root) else { return false };
+    let mut comps: Vec<_> = rel.components().collect();
+    comps.pop();
+    comps.iter().any(|c| c.as_os_str().to_str().is_some_and(|n| crate::git::SKIP_DIRS.contains(&n)))
+}
+
 fn is_git_status_file(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
     s == "HEAD" || s == "index" || s.starts_with("refs/")
@@ -117,6 +130,18 @@ mod tests {
         }
         assert!(seen.contains(&root.join("a.txt")), "{seen:?}");
         assert!(seen.contains(&root.join("b.txt")), "{seen:?}");
+    }
+
+    #[test]
+    fn skips_build_dirs() {
+        let root = Path::new("/r");
+        assert!(in_skipped_dir(root, Path::new("/r/node_modules/x/index.js")));
+        assert!(in_skipped_dir(root, Path::new("/r/app/target/debug/foo")));
+        // The dir itself still shows up (created / deleted).
+        assert!(!in_skipped_dir(root, Path::new("/r/node_modules")));
+        assert!(!in_skipped_dir(root, Path::new("/r/src/build.rs")));
+        // Only below the root: a root inside `target` is fine.
+        assert!(!in_skipped_dir(Path::new("/x/target/r"), Path::new("/x/target/r/a.rs")));
     }
 
     #[test]
