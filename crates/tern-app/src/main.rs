@@ -39,6 +39,10 @@ fn main() {
         unsafe { tern_term::env::prepare_process_env() };
         tern_mux::server::run();
     }
+    // The menu bar agent (started by the UI): lists background terminals.
+    if std::env::args().nth(1).as_deref() == Some("--menubar") {
+        tern_menubar::run();
+    }
     // Read before the environment is cleaned for terminals.
     let control_socket = std::env::var_os("TERN_CONTROL").map(PathBuf::from);
     // SAFETY: no other thread runs yet.
