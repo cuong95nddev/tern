@@ -112,6 +112,47 @@ jobs:
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
             choco install innosetup -y --no-progress
           }
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      # Code signing through SignPath (free for open source, certificate by
+      # SignPath Foundation) once the repository variable
+      # SIGNPATH_ORGANIZATION_ID and the secret SIGNPATH_API_TOKEN are set:
+      # tern.exe is signed, packed into the installer, and the installer is
+      # signed. Each request waits for a manual approval in SignPath.
+      # Without them the installer is built unsigned, as before.
+      - name: Build tern.exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        env:
+          TERN_RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+          TERN_WINDOWS_SIGNER: ${{ vars.WINDOWS_SIGNER }}
+        run: |
+          cargo build --locked --release -p tern-app --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+          New-Item -ItemType Directory -Force -Path unsigned | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\tern-app.exe unsigned\tern.exe
+      - name: Upload unsigned tern.exe
+        id: unsigned-exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tern-exe-unsigned
+          path: unsigned/tern.exe
+      - name: Sign tern.exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2.3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'tern' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: tern-exe
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+          wait-for-completion-timeout-in-seconds: 14400
+          output-artifact-directory: signed
       - name: Build installer
         id: setup
         env:
@@ -119,13 +160,47 @@ jobs:
           # Thumbprints of the installer's signing certificates; Tern installs
           # updates only when set (and the installer is signed by one).
           TERN_WINDOWS_SIGNER: ${{ vars.WINDOWS_SIGNER }}
+          SIGNED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
         run: |
-          $setup = scripts/release-windows.ps1 -OutDir dist
+          if ($env:SIGNED -eq "true") {
+            $setup = scripts/release-windows.ps1 -OutDir dist -Exe signed\tern.exe
+          } else {
+            $setup = scripts/release-windows.ps1 -OutDir dist
+          }
           "path=$setup" >> $env:GITHUB_OUTPUT
+      - name: Upload unsigned installer
+        id: unsigned-setup
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tern-setup-unsigned
+          path: ${{ steps.setup.outputs.path }}
+      - name: Sign installer
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2.3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'tern' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: tern-setup
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+          wait-for-completion-timeout-in-seconds: 14400
+          output-artifact-directory: signed-setup
+      - name: Check signatures
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        run: |
+          foreach ($f in @("signed\tern.exe") + (Get-ChildItem signed-setup\*-setup.exe).FullName) {
+            $s = Get-AuthenticodeSignature -LiteralPath $f
+            if ($s.Status -ne "Valid") { throw "$f is not signed: $($s.Status)" }
+            "$f signed by $($s.SignerCertificate.Subject) ($($s.SignerCertificate.Thumbprint))"
+          }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tern-windows
-          path: ${{ steps.setup.outputs.path }}
+          path: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && 'signed-setup/*-setup.exe' || steps.setup.outputs.path }}
 
   linux:
     # The oldest supported runner, so the binary runs on older glibc too.
@@ -193,8 +268,14 @@ jobs:
 
             Run `Tern-*-windows-x64-setup.exe`. It installs for your user (no admin
             rights), adds Tern to the Start menu and, optionally, the `tern` command
-            to PATH and "Open in Tern" to the folder context menu. The installer
-            isn't code-signed yet: SmartScreen asks first (More info ▸ Run anyway).
+            to PATH and "Open in Tern" to the folder context menu. Until SignPath
+            signs it, SmartScreen asks first (More info ▸ Run anyway).
+
+            ## Code signing policy
+
+            Free code signing provided by [SignPath.io](https://about.signpath.io),
+            certificate by [SignPath Foundation](https://signpath.org). See the
+            [code signing policy](https://github.com/cuong95nddev/tern#code-signing-policy).
 
             ## Install (Linux x86_64)
 

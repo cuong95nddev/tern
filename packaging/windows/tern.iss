@@ -19,6 +19,12 @@ AppId={{6F1C2B57-7E0A-4C8B-9B1E-3D5A2C9F4E61}
 AppName=Tern
 AppVersion={#Version}
 AppVerName=Tern {#Version}
+; Product name and version on setup.exe too (code signing checks them).
+VersionInfoVersion={#Version}
+VersionInfoProductName=Tern
+VersionInfoProductTextVersion={#Version}
+VersionInfoCompany=Tern
+VersionInfoDescription=Tern Setup
 AppPublisher=Tern
 AppPublisherURL=https://github.com/cuong95nddev/tern
 AppSupportURL=https://github.com/cuong95nddev/tern/issues

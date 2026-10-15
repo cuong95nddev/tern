@@ -135,6 +135,13 @@ downloaded installer carries a valid Authenticode signature from one of them; th
 users get the release page. To publish releases to another repo, set the repository
 variable `RELEASE_REPO` and the secret `RELEASE_TOKEN` (a fine-grained token with Contents read/write on it).
 
+Windows signing goes through [SignPath](https://signpath.org) (see [Code signing policy](#code-signing-policy)). With the
+repository variable `SIGNPATH_ORGANIZATION_ID` and the secret `SIGNPATH_API_TOKEN` set, the release workflow has
+SignPath sign `tern.exe`, packs it into the installer and has the installer signed; each request waits for approval
+in SignPath. The project there needs the artifact configurations in `packaging/windows/signpath/` (slugs `tern-exe`,
+`tern-setup`), project slug `tern` and signing policy `release-signing` (or set `SIGNPATH_PROJECT_SLUG` /
+`SIGNPATH_POLICY_SLUG`). Then set `WINDOWS_SIGNER` to the certificate's thumbprint so Tern installs updates itself.
+
 ## Reference
 
 Tern reopens the last session: every window with its workspaces, where it was (`~/Library/Application Support/dev.tern/session`). `tern <folder>` adds the folder as a workspace in the running Tern (or launches it with the session restored); so does dropping a folder on the Dock icon. With no session, the window shows a welcome page (Open Workspace…, recent folders), as it does after its last workspace closes.
@@ -180,6 +187,23 @@ the active scratch tab's text; `\n` for newlines), `windows`, `ws`, `ws-open PAT
 `new-window`. Commands go to the active window; prefix `@N ` to target window N. Scripted runs
 neither restore nor save the session unless `TERN_SESSION=1` (pair it with a scratch `HOME`). Pair with
 `screencapture -l <window id>` to see the result.
+
+## Code signing policy
+
+Windows releases are signed once SignPath approves the project: free code signing provided by
+[SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [@cuong95nddev](https://github.com/cuong95nddev)
+- Approvers: [@cuong95nddev](https://github.com/cuong95nddev)
+
+Only builds made by `.github/workflows/release.yml` from this repository's sources are signed, and every
+release is approved by hand before it is.
+
+## Privacy
+
+Tern sends nothing about you or your files anywhere. Its only network request of its own is the update check:
+anonymous requests to github.com for this repository's latest release (`TERN_NO_UPDATE_CHECK=1` turns it off).
+Programs you run in its terminals, such as Claude Code, follow their own privacy policies.
 
 ## Feedback
 
