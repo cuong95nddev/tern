@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tern — a fast terminal for coding agents</title>
-<meta name="description" content="A fast native macOS terminal for coding agents like Claude Code, OpenCode and Codex, with a file explorer, diff viewer and the git changes of every repo beside your tabs.">
+<meta name="description" content="A fast native terminal for macOS, Windows and Linux, built for coding agents like Claude Code, OpenCode and Codex, with a file explorer, diff viewer and the git changes of every repo beside your tabs.">
 <meta name="theme-color" content="#000000">
 <meta property="og:title" content="Tern">
 <meta property="og:description" content="A fast native terminal for coding agents.">
@@ -91,6 +91,11 @@
   .btn-primary:hover { background: #fff; }
   .btn-ghost:hover { background: var(--raise); }
   .meta { margin-top: 18px; font-size: 14px; color: var(--faint); }
+  .also { margin-top: 6px; font-size: 14px; color: var(--faint); }
+  .also a { color: var(--dim); text-decoration: none; }
+  .also a:hover { color: var(--ink); }
+  .also a + a::before { content: "·"; color: var(--faint); margin: 0 8px; }
+  .also a[hidden] { display: none; }
 
   /* window mock */
   .shot { padding: 24px 0 112px; }
@@ -201,12 +206,13 @@
     <p class="lede">Run Claude Code, OpenCode, Codex or any CLI agent in a native, GPU-rendered terminal, next to a file explorer, a diff viewer and the git changes of every repo in the folder.</p>
     <div class="ctas">
       <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c.02 2.43 2.13 3.24 2.15 3.25-.02.06-.34 1.15-1.11 2.28-.67.98-1.36 1.95-2.45 1.97-1.07.02-1.42-.63-2.64-.63-1.23 0-1.61.61-2.62.65-1.05.04-1.85-1.06-2.52-2.04-1.38-1.99-2.43-5.63-1.02-8.08.7-1.22 1.95-1.99 3.31-2.01 1.03-.02 2.01.7 2.64.7.63 0 1.81-.86 3.06-.73.52.02 1.98.21 2.92 1.59-.08.05-1.74 1.02-1.72 3.05zM14.35 5.04c.56-.68.94-1.62.83-2.56-.81.03-1.79.54-2.37 1.21-.52.6-.98 1.56-.85 2.48.9.07 1.82-.46 2.39-1.13z"/></svg>
-        Download for macOS
+        <span class="js-icon"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c.02 2.43 2.13 3.24 2.15 3.25-.02.06-.34 1.15-1.11 2.28-.67.98-1.36 1.95-2.45 1.97-1.07.02-1.42-.63-2.64-.63-1.23 0-1.61.61-2.62.65-1.05.04-1.85-1.06-2.52-2.04-1.38-1.99-2.43-5.63-1.02-8.08.7-1.22 1.95-1.99 3.31-2.01 1.03-.02 2.01.7 2.64.7.63 0 1.81-.86 3.06-.73.52.02 1.98.21 2.92 1.59-.08.05-1.74 1.02-1.72 3.05zM14.35 5.04c.56-.68.94-1.62.83-2.56-.81.03-1.79.54-2.37 1.21-.52.6-.98 1.56-.85 2.48.9.07 1.82-.46 2.39-1.13z"/></svg></span>
+        <span class="js-label">Download for macOS</span>
       </a>
       <a class="btn btn-ghost" href="https://github.com/cuong95nddev/tern/releases">All releases</a>
     </div>
-    <p class="meta"><span class="js-version">Latest release</span> · Universal (Apple Silicon and Intel) · macOS 12+</p>
+    <p class="meta"><span class="js-version">Latest release</span> · <span class="js-meta">Universal (Apple Silicon and Intel) · macOS 12+</span></p>
+    <p class="also">Also for <a class="js-os" data-os="macos" href="https://github.com/cuong95nddev/tern/releases/latest" hidden>macOS</a><a class="js-os" data-os="windows" href="https://github.com/cuong95nddev/tern/releases/latest">Windows</a><a class="js-os" data-os="linux" href="https://github.com/cuong95nddev/tern/releases/latest">Linux</a></p>
   </header>
 
   <section class="shot" aria-label="Tern window">
@@ -287,18 +293,18 @@
       <p>Every panel has a shortcut. The full list is in the README.</p>
     </div>
     <ul class="klist">
-      <li><span>New Claude tab</span><kbd>⌘T</kbd></li>
-      <li><span>Open a folder as a workspace</span><kbd>⌘O</kbd></li>
-      <li><span>Toggle explorer</span><kbd>⌘B</kbd></li>
-      <li><span>Toggle Changes panel</span><kbd>⌘⇧G</kbd></li>
-      <li><span>Diff the open file against HEAD</span><kbd>⌘⇧D</kbd></li>
-      <li><span>Open the file in VS Code or Cursor</span><kbd>⌘⇧O</kbd></li>
+      <li><span>New Claude tab</span><kbd data-pc="Ctrl+Shift+T">⌘T</kbd></li>
+      <li><span>Open a folder as a workspace</span><kbd data-pc="Ctrl+Shift+O">⌘O</kbd></li>
+      <li><span>Toggle explorer</span><kbd data-pc="Ctrl+Shift+B">⌘B</kbd></li>
+      <li><span>Toggle Changes panel</span><kbd data-pc="Ctrl+Alt+Shift+G">⌘⇧G</kbd></li>
+      <li><span>Diff the open file against HEAD</span><kbd data-pc="Ctrl+Alt+Shift+D">⌘⇧D</kbd></li>
+      <li><span>Open the file in VS Code or Cursor</span><kbd data-pc="Ctrl+Alt+Shift+O">⌘⇧O</kbd></li>
     </ul>
   </section>
 
   <section class="end">
     <h2>Try Tern on your next session</h2>
-    <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest">Download for macOS</a>
+    <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest"><span class="js-label">Download for macOS</span></a>
     <div>
       <pre class="cli"><span># optional: open folders from the shell</span>
 <b>tern</b> ~/code/my-project</pre>
@@ -309,17 +315,45 @@
 <footer>
   <div class="wrap">
     <span>Tern</span>
+    <a href="https://github.com/cuong95nddev/tern#code-signing-policy">Code signing policy</a>
+    <a href="https://github.com/cuong95nddev/tern#privacy">Privacy</a>
     <a href="https://github.com/cuong95nddev/tern">github.com/cuong95nddev/tern</a>
   </div>
 </footer>
 
 <script>
-  // Point the download buttons straight at the latest DMG; the release page stays as the fallback.
+  // The visitor's platform picks the download button (macOS without a
+  // better guess, e.g. on a phone) and, off macOS, the shortcut labels.
+  const ua = (navigator.userAgentData?.platform || navigator.platform || "") + " " + navigator.userAgent;
+  const os = /android|iphone|ipad/i.test(ua) ? "macos" : /win/i.test(ua) ? "windows" : /linux|x11/i.test(ua) ? "linux" : "macos";
+  const platforms = {
+    macos: { name: "macOS", file: ".dmg", meta: "Universal (Apple Silicon and Intel) · macOS 12+" },
+    windows: { name: "Windows", file: "-setup.exe", meta: "x64 · Windows 10 (1809+) and 11" },
+    linux: { name: "Linux", file: ".tar.gz", meta: "x86_64 · tar.gz with an install script" },
+  };
+  const icons = {
+    windows: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.1 10.4 4v7.1H3zm8.3-1.2L21 2.5v8.6h-9.7zM3 12.9h7.4V20L3 18.9zm8.3 0H21v8.6l-9.7-1.4z"/></svg>',
+    linux: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg>',
+  };
+  const p = platforms[os];
+  document.querySelectorAll(".js-label").forEach(el => el.textContent = "Download for " + p.name);
+  document.querySelector(".js-meta").textContent = p.meta;
+  if (icons[os]) document.querySelector(".js-icon").innerHTML = icons[os];
+  document.querySelectorAll(".js-os").forEach(a => a.hidden = a.dataset.os === os);
+  if (os !== "macos") document.querySelectorAll("kbd[data-pc]").forEach(k => k.textContent = k.dataset.pc);
+
+  // Point the download links straight at the latest release's files; the
+  // release page stays as the fallback.
   fetch("https://api.github.com/repos/cuong95nddev/tern/releases/latest")
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(rel => {
-      const dmg = (rel.assets || []).find(a => a.name.endsWith(".dmg"));
-      if (dmg) document.querySelectorAll(".js-download").forEach(a => a.href = dmg.browser_download_url);
+      const asset = key => (rel.assets || []).find(a => a.name.endsWith(platforms[key].file));
+      const mine = asset(os);
+      if (mine) document.querySelectorAll(".js-download").forEach(a => a.href = mine.browser_download_url);
+      document.querySelectorAll(".js-os").forEach(a => {
+        const f = asset(a.dataset.os);
+        if (f) a.href = f.browser_download_url;
+      });
       if (rel.tag_name) document.querySelector(".js-version").textContent = rel.tag_name;
     })
     .catch(() => {});

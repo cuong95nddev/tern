@@ -181,6 +181,23 @@ the active scratch tab's text; `\n` for newlines), `windows`, `ws`, `ws-open PAT
 neither restore nor save the session unless `TERN_SESSION=1` (pair it with a scratch `HOME`). Pair with
 `screencapture -l <window id>` to see the result.
 
+## Code signing policy
+
+Windows releases are signed once SignPath approves the project: free code signing provided by
+[SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [@cuong95nddev](https://github.com/cuong95nddev)
+- Approvers: [@cuong95nddev](https://github.com/cuong95nddev)
+
+Only builds made by `.github/workflows/release.yml` from this repository's sources are signed, and every
+release is approved by hand before it is.
+
+## Privacy
+
+Tern sends nothing about you or your files anywhere. Its only network request of its own is the update check:
+anonymous requests to github.com for this repository's latest release (`TERN_NO_UPDATE_CHECK=1` turns it off).
+Programs you run in its terminals, such as Claude Code, follow their own privacy policies.
+
 ## Feedback
 
 Found a bug or have an idea? [Open an issue](https://github.com/cuong95nddev/tern/issues). Tern is MIT licensed, see [LICENSE](LICENSE).
