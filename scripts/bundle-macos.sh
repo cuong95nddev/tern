@@ -111,10 +111,16 @@ EOF
 # With TERN_SIGN_ID (a "Developer ID Application: ..." identity) sign for
 # distribution: hardened runtime and a secure timestamp, as notarization
 # requires. Else an ad-hoc signature, so Gatekeeper and notifications treat
-# it as one app. The helper is signed first: the outer signature seals it.
+# it as one app. TERN_DEV_SIGN_ID (any identity, e.g. "Apple Development: ...")
+# signs a local build plainly: a stable identity keeps privacy permissions
+# across rebuilds, which an ad-hoc signature (keyed by the binary's hash) can't.
+# The helper is signed first: the outer signature seals it.
 if [ -n "${TERN_SIGN_ID:-}" ]; then
     codesign --force --options runtime --timestamp --sign "$TERN_SIGN_ID" "$HELPER"
     codesign --force --options runtime --timestamp --sign "$TERN_SIGN_ID" "$APP"
+elif [ -n "${TERN_DEV_SIGN_ID:-}" ]; then
+    codesign --force --sign "$TERN_DEV_SIGN_ID" "$HELPER"
+    codesign --force --sign "$TERN_DEV_SIGN_ID" "$APP"
 else
     codesign --force --sign - "$HELPER" >/dev/null 2>&1 || true
     codesign --force --sign - "$APP" >/dev/null 2>&1 || true

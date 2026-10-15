@@ -4,11 +4,20 @@
 # session, if needed).
 #   scripts/install-macos.sh [APP_DIR] [BIN_DIR]
 # Defaults: /Applications and ~/.local/bin.
+# Signs with the first "Apple Development" identity in the keychain, if any,
+# so privacy permissions (Accessibility, Screen Recording) survive reinstalls;
+# set TERN_DEV_SIGN_ID to pick another, or TERN_SIGN_ID for a release signature.
 set -eu
 
 APP_DIR=${1:-/Applications}
 BIN_DIR=${2:-"$HOME/.local/bin"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ -z "${TERN_SIGN_ID:-}" ] && [ -z "${TERN_DEV_SIGN_ID:-}" ]; then
+    TERN_DEV_SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null |
+        sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Apple Development: .*/\1/p' | head -1)
+    export TERN_DEV_SIGN_ID
+fi
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
