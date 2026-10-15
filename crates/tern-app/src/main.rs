@@ -11,6 +11,7 @@ mod panes;
 mod scratch;
 mod scratches_view;
 mod terminal_view;
+mod terminate;
 mod update;
 mod viewer;
 mod window_state;
@@ -67,6 +68,22 @@ fn main() {
         main_window::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-o", OpenFolder, None)]);
         cx.on_action(|_: &Quit, cx| quit(cx));
+        // Quitting from the Dock, AppleScript or logout asks first too.
+        let (terminate_tx, terminate_rx) = flume::unbounded();
+        terminate::install(terminate_tx);
+        cx.spawn(async move |cx| {
+            while terminate_rx.recv_async().await.is_ok() {
+                cx.update(|cx| {
+                    confirm_quit(cx, |ok, cx| {
+                        if ok {
+                            cx.default_global::<main_window::Session>().quitting = true;
+                        }
+                        terminate::reply(ok);
+                    })
+                });
+            }
+        })
+        .detach();
         cx.set_menus([Menu::new("Tern").items([
             MenuItem::action("Check for Updates…", update::CheckForUpdates),
             MenuItem::separator(),
@@ -143,25 +160,34 @@ fn main() {
 /// Quit, keeping every open window in the saved session; ask first when
 /// that ends running programs.
 pub fn quit(cx: &mut App) {
+    confirm_quit(cx, |ok, cx| {
+        if ok {
+            quit_now(cx)
+        }
+    });
+}
+
+/// Ask whether to quit when that ends running programs; `done` gets the answer.
+fn confirm_quit(cx: &mut App, done: impl FnOnce(bool, &mut App) + 'static) {
     let jobs = main_window::running(cx);
     let window = cx.active_window().or_else(|| cx.windows().first().copied());
-    let (Some(window), false) = (window, jobs.is_empty()) else { return quit_now(cx) };
+    let (Some(window), false) = (window, jobs.is_empty()) else { return done(true, cx) };
     let detail = format!("Still running: {}. Quitting ends {}.", jobs.join(", "), if jobs.len() == 1 { "it" } else { "them" });
     let Ok(answer) =
         window.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Quit Tern?", Some(&detail), &["Quit", "Cancel"], cx))
     else {
-        return quit_now(cx);
+        return done(true, cx);
     };
     cx.spawn(async move |cx| {
-        if answer.await == Ok(0) {
-            cx.update(quit_now);
-        }
+        let ok = answer.await == Ok(0);
+        cx.update(|cx| done(ok, cx));
     })
     .detach();
 }
 
 fn quit_now(cx: &mut App) {
     cx.default_global::<main_window::Session>().quitting = true;
+    terminate::approve();
     cx.quit()
 }
 
