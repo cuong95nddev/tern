@@ -26,6 +26,7 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 - **Changes panel** listing the git changes of every repo under the folder; click a file to preview its diff
 - **Scratch files** that save as you type
 - **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
+- **Background sessions**: terminals keep running after you quit, and reattach on the next launch
 - **Automatic updates**: Tern checks for new releases and installs them in place, keeping your session
 
 ## Install
@@ -58,6 +59,12 @@ Then run `tern ~/code/my-project`. Dropping a folder on the Dock icon works too.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd> | Open the file in VS Code or Cursor |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 
+## Background sessions
+
+Terminals run in a small background process (`tern --server`, started by Tern), so quitting Tern, an update or a crash doesn't stop them: at the next launch every tab comes back attached to the same program, with its screen and scrollback. While Tern is closed, a Claude turn that finishes or needs approval still posts a notification. Closing a tab, a workspace or a window ends its programs.
+
+The background process quits by itself once no tab is left. Its log is `~/Library/Logs/Tern/daemon.log`; `pkill -f 'MacOS/tern --server'` ends it and everything running in it.
+
 ## Updates
 
 Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the workspace bar (also under **Tern ▸ Check for Updates…**). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
@@ -71,7 +78,7 @@ cargo run --release -p tern-app -- /path/to/project
 scripts/install-macos.sh      # /Applications/Tern.app plus a `tern` command in ~/.local/bin
 ```
 
-Crates: `tern-term` (PTY + VT core), `tern-fs` (tree, watcher, git),
+Crates: `tern-term` (VT core, snapshots), `tern-mux` (background daemon: PTYs, protocol, client), `tern-fs` (tree, watcher, git),
 `tern-bridge` (Claude Code hook receiver), `tern-app` (UI).
 
 The app icon lives in `assets/icon/source.png`; `scripts/gen-icons.sh` (ImageMagick) regenerates every size from it into `assets/icon/`: macOS `.icns` and an Icon Composer `Tern.icon` (compiled by the install script with Xcode's `actool`, so macOS 26 shows it full-size instead of shrunk into a gray tile), iOS `AppIcon.appiconset` (with dark and tinted looks), Android `res/` (legacy, round, adaptive and monochrome launcher icons, Play Store 512) and web favicons/PWA icons.
