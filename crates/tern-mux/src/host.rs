@@ -287,6 +287,14 @@ impl Host {
         tern_term::procs::foreground_programs(&self.master)
     }
 
+    /// Whether a shell is in the foreground (at its prompt), rather than a
+    /// program run from it.
+    pub fn shell_in_foreground(&self) -> bool {
+        const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"];
+        let programs = self.foreground_programs();
+        !programs.is_empty() && programs.iter().all(|p| SHELLS.contains(&p.trim_start_matches('-')))
+    }
+
     /// End the program: SIGHUP, then SIGKILL if it is still there after a
     /// grace period. Returns at once.
     pub fn kill(&self) {
@@ -490,10 +498,23 @@ impl Driver {
         Ok(())
     }
 
+    /// End the program and the jobs it runs in the foreground: SIGHUP to
+    /// their process groups (as the kernel would on a hangup, which can't
+    /// come while the UI holds the PTY too), SIGKILL after a grace period.
     fn hang_up(&self) {
         let pid = self.pty.child().id() as libc::pid_t;
-        // SAFETY: plain syscalls on our own child.
-        unsafe { libc::kill(pid, libc::SIGHUP) };
+        // SAFETY: plain syscalls on our own child and its PTY.
+        let fg = unsafe { libc::tcgetpgrp(self.pty.file().as_raw_fd()) };
+        let signal = |sig| {
+            // The child leads its own session, so its group id is its pid.
+            unsafe { libc::kill(-pid, sig) };
+            if fg > 0 && fg != pid {
+                unsafe { libc::kill(-fg, sig) };
+            }
+        };
+        signal(libc::SIGHUP);
+        // Stopped jobs only see the hangup once continued.
+        signal(libc::SIGCONT);
         // Reap it here, so the Pty's drop doesn't wait forever on a program
         // that ignores SIGHUP.
         let deadline = Instant::now() + KILL_GRACE;
@@ -501,13 +522,15 @@ impl Driver {
             let mut st = 0;
             let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
             if r != 0 {
+                // Its foreground job may outlive it.
+                if fg > 0 && fg != pid {
+                    unsafe { libc::kill(-fg, libc::SIGKILL) };
+                }
                 return;
             }
             if Instant::now() >= deadline {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    libc::waitpid(pid, &mut st, 0);
-                }
+                signal(libc::SIGKILL);
+                unsafe { libc::waitpid(pid, &mut st, 0) };
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));

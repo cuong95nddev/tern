@@ -27,6 +27,11 @@ pub type HookSink = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Input is sent in pieces of at most this (a big paste stays under the
+/// daemon's frame limit).
+const INPUT_CHUNK: usize = 1 << 20;
+/// Input typed before the daemon answered, kept to send once it has.
+const MAX_EARLY_INPUT: usize = 16 << 20;
 
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
@@ -42,7 +47,10 @@ struct Slot {
     term: Arc<FairMutex<MirrorTerm>>,
     wake: Arc<AtomicBool>,
     sink: EventSink,
+    /// Set once the daemon answered; while `None`, input waits in `early`
+    /// (its lock is held to set the id).
     id: Mutex<Option<u64>>,
+    early: Mutex<Vec<u8>>,
     /// The PTY master, for foreground-process queries.
     tty: Mutex<Option<File>>,
     /// The size the view wants; sent once the session is known.
@@ -64,6 +72,7 @@ struct Inner {
     lists: Mutex<HashMap<u64, mpsc::Sender<Vec<SessionInfo>>>>,
     hooks: HookSink,
     server_pid: u32,
+    server_version: String,
 }
 
 impl Inner {
@@ -77,6 +86,12 @@ impl Inner {
 
     fn req(&self) -> u64 {
         self.next_req.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn input(&self, id: u64, bytes: &[u8]) {
+        for chunk in bytes.chunks(INPUT_CHUNK) {
+            let _ = self.send(&ClientMsg::Input { id, bytes: chunk.to_vec() });
+        }
     }
 }
 
@@ -124,16 +139,20 @@ impl MuxClient {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "daemon runs as another user"));
         }
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // A daemon that accepts but never answers mustn't hang the UI.
+        stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
         let mut writer = stream.try_clone()?;
         proto::write_frame(&mut writer, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into() })?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
-        let server_pid = match reader.read::<ServerMsg>()? {
+        let (server_pid, server_version) = match reader.read::<ServerMsg>()? {
             Some(ServerMsg::Hello { major, pid, app_version, .. }) if major == MAJOR => {
                 log::info!("connected to daemon {pid} (Tern {app_version})");
-                pid
+                (pid, app_version)
             },
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
         };
+        // The same socket: the reader blocks from now on.
+        writer.set_read_timeout(None)?;
         let inner = Arc::new(Inner {
             writer: Mutex::new(writer),
             alive: AtomicBool::new(true),
@@ -143,6 +162,7 @@ impl MuxClient {
             lists: Mutex::default(),
             hooks,
             server_pid,
+            server_version,
         });
         let closer = Closer(inner.writer.lock().unwrap().try_clone()?);
         let i = inner.clone();
@@ -156,6 +176,12 @@ impl MuxClient {
 
     pub fn server_pid(&self) -> u32 {
         self.inner.server_pid
+    }
+
+    /// The Tern version the daemon runs (an older one keeps running after
+    /// an update until it has no terminals left).
+    pub fn server_version(&self) -> &str {
+        &self.inner.server_version
     }
 
     /// Open a tab's session. Returns at once: the sink gets `Ready` (or
@@ -172,6 +198,7 @@ impl MuxClient {
             mirror: Mutex::new(mirror),
             sink,
             id: Mutex::new(None),
+            early: Mutex::new(Vec::new()),
             tty: Mutex::new(None),
             want: Mutex::new(size),
         });
@@ -245,6 +272,11 @@ impl Connector {
     pub fn connected(&self) -> bool {
         self.cur.lock().unwrap().as_ref().is_some_and(MuxClient::alive)
     }
+
+    /// The live connection's daemon version (doesn't connect).
+    pub fn server_version(&self) -> Option<String> {
+        self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).map(|c| c.server_version().to_owned())
+    }
 }
 
 /// Start the daemon from this executable, detached from us.
@@ -304,7 +336,11 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                     },
                 };
                 slot.mirror.lock().unwrap().install(&snap);
-                *slot.id.lock().unwrap() = Some(id);
+                let early = {
+                    let mut early = slot.early.lock().unwrap();
+                    *slot.id.lock().unwrap() = Some(id);
+                    std::mem::take(&mut *early)
+                };
                 if slot.gone.load(Ordering::SeqCst) {
                     // Its tab went away before the answer.
                     let msg = if slot.close.load(Ordering::SeqCst) { ClientMsg::Close { id } } else { ClientMsg::Detach { id } };
@@ -320,6 +356,7 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 if want != slot.sent {
                     let _ = inner.send(&ClientMsg::Resize { id, size: want });
                 }
+                inner.input(id, &early);
             },
             ServerMsg::NotFound { req, .. } => {
                 if let Some(slot) = inner.pending.lock().unwrap().remove(&req) {
@@ -344,8 +381,11 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 }
             },
             ServerMsg::Hook { token, body } => (inner.hooks)(token, body),
+            // Attached elsewhere, or fell behind: the tab reattaches.
             ServerMsg::Detached { id } => {
-                if let Some(slot) = inner.sessions.lock().unwrap().remove(&id) {
+                let slot = inner.sessions.lock().unwrap().remove(&id);
+                if let Some(slot) = slot {
+                    slot.tty.lock().unwrap().take();
                     (slot.sink)(TermEvent::ServerLost);
                 }
             },
@@ -390,9 +430,19 @@ impl RemoteSession {
         *self.slot.id.lock().unwrap()
     }
 
+    /// Send input; before the daemon answered, it is kept and sent then.
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        if let Some(id) = self.id() {
-            let _ = self.inner.send(&ClientMsg::Input { id, bytes: bytes.into().into_owned() });
+        let bytes = bytes.into();
+        let id = {
+            let mut early = self.slot.early.lock().unwrap();
+            let id = *self.slot.id.lock().unwrap();
+            if id.is_none() && early.len() + bytes.len() <= MAX_EARLY_INPUT {
+                early.extend_from_slice(&bytes);
+            }
+            id
+        };
+        if let Some(id) = id {
+            self.inner.input(id, &bytes);
         }
     }
 
@@ -428,6 +478,8 @@ impl RemoteSession {
     /// End the program and forget the session.
     pub fn close(mut self) {
         self.closed = true;
+        // Holding the PTY would keep its programs from getting a hangup.
+        self.slot.tty.lock().unwrap().take();
         if let Some(id) = self.id() {
             let _ = self.inner.send(&ClientMsg::Close { id });
         }

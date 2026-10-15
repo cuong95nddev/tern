@@ -29,6 +29,13 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     dir.join(format!("mux-{MAJOR}.sock"))
 }
 
+/// The lock a daemon of this protocol major holds while it serves: a
+/// daemon of another major (an older Tern's, still running its programs)
+/// doesn't keep this one from starting.
+pub fn lock_path(dir: &Path) -> PathBuf {
+    dir.join(format!("server-{MAJOR}.lock"))
+}
+
 /// Create `dir` (0700), or check that it is a directory only we can use.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;

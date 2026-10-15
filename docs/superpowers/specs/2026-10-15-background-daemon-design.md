@@ -161,7 +161,8 @@ master fd with `SCM_RIGHTS`; the UI keeps it only for `tcgetpgrp`-style queries
 - Start: the UI connects; on `ENOENT`/`ECONNREFUSED` it spawns `current_exe() --server`
   with `setsid` (stdin null, stdout/stderr appended to `~/Library/Logs/Tern/daemon.log`)
   and retries with backoff for up to 3 s (shpool). The daemon takes an exclusive `flock`
-  on `server.lock` before binding; if it can't, another daemon is running and it exits.
+  on `server-<major>.lock` before binding (per major: an older Tern's daemon
+  still running its programs doesn't block a newer one); if it can't, another daemon is running and it exits.
   It removes a stale socket file only after a refused connect.
 - The daemon ignores SIGHUP/SIGINT, exits on SIGTERM (hanging up every child), and exits
   by itself when it has no sessions and no client for 10 s.

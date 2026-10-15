@@ -4,10 +4,11 @@
 //! owns every terminal's program, the Claude Code hook server and their
 //! settings files, so all of them outlive the UI. Each UI connection gets a
 //! reader thread and a writer thread; the writer's queue is bounded so a UI
-//! that stops reading never stalls a program (the connection is dropped and
-//! the UI reattaches).
+//! that stops reading never stalls a program. A session that falls behind is
+//! detached alone (its tab reattaches from a snapshot); a connection that
+//! falls behind as a whole is dropped (every tab reattaches).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -28,8 +29,11 @@ use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
 use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, ServerMsg};
 
-/// Queued output a client may fall behind by before it is dropped.
-pub const MAX_QUEUED: usize = 64 << 20;
+/// Queued output a client may fall behind by, over all its sessions, before
+/// it is dropped.
+pub const MAX_QUEUED: usize = 256 << 20;
+/// Queued output one session may fall behind by before it is detached.
+pub const MAX_QUEUED_SESSION: usize = 64 << 20;
 /// Hook requests kept for a session while no client is attached.
 const MAX_QUEUED_HOOKS: usize = 64;
 const SETTINGS_PLACEHOLDER: &str = "{tern-settings}";
@@ -45,6 +49,8 @@ pub struct ServeOpts {
     pub hooks: bool,
     /// Output a client may fall behind by before it is dropped.
     pub max_queued: usize,
+    /// Output one session may fall behind by before it is detached.
+    pub max_queued_session: usize,
 }
 
 /// `tern --server`: serve until idle.
@@ -60,6 +66,7 @@ pub fn run() -> ! {
         run_root: paths::run_root(),
         hooks: true,
         max_queued: MAX_QUEUED,
+        max_queued_session: MAX_QUEUED_SESSION,
     };
     let code = match serve(&paths::mux_dir(), opts) {
         Ok(()) => 0,
@@ -97,13 +104,14 @@ pub(crate) struct Server {
     run_dir: PathBuf,
     notifications: bool,
     max_queued: usize,
+    max_queued_session: usize,
 }
 
 /// Serve on `dir` until idle for `opts.idle_exit`. Fails with `AddrInUse`
 /// when another daemon holds the directory.
 pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     paths::ensure_private_dir(dir)?;
-    let _lock = lock(&dir.join("server.lock"))?;
+    let _lock = lock(&paths::lock_path(dir))?;
     let sock = paths::socket_path(dir);
     match UnixStream::connect(&sock) {
         Ok(_) => return Err(io::ErrorKind::AddrInUse.into()),
@@ -135,6 +143,7 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
             run_dir,
             notifications: opts.notifications,
             max_queued: opts.max_queued,
+            max_queued_session: opts.max_queued_session,
         }
     });
     log::info!("daemon {} listening on {}", std::process::id(), sock.display());
@@ -217,7 +226,7 @@ impl Server {
     }
 
     fn handle(self: &Arc<Self>, stream: UnixStream) -> io::Result<()> {
-        let conn = Conn::start(stream.try_clone()?, self.max_queued)?;
+        let conn = Conn::start(stream.try_clone()?, self.max_queued, self.max_queued_session)?;
         conn.send(ServerMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), pid: std::process::id() });
         let mut reader = FrameReader::new(stream, proto::MAX_CLIENT_FRAME);
         match reader.read::<ClientMsg>()? {
@@ -366,6 +375,8 @@ impl Server {
         // here) or after it (sent as the marker).
         let mut exited = None;
         host.attach_with(sub, |snapshot| {
+            // The snapshot has whatever it skipped while it lagged.
+            conn.caught_up(id);
             conn.push(Out::Attached { req, id, token: token.clone(), pid, fd, snapshot: Box::new(snapshot) });
             exited = host.exited();
             if let Some(code) = exited {
@@ -378,7 +389,15 @@ impl Server {
             }
         }
         if let (None, Some(size)) = (exited, size) {
-            host.jiggle(size);
+            if host.shell_in_foreground() {
+                // A shell at its prompt: the snapshot is all there is; a
+                // jiggle would only make it draw the prompt twice.
+                if size != host.size() {
+                    host.resize(size);
+                }
+            } else {
+                host.jiggle(size);
+            }
         }
     }
 
@@ -464,40 +483,44 @@ impl Observer for Server {
 
 /// What a connection's writer thread sends.
 enum Out {
-    Frame(Vec<u8>),
+    /// A frame, and the session whose output it is.
+    Frame(Vec<u8>, Option<u64>),
     /// Packed off the reader's thread (it can take a while for a big
     /// scrollback), then sent with the PTY fd.
-    Attached {
-        req: u64,
-        id: u64,
-        token: Option<String>,
-        pid: u32,
-        fd: Option<OwnedFd>,
-        snapshot: Box<Snapshot>,
-    },
+    Attached { req: u64, id: u64, token: Option<String>, pid: u32, fd: Option<OwnedFd>, snapshot: Box<Snapshot> },
 }
 
 pub(crate) struct Conn {
     tx: Mutex<Option<Sender<Out>>>,
     max_queued: usize,
+    max_queued_session: usize,
     queued: Arc<AtomicUsize>,
+    /// Output queued per session.
+    per_session: Arc<Mutex<HashMap<u64, usize>>>,
+    /// Sessions that fell behind: told `Detached`, their output dropped
+    /// until they attach again.
+    lagging: Mutex<HashSet<u64>>,
     dead: AtomicBool,
     stream: UnixStream,
 }
 
 impl Conn {
-    fn start(stream: UnixStream, max_queued: usize) -> io::Result<Arc<Self>> {
+    fn start(stream: UnixStream, max_queued: usize, max_queued_session: usize) -> io::Result<Arc<Self>> {
         let (tx, rx) = mpsc::channel();
         let queued = Arc::new(AtomicUsize::new(0));
+        let per_session = Arc::new(Mutex::new(HashMap::new()));
         let conn = Arc::new(Self {
             tx: Mutex::new(Some(tx)),
             max_queued,
+            max_queued_session,
             queued: queued.clone(),
+            per_session: per_session.clone(),
+            lagging: Mutex::new(HashSet::new()),
             dead: AtomicBool::new(false),
             stream: stream.try_clone()?,
         });
         let weak = Arc::downgrade(&conn);
-        std::thread::Builder::new().name("client writer".into()).spawn(move || writer(stream, rx, queued, weak))?;
+        std::thread::Builder::new().name("client writer".into()).spawn(move || writer(stream, rx, queued, per_session, weak))?;
         Ok(conn)
     }
 
@@ -506,7 +529,7 @@ impl Conn {
             return;
         }
         let len = match &out {
-            Out::Frame(f) => f.len(),
+            Out::Frame(f, _) => f.len(),
             Out::Attached { .. } => 0,
         };
         if self.queued.fetch_add(len, Ordering::AcqRel) + len > self.max_queued {
@@ -520,9 +543,37 @@ impl Conn {
 
     fn send(&self, msg: ServerMsg) {
         match proto::encode(&msg) {
-            Ok(frame) => self.push(Out::Frame(frame)),
+            Ok(frame) => self.push(Out::Frame(frame, None)),
             Err(e) => log::error!("encode: {e}"),
         }
+    }
+
+    /// Queue session `id`'s output, or drop it while the session lags.
+    fn send_output(&self, id: u64, msg: ServerMsg) {
+        if self.lagging.lock().unwrap().contains(&id) {
+            return;
+        }
+        let frame = match proto::encode(&msg) {
+            Ok(f) => f,
+            Err(e) => return log::error!("encode: {e}"),
+        };
+        {
+            let mut per = self.per_session.lock().unwrap();
+            let queued = per.entry(id).or_default();
+            if *queued + frame.len() > self.max_queued_session {
+                drop(per);
+                log::warn!("session {id} fell behind; detaching it");
+                self.lagging.lock().unwrap().insert(id);
+                return self.send(ServerMsg::Detached { id });
+            }
+            *queued += frame.len();
+        }
+        self.push(Out::Frame(frame, Some(id)));
+    }
+
+    /// Session `id` attaches again (from a snapshot): send its output again.
+    fn caught_up(&self, id: u64) {
+        self.lagging.lock().unwrap().remove(&id);
     }
 
     fn close(&self) {
@@ -534,21 +585,36 @@ impl Conn {
 
 impl Subscriber for Conn {
     fn output(&self, id: u64, bytes: &[u8]) {
-        self.send(ServerMsg::Output { id, bytes: bytes.to_vec() });
+        self.send_output(id, ServerMsg::Output { id, bytes: bytes.to_vec() });
     }
 
     fn marker(&self, id: u64, marker: &Marker) {
-        self.send(ServerMsg::Marker { id, marker: marker.clone() });
+        self.send_output(id, ServerMsg::Marker { id, marker: marker.clone() });
     }
 }
 
-fn writer(mut stream: UnixStream, rx: Receiver<Out>, queued: Arc<AtomicUsize>, conn: Weak<Conn>) {
+fn writer(
+    mut stream: UnixStream,
+    rx: Receiver<Out>,
+    queued: Arc<AtomicUsize>,
+    per_session: Arc<Mutex<HashMap<u64, usize>>>,
+    conn: Weak<Conn>,
+) {
     let result = (|| -> io::Result<()> {
         for out in rx {
             match out {
-                Out::Frame(frame) => {
+                Out::Frame(frame, id) => {
                     stream.write_all(&frame)?;
                     queued.fetch_sub(frame.len(), Ordering::AcqRel);
+                    if let Some(id) = id {
+                        let mut per = per_session.lock().unwrap();
+                        if let Some(n) = per.get_mut(&id) {
+                            *n -= frame.len();
+                            if *n == 0 {
+                                per.remove(&id);
+                            }
+                        }
+                    }
                 },
                 Out::Attached { req, id, token, pid, fd, snapshot } => {
                     let msg = ServerMsg::Attached { req, id, token, pid, fd: fd.is_some(), snapshot: proto::pack_snapshot(&snapshot)? };

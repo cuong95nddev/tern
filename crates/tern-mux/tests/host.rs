@@ -179,3 +179,12 @@ fn attach_inside_a_synchronized_update() {
     });
     host.kill();
 }
+
+#[test]
+fn shell_in_foreground_tells_a_prompt_from_a_program() {
+    let host = Host::spawn(1, &sh("read x; exec sleep 5"), Arc::new(NoObserver)).unwrap();
+    wait_until("shell", || host.shell_in_foreground());
+    host.input(b"\n".to_vec());
+    wait_until("program", || !host.shell_in_foreground());
+    host.kill();
+}

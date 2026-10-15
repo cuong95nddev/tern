@@ -22,14 +22,15 @@ struct Daemon {
 }
 
 fn daemon(idle: Duration) -> Daemon {
-    daemon_with(idle, 1 << 20)
+    daemon_with(idle, 1 << 20, usize::MAX)
 }
 
-fn daemon_with(idle: Duration, max_queued: usize) -> Daemon {
+fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize) -> Daemon {
     // Short path: Unix socket paths are limited to 104 bytes.
     let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
     let dir = tmp.path().join("m");
-    let opts = ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued };
+    let opts =
+        ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued, max_queued_session };
     let d = dir.clone();
     let thread = std::thread::spawn(move || serve(&d, opts));
     wait_until("socket", || paths::socket_path(&dir).exists());
@@ -197,6 +198,7 @@ fn second_daemon_refuses_the_dir() {
         run_root: d.dir.join("run2"),
         hooks: false,
         max_queued: 1 << 20,
+        max_queued_session: usize::MAX,
     };
     assert_eq!(serve(&d.dir, opts).unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
 }
@@ -320,11 +322,118 @@ fn size_set_before_the_reply_wins() {
 fn dropped_connection_reports_loss_and_lets_go_of_the_pty() {
     // A daemon that drops a client as soon as more than its hello is
     // queued for it (PTY reads come in ~1 KiB chunks).
-    let d = daemon_with(Duration::from_secs(60), 200);
+    let d = daemon_with(Duration::from_secs(60), 200, usize::MAX);
     let c = client(&d.dir);
     let (sink, ev) = sink();
     let s = c.open(Open::Spawn { cfg: sh("sleep 0.5; head -c 2000000 /dev/zero | tr '\\0' x; read x"), hook: false }, SIZE, 1000, sink);
     wait_until("server lost", || ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::ServerLost)));
     assert!(s.foreground_programs().is_empty(), "still holds the PTY");
     assert!(!c.alive());
+}
+
+#[test]
+fn lagging_session_is_detached_alone() {
+    // Any output frame puts a session over the limit; the connection's is
+    // out of reach.
+    let d = daemon_with(Duration::from_secs(60), usize::MAX, 200);
+    let c = client(&d.dir);
+    let (sink_a, ev_a) = sink();
+    let a = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false }, SIZE, 1000, sink_a);
+    wait_until("a ready", || ready_id(&ev_a).is_some());
+    let (sink_b, ev_b) = sink();
+    let b = c.open(
+        Open::Spawn { cfg: sh("sleep 0.3; head -c 5000 /dev/zero | tr '\\0' x; echo; echo flood; read x"), hook: false },
+        SIZE,
+        1000,
+        sink_b,
+    );
+    wait_until("b lost", || ev_b.lock().unwrap().iter().any(|e| matches!(e, TermEvent::ServerLost)));
+    assert!(c.alive());
+    assert!(!ev_a.lock().unwrap().iter().any(|e| matches!(e, TermEvent::ServerLost)));
+    let id_b = b.id().unwrap();
+    drop(b); // as the tab does before reattaching
+
+    // The other tab is untouched (its one small read stays under the limit).
+    a.write(b"y\n".to_vec());
+    wait_until("a echoes", || screen(&a).contains("got:y"));
+
+    // The lagging one comes back from a snapshot that has what it skipped.
+    let (sink_b, ev_b) = sink();
+    let b = c.open(Open::Attach { id: id_b }, SIZE, 1000, sink_b);
+    wait_until("b back", || ready_id(&ev_b) == Some(id_b));
+    assert!(screen(&b).contains("flood"), "{}", screen(&b));
+    b.close();
+    a.close();
+}
+
+#[test]
+fn input_before_the_reply_is_kept() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false }, SIZE, 1000, sink);
+    s.write(b"early\n".to_vec()); // before `Attached` came back
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("echo", || screen(&s).contains("got:early"));
+    s.close();
+}
+
+#[test]
+fn big_input_goes_in_pieces() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let out = d.dir.join("got");
+    let s =
+        c.open(Open::Spawn { cfg: sh(&format!("stty raw -echo; head -c 20000000 > {}", out.display())), hook: false }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    std::thread::sleep(Duration::from_millis(200));
+    // Over the daemon's 16 MiB frame limit as one message.
+    s.write(vec![b'x'; 20_000_000]);
+    wait_until("all of it", || std::fs::metadata(&out).is_ok_and(|m| m.len() == 20_000_000));
+    assert!(c.alive());
+    s.close();
+}
+
+#[test]
+fn closing_ends_the_foreground_job() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let pidfile = d.dir.join("job");
+    // An interactive shell running a job that ignores SIGHUP, in its own
+    // process group.
+    let mut cfg = sh("");
+    cfg.args = vec!["-i".into()];
+    cfg.env.insert("PS1".into(), "$ ".into());
+    let s = c.open(Open::Spawn { cfg, hook: false }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    s.write(format!("sh -c 'trap \"\" HUP; echo $$ > {}; while :; do sleep 0.1; done'\n", pidfile.display()).into_bytes());
+    wait_until("job", || std::fs::read_to_string(&pidfile).is_ok_and(|p| p.ends_with('\n')));
+    let job: u32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    assert!(alive(job));
+    s.close();
+    wait_until("job ended", || !alive(job));
+}
+
+#[test]
+fn another_majors_daemon_does_not_block_this_one() {
+    use std::os::fd::AsRawFd;
+    let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
+    let dir = tmp.path().join("m");
+    paths::ensure_private_dir(&dir).unwrap();
+    // An older Tern's daemon holds its lock (and runs its programs).
+    let other = std::fs::File::create(dir.join(format!("server-{}.lock", MAJOR + 1))).unwrap();
+    assert_eq!(unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let old = std::fs::File::create(dir.join("server.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(old.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let opts = ServeOpts {
+        idle_exit: Duration::from_millis(200),
+        notifications: false,
+        run_root: tmp.path().join("run"),
+        hooks: false,
+        max_queued: 1 << 20,
+        max_queued_session: usize::MAX,
+    };
+    serve(&dir, opts).unwrap();
 }
