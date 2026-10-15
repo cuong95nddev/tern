@@ -15,7 +15,8 @@ use super::icons;
 use super::targets::{self, Choice, Dest};
 
 const WIDTH: f32 = 420.;
-const HEIGHT: f32 = 300.;
+/// The starting height; the window then fits its content.
+const HEIGHT: f32 = 200.;
 
 /// What the tray holds; it outlives the tray window, which closes while a
 /// capture is on screen.
@@ -61,6 +62,8 @@ pub fn show(cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             display_id: Some(display.id()),
+            // Only the rounded panel shows.
+            window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         },
         cx,
@@ -139,10 +142,14 @@ pub fn control(cmd: &str, arg: &str, cx: &mut App) -> String {
 }
 
 /// Close the tray window, keeping what it holds.
-pub fn hide(cx: &mut App) {
-    if let Some(window) = cx.default_global::<TrayData>().window.take() {
+/// Returns whether it was open. It closes once the current update ends:
+/// this may run in one of the tray's own handlers (its camera button).
+pub fn hide(cx: &mut App) -> bool {
+    let Some(window) = cx.default_global::<TrayData>().window.take() else { return false };
+    cx.defer(move |cx| {
         let _ = window.update(cx, |_, w, _| w.remove_window());
-    }
+    });
+    true
 }
 
 /// Drop everything and close.
@@ -233,7 +240,9 @@ impl Tray {
             data.shots.remove(ix);
         }
         if data.shots.is_empty() && data.prompt.trim().is_empty() {
-            cx.defer(hide);
+            cx.defer(|cx| {
+                hide(cx);
+            });
         }
         cx.notify();
     }
@@ -327,8 +336,23 @@ impl Render for Tray {
                     .tooltip("Send (⌘↵)")
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             );
+        // Fit the window to the panel's height, which changes with the
+        // shots and the prompt's lines.
+        let fit = canvas(
+            |bounds, window, cx| {
+                let h = bounds.size.height;
+                if (window.viewport_size().height - h).abs() > px(1.) {
+                    let w = window.viewport_size().width;
+                    window.defer(cx, move |window, _| window.resize(gpui_kit::size(w, h)));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         div()
-            .size_full()
+            .relative()
+            .w_full()
             .flex()
             .flex_col()
             .gap_2()
@@ -343,5 +367,6 @@ impl Render for Tray {
             .child(Textarea::new(&self.prompt))
             .when_some(self.error.clone(), |d, e| d.child(div().text_xs().text_color(theme.danger).child(e)))
             .child(footer)
+            .child(fit)
     }
 }

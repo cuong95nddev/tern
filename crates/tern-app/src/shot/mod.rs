@@ -76,11 +76,11 @@ pub fn start(cx: &mut App) {
         return;
     }
     cx.default_global::<Capture>().on = true;
-    tray::hide(cx);
+    // The tray's window fades out before the screen is grabbed.
+    let wait = if tray::hide(cx) { 400 } else { 0 };
     let displays: Vec<_> = cx.displays().iter().map(|d| (d.id(), d.bounds().size)).collect();
     cx.spawn(async move |cx| {
-        // The tray's window needs a moment to leave the screen.
-        cx.background_executor().timer(Duration::from_millis(60)).await;
+        cx.background_executor().timer(Duration::from_millis(wait)).await;
         let grabs = cx
             .background_executor()
             .spawn(async move {
@@ -224,7 +224,7 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             let Some(display) = cx.primary_display() else { return Some("error: no display".into()) };
             let img = image::open(arg).map(|i| i.to_rgba8()).map_err(|e| e.to_string());
             cx.default_global::<Capture>().on = true;
-            tray::hide(cx);
+            let _ = tray::hide(cx);
             open_overlays(vec![(display.id(), display.bounds().size, img)], cx);
             "ok".into()
         },
