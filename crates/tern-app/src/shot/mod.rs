@@ -3,3 +3,5 @@
 
 pub mod model;
 pub mod raster;
+pub mod grab;
+pub mod targets;

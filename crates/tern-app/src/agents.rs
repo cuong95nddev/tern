@@ -53,6 +53,19 @@ impl Agent {
         })
     }
 
+    /// The command that starts it in a shell.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+            Self::Cursor => "cursor-agent",
+            Self::Grok => "grok",
+            Self::Pi => "pi",
+        }
+    }
+
     /// The product name, for notification titles.
     pub fn name(self) -> &'static str {
         match self {

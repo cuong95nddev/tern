@@ -426,6 +426,16 @@ pub struct Workspace {
     _subs: Vec<Subscription>,
 }
 
+/// A terminal tab, as the screenshot tray lists it.
+pub struct TermTabInfo {
+    pub id: EntityId,
+    pub title: String,
+    pub agent: Option<Agent>,
+    /// The workspace's active tab.
+    pub active: bool,
+    pub view: Entity<TerminalView>,
+}
+
 pub enum WorkspaceEvent {
     /// The last tab closed: the workspace is done.
     Close,
@@ -1510,6 +1520,42 @@ impl Workspace {
         self.tree.update(cx, |t, cx| t.mark_claude_edit(&paths, cx));
         self.changes.update(cx, |c, cx| c.files_changed(&paths, cx));
         self.files_changed(&paths, window, cx);
+    }
+
+    /// The terminal tabs, in tab order, for picking where a screenshot goes.
+    pub fn term_tabs(&self, cx: &App) -> Vec<TermTabInfo> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tab)| {
+                let t = tab.term()?;
+                Some(TermTabInfo {
+                    id: t.view.entity_id(),
+                    title: self.tab_info(i, cx).0,
+                    agent: t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude)),
+                    active: i == self.active,
+                    view: t.view.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Show the tab with entity `id`.
+    pub fn show_tab(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == id) {
+            self.activate(ix, window, cx);
+        }
+    }
+
+    /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
+    pub fn new_agent_tab(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let kind = if agent == Agent::Claude { TabKind::Claude } else { TabKind::Shell };
+        self.add_tab(kind, window, cx);
+        let view = self.tabs.get(self.active)?.term()?.view.clone();
+        if kind == TabKind::Shell {
+            view.update(cx, |v, cx| v.write_input(format!("{}\r", agent.command()).into_bytes(), cx));
+        }
+        Some(view)
     }
 
     /// What tab `i` shows: its label, its name for drags, and a terminal's

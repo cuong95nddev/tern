@@ -42,6 +42,43 @@ pub fn running(cx: &mut App) -> Vec<String> {
     windows(cx).into_iter().flat_map(|(_, m)| m.read(cx).running(cx)).collect()
 }
 
+/// Every workspace with its window: the frontmost window first, and in
+/// each window its shown workspace first.
+pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
+    let mut wins = windows(cx);
+    if let Some(stack) = cx.window_stack() {
+        wins.sort_by_key(|(h, _)| stack.iter().position(|s| s == h).unwrap_or(usize::MAX));
+    }
+    let mut out = Vec::new();
+    for (h, m) in wins {
+        let m = m.read(cx);
+        let mut ws: Vec<_> = m.slots.iter().map(|s| s.ws.clone()).collect();
+        if m.active < ws.len() {
+            let active = ws.remove(m.active);
+            ws.insert(0, active);
+        }
+        out.extend(ws.into_iter().map(|w| (h, w)));
+    }
+    out
+}
+
+/// Bring `ws` forward in its window `handle`, and Tern with it.
+pub fn reveal(handle: AnyWindowHandle, ws: &Entity<Workspace>, cx: &mut App) {
+    let id = ws.entity_id();
+    let main = windows(cx).into_iter().find(|(h, _)| *h == handle).map(|(_, m)| m);
+    let _ = handle.update(cx, |_, window, cx| {
+        if let Some(main) = main {
+            main.update(cx, |m, cx| {
+                if let Some(ix) = m.position(id) {
+                    m.activate(ix, window, cx);
+                }
+            });
+        }
+        window.activate_window();
+    });
+    cx.activate(true);
+}
+
 fn windows(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<MainWindow>)> {
     let open = cx.windows();
     let reg = cx.default_global::<Registry>();

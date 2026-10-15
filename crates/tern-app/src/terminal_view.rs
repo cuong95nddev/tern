@@ -205,6 +205,8 @@ pub struct TerminalView {
     resolved: RefCell<Option<(String, Option<PathBuf>)>>,
     /// The coding agent running in the foreground, if any.
     agent: Option<Agent>,
+    /// When the program last wrote something.
+    last_output: Instant,
     _pump: Option<Task<()>>,
     _watch: Task<()>,
 }
@@ -248,6 +250,7 @@ impl TerminalView {
             hover_link: None,
             resolved: RefCell::new(None),
             agent: None,
+            last_output: Instant::now(),
             _pump: None,
             _watch: Task::ready(()),
         };
@@ -328,6 +331,12 @@ impl TerminalView {
         self.agent
     }
 
+    /// Whether the program has settled for input: it turned on bracketed
+    /// paste and has been quiet for `quiet`.
+    pub fn ready_for_paste(&self, quiet: Duration) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE) && self.last_output.elapsed() >= quiet
+    }
+
     /// The visible screen's text, trailing blanks trimmed (control socket).
     #[cfg(debug_assertions)]
     pub fn debug_screen(&self) -> String {
@@ -404,6 +413,7 @@ impl TerminalView {
     fn on_term_event(&mut self, ev: TermEvent, cx: &mut Context<Self>) {
         match ev {
             TermEvent::Wakeup => {
+                self.last_output = Instant::now();
                 if self.hover_link.is_some() {
                     self.update_hover(true, cx);
                 }
@@ -1439,7 +1449,7 @@ fn sanitize_paste(text: &str) -> String {
 
 /// A path as a shell word: backslash before every char a shell treats
 /// specially, as Ghostty and iTerm2 do for dropped files.
-fn escape_path(path: &Path) -> String {
+pub(crate) fn escape_path(path: &Path) -> String {
     let mut out = String::new();
     for c in path.to_string_lossy().chars() {
         if c.is_whitespace() || "\\'\"()[]{}<>|&;$!?*#`".contains(c) {
