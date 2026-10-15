@@ -7,6 +7,10 @@ edition.workspace = true
 alacritty_terminal = "0.26"
 polling = "3.8"
 libc = "0.2.190"
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = "0.3.2"
+
+[dev-dependencies]
+serde_json = "1"

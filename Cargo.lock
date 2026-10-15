@@ -1436,6 +1436,7 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -3813,6 +3814,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5533,6 +5543,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
+]
+
+[[package]]
 name = "ropey"
 version = "2.0.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6532,6 +6561,8 @@ dependencies = [
  "semver",
  "tern-bridge",
  "tern-fs",
+ "tern-menubar",
+ "tern-mux",
  "tern-term",
  "tiny-skia",
 ]
@@ -6557,6 +6588,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-menubar"
+version = "0.1.2"
+dependencies = [
+ "dispatch2",
+ "env_logger",
+ "libc",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "semver",
+ "tempfile",
+ "tern-mux",
+ "tern-term",
+]
+
+[[package]]
+name = "tern-mux"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "getrandom 0.4.3",
+ "libc",
+ "log",
+ "lz4_flex",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "polling",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tern-bridge",
+ "tern-term",
+]
+
+[[package]]
 name = "tern-term"
 version = "0.1.0"
 dependencies = [
@@ -6564,6 +6633,8 @@ dependencies = [
  "libc",
  "objc2-foundation 0.3.2",
  "polling",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7106,6 +7177,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"

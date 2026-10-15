@@ -1,4 +1,5 @@
-//! Terminal pane: a GPUI view over a [`tern_term::Session`].
+//! Terminal pane: a GPUI view over a terminal running in the background
+//! daemon ([`tern_mux::client::RemoteSession`]).
 //!
 //! Rendering: on each frame we lock the VT state briefly and convert the
 //! visible grid into background rects + text segments. Segments are shaped via
@@ -18,17 +19,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
+use tern_mux::client::{Connector, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
 use tern_term::palette::Palette;
+use tern_term::status::next_status;
 use tern_term::vt::grid::{Dimensions, Scroll};
 use tern_term::vt::index::{Column, Line, Point as GridPoint, Side};
 use tern_term::vt::selection::{Selection, SelectionType};
 use tern_term::vt::term::TermMode;
 use tern_term::vt::term::cell::Flags;
 use tern_term::vt::vte::ansi::{ClearMode, CursorShape, Handler, Rgb};
-use tern_term::{Session, SpawnConfig, TermEvent, TermSize};
+use tern_term::{SpawnConfig, TermEvent, TermSize};
 
 use crate::agents::Agent;
 use crate::links::{self, Link};
@@ -51,14 +54,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ActivityStatus {
-    #[default]
-    None,
-    Working,
-    Blocked,
-    Done,
-}
+pub use tern_term::status::ActivityStatus;
 
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
@@ -73,6 +69,12 @@ pub enum TerminalEvent {
     Exited {
         code: Option<i32>,
         quick: bool,
+    },
+    /// The background session is known (see `mux_id`), with its hook token;
+    /// `attached`: it was already running (no new program started).
+    Ready {
+        token: Option<String>,
+        attached: bool,
     },
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
@@ -163,8 +165,18 @@ struct CellMetrics {
 }
 
 pub struct TerminalView {
-    session: Option<Session>,
+    session: Option<RemoteSession>,
     spawn_cfg: SpawnConfig,
+    mux: Arc<Connector>,
+    /// Spawn with a Claude hook token.
+    hook: bool,
+    /// The background session to attach to at the next start.
+    attach: Option<u64>,
+    /// Reattaching after the connection to the daemon was lost: if the
+    /// session is gone, say so rather than start a new program.
+    reattaching: bool,
+    /// The last start attached to a running session (vs. spawned one).
+    attaching: bool,
     config: TerminalConfig,
     focus: FocusHandle,
     title: SharedString,
@@ -220,11 +232,26 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(spawn_cfg: SpawnConfig, title: impl Into<SharedString>, config: TerminalConfig, cx: &mut Context<Self>) -> Self {
+    /// A terminal that attaches to background session `attach` when it still
+    /// runs, else starts `spawn_cfg` (with a hook token when `hook`).
+    pub fn new(
+        spawn_cfg: SpawnConfig,
+        hook: bool,
+        attach: Option<u64>,
+        title: impl Into<SharedString>,
+        config: TerminalConfig,
+        mux: Arc<Connector>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let title = title.into();
         let mut this = Self {
             session: None,
             spawn_cfg,
+            mux,
+            hook,
+            attach,
+            reattaching: false,
+            attaching: false,
             config,
             focus: cx.focus_handle(),
             title: title.clone(),
@@ -276,7 +303,8 @@ impl TerminalView {
         }
     }
 
-    /// Start (or restart) the process.
+    /// Start (or restart) the process: attach to the saved background
+    /// session the first time, else start a new one (ending the old one).
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.spawned = true;
         self.reported_focus = false;
@@ -285,21 +313,26 @@ impl TerminalView {
             let _ = tx.send(e);
         });
         let mut cfg = self.spawn_cfg.clone();
-        if let Some(s) = &self.session {
+        if let Some(s) = self.session.take() {
             cfg.size = s.size();
+            s.close();
         }
-        self.session = None;
         self.started = Instant::now();
-        match Session::spawn(cfg, Palette::default(), sink) {
-            Ok(s) => {
-                self.session = Some(s);
+        self.attaching = self.attach.is_some();
+        let open = match self.attach.take() {
+            Some(id) => Open::Attach { id },
+            None => Open::Spawn { cfg: cfg.clone(), hook: self.hook },
+        };
+        match self.mux.get() {
+            Ok(client) => {
+                self.session = Some(client.open(open, cfg.size, cfg.scrollback, sink));
                 self.exited = None;
                 self.spawn_error = None;
             },
             Err(err) => {
-                log::error!("failed to spawn terminal: {err}");
+                log::error!("background server unavailable: {err}");
                 self.exited = Some(None);
-                self.spawn_error = Some(err.to_string());
+                self.spawn_error = Some(format!("background server unavailable: {err}"));
             },
         }
         self._pump = Some(cx.spawn(async move |this, cx| {
@@ -372,6 +405,20 @@ impl TerminalView {
         self.paste_paths(paths, cx);
     }
 
+    /// The background session's id, once known.
+    pub fn mux_id(&self) -> Option<u64> {
+        self.session.as_ref().and_then(RemoteSession::id).or(self.attach)
+    }
+
+    /// End the program (the tab is closing). Dropping the view instead
+    /// leaves it running in the background.
+    pub fn close(&mut self) {
+        self.attach = None;
+        if let Some(s) = self.session.take() {
+            s.close();
+        }
+    }
+
     /// Run `cfg` from the next (re)start on.
     pub fn set_spawn_config(&mut self, cfg: SpawnConfig) {
         self.spawn_cfg = cfg;
@@ -436,24 +483,65 @@ impl TerminalView {
                 cx.emit(TerminalEvent::Exited { code, quick });
                 cx.notify();
             },
-            TermEvent::Signal(OscSignal::ProgramStatus(st)) => {
-                let status = match st.state.as_str() {
-                    "working" => ActivityStatus::Working,
-                    "blocked" => ActivityStatus::Blocked,
-                    "clear" => ActivityStatus::None,
-                    _ => ActivityStatus::Done,
-                };
-                self.set_status(status, cx);
+            TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
+                if let Some(status) = next_status(self.status, &sig) {
+                    self.set_status(status, cx);
+                }
             },
             TermEvent::Signal(OscSignal::Notify { title, body }) => {
                 cx.emit(TerminalEvent::Notify { title, body });
             },
             TermEvent::Signal(OscSignal::ProgramStatusProbe) => {},
+            TermEvent::Ready { token, status, .. } => {
+                // The status it had while no one watched (e.g. Done): shown,
+                // not notified again.
+                self.status = status;
+                self.reattaching = false;
+                cx.emit(TerminalEvent::Ready { token, attached: self.attaching });
+                cx.emit(TerminalEvent::TitleChanged);
+                cx.notify();
+            },
+            // The session is gone: start the program afresh, unless this was
+            // a reconnect (the daemon died with it; Enter restarts).
+            TermEvent::NotFound if self.reattaching => self.server_stopped(cx),
+            TermEvent::NotFound => self.start(cx),
+            TermEvent::SpawnError(err) => {
+                log::error!("failed to spawn terminal: {err}");
+                self.session = None;
+                self.exited = Some(None);
+                self.spawn_error = Some(err);
+                cx.notify();
+            },
+            TermEvent::ServerLost => {
+                // The connection went (the daemon dropped it or died): try the
+                // same session again once.
+                let id = self.session.take().and_then(|s| s.id());
+                if self.exited.is_none()
+                    && !self.reattaching
+                    && let Some(id) = id
+                {
+                    self.reattaching = true;
+                    self.attach = Some(id);
+                    return self.start(cx);
+                }
+                self.server_stopped(cx);
+            },
         }
     }
 
+    fn server_stopped(&mut self, cx: &mut Context<Self>) {
+        self.reattaching = false;
+        if self.exited.is_none() {
+            self.exited = Some(None);
+            self.spawn_error = Some("background server stopped".into());
+            self.set_status(ActivityStatus::None, cx);
+            cx.emit(TerminalEvent::Exited { code: None, quick: false });
+        }
+        cx.notify();
+    }
+
     fn set_status(&mut self, status: ActivityStatus, cx: &mut Context<Self>) {
-        // A finished "working" turn with no explicit idle state reads as done.
+        // A program that ends mid-turn ("working") reads as done.
         let status = if status == ActivityStatus::None && self.status == ActivityStatus::Working { ActivityStatus::Done } else { status };
         if self.status != status {
             self.status = status;
@@ -1425,6 +1513,7 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
 
     if let Some(code) = view.exited {
         let msg = match (code, &view.spawn_error) {
+            (None, Some(err)) if err == "background server stopped" => format!("[{err}] — press Enter to restart"),
             (_, Some(err)) => {
                 format!("[could not start {}: {err}] — press Enter to retry", view.spawn_cfg.program.as_deref().unwrap_or("shell"))
             },

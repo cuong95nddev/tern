@@ -13,18 +13,25 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 APP="$STAGE/Tern.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# The menu bar agent: a helper app of its own (own bundle id, no Dock icon),
+# so a running agent isn't taken for Tern by LaunchServices.
+HELPER="$APP/Contents/Helpers/Tern Menu Bar.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$HELPER/Contents/MacOS"
 
 if [ "${TERN_UNIVERSAL:-}" = 1 ]; then
     for t in aarch64-apple-darwin x86_64-apple-darwin; do
-        cargo build --release -p tern-app --target "$t" --manifest-path "$ROOT/Cargo.toml"
+        cargo build --release -p tern-app -p tern-menubar --target "$t" --manifest-path "$ROOT/Cargo.toml"
     done
     lipo -create -output "$APP/Contents/MacOS/tern" \
         "$ROOT/target/aarch64-apple-darwin/release/tern-app" \
         "$ROOT/target/x86_64-apple-darwin/release/tern-app"
+    lipo -create -output "$HELPER/Contents/MacOS/tern-menubar" \
+        "$ROOT/target/aarch64-apple-darwin/release/tern-menubar" \
+        "$ROOT/target/x86_64-apple-darwin/release/tern-menubar"
 else
-    cargo build --release -p tern-app --manifest-path "$ROOT/Cargo.toml"
+    cargo build --release -p tern-app -p tern-menubar --manifest-path "$ROOT/Cargo.toml"
     cp "$ROOT/target/release/tern-app" "$APP/Contents/MacOS/tern"
+    cp "$ROOT/target/release/tern-menubar" "$HELPER/Contents/MacOS/tern-menubar"
 fi
 
 # Icons come from assets/icon/source.png via scripts/gen-icons.sh. With
@@ -73,16 +80,41 @@ cat > "$APP/Contents/Info.plist" <<EOF
             <key>LSItemContentTypes</key><array><string>public.folder</string></array>
         </dict>
     </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>dev.tern.session</string>
+            <key>CFBundleURLSchemes</key><array><string>tern</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
+EOF
+cat > "$HELPER/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Tern Menu Bar</string>
+    <key>CFBundleIdentifier</key><string>dev.tern.menubar</string>
+    <key>CFBundleExecutable</key><string>tern-menubar</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
 # With TERN_SIGN_ID (a "Developer ID Application: ..." identity) sign for
 # distribution: hardened runtime and a secure timestamp, as notarization
 # requires. Else an ad-hoc signature, so Gatekeeper and notifications treat
-# it as one app.
+# it as one app. The helper is signed first: the outer signature seals it.
 if [ -n "${TERN_SIGN_ID:-}" ]; then
+    codesign --force --options runtime --timestamp --sign "$TERN_SIGN_ID" "$HELPER"
     codesign --force --options runtime --timestamp --sign "$TERN_SIGN_ID" "$APP"
 else
+    codesign --force --sign - "$HELPER" >/dev/null 2>&1 || true
     codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 fi
 

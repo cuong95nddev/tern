@@ -25,7 +25,7 @@ use gpui_kit::*;
 use main_window::Content;
 use terminal_view::TerminalConfig;
 
-actions!(tern, [Quit, OpenFolder]);
+actions!(tern, [Quit, OpenFolder, ToggleMenuBarIcon]);
 
 /// Process-wide services every window shares.
 struct AppServices(workspace::Services);
@@ -34,6 +34,16 @@ impl Global for AppServices {}
 
 fn main() {
     env_logger::init();
+    // The background daemon that runs the terminals (started by the UI).
+    if std::env::args().nth(1).as_deref() == Some("--server") {
+        // SAFETY: no other thread runs yet. Its programs inherit this env.
+        unsafe { tern_term::env::prepare_process_env() };
+        tern_mux::server::run();
+    }
+    // The menu bar agent (started by the UI): lists background terminals.
+    if std::env::args().nth(1).as_deref() == Some("--menubar") {
+        tern_menubar::run();
+    }
     // Read before the environment is cleaned for terminals.
     let control_socket = std::env::var_os("TERN_CONTROL").map(PathBuf::from);
     // SAFETY: no other thread runs yet.
@@ -42,8 +52,15 @@ fn main() {
     // windows come back, plus the cwd when started from a shell (from Finder
     // or the Dock the cwd is `/`); with no session, the last folder or the
     // welcome page.
-    let arg: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
-    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some());
+    // `--open-session <id>`: the menu bar agent's Open in debug builds
+    // (release ones get a `tern://session/<id>` URL).
+    let open_session = match std::env::args().nth(1).as_deref() {
+        Some("--open-session") => std::env::args().nth(2).and_then(|s| s.parse::<u64>().ok()),
+        _ => None,
+    };
+    let arg: Option<PathBuf> = if open_session.is_some() { None } else { std::env::args().nth(1).map(PathBuf::from) };
+    // `--open-session` shows a session, not the folder it was started in.
+    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some() && open_session.is_none());
     // One Tern at a time shares the saved session: a second one hands its
     // folder to the first and exits.
     let Ok(_lock) = lock_instance() else {
@@ -85,15 +102,8 @@ fn main() {
             }
         })
         .detach();
-        cx.set_menus([Menu::new("Tern").items([
-            MenuItem::action("Check for Updates…", update::CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::action("Capture Screenshot (⌘⇧2)", shot::CaptureScreenshot),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Quit Tern", Quit),
-        ])]);
+        set_app_menus(cx);
+        cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         shot::init(cx);
         // Reached only when no window has focus.
@@ -109,12 +119,24 @@ fn main() {
             }
         })
         .detach();
+        // Sessions the menu bar agent asks to show.
+        let reveal_events = services.reveal_events.clone();
+        cx.spawn(async move |cx| {
+            while let Ok(id) = reveal_events.recv_async().await {
+                cx.update(|cx| main_window::reveal_session(id, cx));
+            }
+        })
+        .detach();
         cx.set_global(AppServices(services));
 
         // Scripted debug runs leave the real session alone (unless
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).
         let scripted = cfg!(debug_assertions) && control_socket.is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
+        // The menu bar agent outlives us; a newer one replaces an older one.
+        if !scripted && tern_menubar::setting::enabled(&tern_menubar::setting::file()) {
+            tern_menubar::launch();
+        }
         #[cfg(debug_assertions)]
         if let Some(rx) = control_socket.and_then(control::listen) {
             cx.spawn(async move |cx| {
@@ -126,7 +148,14 @@ fn main() {
         }
 
         match arg {
-            Some(root) => main_window::open_folder(root, cx),
+            Some(root) => {
+                main_window::open_folder(root, cx);
+                // The last session's windows don't come back: their
+                // terminals join this one rather than run unseen.
+                if !scripted {
+                    main_window::adopt_orphans(Default::default(), cx);
+                }
+            },
             None => {
                 let restored = !scripted && main_window::restore_session(cx);
                 match shell_cwd.or_else(|| (!restored).then(window_state::last_folder).flatten()) {
@@ -136,9 +165,17 @@ fn main() {
                 }
             },
         }
+        if let Some(id) = open_session {
+            main_window::reveal_session(id, cx);
+        }
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv_async().await {
                 cx.update(|cx| {
+                    for url in &urls {
+                        if let Some(id) = session_url_id(url) {
+                            main_window::reveal_session(id, cx);
+                        }
+                    }
                     for path in urls.iter().filter_map(|u| file_url_path(u)).filter(|p| p.is_dir()) {
                         main_window::open_folder(path, cx);
                     }
@@ -149,7 +186,9 @@ fn main() {
         .detach();
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
-                cx.quit();
+                // Approved up front: `cx.quit()` terminates from a main-queue
+                // block, where a "later" answer could never come.
+                quit_now(cx);
             } else {
                 // A window closed by the user drops out of the session; the
                 // last one stays, to come back at the next launch.
@@ -161,8 +200,43 @@ fn main() {
     });
 }
 
-/// Quit, keeping every open window in the saved session; ask first when
-/// that ends running programs.
+fn menu_bar_toggle_label(shown: bool) -> &'static str {
+    if shown { "Hide Menu Bar Icon" } else { "Show Menu Bar Icon" }
+}
+
+/// The Tern menu (rebuilt when the menu bar setting may have changed: it
+/// is toggled here, or hidden from the agent's own menu).
+pub fn set_app_menus(cx: &mut App) {
+    let shown = tern_menubar::setting::enabled(&tern_menubar::setting::file());
+    cx.set_menus([Menu::new("Tern").items([
+        MenuItem::action("Check for Updates…", update::CheckForUpdates),
+        MenuItem::action(menu_bar_toggle_label(shown), ToggleMenuBarIcon),
+        MenuItem::separator(),
+        MenuItem::action("Capture Screenshot (⌘⇧2)", shot::CaptureScreenshot),
+        MenuItem::separator(),
+        MenuItem::os_submenu("Services", SystemMenuType::Services),
+        MenuItem::separator(),
+        MenuItem::action("Quit Tern", Quit),
+    ])]);
+}
+
+fn toggle_menu_bar_icon(cx: &mut App) {
+    let file = tern_menubar::setting::file();
+    let show = !tern_menubar::setting::enabled(&file);
+    if let Err(e) = tern_menubar::setting::set_enabled(&file, show) {
+        log::warn!("can't save the menu bar setting: {e}");
+        return;
+    }
+    if show {
+        tern_menubar::launch()
+    } else {
+        tern_menubar::stop()
+    }
+    set_app_menus(cx);
+}
+
+/// Quit, keeping every open window in the saved session. Programs keep
+/// running in the background and are there again at the next launch.
 pub fn quit(cx: &mut App) {
     confirm_quit(cx, |ok, cx| {
         if ok {
@@ -171,22 +245,10 @@ pub fn quit(cx: &mut App) {
     });
 }
 
-/// Ask whether to quit when that ends running programs; `done` gets the answer.
+/// Quitting ends nothing (terminals run in the background daemon), so it
+/// needs no confirmation; `done` gets the answer.
 fn confirm_quit(cx: &mut App, done: impl FnOnce(bool, &mut App) + 'static) {
-    let jobs = main_window::running(cx);
-    let window = cx.active_window().or_else(|| cx.windows().first().copied());
-    let (Some(window), false) = (window, jobs.is_empty()) else { return done(true, cx) };
-    let detail = format!("Still running: {}. Quitting ends {}.", jobs.join(", "), if jobs.len() == 1 { "it" } else { "them" });
-    let Ok(answer) =
-        window.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Quit Tern?", Some(&detail), &["Quit", "Cancel"], cx))
-    else {
-        return done(true, cx);
-    };
-    cx.spawn(async move |cx| {
-        let ok = answer.await == Ok(0);
-        cx.update(|cx| done(ok, cx));
-    })
-    .detach();
+    done(true, cx)
 }
 
 fn quit_now(cx: &mut App) {
@@ -231,6 +293,15 @@ fn forward_to_running(folder: Option<PathBuf>) {
     }
 }
 
+/// The session id in a `tern://session/<id>` URL (from the menu bar agent).
+fn session_url_id(url: &str) -> Option<u64> {
+    let id = url.strip_prefix("tern://session/")?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    id.parse().ok()
+}
+
 /// The path of a `file://` URL, percent-decoded.
 fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -264,5 +335,24 @@ mod tests {
         assert_eq!(file_url_path("file:///Users/a/my%20dir/"), Some(PathBuf::from("/Users/a/my dir/")));
         assert_eq!(file_url_path("file://localhost/tmp/x"), Some(PathBuf::from("/tmp/x")));
         assert_eq!(file_url_path("https://x"), None);
+    }
+
+    #[test]
+    fn menu_bar_toggle_label_follows_the_setting() {
+        assert_eq!(super::menu_bar_toggle_label(true), "Hide Menu Bar Icon");
+        assert_eq!(super::menu_bar_toggle_label(false), "Show Menu Bar Icon");
+    }
+
+    #[test]
+    fn parses_session_urls() {
+        use super::session_url_id;
+        assert_eq!(session_url_id("tern://session/42"), Some(42));
+        assert_eq!(session_url_id("tern://session/9223372036854775807"), Some(9223372036854775807));
+        assert_eq!(session_url_id("tern://session/abc"), None);
+        assert_eq!(session_url_id("tern://session/1/x"), None);
+        assert_eq!(session_url_id("tern://session/-1"), None);
+        assert_eq!(session_url_id("tern://session/99999999999999999999999"), None);
+        assert_eq!(session_url_id("tern://session/"), None);
+        assert_eq!(session_url_id("file:///tmp"), None);
     }
 }

@@ -37,11 +37,6 @@ struct Registry(Vec<(AnyWindowHandle, WeakEntity<MainWindow>)>);
 impl Global for Registry {}
 
 /// Live windows, dropping entries for closed ones.
-/// Everything quitting would end, across windows.
-pub fn running(cx: &mut App) -> Vec<String> {
-    windows(cx).into_iter().flat_map(|(_, m)| m.read(cx).running(cx)).collect()
-}
-
 /// Every workspace with its window: the frontmost window first, and in
 /// each window its shown workspace first.
 pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
@@ -123,7 +118,157 @@ pub fn restore_session(cx: &mut App) -> bool {
         let at = w.placement.as_ref().and_then(|(uuid, bounds)| window_state::resolve(uuid, *bounds, cx));
         open_window(Content::Workspaces(w.workspaces.clone(), w.active), at, cx);
     }
+    let known = saved
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.tabs)
+        .filter_map(|t| match t {
+            window_state::SavedTab::Claude { mux, .. } | window_state::SavedTab::Shell { mux, .. } => *mux,
+            _ => None,
+        })
+        .collect();
+    adopt_orphans(known, cx);
     !saved.is_empty()
+}
+
+/// Background sessions no saved tab knows (the session wasn't saved before
+/// a crash): running ones open as tabs in the first window, so nothing runs
+/// unseen; ended ones go.
+pub fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
+    let Some(client) = cx.global::<AppServices>().0.mux.existing() else { return };
+    let Ok(list) = client.list() else { return };
+    let orphans: Vec<_> = list.into_iter().filter(|s| !known.contains(&s.id)).collect();
+    if orphans.is_empty() {
+        return;
+    }
+    let mut live = vec![];
+    for s in orphans {
+        if s.exited {
+            client.close(s.id);
+        } else {
+            live.push(s);
+        }
+    }
+    if live.is_empty() {
+        return;
+    }
+    log::info!("adopting {} background sessions", live.len());
+    if windows(cx).is_empty() {
+        // No window to put them in: open one at the first one's folder.
+        let root = live[0].cwd.clone().unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default());
+        open_folder(root, cx);
+    }
+    adopt_into_first(live, cx);
+}
+
+fn adopt_into_first(live: Vec<tern_mux::proto::SessionInfo>, cx: &mut App) {
+    let Some((handle, main)) = windows(cx).into_iter().next() else { return };
+    let _ = handle.update(cx, |_, window, cx| {
+        main.update(cx, |m, cx| {
+            if let Some(ws) = m.active_ws().cloned() {
+                ws.update(cx, |w, cx| {
+                    for s in &live {
+                        w.adopt_session(s, window, cx);
+                    }
+                });
+            }
+        })
+    });
+}
+
+/// Where Open (from the menu bar) puts session `id`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RevealTarget {
+    /// A tab shows it already.
+    Focus { window: usize, ws: usize, tab: usize },
+    /// A new tab in the active window's active workspace.
+    AdoptIntoActive,
+    /// No window: one opens, with it.
+    NewWindow,
+    /// It ended meanwhile.
+    Nothing,
+}
+
+/// `tabs[w][ws]` = the mux ids of window `w`'s workspace `ws`'s tabs
+/// (`None` for non-terminal tabs); `known`: the daemon has the session.
+pub fn reveal_target(tabs: &[Vec<Vec<Option<u64>>>], id: u64, known: bool) -> RevealTarget {
+    if !known {
+        return RevealTarget::Nothing;
+    }
+    for (window, wss) in tabs.iter().enumerate() {
+        for (ws, ids) in wss.iter().enumerate() {
+            if let Some(tab) = ids.iter().position(|t| *t == Some(id)) {
+                return RevealTarget::Focus { window, ws, tab };
+            }
+        }
+    }
+    if tabs.is_empty() { RevealTarget::NewWindow } else { RevealTarget::AdoptIntoActive }
+}
+
+/// Show background session `id` (asked from the menu bar): focus the tab
+/// showing it, else adopt it into the active workspace, else into a new
+/// window at its folder. Nothing if it has ended.
+pub fn reveal_session(id: u64, cx: &mut App) {
+    let info = cx.global::<AppServices>().0.mux.existing().and_then(|c| c.list().ok()).and_then(|l| l.into_iter().find(|s| s.id == id));
+    let wins = windows(cx);
+    let tabs: Vec<Vec<Vec<Option<u64>>>> =
+        wins.iter().map(|(_, m)| m.read(cx).slots.iter().map(|s| s.ws.read(cx).mux_ids(cx)).collect()).collect();
+    let target = reveal_target(&tabs, id, info.is_some());
+    log::info!("show session {id}: {target:?}");
+    match target {
+        RevealTarget::Nothing => log::info!("session {id} is gone; nothing to show"),
+        RevealTarget::Focus { window: w, ws, tab } => {
+            let (handle, main) = wins[w].clone();
+            let _ = handle.update(cx, |_, window, cx| {
+                main.update(cx, |m, cx| {
+                    m.activate(ws, window, cx);
+                    if let Some(ws) = m.active_ws().cloned() {
+                        ws.update(cx, |w, cx| w.show_tab_at(tab, window, cx));
+                    }
+                });
+                window.activate_window();
+            });
+        },
+        RevealTarget::AdoptIntoActive | RevealTarget::NewWindow => {
+            let Some(info) = info else { return };
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            // The active window, else the first (as `open_folder` picks).
+            let target = cx.active_window().and_then(|a| wins.iter().find(|(h, _)| *h == a).cloned()).or_else(|| wins.first().cloned());
+            let Some((handle, main)) = target else {
+                // No window: one at its folder, holding just it.
+                open_window(Content::Workspaces(vec![adoption_workspace(&info, &home)], 0), None, cx);
+                cx.activate(true);
+                return;
+            };
+            let _ = handle.update(cx, |_, window, cx| {
+                main.update(cx, |m, cx| match m.active_ws().cloned() {
+                    Some(ws) => ws.update(cx, |w, cx| w.adopt_session(&info, window, cx)),
+                    // A welcome page: a workspace at its folder, holding just it.
+                    None => {
+                        let services = cx.global::<AppServices>().0.clone();
+                        let ws = cx.new(|cx| Workspace::new(adoption_workspace(&info, &home), services, window, cx));
+                        m.insert(ws, None, window, cx);
+                    },
+                });
+                window.activate_window();
+            });
+        },
+    }
+    cx.activate(true);
+}
+
+/// A workspace at session `s`'s folder (`home` without one) whose only tab
+/// shows it: no default Claude tab beside it.
+pub fn adoption_workspace(s: &tern_mux::proto::SessionInfo, home: &Path) -> window_state::SavedWorkspace {
+    let tab = if s.claude {
+        window_state::SavedTab::Claude { name: None, session: s.claude_session.clone(), mux: Some(s.id) }
+    } else {
+        window_state::SavedTab::Shell { name: s.title.clone(), mux: Some(s.id) }
+    };
+    window_state::SavedWorkspace {
+        tabs: vec![tab],
+        ..window_state::SavedWorkspace::fresh(s.cwd.clone().unwrap_or_else(|| home.to_owned()))
+    }
 }
 
 /// What a new window starts with.
@@ -263,6 +408,8 @@ impl Render for DraggedWorkspace {
 }
 
 pub struct MainWindow {
+    /// Closed by the user (not by quitting): its terminals end with it.
+    ends_terminals: bool,
     slots: Vec<Slot>,
     active: usize,
     /// The workspace tab last right-clicked, for its menu.
@@ -283,31 +430,54 @@ impl MainWindow {
             this.placement = window_state::placement(window, cx);
             this.changed(cx);
         });
+        // The agent's own menu may have hidden it meanwhile.
+        let activation_sub = cx.observe_window_activation(window, |_: &mut Self, window, cx| {
+            if window.is_window_active() {
+                crate::set_app_menus(cx);
+            }
+        });
         // The close button asks first when that ends running programs.
         let me = cx.entity().downgrade();
         let confirmed = Rc::new(Cell::new(false));
         window.on_window_should_close(cx, move |window, cx| {
+            // The last window going quits Tern: like ⌘Q, its terminals keep
+            // running and it comes back at the next launch.
+            if windows(cx).len() <= 1 {
+                return true;
+            }
             let jobs = me.upgrade().map(|m| m.read(cx).running(cx)).unwrap_or_default();
             if jobs.is_empty() || confirmed.get() {
+                // Closed by the user: its terminals end with it.
+                if let Some(me) = me.upgrade() {
+                    me.update(cx, |m, _| m.ends_terminals = true);
+                }
                 return true;
             }
             let Some(me) = me.upgrade() else { return true };
             let confirmed = confirmed.clone();
             me.update(cx, |_, cx| {
-                confirm_close(jobs, "this window", window, cx, move |_, window, _| {
+                confirm_close(jobs, "this window", window, cx, move |this: &mut Self, window, _| {
                     confirmed.set(true);
+                    this.ends_terminals = true;
                     window.remove_window();
                 })
             });
             false
         });
         cx.on_release(|this: &mut Self, cx| {
+            let end = this.ends_terminals;
             for slot in &this.slots {
-                slot.ws.update(cx, |w, cx| w.shutdown(cx));
+                slot.ws.update(cx, |w, cx| {
+                    w.shutdown(cx);
+                    if end {
+                        w.end_terminals(cx);
+                    }
+                });
             }
         })
         .detach();
         Self {
+            ends_terminals: false,
             slots: vec![],
             active: 0,
             menu_ix: None,
@@ -315,7 +485,7 @@ impl MainWindow {
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
-            _subs: vec![bounds_sub],
+            _subs: vec![bounds_sub, activation_sub],
         }
     }
 
@@ -415,7 +585,10 @@ impl MainWindow {
     /// the welcome page when it was the last.
     fn close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ws) = self.take(ix, window, cx) {
-            ws.update(cx, |w, cx| w.shutdown(cx));
+            ws.update(cx, |w, cx| {
+                w.shutdown(cx);
+                w.end_terminals(cx);
+            });
         }
     }
 
@@ -872,5 +1045,46 @@ impl Render for MainWindow {
                 }
             }))
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RevealTarget, adoption_workspace, reveal_target};
+    use crate::window_state::SavedTab;
+    use tern_mux::proto::SessionInfo;
+
+    #[test]
+    fn reveal_target_focuses_the_tab_showing_it() {
+        let tabs = vec![vec![vec![None, Some(1)]], vec![vec![Some(2)], vec![None, None, Some(3)]]];
+        assert_eq!(reveal_target(&tabs, 3, true), RevealTarget::Focus { window: 1, ws: 1, tab: 2 });
+        assert_eq!(reveal_target(&tabs, 1, true), RevealTarget::Focus { window: 0, ws: 0, tab: 1 });
+    }
+
+    #[test]
+    fn reveal_target_adopts_what_no_tab_shows() {
+        let tabs = vec![vec![vec![Some(1)]]];
+        assert_eq!(reveal_target(&tabs, 9, true), RevealTarget::AdoptIntoActive);
+        assert_eq!(reveal_target(&[], 9, true), RevealTarget::NewWindow);
+    }
+
+    #[test]
+    fn adoption_workspace_holds_just_the_session() {
+        // No default Claude tab: the workspace opens with the session alone.
+        let shell = SessionInfo { id: 7, cwd: Some("/p".into()), title: Some("vim".into()), ..Default::default() };
+        let w = adoption_workspace(&shell, "/home".as_ref());
+        assert_eq!(w.folder, std::path::Path::new("/p"));
+        assert_eq!(w.tabs, [SavedTab::Shell { name: Some("vim".into()), mux: Some(7) }]);
+        let claude = SessionInfo { id: 8, claude: true, claude_session: Some("s".into()), ..Default::default() };
+        let w = adoption_workspace(&claude, "/home".as_ref());
+        assert_eq!(w.folder, std::path::Path::new("/home"));
+        assert_eq!(w.tabs, [SavedTab::Claude { name: None, session: Some("s".into()), mux: Some(8) }]);
+    }
+
+    #[test]
+    fn reveal_target_unknown_session_does_nothing() {
+        // Ended between the menu and the click; a stale tab may still name it.
+        assert_eq!(reveal_target(&[vec![vec![Some(9)]]], 9, false), RevealTarget::Nothing);
+        assert_eq!(reveal_target(&[], 9, false), RevealTarget::Nothing);
     }
 }
