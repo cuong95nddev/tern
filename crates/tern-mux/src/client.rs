@@ -47,6 +47,12 @@ struct Slot {
     tty: Mutex<Option<File>>,
     /// The size the view wants; sent once the session is known.
     want: Mutex<TermSize>,
+    /// The size the open request carried.
+    sent: TermSize,
+    /// The tab let go of it: `close` says whether to end the session or
+    /// only detach, once its id is known.
+    gone: AtomicBool,
+    close: AtomicBool,
 }
 
 struct Inner {
@@ -156,7 +162,11 @@ impl MuxClient {
     /// `NotFound` / `SpawnError` / `ServerLost`) when the daemon answers.
     pub fn open(&self, open: Open, size: TermSize, scrollback: usize, sink: EventSink) -> RemoteSession {
         let mirror = Mirror::new(size, scrollback, sink.clone());
+        let req = self.inner.req();
         let slot = Arc::new(Slot {
+            sent: size,
+            gone: AtomicBool::new(false),
+            close: AtomicBool::new(false),
             term: mirror.term().clone(),
             wake: mirror.wake_flag().clone(),
             mirror: Mutex::new(mirror),
@@ -165,7 +175,6 @@ impl MuxClient {
             tty: Mutex::new(None),
             want: Mutex::new(size),
         });
-        let req = self.inner.req();
         self.inner.pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
             Open::Spawn { mut cfg, hook } => {
@@ -296,11 +305,19 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 };
                 slot.mirror.lock().unwrap().install(&snap);
                 *slot.id.lock().unwrap() = Some(id);
+                if slot.gone.load(Ordering::SeqCst) {
+                    // Its tab went away before the answer.
+                    let msg = if slot.close.load(Ordering::SeqCst) { ClientMsg::Close { id } } else { ClientMsg::Detach { id } };
+                    let _ = inner.send(&msg);
+                    continue;
+                }
                 *slot.tty.lock().unwrap() = tty;
                 inner.sessions.lock().unwrap().insert(id, slot.clone());
                 (slot.sink)(TermEvent::Ready { id, token, status: snap.status });
+                // The daemon sized it as the request said; the view may
+                // have moved on since.
                 let want = *slot.want.lock().unwrap();
-                if want != snap.size {
+                if want != slot.sent {
                     let _ = inner.send(&ClientMsg::Resize { id, size: want });
                 }
             },
@@ -343,6 +360,8 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
     let slots: Vec<_> =
         inner.pending.lock().unwrap().drain().map(|(_, s)| s).chain(inner.sessions.lock().unwrap().drain().map(|(_, s)| s)).collect();
     for slot in slots {
+        // Holding the PTY would keep its programs from getting a hangup.
+        slot.tty.lock().unwrap().take();
         (slot.sink)(TermEvent::ServerLost);
     }
 }
@@ -417,7 +436,10 @@ impl RemoteSession {
 
 impl Drop for RemoteSession {
     fn drop(&mut self) {
-        self.inner.pending.lock().unwrap().retain(|_, s| !Arc::ptr_eq(s, &self.slot));
+        // When the daemon hasn't answered yet, the reader deals with the
+        // session (see `gone`); either side may do it, twice is harmless.
+        self.slot.close.store(self.closed, Ordering::SeqCst);
+        self.slot.gone.store(true, Ordering::SeqCst);
         if let Some(id) = self.id() {
             self.inner.sessions.lock().unwrap().remove(&id);
             if !self.closed {

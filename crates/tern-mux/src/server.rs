@@ -355,9 +355,9 @@ impl Server {
         if let Some(p) = previous {
             p.send(ServerMsg::Detached { id });
         }
-        let fd = host.master_fd();
+        // Closed on exec: programs spawned meanwhile mustn't inherit it.
         // SAFETY: dup of an fd the host keeps open.
-        let fd = unsafe { libc::dup(fd) };
+        let fd = unsafe { libc::fcntl(host.master_fd(), libc::F_DUPFD_CLOEXEC, 0) };
         let fd = (fd >= 0).then(|| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
         let pid = host.pid();
         let sub: Arc<dyn Subscriber> = conn.clone();

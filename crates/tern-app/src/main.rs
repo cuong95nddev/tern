@@ -128,7 +128,14 @@ fn main() {
         }
 
         match arg {
-            Some(root) => main_window::open_folder(root, cx),
+            Some(root) => {
+                main_window::open_folder(root, cx);
+                // The last session's windows don't come back: their
+                // terminals join this one rather than run unseen.
+                if !scripted {
+                    main_window::adopt_orphans(Default::default(), cx);
+                }
+            },
             None => {
                 let restored = !scripted && main_window::restore_session(cx);
                 match shell_cwd.or_else(|| (!restored).then(window_state::last_folder).flatten()) {

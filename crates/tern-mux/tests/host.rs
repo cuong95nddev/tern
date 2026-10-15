@@ -157,3 +157,25 @@ fn attach_mid_stream_loses_and_doubles_nothing() {
     drop(m);
     host.kill();
 }
+
+#[test]
+fn attach_inside_a_synchronized_update() {
+    // Starts a synchronized update, waits, then finishes it.
+    let host = Host::spawn(6, &sh("printf '\\033[?2026hAAA'; read x; printf 'BBB\\033[?2026l'; read y"), Arc::new(NoObserver)).unwrap();
+    // Inside the update (it times out after 150 ms).
+    std::thread::sleep(Duration::from_millis(60));
+    let events: Arc<Mutex<Vec<tern_term::TermEvent>>> = Arc::default();
+    let ev = events.clone();
+    let mirror = Mirror::new(SIZE, 1000, Arc::new(move |e| ev.lock().unwrap().push(e)));
+    let sub = Arc::new(MirrorSub(Mutex::new(mirror)));
+    let snap = host.attach(sub.clone());
+    sub.0.lock().unwrap().install(&snap);
+    host.input(b"\n".to_vec());
+    wait_until("both halves", || {
+        let m = sub.0.lock().unwrap();
+        let term = m.term().lock();
+        let rows: String = (0..2).flat_map(|l| term.grid()[Line(l)].into_iter().map(|c| c.c).collect::<Vec<_>>()).collect();
+        rows.contains("AAA") && rows.contains("BBB")
+    });
+    host.kill();
+}

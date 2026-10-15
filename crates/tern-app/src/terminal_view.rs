@@ -168,8 +168,11 @@ pub struct TerminalView {
     mux: Arc<Connector>,
     /// Spawn with a Claude hook token.
     hook: bool,
-    /// The background session to attach to at the first start.
+    /// The background session to attach to at the next start.
     attach: Option<u64>,
+    /// Reattaching after the connection to the daemon was lost: if the
+    /// session is gone, say so rather than start a new program.
+    reattaching: bool,
     config: TerminalConfig,
     focus: FocusHandle,
     title: SharedString,
@@ -241,6 +244,7 @@ impl TerminalView {
             mux,
             hook,
             attach,
+            reattaching: false,
             config,
             focus: cx.focus_handle(),
             title: title.clone(),
@@ -476,11 +480,14 @@ impl TerminalView {
                 // The status it had while no one watched (e.g. Done): shown,
                 // not notified again.
                 self.status = status;
+                self.reattaching = false;
                 cx.emit(TerminalEvent::Ready { token });
                 cx.emit(TerminalEvent::TitleChanged);
                 cx.notify();
             },
-            // The saved session is gone: start the program afresh.
+            // The session is gone: start the program afresh, unless this was
+            // a reconnect (the daemon died with it; Enter restarts).
+            TermEvent::NotFound if self.reattaching => self.server_stopped(cx),
             TermEvent::NotFound => self.start(cx),
             TermEvent::SpawnError(err) => {
                 log::error!("failed to spawn terminal: {err}");
@@ -490,15 +497,31 @@ impl TerminalView {
                 cx.notify();
             },
             TermEvent::ServerLost => {
-                if self.exited.is_none() {
-                    self.exited = Some(None);
-                    self.spawn_error = Some("background server stopped".into());
-                    self.set_status(ActivityStatus::None, cx);
-                    cx.emit(TerminalEvent::Exited { code: None, quick: false });
+                // The connection went (the daemon dropped it or died): try the
+                // same session again once.
+                let id = self.session.take().and_then(|s| s.id());
+                if self.exited.is_none()
+                    && !self.reattaching
+                    && let Some(id) = id
+                {
+                    self.reattaching = true;
+                    self.attach = Some(id);
+                    return self.start(cx);
                 }
-                cx.notify();
+                self.server_stopped(cx);
             },
         }
+    }
+
+    fn server_stopped(&mut self, cx: &mut Context<Self>) {
+        self.reattaching = false;
+        if self.exited.is_none() {
+            self.exited = Some(None);
+            self.spawn_error = Some("background server stopped".into());
+            self.set_status(ActivityStatus::None, cx);
+            cx.emit(TerminalEvent::Exited { code: None, quick: false });
+        }
+        cx.notify();
     }
 
     fn set_status(&mut self, status: ActivityStatus, cx: &mut Context<Self>) {

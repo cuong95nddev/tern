@@ -789,7 +789,8 @@ impl Workspace {
         let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
-        let resuming = session.is_some();
+        // Reattaching runs no `--resume`, so its quick exit says nothing.
+        let resuming = session.is_some() && mux.is_none();
         let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);

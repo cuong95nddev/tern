@@ -22,10 +22,14 @@ struct Daemon {
 }
 
 fn daemon(idle: Duration) -> Daemon {
+    daemon_with(idle, 1 << 20)
+}
+
+fn daemon_with(idle: Duration, max_queued: usize) -> Daemon {
     // Short path: Unix socket paths are limited to 104 bytes.
     let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
     let dir = tmp.path().join("m");
-    let opts = ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued: 1 << 20 };
+    let opts = ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued };
     let d = dir.clone();
     let thread = std::thread::spawn(move || serve(&d, opts));
     wait_until("socket", || paths::socket_path(&dir).exists());
@@ -269,4 +273,58 @@ fn attach_to_an_exited_session_reports_the_exit() {
     wait_until("exit event", || ev2.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(5)))));
     assert!(screen(&s).contains("bye"));
     s.close();
+}
+
+#[test]
+fn closing_before_the_reply_ends_the_session() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink1, _ev1) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink1);
+    s.close(); // before `Attached` came back
+    let (sink2, _ev2) = sink();
+    let s2 = c.open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink2);
+    drop(s2); // dropped before the reply: detached, still listed
+    wait_until("only the dropped one left", || {
+        let l = c.list().unwrap();
+        l.len() == 1 && !l[0].exited
+    });
+    for i in c.list().unwrap() {
+        c.close(i.id);
+    }
+}
+
+#[test]
+fn size_set_before_the_reply_wins() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink1, ev1) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    let id = s.id().unwrap();
+    drop(s);
+    // Reattach at a passing size, then settle back at the old one before
+    // the daemon answers.
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, TermSize { cols: 90, rows: 30, ..SIZE }, 1000, sink2);
+    s.resize(SIZE);
+    wait_until("ready", || ready_id(&ev2).is_some());
+    std::thread::sleep(Duration::from_millis(300));
+    let cols = s.term().lock().columns();
+    let rows = s.term().lock().screen_lines();
+    assert_eq!((cols, rows), (SIZE.cols as usize, SIZE.rows as usize));
+    s.close();
+}
+
+#[test]
+fn dropped_connection_reports_loss_and_lets_go_of_the_pty() {
+    // A daemon that drops a client as soon as more than its hello is
+    // queued for it (PTY reads come in ~1 KiB chunks).
+    let d = daemon_with(Duration::from_secs(60), 200);
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("sleep 0.5; head -c 2000000 /dev/zero | tr '\\0' x; read x"), hook: false }, SIZE, 1000, sink);
+    wait_until("server lost", || ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::ServerLost)));
+    assert!(s.foreground_programs().is_empty(), "still holds the PTY");
+    assert!(!c.alive());
 }

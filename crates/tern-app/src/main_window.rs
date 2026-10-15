@@ -97,7 +97,7 @@ pub fn restore_session(cx: &mut App) -> bool {
 /// Background sessions no saved tab knows (the session wasn't saved before
 /// a crash): running ones open as tabs in the first window, so nothing runs
 /// unseen; ended ones go.
-fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
+pub fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
     let Some(client) = cx.global::<AppServices>().0.mux.existing() else { return };
     let Ok(list) = client.list() else { return };
     let orphans: Vec<_> = list.into_iter().filter(|s| !known.contains(&s.id)).collect();

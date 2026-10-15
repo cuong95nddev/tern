@@ -131,6 +131,8 @@ pub struct Host {
     master: File,
     shared: Arc<Shared>,
     term: Arc<FairMutex<HostTerm>>,
+    /// Locked after `term`, never before.
+    parser: Arc<Mutex<Processor<StdSyncHandler>>>,
 }
 
 fn window_size(s: TermSize) -> WindowSize {
@@ -169,7 +171,8 @@ impl Host {
         let pty = tty::new(&opts, window_size(cfg.size), id)?;
         let pid = pty.child().id();
         let master = pty.file().try_clone()?;
-        let host = Arc::new(Self { id, pid, master, shared: shared.clone(), term: term.clone() });
+        let parser = Arc::new(Mutex::new(Processor::new()));
+        let host = Arc::new(Self { id, pid, master, shared: shared.clone(), term: term.clone(), parser: parser.clone() });
         let driver = Driver {
             id,
             pty,
@@ -178,7 +181,7 @@ impl Host {
             term,
             shared,
             observer,
-            parser: Processor::new(),
+            parser,
             scanner: OscScanner::new(),
             writes: VecDeque::new(),
             last_probe_reply: None,
@@ -224,6 +227,16 @@ impl Host {
     /// still locked: whatever `f` queues goes before the bytes that follow.
     pub fn attach_with(&self, sub: Arc<dyn Subscriber>, f: impl FnOnce(Snapshot)) {
         let mut term = self.term.lock();
+        // Bytes held for an open synchronized update aren't in the grid yet:
+        // end it, so the snapshot has them (the old client ends it too).
+        let mut parser = self.parser.lock().unwrap();
+        if parser.sync_bytes_count() > 0 {
+            parser.stop_sync(&mut *term);
+            if let Some(old) = self.shared.subscriber() {
+                old.marker(self.id, &Marker::SyncFlush);
+            }
+        }
+        drop(parser);
         let title = self.shared.title.lock().unwrap().clone();
         f(snapshot::capture(&mut term, self.size(), title, self.status()));
         *self.shared.subscriber.lock().unwrap() = Some(sub);
@@ -289,7 +302,7 @@ struct Driver {
     term: Arc<FairMutex<HostTerm>>,
     shared: Arc<Shared>,
     observer: Arc<dyn Observer>,
-    parser: Processor<StdSyncHandler>,
+    parser: Arc<Mutex<Processor<StdSyncHandler>>>,
     scanner: OscScanner,
     writes: VecDeque<(Cow<'static, [u8]>, usize)>,
     last_probe_reply: Option<Instant>,
@@ -310,7 +323,8 @@ impl Driver {
         let mut buf = vec![0u8; READ_BUFFER];
         let code = 'run: loop {
             let now = Instant::now();
-            let deadlines = [self.parser.sync_timeout().sync_timeout(), self.jiggle.map(|j| j.0)];
+            let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0)];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -321,10 +335,14 @@ impl Driver {
                 break None;
             }
             let now = Instant::now();
-            if self.parser.sync_timeout().sync_timeout().is_some_and(|t| t <= now) {
+            if sync_deadline.is_some_and(|t| t <= now) {
                 let mut term = self.term.lock();
-                self.parser.stop_sync(&mut *term);
-                self.emit_marker(&Marker::SyncFlush);
+                let mut parser = self.parser.lock().unwrap();
+                // An attach may have ended it meanwhile.
+                if parser.sync_timeout().sync_timeout().is_some_and(|t| t <= now) {
+                    parser.stop_sync(&mut *term);
+                    self.emit_marker(&Marker::SyncFlush);
+                }
             }
             if let Some((at, size)) = self.jiggle
                 && at <= now
@@ -414,7 +432,7 @@ impl Driver {
             let bytes = &buf[..n];
             {
                 let mut term = self.term.lock();
-                self.parser.advance(&mut *term, bytes);
+                self.parser.lock().unwrap().advance(&mut *term, bytes);
                 if let Some(sub) = self.shared.subscriber() {
                     sub.output(self.id, bytes);
                 }
