@@ -10,6 +10,7 @@ mod main_window;
 mod panes;
 mod scratch;
 mod scratches_view;
+mod shot;
 mod terminal_view;
 mod terminate;
 mod update;
