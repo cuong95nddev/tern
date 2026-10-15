@@ -6494,6 +6494,7 @@ dependencies = [
  "semver",
  "tern-bridge",
  "tern-fs",
+ "tern-mux",
  "tern-term",
 ]
 

@@ -33,6 +33,12 @@ impl Global for AppServices {}
 
 fn main() {
     env_logger::init();
+    // The background daemon that runs the terminals (started by the UI).
+    if std::env::args().nth(1).as_deref() == Some("--server") {
+        // SAFETY: no other thread runs yet. Its programs inherit this env.
+        unsafe { tern_term::env::prepare_process_env() };
+        tern_mux::server::run();
+    }
     // Read before the environment is cleaned for terminals.
     let control_socket = std::env::var_os("TERN_CONTROL").map(PathBuf::from);
     // SAFETY: no other thread runs yet.
