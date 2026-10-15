@@ -104,6 +104,9 @@ struct State {
     clients: usize,
     /// UI connections, oldest first (`Reveal` goes to the newest).
     uis: Vec<Weak<Conn>>,
+    /// Observer connections, closed when the daemon exits (they don't hold
+    /// it, so they may still be there).
+    observers: Vec<Weak<Conn>>,
     /// When the daemon last had neither sessions nor clients.
     idle_since: Option<Instant>,
 }
@@ -148,7 +151,13 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
             })
             .flatten();
         Server {
-            state: Mutex::new(State { sessions: HashMap::new(), clients: 0, uis: Vec::new(), idle_since: Some(Instant::now()) }),
+            state: Mutex::new(State {
+                sessions: HashMap::new(),
+                clients: 0,
+                uis: Vec::new(),
+                observers: Vec::new(),
+                idle_since: Some(Instant::now()),
+            }),
             hooks,
             run_dir,
             notifications: opts.notifications,
@@ -199,6 +208,11 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     }
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_dir_all(&server.run_dir);
+    // Observers learn at once that this daemon is gone.
+    let observers = std::mem::take(&mut server.state.lock().unwrap().observers);
+    for c in observers.iter().filter_map(Weak::upgrade) {
+        c.close();
+    }
     log::info!("daemon idle, exiting");
     Ok(())
 }
@@ -251,6 +265,8 @@ impl Server {
             st.clients += 1;
             st.uis.push(Arc::downgrade(&conn));
             Self::update_idle(&mut st);
+        } else {
+            self.state.lock().unwrap().observers.push(Arc::downgrade(&conn));
         }
         let result = (|| {
             while let Some(msg) = reader.read::<ClientMsg>()? {
@@ -266,6 +282,8 @@ impl Server {
         if role == Role::Ui {
             st.clients -= 1;
             st.uis.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
+        } else {
+            st.observers.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
         }
         for s in st.sessions.values_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {

@@ -5,6 +5,7 @@ pub mod client;
 pub mod fdpass;
 pub mod host;
 pub mod notify;
+pub mod observer;
 pub mod paths;
 pub mod proto;
 pub mod server;
