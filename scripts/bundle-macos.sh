@@ -73,6 +73,13 @@ cat > "$APP/Contents/Info.plist" <<EOF
             <key>LSItemContentTypes</key><array><string>public.folder</string></array>
         </dict>
     </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>dev.tern.session</string>
+            <key>CFBundleURLSchemes</key><array><string>tern</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

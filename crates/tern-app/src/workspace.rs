@@ -377,6 +377,8 @@ pub struct Services {
     /// The background daemon the terminals run in.
     pub mux: Arc<Connector>,
     pub hook_events: flume::Receiver<HookEvent>,
+    /// Sessions the menu bar agent asked to show.
+    pub reveal_events: flume::Receiver<u64>,
     pub terminal: TerminalConfig,
 }
 
@@ -797,9 +799,25 @@ impl Workspace {
         self.activate(ix, window, cx);
     }
 
-    /// A tab for background session `id` that no saved tab knew.
-    pub fn adopt_session(&mut self, id: u64, title: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(TabKind::Shell, title, None, Some(id), window, cx);
+    /// A tab for background session `s` that no tab shows. A Claude one
+    /// resumes its conversation if it has to start again.
+    pub fn adopt_session(&mut self, s: &tern_mux::proto::SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if s.claude {
+            // Claude names its tab itself.
+            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), window, cx);
+        } else {
+            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), window, cx);
+        }
+    }
+
+    /// Each tab's background session id (`None` for other tabs), by index.
+    pub fn mux_ids(&self, cx: &App) -> Vec<Option<u64>> {
+        self.tabs.iter().map(|t| t.term().and_then(|t| t.view.read(cx).mux_id())).collect()
+    }
+
+    /// Make tab `ix` the active one.
+    pub fn show_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate(ix, window, cx);
     }
 
     /// Create a scratch file of type `ext` and open it.
@@ -3330,6 +3348,10 @@ pub fn services(terminal: TerminalConfig) -> Services {
             let _ = tx.send(ev);
         }
     });
-    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, Arc::new(|_| {})));
-    Services { mux, hook_events: rx, terminal }
+    let (reveal_tx, reveal_rx) = flume::unbounded();
+    let reveal: tern_mux::client::RevealSink = Arc::new(move |id| {
+        let _ = reveal_tx.send(id);
+    });
+    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, reveal));
+    Services { mux, hook_events: rx, reveal_events: reveal_rx, terminal }
 }

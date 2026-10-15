@@ -51,8 +51,15 @@ fn main() {
     // windows come back, plus the cwd when started from a shell (from Finder
     // or the Dock the cwd is `/`); with no session, the last folder or the
     // welcome page.
-    let arg: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
-    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some());
+    // `--open-session <id>`: the menu bar agent's Open in debug builds
+    // (release ones get a `tern://session/<id>` URL).
+    let open_session = match std::env::args().nth(1).as_deref() {
+        Some("--open-session") => std::env::args().nth(2).and_then(|s| s.parse::<u64>().ok()),
+        _ => None,
+    };
+    let arg: Option<PathBuf> = if open_session.is_some() { None } else { std::env::args().nth(1).map(PathBuf::from) };
+    // `--open-session` shows a session, not the folder it was started in.
+    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some() && open_session.is_none());
     // One Tern at a time shares the saved session: a second one hands its
     // folder to the first and exits.
     let Ok(_lock) = lock_instance() else {
@@ -115,6 +122,14 @@ fn main() {
             }
         })
         .detach();
+        // Sessions the menu bar agent asks to show.
+        let reveal_events = services.reveal_events.clone();
+        cx.spawn(async move |cx| {
+            while let Ok(id) = reveal_events.recv_async().await {
+                cx.update(|cx| main_window::reveal_session(id, cx));
+            }
+        })
+        .detach();
         cx.set_global(AppServices(services));
 
         // Scripted debug runs leave the real session alone (unless
@@ -149,9 +164,17 @@ fn main() {
                 }
             },
         }
+        if let Some(id) = open_session {
+            main_window::reveal_session(id, cx);
+        }
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv_async().await {
                 cx.update(|cx| {
+                    for url in &urls {
+                        if let Some(id) = session_url_id(url) {
+                            main_window::reveal_session(id, cx);
+                        }
+                    }
                     for path in urls.iter().filter_map(|u| file_url_path(u)).filter(|p| p.is_dir()) {
                         main_window::open_folder(path, cx);
                     }
@@ -234,6 +257,15 @@ fn forward_to_running(folder: Option<PathBuf>) {
     }
 }
 
+/// The session id in a `tern://session/<id>` URL (from the menu bar agent).
+fn session_url_id(url: &str) -> Option<u64> {
+    let id = url.strip_prefix("tern://session/")?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    id.parse().ok()
+}
+
 /// The path of a `file://` URL, percent-decoded.
 fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -267,5 +299,18 @@ mod tests {
         assert_eq!(file_url_path("file:///Users/a/my%20dir/"), Some(PathBuf::from("/Users/a/my dir/")));
         assert_eq!(file_url_path("file://localhost/tmp/x"), Some(PathBuf::from("/tmp/x")));
         assert_eq!(file_url_path("https://x"), None);
+    }
+
+    #[test]
+    fn parses_session_urls() {
+        use super::session_url_id;
+        assert_eq!(session_url_id("tern://session/42"), Some(42));
+        assert_eq!(session_url_id("tern://session/9223372036854775807"), Some(9223372036854775807));
+        assert_eq!(session_url_id("tern://session/abc"), None);
+        assert_eq!(session_url_id("tern://session/1/x"), None);
+        assert_eq!(session_url_id("tern://session/-1"), None);
+        assert_eq!(session_url_id("tern://session/99999999999999999999999"), None);
+        assert_eq!(session_url_id("tern://session/"), None);
+        assert_eq!(session_url_id("file:///tmp"), None);
     }
 }

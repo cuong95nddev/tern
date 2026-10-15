@@ -131,12 +131,89 @@ fn adopt_into_first(live: Vec<tern_mux::proto::SessionInfo>, cx: &mut App) {
             if let Some(ws) = m.active_ws().cloned() {
                 ws.update(cx, |w, cx| {
                     for s in &live {
-                        w.adopt_session(s.id, s.title.clone(), window, cx);
+                        w.adopt_session(s, window, cx);
                     }
                 });
             }
         })
     });
+}
+
+/// Where Open (from the menu bar) puts session `id`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RevealTarget {
+    /// A tab shows it already.
+    Focus { window: usize, ws: usize, tab: usize },
+    /// A new tab in the active window's active workspace.
+    AdoptIntoActive,
+    /// No window: one opens, with it.
+    NewWindow,
+    /// It ended meanwhile.
+    Nothing,
+}
+
+/// `tabs[w][ws]` = the mux ids of window `w`'s workspace `ws`'s tabs
+/// (`None` for non-terminal tabs); `known`: the daemon has the session.
+pub fn reveal_target(tabs: &[Vec<Vec<Option<u64>>>], id: u64, known: bool) -> RevealTarget {
+    if !known {
+        return RevealTarget::Nothing;
+    }
+    for (window, wss) in tabs.iter().enumerate() {
+        for (ws, ids) in wss.iter().enumerate() {
+            if let Some(tab) = ids.iter().position(|t| *t == Some(id)) {
+                return RevealTarget::Focus { window, ws, tab };
+            }
+        }
+    }
+    if tabs.is_empty() { RevealTarget::NewWindow } else { RevealTarget::AdoptIntoActive }
+}
+
+/// Show background session `id` (asked from the menu bar): focus the tab
+/// showing it, else adopt it into the active workspace, else into a new
+/// window at its folder. Nothing if it has ended.
+pub fn reveal_session(id: u64, cx: &mut App) {
+    let info = cx.global::<AppServices>().0.mux.existing().and_then(|c| c.list().ok()).and_then(|l| l.into_iter().find(|s| s.id == id));
+    let wins = windows(cx);
+    let tabs: Vec<Vec<Vec<Option<u64>>>> =
+        wins.iter().map(|(_, m)| m.read(cx).slots.iter().map(|s| s.ws.read(cx).mux_ids(cx)).collect()).collect();
+    let target = reveal_target(&tabs, id, info.is_some());
+    log::info!("show session {id}: {target:?}");
+    match target {
+        RevealTarget::Nothing => log::info!("session {id} is gone; nothing to show"),
+        RevealTarget::Focus { window: w, ws, tab } => {
+            let (handle, main) = wins[w].clone();
+            let _ = handle.update(cx, |_, window, cx| {
+                main.update(cx, |m, cx| {
+                    m.activate(ws, window, cx);
+                    if let Some(ws) = m.active_ws().cloned() {
+                        ws.update(cx, |w, cx| w.show_tab(tab, window, cx));
+                    }
+                });
+                window.activate_window();
+            });
+        },
+        RevealTarget::AdoptIntoActive | RevealTarget::NewWindow => {
+            let Some(info) = info else { return };
+            let target = |cx: &mut App| {
+                let wins = windows(cx);
+                cx.active_window().and_then(|a| wins.iter().find(|(h, _)| *h == a).cloned()).or_else(|| wins.last().cloned())
+            };
+            let has_ws = target(cx).is_some_and(|(_, m)| m.read(cx).active_ws().is_some());
+            if !has_ws {
+                // No window, or a welcome page: open its folder there first.
+                let root = info.cwd.clone().unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default());
+                open_folder(root, cx);
+            }
+            let Some((handle, main)) = target(cx) else { return };
+            let _ = handle.update(cx, |_, window, cx| {
+                if let Some(ws) = main.read(cx).active_ws().cloned() {
+                    ws.update(cx, |w, cx| w.adopt_session(&info, window, cx));
+                }
+                window.activate_window();
+            });
+        },
+    }
+    cx.activate(true);
 }
 
 /// What a new window starts with.
@@ -904,5 +981,31 @@ impl Render for MainWindow {
                 }
             }))
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RevealTarget, reveal_target};
+
+    #[test]
+    fn reveal_target_focuses_the_tab_showing_it() {
+        let tabs = vec![vec![vec![None, Some(1)]], vec![vec![Some(2)], vec![None, None, Some(3)]]];
+        assert_eq!(reveal_target(&tabs, 3, true), RevealTarget::Focus { window: 1, ws: 1, tab: 2 });
+        assert_eq!(reveal_target(&tabs, 1, true), RevealTarget::Focus { window: 0, ws: 0, tab: 1 });
+    }
+
+    #[test]
+    fn reveal_target_adopts_what_no_tab_shows() {
+        let tabs = vec![vec![vec![Some(1)]]];
+        assert_eq!(reveal_target(&tabs, 9, true), RevealTarget::AdoptIntoActive);
+        assert_eq!(reveal_target(&[], 9, true), RevealTarget::NewWindow);
+    }
+
+    #[test]
+    fn reveal_target_unknown_session_does_nothing() {
+        // Ended between the menu and the click; a stale tab may still name it.
+        assert_eq!(reveal_target(&[vec![vec![Some(9)]]], 9, false), RevealTarget::Nothing);
+        assert_eq!(reveal_target(&[], 9, false), RevealTarget::Nothing);
     }
 }
