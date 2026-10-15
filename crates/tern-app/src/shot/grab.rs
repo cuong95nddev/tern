@@ -62,7 +62,8 @@ fn unique_name(prefix: &str) -> String {
 pub fn grab(x: f32, y: f32, w: f32, h: f32) -> Result<RgbaImage, String> {
     let dir = dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(unique_name(".grab"));
+    // Not a dot file: screencapture won't write those (and still exits 0).
+    let file = dir.join(unique_name("grab"));
     let rect = format!("{},{},{},{}", x.round() as i64, y.round() as i64, w.round() as i64, h.round() as i64);
     let status = Command::new("/usr/sbin/screencapture").args(["-x", "-R", &rect]).arg(&file).status().map_err(|e| e.to_string())?;
     let img = if status.success() {
@@ -97,6 +98,12 @@ pub fn cleanup(dir: &Path, max_age: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_not_hidden() {
+        assert!(!unique_name("grab").starts_with('.'));
+        assert!(unique_name("grab").ends_with(".png"));
+    }
 
     #[test]
     fn saves_and_cleans_up() {
