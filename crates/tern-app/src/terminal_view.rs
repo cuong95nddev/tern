@@ -1,4 +1,5 @@
-//! Terminal pane: a GPUI view over a [`tern_term::Session`].
+//! Terminal pane: a GPUI view over a terminal running in the background
+//! daemon ([`tern_mux::client::RemoteSession`]).
 //!
 //! Rendering: on each frame we lock the VT state briefly and convert the
 //! visible grid into background rects + text segments. Segments are shaped via
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
+use tern_mux::client::{Connector, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
@@ -29,7 +31,7 @@ use tern_term::vt::selection::{Selection, SelectionType};
 use tern_term::vt::term::TermMode;
 use tern_term::vt::term::cell::Flags;
 use tern_term::vt::vte::ansi::{ClearMode, CursorShape, Handler, Rgb};
-use tern_term::{Session, SpawnConfig, TermEvent, TermSize};
+use tern_term::{SpawnConfig, TermEvent, TermSize};
 
 use crate::agents::Agent;
 use crate::links::{self, Link};
@@ -67,6 +69,10 @@ pub enum TerminalEvent {
     Exited {
         code: Option<i32>,
         quick: bool,
+    },
+    /// The background session is known (see `mux_id`), with its hook token.
+    Ready {
+        token: Option<String>,
     },
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
@@ -157,8 +163,13 @@ struct CellMetrics {
 }
 
 pub struct TerminalView {
-    session: Option<Session>,
+    session: Option<RemoteSession>,
     spawn_cfg: SpawnConfig,
+    mux: Arc<Connector>,
+    /// Spawn with a Claude hook token.
+    hook: bool,
+    /// The background session to attach to at the first start.
+    attach: Option<u64>,
     config: TerminalConfig,
     focus: FocusHandle,
     title: SharedString,
@@ -212,11 +223,24 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(spawn_cfg: SpawnConfig, title: impl Into<SharedString>, config: TerminalConfig, cx: &mut Context<Self>) -> Self {
+    /// A terminal that attaches to background session `attach` when it still
+    /// runs, else starts `spawn_cfg` (with a hook token when `hook`).
+    pub fn new(
+        spawn_cfg: SpawnConfig,
+        hook: bool,
+        attach: Option<u64>,
+        title: impl Into<SharedString>,
+        config: TerminalConfig,
+        mux: Arc<Connector>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let title = title.into();
         let mut this = Self {
             session: None,
             spawn_cfg,
+            mux,
+            hook,
+            attach,
             config,
             focus: cx.focus_handle(),
             title: title.clone(),
@@ -267,7 +291,8 @@ impl TerminalView {
         }
     }
 
-    /// Start (or restart) the process.
+    /// Start (or restart) the process: attach to the saved background
+    /// session the first time, else start a new one (ending the old one).
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.spawned = true;
         self.reported_focus = false;
@@ -276,21 +301,25 @@ impl TerminalView {
             let _ = tx.send(e);
         });
         let mut cfg = self.spawn_cfg.clone();
-        if let Some(s) = &self.session {
+        if let Some(s) = self.session.take() {
             cfg.size = s.size();
+            s.close();
         }
-        self.session = None;
         self.started = Instant::now();
-        match Session::spawn(cfg, Palette::default(), sink) {
-            Ok(s) => {
-                self.session = Some(s);
+        let open = match self.attach.take() {
+            Some(id) => Open::Attach { id },
+            None => Open::Spawn { cfg: cfg.clone(), hook: self.hook },
+        };
+        match self.mux.get() {
+            Ok(client) => {
+                self.session = Some(client.open(open, cfg.size, cfg.scrollback, sink));
                 self.exited = None;
                 self.spawn_error = None;
             },
             Err(err) => {
-                log::error!("failed to spawn terminal: {err}");
+                log::error!("background server unavailable: {err}");
                 self.exited = Some(None);
-                self.spawn_error = Some(err.to_string());
+                self.spawn_error = Some(format!("background server unavailable: {err}"));
             },
         }
         self._pump = Some(cx.spawn(async move |this, cx| {
@@ -355,6 +384,20 @@ impl TerminalView {
     #[cfg(debug_assertions)]
     pub fn debug_paste_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         self.paste_paths(paths, cx);
+    }
+
+    /// The background session's id, once known.
+    pub fn mux_id(&self) -> Option<u64> {
+        self.session.as_ref().and_then(RemoteSession::id).or(self.attach)
+    }
+
+    /// End the program (the tab is closing). Dropping the view instead
+    /// leaves it running in the background.
+    pub fn close(&mut self) {
+        self.attach = None;
+        if let Some(s) = self.session.take() {
+            s.close();
+        }
     }
 
     /// Run `cfg` from the next (re)start on.
@@ -429,8 +472,32 @@ impl TerminalView {
                 cx.emit(TerminalEvent::Notify { title, body });
             },
             TermEvent::Signal(OscSignal::ProgramStatusProbe) => {},
-            // Daemon sessions only.
-            TermEvent::Ready { .. } | TermEvent::SpawnError(_) | TermEvent::NotFound | TermEvent::ServerLost => {},
+            TermEvent::Ready { token, status, .. } => {
+                // The status it had while no one watched (e.g. Done): shown,
+                // not notified again.
+                self.status = status;
+                cx.emit(TerminalEvent::Ready { token });
+                cx.emit(TerminalEvent::TitleChanged);
+                cx.notify();
+            },
+            // The saved session is gone: start the program afresh.
+            TermEvent::NotFound => self.start(cx),
+            TermEvent::SpawnError(err) => {
+                log::error!("failed to spawn terminal: {err}");
+                self.session = None;
+                self.exited = Some(None);
+                self.spawn_error = Some(err);
+                cx.notify();
+            },
+            TermEvent::ServerLost => {
+                if self.exited.is_none() {
+                    self.exited = Some(None);
+                    self.spawn_error = Some("background server stopped".into());
+                    self.set_status(ActivityStatus::None, cx);
+                    cx.emit(TerminalEvent::Exited { code: None, quick: false });
+                }
+                cx.notify();
+            },
         }
     }
 
@@ -1407,6 +1474,7 @@ fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, 
 
     if let Some(code) = view.exited {
         let msg = match (code, &view.spawn_error) {
+            (None, Some(err)) if err == "background server stopped" => format!("[{err}] — press Enter to restart"),
             (_, Some(err)) => {
                 format!("[could not start {}: {err}] — press Enter to retry", view.spawn_cfg.program.as_deref().unwrap_or("shell"))
             },

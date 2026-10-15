@@ -362,16 +362,22 @@ impl Server {
         let pid = host.pid();
         let sub: Arc<dyn Subscriber> = conn.clone();
         // The reply is queued under the terminal lock, before any output
-        // that follows the snapshot.
-        host.attach_with(sub, |snapshot| conn.push(Out::Attached { req, id, token: token.clone(), pid, fd, snapshot: Box::new(snapshot) }));
+        // that follows the snapshot; an exit is either before it (said
+        // here) or after it (sent as the marker).
+        let mut exited = None;
+        host.attach_with(sub, |snapshot| {
+            conn.push(Out::Attached { req, id, token: token.clone(), pid, fd, snapshot: Box::new(snapshot) });
+            exited = host.exited();
+            if let Some(code) = exited {
+                conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
+            }
+        });
         for body in hooks {
             if let Some(token) = &token {
                 conn.send(ServerMsg::Hook { token: token.clone(), body });
             }
         }
-        if let Some(size) = size
-            && host.exited().is_none()
-        {
+        if let (None, Some(size)) = (exited, size) {
             host.jiggle(size);
         }
     }

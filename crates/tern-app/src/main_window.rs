@@ -37,11 +37,6 @@ struct Registry(Vec<(AnyWindowHandle, WeakEntity<MainWindow>)>);
 impl Global for Registry {}
 
 /// Live windows, dropping entries for closed ones.
-/// Everything quitting would end, across windows.
-pub fn running(cx: &mut App) -> Vec<String> {
-    windows(cx).into_iter().flat_map(|(_, m)| m.read(cx).running(cx)).collect()
-}
-
 fn windows(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<MainWindow>)> {
     let open = cx.windows();
     let reg = cx.default_global::<Registry>();
@@ -86,7 +81,62 @@ pub fn restore_session(cx: &mut App) -> bool {
         let at = w.placement.as_ref().and_then(|(uuid, bounds)| window_state::resolve(uuid, *bounds, cx));
         open_window(Content::Workspaces(w.workspaces.clone(), w.active), at, cx);
     }
+    let known = saved
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.tabs)
+        .filter_map(|t| match t {
+            window_state::SavedTab::Claude { mux, .. } | window_state::SavedTab::Shell { mux, .. } => *mux,
+            _ => None,
+        })
+        .collect();
+    adopt_orphans(known, cx);
     !saved.is_empty()
+}
+
+/// Background sessions no saved tab knows (the session wasn't saved before
+/// a crash): running ones open as tabs in the first window, so nothing runs
+/// unseen; ended ones go.
+fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
+    let Some(client) = cx.global::<AppServices>().0.mux.existing() else { return };
+    let Ok(list) = client.list() else { return };
+    let orphans: Vec<_> = list.into_iter().filter(|s| !known.contains(&s.id)).collect();
+    if orphans.is_empty() {
+        return;
+    }
+    let mut live = vec![];
+    for s in orphans {
+        if s.exited {
+            client.close(s.id);
+        } else {
+            live.push(s);
+        }
+    }
+    if live.is_empty() {
+        return;
+    }
+    log::info!("adopting {} background sessions", live.len());
+    if windows(cx).is_empty() {
+        // No window to put them in: open one at the first one's folder.
+        let root = live[0].cwd.clone().unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default());
+        open_folder(root, cx);
+    }
+    adopt_into_first(live, cx);
+}
+
+fn adopt_into_first(live: Vec<tern_mux::proto::SessionInfo>, cx: &mut App) {
+    let Some((handle, main)) = windows(cx).into_iter().next() else { return };
+    let _ = handle.update(cx, |_, window, cx| {
+        main.update(cx, |m, cx| {
+            if let Some(ws) = m.active_ws().cloned() {
+                ws.update(cx, |w, cx| {
+                    for s in &live {
+                        w.adopt_session(s.id, s.title.clone(), window, cx);
+                    }
+                });
+            }
+        })
+    });
 }
 
 /// What a new window starts with.
@@ -226,6 +276,8 @@ impl Render for DraggedWorkspace {
 }
 
 pub struct MainWindow {
+    /// Closed by the user (not by quitting): its terminals end with it.
+    ends_terminals: bool,
     slots: Vec<Slot>,
     active: usize,
     /// The workspace tab last right-clicked, for its menu.
@@ -252,25 +304,37 @@ impl MainWindow {
         window.on_window_should_close(cx, move |window, cx| {
             let jobs = me.upgrade().map(|m| m.read(cx).running(cx)).unwrap_or_default();
             if jobs.is_empty() || confirmed.get() {
+                // Closed by the user: its terminals end with it.
+                if let Some(me) = me.upgrade() {
+                    me.update(cx, |m, _| m.ends_terminals = true);
+                }
                 return true;
             }
             let Some(me) = me.upgrade() else { return true };
             let confirmed = confirmed.clone();
             me.update(cx, |_, cx| {
-                confirm_close(jobs, "this window", window, cx, move |_, window, _| {
+                confirm_close(jobs, "this window", window, cx, move |this: &mut Self, window, _| {
                     confirmed.set(true);
+                    this.ends_terminals = true;
                     window.remove_window();
                 })
             });
             false
         });
         cx.on_release(|this: &mut Self, cx| {
+            let end = this.ends_terminals;
             for slot in &this.slots {
-                slot.ws.update(cx, |w, cx| w.shutdown(cx));
+                slot.ws.update(cx, |w, cx| {
+                    w.shutdown(cx);
+                    if end {
+                        w.end_terminals(cx);
+                    }
+                });
             }
         })
         .detach();
         Self {
+            ends_terminals: false,
             slots: vec![],
             active: 0,
             menu_ix: None,
@@ -378,7 +442,10 @@ impl MainWindow {
     /// the welcome page when it was the last.
     fn close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ws) = self.take(ix, window, cx) {
-            ws.update(cx, |w, cx| w.shutdown(cx));
+            ws.update(cx, |w, cx| {
+                w.shutdown(cx);
+                w.end_terminals(cx);
+            });
         }
     }
 

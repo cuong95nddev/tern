@@ -20,8 +20,9 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tern_bridge::{HookEvent, HookServer};
+use tern_bridge::HookEvent;
 use tern_fs::GitStatus;
+use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::agents::Agent;
@@ -373,9 +374,9 @@ impl Default for PaneUi {
 /// Shared app services (one per process).
 #[derive(Clone)]
 pub struct Services {
-    pub hooks: Option<HookServer>,
+    /// The background daemon the terminals run in.
+    pub mux: Arc<Connector>,
     pub hook_events: flume::Receiver<HookEvent>,
-    pub run_dir: PathBuf,
     pub terminal: TerminalConfig,
 }
 
@@ -550,8 +551,8 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session } => this.add_term(TabKind::Claude, name, session, window, cx),
-                SavedTab::Shell { name } => this.add_term(TabKind::Shell, name, None, window, cx),
+                SavedTab::Claude { name, session, mux } => this.add_term(TabKind::Claude, name, session, mux, window, cx),
+                SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
                 SavedTab::Scratch(p) if p.is_file() => this.open_scratch(p, window, cx),
@@ -602,9 +603,10 @@ impl Workspace {
             .map(|t| match t {
                 CenterTab::Term(t) => {
                     let name = t.rename.as_ref().map(|r| r.to_string());
+                    let mux = t.view.read(cx).mux_id();
                     match t.kind {
-                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone() },
-                        TabKind::Shell => SavedTab::Shell { name },
+                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux },
+                        TabKind::Shell => SavedTab::Shell { name, mux },
                     }
                 },
                 CenterTab::File { view, .. } => SavedTab::File(view.read(cx).path().map(Path::to_owned).unwrap_or_default()),
@@ -685,6 +687,14 @@ impl Workspace {
 
     /// The workspace is being closed: save scratches (dropping empty ones).
     /// Terminals and hook registrations go when the workspace is dropped.
+    /// End every terminal's program (the workspace or its window was
+    /// closed). Quitting Tern doesn't: they keep running in the background.
+    pub fn end_terminals(&mut self, cx: &mut Context<Self>) {
+        for t in self.tabs.iter().filter_map(CenterTab::term) {
+            t.view.update(cx, |v, _| v.close());
+        }
+    }
+
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             if let CenterTab::Scratch { view, .. } = tab {
@@ -710,7 +720,7 @@ impl Workspace {
         self.focus_active(window, cx);
     }
 
-    fn spawn_config(&self, kind: TabKind, token: Option<&str>, resume: Option<&str>) -> (SpawnConfig, &'static str) {
+    fn spawn_config(&self, kind: TabKind, resume: Option<&str>) -> (SpawnConfig, &'static str) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut env = std::collections::HashMap::new();
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
@@ -718,12 +728,9 @@ impl Workspace {
             TabKind::Shell => (vec!["-l".to_owned()], "shell"),
             TabKind::Claude => {
                 // Run through an interactive login shell so PATH from rc files applies.
-                let mut settings = String::new();
-                if let (Some(hooks), Some(token)) = (&self.services.hooks, token)
-                    && let Ok(path) = tern_bridge::write_claude_settings(&self.services.run_dir, token, &hooks.hook_url(token))
-                {
-                    settings = format!(" --settings {}", shell_quote(&path.to_string_lossy()));
-                }
+                // The daemon puts the hook settings file's path in place of
+                // the placeholder (or drops the flag without hooks).
+                let settings = " --settings {tern-settings}";
                 // The user's own arguments, as typed (shell syntax).
                 let args = window_state::claude_args();
                 let claude = if args.is_empty() { format!("claude{settings}") } else { format!("claude {args}{settings}") };
@@ -759,24 +766,38 @@ impl Workspace {
     }
 
     fn add_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(kind, None, None, window, cx);
+        self.add_term(kind, None, None, None, window, cx);
     }
 
-    /// A new terminal tab named `rename`; a Claude one resumes `session`.
-    fn add_term(&mut self, kind: TabKind, rename: Option<String>, session: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let token = match kind {
-            TabKind::Claude => self.services.hooks.as_ref().map(|h| h.register()),
-            TabKind::Shell => None,
-        };
-        let (cfg, title) = self.spawn_config(kind, token.as_deref(), session.as_deref());
+    /// A new terminal tab named `rename`: background session `mux` when it
+    /// still runs, else a new program (a Claude one resumes `session`).
+    fn add_term(
+        &mut self,
+        kind: TabKind,
+        rename: Option<String>,
+        session: Option<String>,
+        mux: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Known once the daemon answers (`TerminalEvent::Ready`).
+        let token = None;
+        let (cfg, title) = self.spawn_config(kind, session.as_deref());
         let config = self.services.terminal.clone();
-        let view = cx.new(|cx| TerminalView::new(cfg, title, config, cx));
+        let connector = self.services.mux.clone();
+        let hook = kind == TabKind::Claude;
+        let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
         let resuming = session.is_some();
         let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
+    }
+
+    /// A tab for background session `id` that no saved tab knew.
+    pub fn adopt_session(&mut self, id: u64, title: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_term(TabKind::Shell, title, None, Some(id), window, cx);
     }
 
     /// Create a scratch file of type `ext` and open it.
@@ -889,11 +910,8 @@ impl Workspace {
         if let CenterTab::Scratch { view, .. } = &tab {
             view.update(cx, |s, cx| s.close(cx));
         }
-        if let Some(t) = tab.term()
-            && let (Some(hooks), Some(token)) = (&self.services.hooks, &t.token)
-        {
-            hooks.unregister(token);
-            tern_bridge::remove_claude_settings(&self.services.run_dir, token);
+        if let Some(t) = tab.term() {
+            t.view.update(cx, |v, _| v.close());
         }
         if self.tabs.is_empty() {
             cx.emit(WorkspaceEvent::Close);
@@ -1405,6 +1423,13 @@ impl Workspace {
     fn on_terminal_event(&mut self, view: &Entity<TerminalView>, ev: &TerminalEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             TerminalEvent::TitleChanged => cx.notify(),
+            TerminalEvent::Ready { token, .. } => {
+                if let Some(t) = self.term_tab_mut(view) {
+                    t.token = token.clone();
+                }
+                // Its id goes into the saved session.
+                cx.emit(WorkspaceEvent::TabsChanged);
+            },
             TerminalEvent::Exited { code, quick } => {
                 // `claude --resume` failing at once: the conversation is
                 // gone; start a new one in its place.
@@ -1420,13 +1445,20 @@ impl Workspace {
                     },
                     None => None,
                 };
-                if let Some(token) = restart {
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, token.as_deref(), None);
+                if restart.is_some() {
+                    let (cfg, _) = self.spawn_config(TabKind::Claude, None);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.start(cx);
                     });
                     cx.emit(WorkspaceEvent::TabsChanged);
+                } else if let Some(t) = self.term_tab_mut(view)
+                    && t.kind == TabKind::Claude
+                {
+                    // Enter restarts it: resume the conversation it had.
+                    let session = t.session.clone();
+                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref());
+                    view.update(cx, |v, _| v.set_spawn_config(cfg));
                 }
                 cx.notify();
             },
@@ -3147,17 +3179,6 @@ fn notify_system(title: &str, body: &str, cx: &mut App) {
     });
 }
 
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        for t in self.tabs.iter().filter_map(CenterTab::term) {
-            if let (Some(hooks), Some(token)) = (&self.services.hooks, &t.token) {
-                hooks.unregister(token);
-                tern_bridge::remove_claude_settings(&self.services.run_dir, token);
-            }
-        }
-    }
-}
-
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
@@ -3198,7 +3219,7 @@ impl Render for Workspace {
             .text_xs()
             .text_color(muted)
             .child(self.root.display().to_string())
-            .child(if self.services.hooks.is_some() { "hooks: ✓" } else { "hooks: unavailable" });
+            .child(if self.services.mux.connected() { "background: ✓" } else { "background: unavailable" });
 
         div()
             .key_context("Workspace")
@@ -3293,15 +3314,11 @@ impl Render for Workspace {
 
 pub fn services(terminal: TerminalConfig) -> Services {
     let (tx, rx) = flume::unbounded();
-    let hooks = HookServer::start(Arc::new(move |e| {
-        let _ = tx.send(e);
-    }))
-    .map_err(|e| log::warn!("hook server unavailable: {e}"))
-    .ok();
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    // Each process keeps its tabs' settings files in its own dir, so one
-    // never sweeps another's (a dev build runs next to the installed app).
-    let runs = PathBuf::from(home).join("Library/Caches/dev.tern/run");
-    tern_bridge::sweep_run_dirs(&runs);
-    Services { hooks, hook_events: rx, run_dir: runs.join(std::process::id().to_string()), terminal }
+    let hooks: tern_mux::client::HookSink = Arc::new(move |token, body| {
+        if let Some(ev) = HookEvent::parse(token, &body) {
+            let _ = tx.send(ev);
+        }
+    });
+    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks));
+    Services { mux, hook_events: rx, terminal }
 }

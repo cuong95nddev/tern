@@ -163,8 +163,8 @@ fn main() {
     });
 }
 
-/// Quit, keeping every open window in the saved session; ask first when
-/// that ends running programs.
+/// Quit, keeping every open window in the saved session. Programs keep
+/// running in the background and are there again at the next launch.
 pub fn quit(cx: &mut App) {
     confirm_quit(cx, |ok, cx| {
         if ok {
@@ -173,22 +173,10 @@ pub fn quit(cx: &mut App) {
     });
 }
 
-/// Ask whether to quit when that ends running programs; `done` gets the answer.
+/// Quitting ends nothing (terminals run in the background daemon), so it
+/// needs no confirmation; `done` gets the answer.
 fn confirm_quit(cx: &mut App, done: impl FnOnce(bool, &mut App) + 'static) {
-    let jobs = main_window::running(cx);
-    let window = cx.active_window().or_else(|| cx.windows().first().copied());
-    let (Some(window), false) = (window, jobs.is_empty()) else { return done(true, cx) };
-    let detail = format!("Still running: {}. Quitting ends {}.", jobs.join(", "), if jobs.len() == 1 { "it" } else { "them" });
-    let Ok(answer) =
-        window.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Quit Tern?", Some(&detail), &["Quit", "Cancel"], cx))
-    else {
-        return done(true, cx);
-    };
-    cx.spawn(async move |cx| {
-        let ok = answer.await == Ok(0);
-        cx.update(|cx| done(ok, cx));
-    })
-    .detach();
+    done(true, cx)
 }
 
 fn quit_now(cx: &mut App) {

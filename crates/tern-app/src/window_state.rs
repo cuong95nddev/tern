@@ -236,12 +236,13 @@ pub fn toggle_flag(args: &str, flag: &str) -> String {
     }
 }
 
-/// One center tab of a saved workspace. Terminals come back as new
-/// processes; a Claude tab resumes its conversation when it had one.
+/// One center tab of a saved workspace. Terminals reattach to their
+/// background session (`mux`) when it still runs; otherwise they come back
+/// as new processes, and a Claude tab resumes its conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SavedTab {
-    Claude { name: Option<String>, session: Option<String> },
-    Shell { name: Option<String> },
+    Claude { name: Option<String>, session: Option<String>, mux: Option<u64> },
+    Shell { name: Option<String>, mux: Option<u64> },
     File(PathBuf),
     Diff(PathBuf),
     Scratch(PathBuf),
@@ -339,8 +340,10 @@ fn encode_session(windows: &[SavedWindow]) -> String {
             for (i, tab) in ws.tabs.iter().enumerate() {
                 let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
                 let line = match tab {
-                    SavedTab::Claude { name, session } => format!("claude\t{}\t{}", opt(session), opt(name)),
-                    SavedTab::Shell { name } => format!("shell\t{}", opt(name)),
+                    SavedTab::Claude { name, session, mux } => {
+                        format!("claude\t{}\t{}\t{}", opt(session), opt(name), mux.map(|m| m.to_string()).unwrap_or_default())
+                    },
+                    SavedTab::Shell { name, mux } => format!("shell\t{}\t{}", opt(name), mux.map(|m| m.to_string()).unwrap_or_default()),
                     SavedTab::File(p) => format!("file\t{}", path(p)),
                     SavedTab::Diff(p) => format!("diff\t{}", path(p)),
                     SavedTab::Scratch(p) => format!("scratch\t{}", path(p)),
@@ -359,9 +362,13 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
     Some(match kind {
         "claude" => {
             let session = next();
-            SavedTab::Claude { session, name: next() }
+            let name = next();
+            SavedTab::Claude { session, name, mux: next().and_then(|m| m.parse().ok()) }
         },
-        "shell" => SavedTab::Shell { name: next() },
+        "shell" => {
+            let name = next();
+            SavedTab::Shell { name, mux: next().and_then(|m| m.parse().ok()) }
+        },
         "file" => SavedTab::File(next()?.into()),
         "diff" => SavedTab::Diff(next()?.into()),
         "scratch" => SavedTab::Scratch(next()?.into()),
@@ -466,9 +473,9 @@ mod tests {
                     SavedWorkspace {
                         folder: PathBuf::from("/a b/c"),
                         tabs: vec![
-                            SavedTab::Claude { name: None, session: Some("s-1".into()) },
-                            SavedTab::Claude { name: Some("api work".into()), session: None },
-                            SavedTab::Shell { name: None },
+                            SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42) },
+                            SavedTab::Claude { name: Some("api work".into()), session: None, mux: None },
+                            SavedTab::Shell { name: None, mux: Some(7) },
                             SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
                             SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
                             SavedTab::Scratch(PathBuf::from("/s/n.txt")),
@@ -502,16 +509,29 @@ mod tests {
     fn tab_names_cannot_break_lines() {
         let ws = SavedWorkspace {
             folder: PathBuf::from("/a"),
-            tabs: vec![SavedTab::Shell { name: Some("x\ty\nz".into()) }],
+            tabs: vec![SavedTab::Shell { name: Some("x\ty\nz".into()), mux: None }],
             tab_groups: vec![Some(0)],
             groups: vec![SavedGroup { name: "a\tb".into(), color: "grey".into(), collapsed: false }],
             ..SavedWorkspace::fresh(PathBuf::from("/a"))
         };
         let w = SavedWindow { placement: None, workspaces: vec![ws], active: 0 };
         let back = decode_session(&encode_session(&[w]));
-        assert_eq!(back[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("x y z".into()) }]);
+        assert_eq!(back[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("x y z".into()), mux: None }]);
         assert_eq!(back[0].workspaces[0].groups[0].name, "a b");
         assert_eq!(back[0].workspaces[0].tab_groups, vec![Some(0)]);
+    }
+
+    #[test]
+    fn tabs_from_before_background_sessions() {
+        let w = decode_session("window 0\n\t/a\n\t\tclaude\ts-1\tname\n\t\tshell\t\n\t\tshell\tn\n");
+        assert_eq!(
+            w[0].workspaces[0].tabs,
+            vec![
+                SavedTab::Claude { name: Some("name".into()), session: Some("s-1".into()), mux: None },
+                SavedTab::Shell { name: None, mux: None },
+                SavedTab::Shell { name: Some("n".into()), mux: None },
+            ]
+        );
     }
 
     #[test]

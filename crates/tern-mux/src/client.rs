@@ -197,6 +197,47 @@ impl MuxClient {
     }
 }
 
+/// The UI's way to the daemon: one connection, made again (starting the
+/// daemon if needed) after the old one was lost.
+pub struct Connector {
+    dir: PathBuf,
+    spawn_daemon: bool,
+    hooks: HookSink,
+    cur: Mutex<Option<MuxClient>>,
+}
+
+impl Connector {
+    pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink) -> Self {
+        Self { dir, spawn_daemon, hooks, cur: Mutex::new(None) }
+    }
+
+    pub fn get(&self) -> io::Result<MuxClient> {
+        let mut cur = self.cur.lock().unwrap();
+        if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
+            return Ok(c.clone());
+        }
+        let c = MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone())?;
+        *cur = Some(c.clone());
+        Ok(c)
+    }
+
+    /// The connection, if a daemon already runs (never starts one).
+    pub fn existing(&self) -> Option<MuxClient> {
+        let mut cur = self.cur.lock().unwrap();
+        if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
+            return Some(c.clone());
+        }
+        let c = MuxClient::connect(&self.dir, false, self.hooks.clone()).ok()?;
+        *cur = Some(c.clone());
+        Some(c)
+    }
+
+    /// Whether a live connection exists (doesn't connect).
+    pub fn connected(&self) -> bool {
+        self.cur.lock().unwrap().as_ref().is_some_and(MuxClient::alive)
+    }
+}
+
 /// Start the daemon from this executable, detached from us.
 fn spawn() -> io::Result<()> {
     use std::os::unix::process::CommandExt;

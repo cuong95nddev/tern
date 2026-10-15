@@ -232,3 +232,41 @@ fn slow_client_is_dropped() {
     }
     s.close();
 }
+
+#[test]
+fn connector_keeps_one_connection() {
+    let d = daemon(Duration::from_secs(60));
+    let conn = tern_mux::client::Connector::new(d.dir.clone(), false, Arc::new(|_, _| {}));
+    assert!(!conn.connected());
+    let (sink, ev) = sink();
+    let s = conn.get().unwrap().open(Open::Spawn { cfg: sh("read x"), hook: false }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    assert!(conn.connected());
+    // Same connection: the session is visible to the next `get`.
+    assert!(conn.get().unwrap().list().unwrap().iter().any(|i| Some(i.id) == s.id()));
+    s.close();
+}
+
+#[test]
+fn connector_without_daemon_fails() {
+    let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
+    let conn = tern_mux::client::Connector::new(tmp.path().to_owned(), false, Arc::new(|_, _| {}));
+    assert!(conn.get().is_err());
+}
+
+#[test]
+fn attach_to_an_exited_session_reports_the_exit() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink1, ev1) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("echo bye; sleep 0.3; exit 5"), hook: false }, SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    let id = s.id().unwrap();
+    drop(s);
+    wait_until("exited", || c.list().unwrap().iter().any(|i| i.id == id && i.exited));
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("exit event", || ev2.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(5)))));
+    assert!(screen(&s).contains("bye"));
+    s.close();
+}
