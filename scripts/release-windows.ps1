@@ -23,8 +23,14 @@ try {
     Copy-Item $Exe (Join-Path $Stage "tern.exe")
 
     $Iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-    if (-not $Iscc) { $Iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe" }
-    if (-not (Test-Path $Iscc)) { throw "Inno Setup 6 (iscc) not found" }
+    # Not on PATH: where an install for all users, or for this one, puts it.
+    if (-not $Iscc) {
+        $Iscc = @(
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+    if (-not $Iscc) { throw "Inno Setup 6 (iscc) not found" }
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $OutDir = (Resolve-Path $OutDir).Path
     & $Iscc /Q "/DVersion=$Version" "/DNumVersion=$(($Version -split '[-+]')[0])" "/DStageDir=$Stage" "/DOutputDir=$OutDir" (Join-Path $Root "packaging\windows\tern.iss") | Out-Host
