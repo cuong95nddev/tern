@@ -87,7 +87,7 @@ pub fn check_at_launch(cx: &mut App) {
         if (o.outdated.is_none() || o.live == 0) && o.others.is_empty() {
             return;
         }
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else { return };
             let _ = window.update(cx, |_, window, cx| open(&o, true, window, cx));
         });

@@ -125,6 +125,23 @@ impl MuxClient {
     /// Connect to the daemon in `dir`, starting it first when `spawn_daemon`
     /// and none runs.
     pub fn connect(dir: &Path, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> io::Result<Self> {
+        // A daemon that was exiting (idle) turns us away: once it has gone,
+        // a new one starts.
+        let deadline = Instant::now() + 2 * CONNECT_TIMEOUT;
+        let mut turned_away = false;
+        loop {
+            match Self::connect_once(dir, spawn_daemon, hooks.clone(), reveal.clone()) {
+                Err(e) if spawn_daemon && (turned_away || e.kind() == io::ErrorKind::ConnectionAborted) && Instant::now() < deadline => {
+                    log::info!("daemon went away while connecting ({e}); again");
+                    turned_away = true;
+                    std::thread::sleep(Duration::from_millis(100));
+                },
+                r => return r,
+            }
+        }
+    }
+
+    fn connect_once(dir: &Path, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> io::Result<Self> {
         let sock = paths::socket_path(dir);
         let stream = match UnixStream::connect(&sock) {
             Ok(s) => s,
@@ -152,16 +169,24 @@ impl MuxClient {
         // A daemon that accepts but never answers mustn't hang the UI.
         stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
         let mut writer = stream.try_clone()?;
+        let gone = |e: io::Error| match e.kind() {
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof => {
+                io::Error::new(io::ErrorKind::ConnectionAborted, e)
+            },
+            _ => e,
+        };
         proto::write_frame(
             &mut writer,
             &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), role: Role::Ui },
-        )?;
+        )
+        .map_err(gone)?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
-        let (server_pid, server_version, server_build) = match reader.read::<ServerMsg>()? {
+        let (server_pid, server_version, server_build) = match reader.read::<ServerMsg>().map_err(gone)? {
             Some(ServerMsg::Hello { major, pid, app_version, build, .. }) if major == MAJOR => {
                 log::info!("connected to daemon {pid} (Tern {app_version}, build {build})");
                 (pid, app_version, build)
             },
+            None => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "daemon closed the connection")),
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
         };
         // The reader blocks from now on. Cleared on the reader's own handle:
@@ -301,6 +326,12 @@ impl Connector {
         }
         *cur = Some(c.clone());
         Ok(c)
+    }
+
+    /// The live connection, when it needs no work: connected, to a daemon
+    /// of this build (doesn't connect).
+    pub fn ready(&self) -> Option<MuxClient> {
+        self.cur.lock().unwrap().as_ref().filter(|c| c.alive() && !c.server_outdated()).cloned()
     }
 
     /// The connection, if a daemon already runs (never starts one).

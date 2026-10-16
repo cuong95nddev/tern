@@ -253,6 +253,8 @@ pub struct TerminalView {
     /// When the program last wrote something.
     last_output: Instant,
     _pump: Option<Task<()>>,
+    /// Connecting to the daemon, before the session opens.
+    _connect: Option<Task<()>>,
     _watch: Task<()>,
 }
 
@@ -313,6 +315,7 @@ impl TerminalView {
             agent: None,
             last_output: Instant::now(),
             _pump: None,
+            _connect: None,
             _watch: Task::ready(()),
         };
         this._watch = cx.spawn(async move |this, cx| {
@@ -368,20 +371,26 @@ impl TerminalView {
         }
         self.started = Instant::now();
         self.attaching = self.attach.is_some();
-        let open = match self.attach.take() {
+        let open = match self.attach {
             Some(id) => Open::Attach { id },
             None => Open::Spawn { cfg: cfg.clone(), hook: self.hook },
         };
-        match self.mux.get() {
-            Ok(client) => {
-                self.session = Some(client.open(open, cfg.size, cfg.scrollback, sink));
-                self.exited = None;
-                self.spawn_error = None;
-            },
-            Err(err) => {
-                log::error!("background server unavailable: {err}");
-                self.exited = Some(None);
-                self.spawn_error = Some(format!("background server unavailable: {err}"));
+        self.exited = None;
+        self.spawn_error = None;
+        match self.mux.ready() {
+            Some(client) => self.open_session(Ok(client), open, &cfg, sink),
+            // Connecting may start the daemon and wait for it: off the UI
+            // thread. The saved session id stays until it is open.
+            None => {
+                let mux = self.mux.clone();
+                let task = cx.background_spawn(async move { mux.get() });
+                self._connect = Some(cx.spawn(async move |this, cx| {
+                    let client = task.await;
+                    let _ = this.update(cx, |view, cx| {
+                        view.open_session(client, open, &cfg, sink);
+                        cx.notify();
+                    });
+                }));
             },
         }
         cx.notify();
@@ -400,6 +409,24 @@ impl TerminalView {
             }
         }));
         cx.notify();
+    }
+
+    fn open_session(
+        &mut self,
+        client: std::io::Result<tern_mux::client::MuxClient>,
+        open: Open,
+        cfg: &tern_term::SpawnConfig,
+        sink: tern_term::EventSink,
+    ) {
+        self.attach = None;
+        match client {
+            Ok(client) => self.session = Some(client.open(open, cfg.size, cfg.scrollback, sink)),
+            Err(err) => {
+                log::error!("background server unavailable: {err}");
+                self.exited = Some(None);
+                self.spawn_error = Some(format!("background server unavailable: {err}"));
+            },
+        }
     }
 
     pub fn title(&self) -> &SharedString {
@@ -464,6 +491,8 @@ impl TerminalView {
     /// End the program (the tab is closing). Dropping the view instead
     /// leaves it running in the background.
     pub fn close(&mut self) {
+        // Not opened yet: it never will be.
+        self._connect = None;
         self.attach = None;
         if let Some(s) = self.session.take() {
             s.close();

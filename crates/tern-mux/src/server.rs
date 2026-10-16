@@ -38,6 +38,9 @@ use crate::{UnixListener, UnixStream};
 pub const MAX_QUEUED: usize = 256 << 20;
 /// Queued output one session may fall behind by before it is detached.
 pub const MAX_QUEUED_SESSION: usize = 64 << 20;
+/// How long a daemon whose programs have all ended waits for a UI to show
+/// their ends before it exits.
+const ENDED_GRACE: Duration = Duration::from_secs(600);
 /// Hook requests kept for a session while no client is attached.
 const MAX_QUEUED_HOOKS: usize = 64;
 const SETTINGS_PLACEHOLDER: &str = "{tern-settings}";
@@ -117,8 +120,12 @@ struct State {
     /// Observer connections, closed when the daemon exits (they don't hold
     /// it, so they may still be there).
     observers: Vec<Weak<Conn>>,
-    /// When the daemon last had neither sessions nor clients.
+    /// Connections not yet past `Hello`: they hold the daemon like clients.
+    connecting: usize,
+    /// When the daemon last had neither running programs nor clients.
     idle_since: Option<Instant>,
+    /// Decided to exit: new connections are turned away.
+    exiting: bool,
 }
 
 pub(crate) struct Server {
@@ -172,7 +179,9 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
                 clients: 0,
                 uis: Vec::new(),
                 observers: Vec::new(),
+                connecting: 0,
                 idle_since: Some(Instant::now()),
+                exiting: false,
             }),
             hooks,
             run_dir,
@@ -192,15 +201,26 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
             let mut wait = Duration::from_millis(100).min(opts.idle_exit);
             loop {
                 std::thread::sleep(wait);
-                let idle = server.state.lock().unwrap().idle_since;
-                match idle.map(|t| t.elapsed()) {
-                    Some(for_) if for_ >= opts.idle_exit => {
+                // Decided under the lock, so a connection either counted
+                // before it or is turned away after it.
+                let (idle, after) = {
+                    let mut st = server.state.lock().unwrap();
+                    // Ended programs are kept a while for their tabs.
+                    let after = if st.sessions.is_empty() { opts.idle_exit } else { opts.idle_exit.max(ENDED_GRACE) };
+                    let idle = st.idle_since.map(|t| t.elapsed());
+                    if idle.is_some_and(|for_| for_ >= after) {
+                        st.exiting = true;
+                    }
+                    (idle, after)
+                };
+                match idle {
+                    Some(for_) if for_ >= after => {
                         done.store(true, Ordering::Release);
                         // Wake the accept loop.
                         let _ = UnixStream::connect(&sock);
                         return;
                     },
-                    Some(for_) => wait = opts.idle_exit - for_,
+                    Some(for_) => wait = (after - for_).min(Duration::from_secs(1)),
                     None => wait = Duration::from_secs(1).min(opts.idle_exit),
                 }
             }
@@ -280,7 +300,7 @@ fn random_id() -> u64 {
 
 impl Server {
     fn update_idle(state: &mut State) {
-        let idle = state.sessions.is_empty() && state.clients == 0;
+        let idle = state.clients == 0 && state.connecting == 0 && state.sessions.values().all(|s| s.host.exited().is_some());
         match (idle, state.idle_since) {
             (true, None) => state.idle_since = Some(Instant::now()),
             (false, Some(_)) => state.idle_since = None,
@@ -289,7 +309,24 @@ impl Server {
     }
 
     fn handle(self: &Arc<Self>, stream: UnixStream) -> io::Result<()> {
-        let conn = Conn::start(stream.try_clone()?, self.max_queued, self.max_queued_session)?;
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.exiting {
+                // Closed without a Hello: the client starts a new daemon.
+                return Err(io::Error::other("exiting"));
+            }
+            st.connecting += 1;
+            Self::update_idle(&mut st);
+        }
+        let conn = match stream.try_clone().and_then(|s| Conn::start(s, self.max_queued, self.max_queued_session)) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut st = self.state.lock().unwrap();
+                st.connecting -= 1;
+                Self::update_idle(&mut st);
+                return Err(e);
+            },
+        };
         conn.send(ServerMsg::Hello {
             major: MAJOR,
             minor: MINOR,
@@ -297,22 +334,34 @@ impl Server {
             pid: std::process::id(),
             build: paths::build_id().into(),
         });
+        // A client that never says Hello mustn't keep the daemon forever.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut reader = FrameReader::new(stream, proto::MAX_CLIENT_FRAME);
-        let role = match reader.read::<ClientMsg>()? {
-            Some(ClientMsg::Hello { major, role, .. }) if major == MAJOR => role,
-            other => {
-                conn.close();
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}")));
-            },
-        };
-        if role == Role::Ui {
+        let hello = reader.read::<ClientMsg>();
+        let _ = reader.get_ref().set_read_timeout(None);
+        let role = {
+            // Past its Hello: a UI holds the daemon from now on, the others don't.
             let mut st = self.state.lock().unwrap();
-            st.clients += 1;
-            st.uis.push(Arc::downgrade(&conn));
+            st.connecting -= 1;
+            let role = match hello {
+                Ok(Some(ClientMsg::Hello { major, role, .. })) if major == MAJOR => Some(role),
+                _ => None,
+            };
+            match role {
+                Some(Role::Ui) => {
+                    st.clients += 1;
+                    st.uis.push(Arc::downgrade(&conn));
+                },
+                Some(_) => st.observers.push(Arc::downgrade(&conn)),
+                None => {},
+            }
             Self::update_idle(&mut st);
-        } else {
-            self.state.lock().unwrap().observers.push(Arc::downgrade(&conn));
-        }
+            role
+        };
+        let Some(role) = role else {
+            conn.close();
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {:?}", hello.ok().flatten())));
+        };
         let result = (|| {
             while let Some(msg) = reader.read::<ClientMsg>()? {
                 if conn.dead.load(Ordering::Acquire) {
@@ -629,6 +678,7 @@ impl Observer for Server {
 
     fn exited(&self, id: u64, code: Option<i32>) {
         log::info!("session {id}: exited ({code:?})");
+        Self::update_idle(&mut self.state.lock().unwrap());
     }
 }
 

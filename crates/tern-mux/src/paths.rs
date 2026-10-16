@@ -50,10 +50,32 @@ pub fn logs() -> PathBuf {
     }
 }
 
-/// The daemon's directory. Debug builds have their own daemon, so a dev
-/// build runs next to the installed app.
+/// The daemon's directory. Debug builds, and release builds run from a
+/// cargo `target` folder, have their own daemon, so they run next to the
+/// installed app without ending or replacing its terminals.
 pub fn mux_dir() -> PathBuf {
-    caches().join(if cfg!(debug_assertions) { "mux-dev" } else { "mux" })
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok();
+        // The Windows daemon runs from its copy, kept in the directory.
+        if let Some(dir) = exe.as_deref().filter(|e| is_daemon_copy(e)).and_then(Path::parent) {
+            return dir.to_owned();
+        }
+        let built_here = exe.as_deref().is_some_and(|e| e.ancestors().any(|a| a.join("CACHEDIR.TAG").is_file()));
+        caches().join(if cfg!(debug_assertions) {
+            "mux-dev"
+        } else if built_here {
+            "mux-local"
+        } else {
+            "mux"
+        })
+    })
+    .clone()
+}
+
+/// Whether `exe` is a daemon's copy of the app (see `client::spawn`).
+pub fn is_daemon_copy(exe: &Path) -> bool {
+    exe.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("tern-server-"))
 }
 
 /// The terminal palette of the app's theme, written by the app and read by

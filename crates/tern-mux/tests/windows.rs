@@ -122,3 +122,33 @@ fn idle_daemon_exits() {
     drop(c);
     d.thread.take().unwrap().join().unwrap().unwrap();
 }
+
+#[test]
+fn ended_programs_keep_the_daemon_a_while() {
+    let mut d = daemon(Duration::from_millis(200));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: ps("exit 3"), hook: false }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    wait_until("exited", || c.list().unwrap().iter().any(|i| i.id == id && i.exited));
+    drop(s);
+    drop(c);
+    // Its tab may still come to show the end.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!d.thread.as_ref().unwrap().is_finished());
+    let c = client(&d.dir);
+    c.close(id);
+    wait_until("closed", || c.list().unwrap().is_empty());
+    drop(c);
+    d.thread.take().unwrap().join().unwrap().unwrap();
+}
+
+#[test]
+fn pid_file_names_the_daemon_while_it_runs() {
+    let mut d = daemon(Duration::from_millis(200));
+    let pid = std::fs::read_to_string(tern_mux::paths::pid_path(&d.dir)).unwrap();
+    assert_eq!(pid, std::process::id().to_string());
+    d.thread.take().unwrap().join().unwrap().unwrap();
+    assert!(!tern_mux::paths::pid_path(&d.dir).exists());
+}

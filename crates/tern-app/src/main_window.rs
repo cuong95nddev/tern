@@ -140,23 +140,30 @@ pub fn restore_session(cx: &mut App) -> bool {
 /// a crash): running ones open as tabs in the first window, so nothing runs
 /// unseen; ended ones go.
 pub fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
-    let Some(client) = cx.global::<AppServices>().0.mux.existing() else { return };
-    let Ok(list) = client.list() else { return };
-    let orphans: Vec<_> = list.into_iter().filter(|s| !known.contains(&s.id)).collect();
-    if orphans.is_empty() {
-        return;
-    }
-    let mut live = vec![];
-    for s in orphans {
-        if s.exited {
-            client.close(s.id);
-        } else {
-            live.push(s);
+    let mux = cx.global::<AppServices>().0.mux.clone();
+    // Asking the daemon can take a while: off the UI thread.
+    let task = cx.background_spawn(async move {
+        let client = mux.existing()?;
+        let list = client.list().ok()?;
+        let mut live = vec![];
+        for s in list.into_iter().filter(|s| !known.contains(&s.id)) {
+            if s.exited {
+                client.close(s.id);
+            } else {
+                live.push(s);
+            }
         }
-    }
-    if live.is_empty() {
-        return;
-    }
+        Some(live)
+    });
+    cx.spawn(async move |cx| {
+        if let Some(live) = task.await.filter(|l| !l.is_empty()) {
+            cx.update(|cx| adopt(live, cx));
+        }
+    })
+    .detach();
+}
+
+fn adopt(live: Vec<tern_mux::proto::SessionInfo>, cx: &mut App) {
     log::info!("adopting {} background sessions", live.len());
     if windows(cx).is_empty() {
         // No window to put them in: open one at the first one's folder.
