@@ -1226,7 +1226,8 @@ mod tests {
         let red = gpui_kit::component::try_parse_color("#ff0000").unwrap();
         assert_eq!(get(&l, "explorer.row", "text"), &Val::Color(red));
         assert_eq!(get(&l, "scratches.row", "font_size"), &Val::Len(rems(1.).into()));
-        assert_eq!(get(&l, "explorer", "background_image"), &Val::Text("/cfg/img/sky.png".into()));
+        let sky = Path::new("/cfg").join("img/sky.png").to_string_lossy().into_owned();
+        assert_eq!(get(&l, "explorer", "background_image"), &Val::Text(sky.into()));
         // The image doesn't exist.
         assert_eq!(problems.len(), 1, "{problems:?}");
     }

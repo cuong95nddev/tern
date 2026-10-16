@@ -276,6 +276,11 @@ fn handle(stream: TcpStream, tokens: &Mutex<HashSet<String>>, sink: &HookSink) -
 
     let mut out = stream;
     if method != "POST" || !authorized || content_length > MAX_BODY {
+        // Read what was sent first: closing with unread bytes resets the
+        // connection (on Linux) before the client reads the answer.
+        if content_length <= MAX_BODY {
+            let _ = std::io::copy(&mut reader.by_ref().take(content_length as u64), &mut std::io::sink());
+        }
         out.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     }
