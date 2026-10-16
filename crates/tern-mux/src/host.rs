@@ -308,15 +308,18 @@ impl Host {
     }
 
     pub fn info(&self) -> SessionInfo {
+        SessionInfo { cwd: self.cwd(), program: self.foreground_programs().into_iter().next(), ..self.info_without_processes() }
+    }
+
+    /// [`Self::info`] without `cwd` and `program`, which ask the OS.
+    pub fn info_without_processes(&self) -> SessionInfo {
         SessionInfo {
             id: self.id,
             pid: self.pid,
             exited: self.exited().is_some(),
-            cwd: self.cwd(),
             title: self.shared.title.lock().unwrap().clone(),
             status: self.status(),
             attached: self.attached(),
-            program: self.foreground_programs().into_iter().next(),
             ..Default::default()
         }
     }

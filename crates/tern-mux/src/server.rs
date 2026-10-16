@@ -49,6 +49,8 @@ type PassedPty = OwnedFd;
 type PassedPty = std::convert::Infallible;
 /// How often a watcher's list is checked for changes (also coalesces bursts).
 pub const WATCH_INTERVAL: Duration = Duration::from_millis(250);
+/// A watcher's list asks the OS about processes every this many checks.
+const WATCH_SCANS_EVERY: u32 = 8;
 
 pub struct ServeOpts {
     /// Exit after this long with no sessions and no client.
@@ -181,14 +183,21 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     {
         let (server, done, sock) = (server.clone(), done.clone(), sock.clone());
         std::thread::Builder::new().name("idle".into()).spawn(move || {
+            // Wakes when an idle daemon may be due to exit, and once a
+            // second otherwise to see whether it has gone idle.
+            let mut wait = Duration::from_millis(100).min(opts.idle_exit);
             loop {
-                std::thread::sleep(Duration::from_millis(100).min(opts.idle_exit));
+                std::thread::sleep(wait);
                 let idle = server.state.lock().unwrap().idle_since;
-                if idle.is_some_and(|t| t.elapsed() >= opts.idle_exit) {
-                    done.store(true, Ordering::Release);
-                    // Wake the accept loop.
-                    let _ = UnixStream::connect(&sock);
-                    return;
+                match idle.map(|t| t.elapsed()) {
+                    Some(for_) if for_ >= opts.idle_exit => {
+                        done.store(true, Ordering::Release);
+                        // Wake the accept loop.
+                        let _ = UnixStream::connect(&sock);
+                        return;
+                    },
+                    Some(for_) => wait = opts.idle_exit - for_,
+                    None => wait = Duration::from_secs(1).min(opts.idle_exit),
                 }
             }
         })?;
@@ -366,10 +375,26 @@ impl Server {
     /// Every session, by id (a stable order: watchers compare lists).
     /// Built outside the state lock: `info` asks the OS about processes.
     fn list(&self) -> Vec<SessionInfo> {
+        self.list_with(Host::info)
+    }
+
+    /// [`Self::list`], with each session's `cwd` and `program` taken from
+    /// `last` instead of asked of the OS.
+    fn list_keeping(&self, last: &[SessionInfo]) -> Vec<SessionInfo> {
+        self.list_with(|h| {
+            let info = h.info_without_processes();
+            match last.iter().find(|l| l.id == info.id) {
+                Some(l) => SessionInfo { cwd: l.cwd.clone(), program: l.program.clone(), ..info },
+                None => h.info(),
+            }
+        })
+    }
+
+    fn list_with(&self, info: impl Fn(&Host) -> SessionInfo) -> Vec<SessionInfo> {
         let sessions: Vec<_> =
             self.state.lock().unwrap().sessions.values().map(|s| (s.host.clone(), s.token.is_some(), s.claude_session.clone())).collect();
         let mut list: Vec<_> =
-            sessions.into_iter().map(|(h, claude, claude_session)| SessionInfo { claude, claude_session, ..h.info() }).collect();
+            sessions.into_iter().map(|(h, claude, claude_session)| SessionInfo { claude, claude_session, ..info(&h) }).collect();
         list.sort_by_key(|i| i.id);
         list
     }
@@ -382,13 +407,20 @@ impl Server {
         }
         let (server, conn) = (Arc::downgrade(self), Arc::downgrade(conn));
         let _ = std::thread::Builder::new().name("watch".into()).spawn(move || {
-            let mut last = None;
+            let mut last: Option<Vec<SessionInfo>> = None;
+            let mut ticks = 0u32;
             loop {
                 let (Some(server), Some(conn)) = (server.upgrade(), conn.upgrade()) else { return };
                 if conn.dead.load(Ordering::Acquire) {
                     return;
                 }
-                let list = server.list();
+                // Programs and folders change rarely and cost a process scan:
+                // asked every few ticks, kept in between.
+                let list = match &last {
+                    Some(l) if ticks % WATCH_SCANS_EVERY != 0 => server.list_keeping(l),
+                    _ => server.list(),
+                };
+                ticks = ticks.wrapping_add(1);
                 if last.as_ref() != Some(&list) {
                     conn.send(ServerMsg::SessionsChanged { list: list.clone() });
                     last = Some(list);
