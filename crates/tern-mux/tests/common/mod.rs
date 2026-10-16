@@ -24,8 +24,7 @@ pub fn daemon(idle: Duration) -> Daemon {
 }
 
 pub fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize) -> Daemon {
-    // Short path: Unix socket paths are limited to 104 bytes.
-    let tmp = tempfile::Builder::new().prefix("tm").tempdir_in("/tmp").unwrap();
+    let tmp = short_tempdir();
     let dir = tmp.path().join("m");
     let opts =
         ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued, max_queued_session };
@@ -33,6 +32,13 @@ pub fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize)
     let thread = std::thread::spawn(move || serve(&d, opts));
     wait_until("socket", || paths::socket_path(&dir).exists());
     Daemon { _tmp: tmp, dir, thread: Some(thread) }
+}
+
+/// A temporary folder with a short path: Unix socket paths are limited to
+/// 104 bytes (108 on Windows).
+pub fn short_tempdir() -> tempfile::TempDir {
+    let base = if cfg!(windows) { std::env::temp_dir() } else { PathBuf::from("/tmp") };
+    tempfile::Builder::new().prefix("tm").tempdir_in(base).unwrap()
 }
 
 pub fn client(dir: &Path) -> MuxClient {
@@ -55,11 +61,25 @@ pub fn sink() -> (tern_term::EventSink, Events) {
     (Arc::new(move |x| e.lock().unwrap().push(x)), ev)
 }
 
+#[cfg(unix)]
 pub fn sh(script: &str) -> SpawnConfig {
     SpawnConfig {
         program: Some("/bin/sh".into()),
         args: vec!["-c".into(), script.into()],
         cwd: Some("/tmp".into()),
+        env: HashMap::new(),
+        size: SIZE,
+        scrollback: 1000,
+    }
+}
+
+/// Windows PowerShell running `script`.
+#[cfg(windows)]
+pub fn ps(script: &str) -> SpawnConfig {
+    SpawnConfig {
+        program: Some("powershell.exe".into()),
+        args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into(), script.into()],
+        cwd: Some(std::env::temp_dir()),
         env: HashMap::new(),
         size: SIZE,
         scrollback: 1000,

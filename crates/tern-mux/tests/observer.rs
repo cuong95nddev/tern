@@ -1,3 +1,6 @@
+// The scripts are sh; `windows.rs` covers Windows.
+#![cfg(unix)]
+
 mod common;
 use common::*;
 

@@ -10,9 +10,11 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+#[cfg(unix)]
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::num::NonZeroUsize;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -29,13 +31,18 @@ use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
 use tern_term::vt::sync::FairMutex;
 use tern_term::vt::term::{Config, Osc52, Term};
 use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+#[cfg(windows)]
+use tern_term::vt::tty::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
 use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::proto::SessionInfo;
 
-/// alacritty's poll keys for the PTY and its child-exit pipe.
+/// alacritty's poll keys for the PTY and its child-exit pipe: crate-private
+/// on Unix, public (and other values) on Windows.
+#[cfg(unix)]
 const PTY_READ_WRITE_TOKEN: usize = 0;
+#[cfg(unix)]
 const PTY_CHILD_EVENT_TOKEN: usize = 1;
 const READ_BUFFER: usize = 64 << 10;
 /// The most bytes parsed in one go under the lock before letting an attach in.
@@ -44,6 +51,7 @@ const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the rows+1 size of an attach "jiggle" lasts.
 const JIGGLE: Duration = Duration::from_millis(50);
 /// How long a closed program has to exit after SIGHUP before SIGKILL.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(3);
 
 /// Where an attached client gets its bytes. Called with the terminal locked:
@@ -128,6 +136,7 @@ pub struct Host {
     id: u64,
     pid: u32,
     /// The PTY master, for foreground-process queries and fd passing.
+    #[cfg(unix)]
     master: File,
     shared: Arc<Shared>,
     term: Arc<FairMutex<HostTerm>>,
@@ -163,16 +172,29 @@ impl Host {
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         env.entry("TERM_PROGRAM".into()).or_insert_with(|| "Tern".into());
         let opts = Options {
-            shell: cfg.program.clone().map(|p| Shell::new(p, cfg.args.clone())),
+            shell: cfg.program.clone().map(|p| Shell::new(tern_term::session::program_word(p), cfg.args.clone())),
             working_directory: cfg.cwd.clone(),
             drain_on_exit: true,
             env,
+            // Quote arguments for the child's command line (MSVCRT rules).
+            #[cfg(windows)]
+            escape_args: true,
         };
         let pty = tty::new(&opts, window_size(cfg.size), id)?;
-        let pid = pty.child().id();
-        let master = pty.file().try_clone()?;
+        #[cfg(unix)]
+        let (pid, master) = (pty.child().id(), pty.file().try_clone()?);
+        #[cfg(windows)]
+        let pid = pty.child_watcher().pid().map_or(0, |p| p.get());
         let parser = Arc::new(Mutex::new(Processor::new()));
-        let host = Arc::new(Self { id, pid, master, shared: shared.clone(), term: term.clone(), parser: parser.clone() });
+        let host = Arc::new(Self {
+            id,
+            pid,
+            #[cfg(unix)]
+            master,
+            shared: shared.clone(),
+            term: term.clone(),
+            parser: parser.clone(),
+        });
         let driver = Driver {
             id,
             pty,
@@ -199,6 +221,7 @@ impl Host {
         self.pid
     }
 
+    #[cfg(unix)]
     pub fn master_fd(&self) -> RawFd {
         self.master.as_raw_fd()
     }
@@ -284,19 +307,26 @@ impl Host {
     }
 
     pub fn cwd(&self) -> Option<PathBuf> {
-        tern_term::procs::foreground_cwd(&self.master)
+        #[cfg(unix)]
+        return tern_term::procs::foreground_cwd(&self.master);
+        #[cfg(windows)]
+        return tern_term::procs::foreground_cwd(self.pid);
     }
 
     pub fn foreground_programs(&self) -> Vec<String> {
-        tern_term::procs::foreground_programs(&self.master)
+        #[cfg(unix)]
+        return tern_term::procs::foreground_programs(&self.master);
+        #[cfg(windows)]
+        return tern_term::procs::foreground_programs(self.pid);
     }
 
     /// Whether a shell is in the foreground (at its prompt), rather than a
     /// program run from it.
     pub fn shell_in_foreground(&self) -> bool {
-        const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"];
+        const SHELLS: [&str; 12] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh", "powershell", "cmd"];
         let programs = self.foreground_programs();
-        !programs.is_empty() && programs.iter().all(|p| SHELLS.contains(&p.trim_start_matches('-')))
+        let name = |p: &str| p.trim_start_matches('-').trim_end_matches(".exe").to_ascii_lowercase();
+        !programs.is_empty() && programs.iter().all(|p| SHELLS.contains(&name(p).as_str()))
     }
 
     /// End the program: SIGHUP, then SIGKILL if it is still there after a
@@ -374,6 +404,9 @@ impl Driver {
                         self.jiggle = Some((Instant::now() + JIGGLE, size));
                     },
                     Ok(Msg::Shutdown) => {
+                        // On Windows, closing the pseudoconsole (dropping
+                        // the PTY in `finish`) ends the program.
+                        #[cfg(unix)]
                         self.hang_up();
                         return self.finish(None);
                     },
@@ -505,6 +538,7 @@ impl Driver {
     /// End the program and the jobs it runs in the foreground: SIGHUP to
     /// their process groups (as the kernel would on a hangup, which can't
     /// come while the UI holds the PTY too), SIGKILL after a grace period.
+    #[cfg(unix)]
     fn hang_up(&self) {
         let pid = self.pty.child().id() as libc::pid_t;
         // SAFETY: plain syscalls on our own child and its PTY.

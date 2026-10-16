@@ -40,6 +40,7 @@ impl Global for Registry {}
 /// Live windows, dropping entries for closed ones.
 /// Every workspace with its window: the frontmost window first, and in
 /// each window its shown workspace first.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
 pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
     let mut wins = windows(cx);
     if let Some(stack) = cx.window_stack() {
@@ -59,6 +60,7 @@ pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
 }
 
 /// Bring `ws` forward in its window `handle`, and Tern with it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
 pub fn reveal(handle: AnyWindowHandle, ws: &Entity<Workspace>, cx: &mut App) {
     let id = ws.entity_id();
     let main = windows(cx).into_iter().find(|(h, _)| *h == handle).map(|(_, m)| m);

@@ -6627,6 +6627,7 @@ dependencies = [
  "tempfile",
  "tern-bridge",
  "tern-term",
+ "uds_windows",
 ]
 
 [[package]]

@@ -61,6 +61,7 @@ pub fn launch() {
 
 /// Stop the running agent, if any ("Hide Menu Bar Icon" in Tern).
 pub fn stop() {
+    #[cfg(unix)]
     if let Some(pid) = instance::holder(&instance::lock_path()) {
         // SAFETY: plain kill.
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };

@@ -241,7 +241,7 @@ pub struct Session {
 /// leaves unquoted: CreateProcess would try `C:\Program.exe` for an
 /// unquoted `C:\Program Files\PowerShell\7\pwsh.exe`. A path can't hold
 /// a `"`, so quotes are all it needs.
-fn program_word(program: String) -> String {
+pub fn program_word(program: String) -> String {
     if cfg!(windows) && program.contains([' ', '\t']) && !program.starts_with('"') { format!("\"{program}\"") } else { program }
 }
 

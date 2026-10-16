@@ -6,9 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{self, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -19,8 +17,16 @@ use tern_term::mirror::{Mirror, MirrorTerm};
 use tern_term::vt::sync::FairMutex;
 use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
+use crate::UnixStream;
 use crate::paths;
 use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+
+/// What the client asks who runs in a session's foreground with: the PTY
+/// the daemon passed, on Windows the shell's pid.
+#[cfg(unix)]
+type Pty = std::fs::File;
+#[cfg(windows)]
+type Pty = u32;
 
 /// Gets each hook request: the tab's token and the JSON body.
 pub type HookSink = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
@@ -54,7 +60,7 @@ struct Slot {
     id: Mutex<Option<u64>>,
     early: Mutex<Vec<u8>>,
     /// The PTY master, for foreground-process queries.
-    tty: Mutex<Option<File>>,
+    tty: Mutex<Option<Pty>>,
     /// The size the view wants; sent once the session is known.
     want: Mutex<TermSize>,
     /// The size the open request carried.
@@ -288,8 +294,47 @@ impl Connector {
 }
 
 /// Start the daemon from this executable, detached from us.
+#[cfg(unix)]
 fn spawn() -> io::Result<()> {
     spawn_detached(&["--server"], log_file().as_deref())
+}
+
+/// Start the daemon from a copy of this executable, detached from us: a
+/// running `tern.exe` can't be replaced, and the daemon outlives updates.
+#[cfg(windows)]
+fn spawn() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = paths::mux_dir();
+    paths::ensure_private_dir(&dir)?;
+    let copy = dir.join(format!("tern-server-{}.exe", env!("CARGO_PKG_VERSION")));
+    let same = |a: &Path, b: &Path| std::fs::metadata(a).ok().map(|m| m.len()) == std::fs::metadata(b).ok().map(|m| m.len());
+    if !same(&exe, &copy) {
+        // Another UI may be copying it too: copy beside it, then move.
+        let tmp = dir.join(format!("tern-server-{}.exe.{}", env!("CARGO_PKG_VERSION"), std::process::id()));
+        std::fs::copy(&exe, &tmp)?;
+        if std::fs::rename(&tmp, &copy).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            // Running already (another UI started it): use it as it is.
+            if !copy.is_file() {
+                return spawn_detached_exe(&exe, &["--server"], log_file().as_deref());
+            }
+        }
+    }
+    sweep_old_copies(&dir, &copy);
+    spawn_detached_exe(&copy, &["--server"], log_file().as_deref())
+}
+
+/// Delete the daemon copies of other versions (those still running stay).
+#[cfg(windows)]
+fn sweep_old_copies(dir: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("tern-server-") && name.ends_with(".exe") && p != keep {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
 }
 
 /// Run this executable with `args` in its own session (it outlives us;
@@ -300,7 +345,6 @@ pub fn spawn_detached(args: &[&str], log: Option<&Path>) -> io::Result<()> {
 
 /// `spawn_detached` for another executable.
 pub fn spawn_detached_exe(exe: &Path, args: &[&str], log: Option<&Path>) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
     let (out, err) = match log.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()) {
         Some(f) => (std::process::Stdio::from(f.try_clone()?), std::process::Stdio::from(f)),
         None => (std::process::Stdio::null(), std::process::Stdio::null()),
@@ -310,20 +354,37 @@ pub fn spawn_detached_exe(exe: &Path, args: &[&str], log: Option<&Path>) -> io::
     if std::env::var_os("RUST_LOG").is_none() {
         cmd.env("RUST_LOG", "info");
     }
-    // SAFETY: setsid is async-signal-safe.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().map(drop)
     }
-    cmd.spawn().map(drop)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        // Out of our job too, if it lets us: a job that ends with Tern
+        // would take the daemon with it.
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        cmd.spawn().map(drop).or_else(|_| {
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            cmd.spawn().map(drop)
+        })
+    }
 }
 
-/// `~/Library/Logs/Tern/<name>.log` (`<name>-dev.log` for debug builds).
+/// `<name>.log` in [`paths::logs`] (`<name>-dev.log` for debug builds).
 pub fn log_path(name: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join("Library/Logs/Tern");
+    let dir = paths::logs();
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join(if cfg!(debug_assertions) { format!("{name}-dev.log") } else { format!("{name}.log") }))
 }
@@ -348,8 +409,13 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
             ServerMsg::Reveal { id } => (inner.reveal)(id),
             // For observers.
             ServerMsg::SessionsChanged { .. } | ServerMsg::Revealed { .. } => {},
-            ServerMsg::Attached { req, id, token, pid: _, fd, snapshot } => {
-                let tty = if fd { reader.take_fd().map(File::from) } else { None };
+            ServerMsg::Attached { req, id, token, pid, fd, snapshot } => {
+                #[cfg(unix)]
+                let tty = if fd { reader.take_fd().map(Pty::from) } else { None };
+                #[cfg(unix)]
+                let _ = pid;
+                #[cfg(windows)]
+                let tty = (!fd && pid != 0).then_some(pid);
                 let Some(slot) = inner.pending.lock().unwrap().remove(&req) else { continue };
                 let snap = match proto::unpack_snapshot(&snapshot) {
                     Ok(s) => s,
@@ -491,12 +557,18 @@ impl RemoteSession {
 
     /// See [`tern_term::procs::foreground_programs`].
     pub fn foreground_programs(&self) -> Vec<String> {
-        self.slot.tty.lock().unwrap().as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default()
+        #[cfg(unix)]
+        return self.slot.tty.lock().unwrap().as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default();
+        #[cfg(windows)]
+        return self.slot.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
     }
 
     /// See [`tern_term::procs::foreground_cwd`].
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
-        self.slot.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd)
+        #[cfg(unix)]
+        return self.slot.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
+        #[cfg(windows)]
+        return self.slot.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
     }
 
     /// End the program and forget the session.

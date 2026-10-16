@@ -7,10 +7,11 @@
 //! so a minor version can add kinds; the major is part of the socket name,
 //! so incompatible versions never talk.
 
+#[cfg(unix)]
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
@@ -20,6 +21,8 @@ use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
 use tern_term::{SpawnConfig, TermSize};
 
+use crate::UnixStream;
+#[cfg(unix)]
 use crate::fdpass;
 
 pub const MAJOR: u32 = 1;
@@ -202,6 +205,7 @@ pub fn write_frame(w: &mut impl Write, msg: &impl Serialize) -> io::Result<()> {
 }
 
 /// Write `msg` with `fd` attached (SCM_RIGHTS) to its first bytes.
+#[cfg(unix)]
 pub fn write_frame_with_fd(sock: &UnixStream, msg: &impl Serialize, fd: &impl AsRawFd) -> io::Result<()> {
     let frame = encode(msg)?;
     let n = fdpass::send_with_fd(sock, &frame, fd.as_raw_fd())?;
@@ -220,17 +224,25 @@ fn decode<T: DeserializeOwned>(body: &[u8]) -> io::Result<Option<T>> {
     }
 }
 
-/// Reads frames, and the fds that come with them, from a Unix socket.
+/// Reads frames, and the fds that come with them (not on Windows), from a
+/// Unix socket.
 pub struct FrameReader {
     sock: UnixStream,
     buf: Vec<u8>,
+    #[cfg(unix)]
     fds: VecDeque<OwnedFd>,
     max: usize,
 }
 
 impl FrameReader {
     pub fn new(sock: UnixStream, max: usize) -> Self {
-        Self { sock, buf: Vec::with_capacity(64 << 10), fds: VecDeque::new(), max }
+        Self {
+            sock,
+            buf: Vec::with_capacity(64 << 10),
+            #[cfg(unix)]
+            fds: VecDeque::new(),
+            max,
+        }
     }
 
     /// The next message; `Ok(None)` at end of stream. Unknown kinds are
@@ -252,7 +264,15 @@ impl FrameReader {
                 }
             }
             let mut chunk = [0u8; 64 << 10];
+            #[cfg(unix)]
             let n = fdpass::recv_with_fds(&self.sock, &mut chunk, &mut self.fds)?;
+            #[cfg(windows)]
+            let n = loop {
+                match (&self.sock).read(&mut chunk) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    r => break r?,
+                }
+            };
             if n == 0 {
                 return if self.buf.is_empty() { Ok(None) } else { Err(io::ErrorKind::UnexpectedEof.into()) };
             }
@@ -261,6 +281,7 @@ impl FrameReader {
     }
 
     /// The oldest fd received and not taken yet.
+    #[cfg(unix)]
     pub fn take_fd(&mut self) -> Option<OwnedFd> {
         self.fds.pop_front()
     }
@@ -376,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn fd_travels_with_its_frame() {
         let (a, b) = UnixStream::pair().unwrap();
         let (pipe_r, pipe_w) = std::io::pipe().unwrap();

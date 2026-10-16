@@ -54,6 +54,7 @@ impl Agent {
     }
 
     /// The command that starts it in a shell.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
     pub fn command(self) -> &'static str {
         match self {
             Self::Claude => "claude",

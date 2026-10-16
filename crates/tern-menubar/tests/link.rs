@@ -1,3 +1,6 @@
+// The menu bar agent is macOS only (Unix socket paths under /tmp here).
+#![cfg(unix)]
+
 use std::sync::mpsc;
 use std::time::Duration;
 

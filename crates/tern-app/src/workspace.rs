@@ -436,6 +436,7 @@ pub struct Workspace {
 }
 
 /// A terminal tab, as the screenshot tray lists it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
 pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
@@ -472,8 +473,17 @@ fn tab_layout_items(mut menu: PopupMenu) -> PopupMenu {
 /// `s` as one word of the shell Claude tabs run in (see `platform::shell`).
 fn shell_quote(s: &str) -> String {
     if cfg!(windows) {
-        // PowerShell: only `'` is special inside single quotes.
-        format!("'{}'", s.replace('\'', "''"))
+        // PowerShell: inside single quotes only `'` is special, and it takes
+        // the curly quotes U+2018–U+201B for one too. Double them all.
+        let mut out = String::from("'");
+        for c in s.chars() {
+            if matches!(c, '\'' | '\u{2018}'..='\u{201B}') {
+                out.push(c);
+            }
+            out.push(c);
+        }
+        out.push('\'');
+        out
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
     }
@@ -1599,6 +1609,7 @@ impl Workspace {
     }
 
     /// The terminal tabs, in tab order, for picking where a screenshot goes.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
     pub fn term_tabs(&self, cx: &App) -> Vec<TermTabInfo> {
         self.tabs
             .iter()
@@ -1617,6 +1628,7 @@ impl Workspace {
     }
 
     /// Show the tab with entity `id`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
     pub fn show_tab(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == id) {
             self.activate(ix, window, cx);
@@ -1624,6 +1636,7 @@ impl Workspace {
     }
 
     /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         let kind = if agent == Agent::Claude { TabKind::Claude } else { TabKind::Shell };
         self.add_tab(kind, window, cx);

@@ -1,3 +1,6 @@
+// The scripts are sh; `windows.rs` covers Windows.
+#![cfg(unix)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

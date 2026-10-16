@@ -5,11 +5,13 @@ edition.workspace = true
 
 [dependencies]
 env_logger = "0.11.11"
-libc = "0.2.190"
 log = "0.4.34"
 semver = "1"
 tern-mux = { version = "0.1.0", path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
 
 [dev-dependencies]
 tempfile = "3.27.0"
