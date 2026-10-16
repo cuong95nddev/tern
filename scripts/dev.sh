@@ -1,8 +1,10 @@
 #!/bin/sh
 # Dev loop: run a debug Tern next to the installed one, and rebuild and
 # relaunch it whenever a source file changes (a failed build keeps the old
-# one running). On macOS it runs as "Tern Dev" (scripts/dev-app-macos.sh). It leaves the installed app's saved session alone, and its
-# control socket is target/dev.sock (see crates/tern-app/src/control.rs).
+# one running). On macOS it runs as "Tern Dev" (scripts/dev-app-macos.sh);
+# on Windows (Git Bash) it runs a copy, as a running .exe can't be relinked.
+# It leaves the installed app's saved session alone, and its control socket
+# is target/dev.sock (Unix only, see crates/tern-app/src/control.rs).
 #   scripts/dev.sh [FOLDER]     default: this repo
 set -u
 
@@ -11,7 +13,9 @@ FOLDER=$(cd "${1:-$ROOT}" && pwd)
 cd "$ROOT"
 
 # Newest mtime of the sources and manifests.
-stamp() { find crates \( -name '*.rs' -o -name Cargo.toml \) -exec stat -f %m {} + | sort -n | tail -1; }
+# GNU stat (Linux, Git Bash) takes -c, BSD stat (macOS) -f.
+if stat -c %Y . >/dev/null 2>&1; then MTIME='-c %Y'; else MTIME='-f %m'; fi
+stamp() { find crates \( -name '*.rs' -o -name Cargo.toml \) -exec stat $MTIME {} + | sort -n | tail -1; }
 
 PID=
 stop() {
@@ -27,14 +31,23 @@ while :; do
         last=$now
         if cargo build -p tern-app; then
             stop
-            if [ "$(uname)" = Darwin ]; then
+            case $(uname) in
+            Darwin)
                 # As "Tern Dev", with privacy permissions of its own.
                 PID=$(scripts/dev-app-macos.sh "$FOLDER") || PID=
-            else
+                ;;
+            MINGW* | MSYS* | CYGWIN*)
+                # From a copy: the next build relinks tern-app.exe.
+                cp target/debug/tern-app.exe target/debug/tern-dev.exe
+                target/debug/tern-dev.exe "$FOLDER" &
+                PID=$!
+                ;;
+            *)
                 # A relative path: socket paths are limited to ~100 bytes.
                 TERN_CONTROL=target/dev.sock target/debug/tern-app "$FOLDER" &
                 PID=$!
-            fi
+                ;;
+            esac
             echo "dev: Tern running (pid $PID)"
         else
             echo "dev: build failed, keeping the running Tern"
