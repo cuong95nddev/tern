@@ -21,8 +21,8 @@ mod platform;
 mod restart;
 mod scratch;
 mod scratches_view;
-#[cfg(target_os = "macos")]
 mod settings;
+#[cfg(target_os = "macos")]
 mod shot;
 mod style;
 mod template;
