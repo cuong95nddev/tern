@@ -1309,65 +1309,73 @@ struct Style {
     strike: bool,
 }
 
+/// A segment's text and runs, shaped once the terminal is unlocked.
+struct PendingText {
+    origin: Point<Pixels>,
+    text: String,
+    runs: Vec<TextRun>,
+}
+
 /// Accumulates one row's text into force-width segments.
 struct RowBuilder<'a> {
-    font: &'a Font,
-    font_size: Pixels,
+    /// The font, then bold, italic, and bold italic (see [`face`]).
+    fonts: &'a [Font; 4],
     cell: CellMetrics,
     y: Pixels,
     origin_x: Pixels,
     text: String,
     runs: Vec<TextRun>,
+    /// The face of the last run.
+    face: usize,
     start_col: usize,
     next_col: usize,
 }
 
+/// Index of a style's font in [`RowBuilder::fonts`].
+fn face(style: &Style) -> usize {
+    usize::from(style.bold) | usize::from(style.italic) << 1
+}
+
 impl<'a> RowBuilder<'a> {
-    fn push(&mut self, col: usize, s: &str, style: Style, out: &mut Vec<TextSegment>, ts: &WindowTextSystem) {
+    fn push(&mut self, col: usize, s: &str, style: Style, out: &mut Vec<PendingText>) {
         if !self.text.is_empty() && col != self.next_col {
-            self.flush(out, ts);
+            self.flush(out);
         }
         if self.text.is_empty() {
             self.start_col = col;
         }
-        let mut f = self.font.clone();
-        if style.bold {
-            f.weight = FontWeight::BOLD;
-        }
-        if style.italic {
-            f.style = FontStyle::Italic;
-        }
-        let run = TextRun {
-            len: s.len(),
-            font: f,
-            color: style.fg,
-            background_color: None,
-            underline: style.underline.map(|(color, wavy)| UnderlineStyle { thickness: px(1.), color: Some(color), wavy }),
-            strikethrough: style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) }),
-        };
+        let face = face(&style);
+        let underline = style.underline.map(|(color, wavy)| UnderlineStyle { thickness: px(1.), color: Some(color), wavy });
+        let strikethrough = style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) });
         match self.runs.last_mut() {
-            Some(last)
-                if last.font == run.font
-                    && last.color == run.color
-                    && last.underline == run.underline
-                    && last.strikethrough == run.strikethrough =>
-            {
-                last.len += run.len
+            Some(last) if self.face == face && last.color == style.fg && last.underline == underline && last.strikethrough == strikethrough => {
+                last.len += s.len()
             },
-            _ => self.runs.push(run),
+            _ => {
+                self.runs.push(TextRun {
+                    len: s.len(),
+                    font: self.fonts[face].clone(),
+                    color: style.fg,
+                    background_color: None,
+                    underline,
+                    strikethrough,
+                });
+                self.face = face;
+            },
         }
         self.text.push_str(s);
         self.next_col = col + 1;
     }
 
-    fn flush(&mut self, out: &mut Vec<TextSegment>, ts: &WindowTextSystem) {
+    fn flush(&mut self, out: &mut Vec<PendingText>) {
         if self.text.is_empty() {
             return;
         }
-        let text: SharedString = std::mem::take(&mut self.text).into();
-        let line = ts.shape_line(text, self.font_size, &self.runs, Some(self.cell.width));
-        self.runs.clear();
-        out.push(TextSegment { origin: point(self.origin_x + self.cell.width * self.start_col as f32, self.y), line });
+        out.push(PendingText {
+            origin: point(self.origin_x + self.cell.width * self.start_col as f32, self.y),
+            text: std::mem::take(&mut self.text),
+            runs: std::mem::take(&mut self.runs),
+        });
     }
 }
 
@@ -1456,6 +1464,16 @@ impl Element for TerminalElement {
 
 fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels>, m: CellMetrics, window: &mut Window) -> Frame {
     let base_font = font(view.config.font_family.clone());
+    let fonts: [Font; 4] = std::array::from_fn(|i| {
+        let mut f = base_font.clone();
+        if i & 1 != 0 {
+            f.weight = FontWeight::BOLD;
+        }
+        if i & 2 != 0 {
+            f.style = FontStyle::Italic;
+        }
+        f
+    });
     let font_size = view.config.font_size;
     let focused = view.focus.is_focused(window);
     let ts = window.text_system().clone();
@@ -1493,23 +1511,27 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         }
     };
 
+    // Shaping waits until the terminal is unlocked: its reader stays free.
+    let mut pending: Vec<PendingText> = Vec::new();
+    // Neighboring cells mostly share a color.
+    let mut last_fg: Option<(Rgb, Hsla)> = None;
     let mut buf = String::new();
     for indexed in content.display_iter {
         let vp_line = indexed.point.line.0 + offset;
         let col = indexed.point.column.0;
         if vp_line != row {
             if let Some(b) = builder.as_mut() {
-                b.flush(&mut frame.text, &ts);
+                b.flush(&mut pending);
             }
             row = vp_line;
             builder = Some(RowBuilder {
-                font: &base_font,
-                font_size,
+                fonts: &fonts,
                 cell: m,
                 y: bounds.origin.y + m.height * row as f32,
                 origin_x: bounds.origin.x,
                 text: String::new(),
                 runs: vec![],
+                face: 0,
                 start_col: 0,
                 next_col: 0,
             });
@@ -1525,7 +1547,14 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
-        let mut fg_h = rgb_to_hsla(fg);
+        let mut fg_h = match last_fg {
+            Some((rgb, h)) if rgb == fg => h,
+            _ => {
+                let h = rgb_to_hsla(fg);
+                last_fg = Some((fg, h));
+                h
+            },
+        };
         if flags.contains(Flags::DIM) {
             fg_h.a *= 0.66;
         }
@@ -1577,16 +1606,16 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         let b = builder.as_mut().unwrap();
         if wide {
             // Own segment so following cells stay on the grid.
-            b.flush(&mut frame.text, &ts);
-            b.push(col, &buf, style, &mut frame.text, &ts);
-            b.flush(&mut frame.text, &ts);
+            b.flush(&mut pending);
+            b.push(col, &buf, style, &mut pending);
+            b.flush(&mut pending);
         } else {
-            b.push(col, &buf, style, &mut frame.text, &ts);
+            b.push(col, &buf, style, &mut pending);
         }
     }
     flush_bg(&mut bg_run, &mut frame.rects);
     if let Some(b) = builder.as_mut() {
-        b.flush(&mut frame.text, &ts);
+        b.flush(&mut pending);
     }
 
     // Cursor.
@@ -1605,6 +1634,10 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         });
     }
     drop(term);
+    frame.text = pending
+        .into_iter()
+        .map(|p| TextSegment { origin: p.origin, line: ts.shape_line(p.text.into(), font_size, &p.runs, Some(m.width)) })
+        .collect();
 
     // IME marked text, drawn over the cursor.
     if let Some(marked) = view.marked_text.clone() {
