@@ -1,6 +1,6 @@
 [package]
 name = "tern-app"
-version = "0.2.2"
+version = "0.3.0"
 edition.workspace = true
 
 [build-dependencies]
@@ -25,6 +25,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
-tern-menubar = { version = "0.2.2", path = "../tern-menubar" }
+tern-menubar = { version = "0.3.0", path = "../tern-menubar" }
 tern-mux = { version = "0.1.0", path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
