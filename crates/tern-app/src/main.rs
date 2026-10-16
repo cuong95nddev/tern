@@ -23,7 +23,7 @@ mod restart;
 mod scratch;
 mod scratches_view;
 mod settings;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod shot;
 mod style;
 mod template;
@@ -138,7 +138,7 @@ fn main() {
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         agent_monitor::init(cx);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         shot::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));

@@ -33,7 +33,16 @@ struct Capture {
 
 impl Global for Capture {}
 
-/// ⌘⇧2 anywhere, and the menu action.
+/// The global capture shortcut: ⌘⇧2 on macOS, Ctrl+Shift+2 on Windows.
+#[cfg(target_os = "macos")]
+const HOTKEY: (Modifiers, &str) = (Modifiers::SUPER.union(Modifiers::SHIFT), "⌘⇧2");
+#[cfg(windows)]
+const HOTKEY: (Modifiers, &str) = (Modifiers::CONTROL.union(Modifiers::SHIFT), "Ctrl+Shift+2");
+
+/// The shortcut as menus show it.
+pub const HOTKEY_LABEL: &str = HOTKEY.1;
+
+/// The global shortcut anywhere, and the menu action.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &CaptureScreenshot, cx| start(cx));
     cx.background_executor().spawn(async { grab::cleanup(&grab::dir(), KEEP) }).detach();
@@ -41,9 +50,9 @@ pub fn init(cx: &mut App) {
         Ok(m) => m,
         Err(e) => return log::warn!("no global hotkey: {e}"),
     };
-    let hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit2);
+    let hotkey = HotKey::new(Some(HOTKEY.0), Code::Digit2);
     if let Err(e) = manager.register(hotkey) {
-        log::warn!("can't register ⌘⇧2: {e}");
+        log::warn!("can't register {}: {e}", HOTKEY.1);
     }
     let (tx, rx) = flume::unbounded();
     GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
@@ -78,22 +87,15 @@ pub fn start(cx: &mut App) {
     cx.default_global::<Capture>().on = true;
     // The tray's window fades out before the screen is grabbed.
     let wait = if tray::hide(cx) { 400 } else { 0 };
-    let displays: Vec<_> = cx.displays().iter().map(|d| (d.id(), d.bounds().size)).collect();
+    let displays: Vec<_> = cx.displays().iter().map(|d| (d.id(), d.bounds())).collect();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(Duration::from_millis(wait)).await;
         let grabs = cx
             .background_executor()
             .spawn(async move {
                 std::thread::scope(|s| {
-                    let jobs: Vec<_> = displays
-                        .into_iter()
-                        .map(|(id, size)| {
-                            s.spawn(move || {
-                                let (x, y, w, h) = grab::display_frame(u64::from(id));
-                                (id, size, grab::grab(x, y, w, h))
-                            })
-                        })
-                        .collect();
+                    let jobs: Vec<_> =
+                        displays.into_iter().map(|(id, bounds)| s.spawn(move || (id, bounds, grab::grab_display(u64::from(id))))).collect();
                     jobs.into_iter().filter_map(|j| j.join().ok()).collect::<Vec<_>>()
                 })
             })
@@ -103,9 +105,10 @@ pub fn start(cx: &mut App) {
     .detach();
 }
 
-fn open_overlays(grabs: Vec<(DisplayId, Size<Pixels>, Result<image::RgbaImage, String>)>, cx: &mut App) {
+fn open_overlays(grabs: Vec<(DisplayId, Bounds<Pixels>, Result<image::RgbaImage, String>)>, cx: &mut App) {
     let mut overlays = Vec::new();
-    for (id, size, grabbed) in grabs {
+    for (id, bounds, grabbed) in grabs {
+        let size = bounds.size;
         let img = match grabbed {
             Ok(img) => img,
             Err(e) => {
@@ -115,7 +118,7 @@ fn open_overlays(grabs: Vec<(DisplayId, Size<Pixels>, Result<image::RgbaImage, S
         };
         let opened = gpui_kit::open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), size))),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(window_origin(bounds), size))),
                 titlebar: None,
                 focus: true,
                 show: true,
@@ -136,7 +139,7 @@ fn open_overlays(grabs: Vec<(DisplayId, Size<Pixels>, Result<image::RgbaImage, S
     }
     if overlays.is_empty() {
         cx.default_global::<Capture>().on = false;
-        notify("Couldn't capture the screen", "screencapture failed; see the log.", cx);
+        notify("Couldn't capture the screen", "See the log for why.", cx);
         if tray::has_shots(cx) {
             tray::show(cx);
         }
@@ -146,6 +149,12 @@ fn open_overlays(grabs: Vec<(DisplayId, Size<Pixels>, Result<image::RgbaImage, S
         let _ = first.update(cx, |_, w, _| w.activate_window());
     }
     cx.default_global::<Capture>().overlays = overlays;
+}
+
+/// Where a window covering `display` goes: macOS places windows relative to
+/// their display, Windows in global coordinates.
+fn window_origin(display: Bounds<Pixels>) -> Point<Pixels> {
+    if cfg!(windows) { display.origin } else { point(px(0.), px(0.)) }
 }
 
 /// Close the overlays (after the current update, which may be one of
@@ -161,6 +170,11 @@ pub fn cancel(cx: &mut App) {
             tray::show(cx);
         }
     });
+}
+
+/// A shortcut hint: `mac` on macOS, `other` elsewhere.
+fn keys(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else { other }
 }
 
 fn notify(title: &str, body: &str, cx: &mut App) {
@@ -225,7 +239,7 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             let img = image::open(arg).map(|i| i.to_rgba8()).map_err(|e| e.to_string());
             cx.default_global::<Capture>().on = true;
             let _ = tray::hide(cx);
-            open_overlays(vec![(display.id(), display.bounds().size, img)], cx);
+            open_overlays(vec![(display.id(), display.bounds(), img)], cx);
             "ok".into()
         },
         "tray-add" => {

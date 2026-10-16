@@ -172,7 +172,10 @@ impl Tray {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = cx.default_global::<TrayData>().prompt.clone();
         let prompt = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 5).placeholder("What should the agent do? (⌘↵ sends)").default_value(text)
+            TextareaState::new(window, cx)
+                .auto_grow(2, 5)
+                .placeholder(super::keys("What should the agent do? (⌘↵ sends)", "What should the agent do? (Ctrl+Enter sends)"))
+                .default_value(text)
         });
         let sub = cx.subscribe_in(&prompt, window, |this, input, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => cx.default_global::<TrayData>().prompt = input.read(cx).value().to_string(),
@@ -289,7 +292,7 @@ impl Render for Tray {
                     .icon(icons::icon(icons::CAMERA))
                     .ghost()
                     .small()
-                    .tooltip("Capture another (⌘⇧2)")
+                    .tooltip(super::keys("Capture another (⌘⇧2)", "Capture another (Ctrl+Shift+2)"))
                     .on_click(|_, _, cx| super::start(cx)),
             )
             .child(
@@ -333,7 +336,7 @@ impl Render for Tray {
                     .icon(icons::icon(icons::SEND))
                     .label(if self.sending { "Sending…" } else { "Send" })
                     .disabled(self.sending)
-                    .tooltip("Send (⌘↵)")
+                    .tooltip(super::keys("Send (⌘↵)", "Send (Ctrl+Enter)"))
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             );
         // Fit the window to the panel's height, which changes with the

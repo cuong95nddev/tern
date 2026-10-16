@@ -263,15 +263,15 @@ impl Overlay {
             "escape" if self.drag.is_some() => self.drag = None,
             "escape" => return super::cancel(cx),
             "enter" if self.sel.is_some() => return self.add(window, cx),
-            "z" if m.platform && m.shift => {
+            "z" if m.secondary() && m.shift => {
                 self.doc.redo();
             },
-            "z" if m.platform => {
+            "z" if m.secondary() => {
                 self.doc.undo();
             },
-            "c" if m.platform => return self.copy(cx),
-            "s" if m.platform => return self.save_as(cx),
-            key if !m.platform && !m.control && self.sel.is_some() => {
+            "c" if m.secondary() => return self.copy(cx),
+            "s" if m.secondary() => return self.save_as(cx),
+            key if !m.platform && !m.control && !m.alt && self.sel.is_some() => {
                 let tool = match key {
                     "r" => Tool::Rect,
                     "e" => Tool::Ellipse,
@@ -338,7 +338,7 @@ impl Overlay {
         let Some(img) = self.export() else { return };
         // The save panel would open under the overlay.
         super::cancel(cx);
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        let home = crate::dirs::home().unwrap_or_default();
         let rx = cx.prompt_for_new_path(&home.join("Desktop"), Some("Screenshot.png"));
         cx.spawn(async move |_, cx| {
             let Ok(Ok(Some(path))) = rx.await else { return };
@@ -409,22 +409,32 @@ impl Overlay {
             bar = bar.child(self.tool_button(tool, cx));
         }
         bar.child(sep())
-            .child(Self::action_button("undo", icons::UNDO, "Undo (⌘Z)").disabled(!self.doc.can_undo()).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.doc.undo();
-                    cx.notify();
-                },
-            )))
-            .child(Self::action_button("redo", icons::REDO, "Redo (⌘⇧Z)").disabled(!self.doc.can_redo()).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.doc.redo();
-                    cx.notify();
-                },
-            )))
+            .child(
+                Self::action_button("undo", icons::UNDO, super::keys("Undo (⌘Z)", "Undo (Ctrl+Z)"))
+                    .disabled(!self.doc.can_undo())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.doc.undo();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Self::action_button("redo", icons::REDO, super::keys("Redo (⌘⇧Z)", "Redo (Ctrl+Shift+Z)"))
+                    .disabled(!self.doc.can_redo())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.doc.redo();
+                        cx.notify();
+                    })),
+            )
             .child(sep())
             .child(Self::action_button("cancel", icons::CLOSE, "Cancel (Esc)").on_click(|_, _, cx| super::cancel(cx)))
-            .child(Self::action_button("copy", icons::COPY, "Copy (⌘C)").on_click(cx.listener(|this, _, _, cx| this.copy(cx))))
-            .child(Self::action_button("save", icons::SAVE, "Save As… (⌘S)").on_click(cx.listener(|this, _, _, cx| this.save_as(cx))))
+            .child(
+                Self::action_button("copy", icons::COPY, super::keys("Copy (⌘C)", "Copy (Ctrl+C)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
+            )
+            .child(
+                Self::action_button("save", icons::SAVE, super::keys("Save As… (⌘S)", "Save As… (Ctrl+S)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.save_as(cx))),
+            )
             .child(
                 Button::new("add")
                     .icon(icons::icon(icons::ADD))

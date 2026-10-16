@@ -66,7 +66,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
         ];
         #[cfg(target_os = "macos")]
-        items.extend([MenuItem::action("Capture Screenshot (⌘⇧2)", crate::shot::CaptureScreenshot), MenuItem::separator()]);
+        items.extend([MenuItem::action(capture_label(), crate::shot::CaptureScreenshot), MenuItem::separator()]);
         items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -75,6 +75,8 @@ fn menus() -> Vec<Menu> {
         let app = Menu::new("Tern").items(items);
         vec![app, Menu::new("File").items(file), edit, view]
     } else {
+        #[cfg(windows)]
+        file.extend([MenuItem::separator(), MenuItem::action(capture_label(), crate::shot::CaptureScreenshot)]);
         file.extend([
             MenuItem::separator(),
             MenuItem::action("Settings", OpenSettings),
@@ -89,6 +91,11 @@ fn menus() -> Vec<Menu> {
         ]);
         vec![file, edit, view, help]
     }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn capture_label() -> String {
+    format!("Capture Screenshot ({})", crate::shot::HOTKEY_LABEL)
 }
 
 fn menu_bar_toggle_label(shown: bool) -> &'static str {

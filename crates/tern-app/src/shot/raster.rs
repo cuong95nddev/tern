@@ -18,11 +18,12 @@ pub struct Crop {
     pub h: u32,
 }
 
-/// The system UI font (SF), else Helvetica; `None` leaves text out.
+/// The system UI font (macOS: SF, else Helvetica; Windows: Segoe UI, else
+/// Arial); `None` leaves text out.
 pub fn font() -> Option<&'static FontVec> {
     static FONT: OnceLock<Option<FontVec>> = OnceLock::new();
     FONT.get_or_init(|| {
-        ["/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc"].iter().find_map(|path| {
+        font_paths().into_iter().find_map(|path| {
             let bytes = std::fs::read(path).ok()?;
             FontVec::try_from_vec_and_index(bytes, 0).ok()
         })
@@ -31,6 +32,15 @@ pub fn font() -> Option<&'static FontVec> {
 }
 
 /// `crop` of `base` with `doc`'s shapes drawn on it, oldest first.
+fn font_paths() -> Vec<std::path::PathBuf> {
+    if cfg!(windows) {
+        let windir = std::env::var_os("WINDIR").map_or_else(|| r"C:\Windows".into(), std::path::PathBuf::from);
+        ["segoeui.ttf", "arial.ttf"].iter().map(|f| windir.join("Fonts").join(f)).collect()
+    } else {
+        ["/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc"].iter().map(Into::into).collect()
+    }
+}
+
 pub fn render(base: &RgbaImage, crop: Crop, doc: &Doc, font: Option<&FontVec>) -> RgbaImage {
     let crop = clamp(crop, base.width(), base.height());
     let mut pm = Pixmap::new(crop.w.max(1), crop.h.max(1)).expect("non-empty pixmap");

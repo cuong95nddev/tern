@@ -418,7 +418,7 @@
       <p>Name and color groups of tabs, collapse them, lay tabs out in a grid of panes, or list them down the side.</p>
     </div>
     <div>
-      <h3>Screenshots for agents<span class="tag">macOS</span></h3>
+      <h3>Screenshots for agents<span class="tag">macOS, Windows</span></h3>
       <p>Grab a region from any app, mark it up and send it with a prompt to an agent tab.</p>
     </div>
     <div>
@@ -433,9 +433,9 @@
 
   <section class="spot">
     <div>
-      <p class="eyebrow">Screenshots for agents · macOS</p>
+      <p class="eyebrow">Screenshots for agents · macOS and Windows</p>
       <h2>Show the agent what you mean</h2>
-      <p>Press <kbd>⌘⇧2</kbd> in any app. The screen freezes; pick a region and mark it up, collect a few, write a prompt and send them all to an agent tab, or start a new Claude Code, Codex or OpenCode tab with them.</p>
+      <p>Press <kbd>⌘⇧2</kbd> (<kbd>Ctrl+Shift+2</kbd> on Windows) in any app. The screen freezes; pick a region and mark it up, collect a few, write a prompt and send them all to an agent tab, or start a new Claude Code, Codex or OpenCode tab with them.</p>
       <ul>
         <li><b>Boxes, arrows, text</b> and numbered markers to point at things</li>
         <li><b>Mosaic</b> to hide what the agent shouldn't see</li>
@@ -561,6 +561,7 @@
           <li>Installs for your user, no admin rights</li>
           <li>Optional <code>tern</code> command and <b>Open in Tern</b> in Explorer's folder menu</li>
           <li>Shell tabs run PowerShell 7 when installed</li>
+          <li>Screenshots for agents</li>
           <li>Not code-signed yet: SmartScreen asks first (<b>More info ▸ Run anyway</b>)</li>
         </ul>
         <a class="btn btn-ghost js-plat" data-os="windows" href="https://github.com/cuong95nddev/tern/releases/latest">Download installer</a>
@@ -586,7 +587,7 @@
     <ul class="klist">
       <li><span>New Claude tab / shell tab</span><kbd data-pc="Ctrl+Shift+T / Ctrl+Alt+Shift+T">⌘T / ⌘⇧T</kbd></li>
       <li><span>Open a folder as a workspace</span><kbd data-pc="Ctrl+Shift+O">⌘O</kbd></li>
-      <li data-mac-only><span>Screenshot for an agent, from any app</span><kbd>⌘⇧2</kbd></li>
+      <li data-no-linux><span>Screenshot for an agent, from any app</span><kbd data-pc="Ctrl+Shift+2">⌘⇧2</kbd></li>
       <li><span>Split right</span><kbd data-pc="Ctrl+Shift+\">⌘\</kbd></li>
       <li><span>Maximize the focused pane</span><kbd data-pc="Ctrl+Alt+Shift+Enter">⌘⇧↩</kbd></li>
       <li><span>Toggle explorer</span><kbd data-pc="Ctrl+Shift+B">⌘B</kbd></li>
@@ -637,8 +638,8 @@
   document.querySelector(`.pcard[data-os="${os}"]`)?.classList.add("mine");
   if (os !== "macos") {
     document.querySelectorAll("kbd[data-pc]").forEach(k => k.textContent = k.dataset.pc);
-    document.querySelectorAll("[data-mac-only]").forEach(li => li.hidden = true);
   }
+  if (os === "linux") document.querySelectorAll("[data-no-linux]").forEach(li => li.hidden = true);
   if (os === "windows") document.querySelector(".js-path").textContent = "C:\\code\\my-project";
 
   // Point the download links straight at the latest release's files; the

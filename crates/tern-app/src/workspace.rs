@@ -459,7 +459,7 @@ pub struct Workspace {
 }
 
 /// A terminal tab, as the screenshot tray and the agent monitor list it.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
 pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
@@ -1695,7 +1695,7 @@ impl Workspace {
     }
 
     /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         let kind = if agent == Agent::Claude { TabKind::Claude } else { TabKind::Shell };
         self.add_tab(kind, window, cx);

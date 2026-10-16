@@ -443,7 +443,7 @@ impl TerminalView {
 
     /// Whether the program has settled for input: it turned on bracketed
     /// paste and has been quiet for `quiet`.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn ready_for_paste(&self, quiet: Duration) -> bool {
         self.mode().contains(TermMode::BRACKETED_PASTE) && self.last_output.elapsed() >= quiet
     }

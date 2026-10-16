@@ -171,10 +171,12 @@ mod tests {
     #[test]
     fn plan_pastes_each_image_then_the_prompt_then_enter() {
         let steps = plan(&["/a b.png".into(), "/c.png".into()], "  fix #1\n");
+        // As each platform's shell takes a path with a space.
+        let spaced = if cfg!(windows) { "\"/a b.png\" " } else { "/a\\ b.png " };
         assert_eq!(
             steps,
             vec![
-                Step::Paste("/a\\ b.png ".into()),
+                Step::Paste(spaced.into()),
                 Step::Wait(Duration::from_millis(150)),
                 Step::Paste("/c.png ".into()),
                 Step::Wait(Duration::from_millis(150)),
