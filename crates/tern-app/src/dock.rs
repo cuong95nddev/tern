@@ -1,5 +1,6 @@
 //! What the drawn docks report back to the code that owns the arrangement.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gpui_kit::*;
@@ -44,6 +45,13 @@ impl Global for ActiveDrag {}
 pub struct LayoutLock(pub bool);
 
 impl Global for LayoutLock {}
+
+/// The parts that can't be dragged now: their `drag` doesn't hold with the
+/// values of the workspace that draws them.
+#[derive(Default)]
+pub struct PinnedParts(pub BTreeSet<&'static str>);
+
+impl Global for PinnedParts {}
 
 /// A side panel's title bar, drawn with the template named after its element
 /// (`explorer.header`, …): its title (or the element's `title`), a count

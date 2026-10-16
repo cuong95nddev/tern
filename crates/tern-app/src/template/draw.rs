@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::{Align, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, What};
 use crate::arrange::{self, Shown, Size};
-use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange};
+use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange, PinnedParts};
 use crate::style::{self, Val};
 
 /// Attaches behavior to a box named by `frame`: gets the frame's name, the
@@ -46,7 +46,7 @@ struct Drawer<'a, 'f> {
 }
 
 /// The values a node sees: its scope's, then those of the scopes around it.
-fn lookup<'s>(scope: &'s Scope, outer: &'s [&'s HashMap<&'static str, Value>]) -> impl Fn(&str) -> Option<Value> + 's {
+pub(super) fn lookup<'s>(scope: &'s Scope, outer: &'s [&'s HashMap<&'static str, Value>]) -> impl Fn(&str) -> Option<Value> + 's {
     move |name: &str| match name {
         "true" => Some(Value::Bool(true)),
         "false" => Some(Value::Bool(false)),
@@ -141,7 +141,8 @@ impl Drawer<'_, '_> {
         Some(self.boxed(n, &look, kids, scope.index, drag))
     }
 
-    /// What dragging handle `n` drags: the part its scope names, when it may be dragged.
+    /// What dragging handle `n` drags: the part its scope names, when it may
+    /// be dragged (the part's own `drag` was read where its dock draws it).
     fn dragged_part(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<DraggedPart> {
         if self.locked() || !self.holds(&n.drag, scope, outer) {
             return None;
@@ -149,8 +150,8 @@ impl Drawer<'_, '_> {
         let get = lookup(scope, outer);
         let part = get("part")?.text();
         let templates = self.cx.try_global::<Templates>()?;
-        let (kind, node) = templates.parts.get(part.as_ref())?;
-        if !self.holds(&node.drag, scope, outer) {
+        let (kind, _) = templates.parts.get(part.as_ref())?;
+        if self.cx.try_global::<PinnedParts>().is_some_and(|p| p.0.contains(part.as_ref())) {
             return None;
         }
         let title = get("title").map(|t| t.text()).unwrap_or_else(|| part.clone());

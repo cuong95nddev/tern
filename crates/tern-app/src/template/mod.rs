@@ -118,7 +118,7 @@ pub struct Spec {
     /// What a dock matches a part on (default `panel`).
     pub kind: Option<String>,
     /// This box holds parts, named so a layout can refer to it; its children
-    /// are its default parts. It needs a `split`.
+    /// are its default parts, and only parts. It needs a `split` and a `strip`.
     pub dock: Option<String>,
     /// The part names or kinds a dock takes.
     pub accepts: Vec<String>,
@@ -126,7 +126,8 @@ pub struct Spec {
     pub zones: Vec<String>,
     /// What a dock does when it has no parts: `hide` (the default) or `keep`.
     pub empty: Option<String>,
-    /// `left` or `right`: the tool strip whose buttons show this dock's parts.
+    /// `left` or `right`: the tool strip whose buttons show this dock's parts
+    /// (a dock needs one).
     pub strip: Option<String>,
     /// Dragging this box drags the part it is drawn for.
     pub handle: bool,
@@ -318,6 +319,13 @@ impl Templates {
     /// Bumped on every compile, so a change of settings can be noticed.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The parts whose `drag` doesn't hold with `scope`'s values, the ones
+    /// their `when` reads where the docks draw them.
+    pub fn pinned(&self, scope: &Scope) -> BTreeSet<&'static str> {
+        let get = draw::lookup(scope, &[]);
+        self.parts.iter().filter(|(_, (_, n))| n.drag.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
     }
 
     /// Whether `template`'s root is a drag handle.
@@ -611,6 +619,11 @@ impl Seen<'_> {
             self.walk(Arc::make_mut(item));
         }
         node.children.iter_mut().for_each(|c| self.walk(c));
+        // A part placed before is no longer one of the dock's.
+        if let Some(d) = &mut node.dock {
+            let d = Arc::make_mut(d);
+            d.info.defaults = dock_defaults(d.dir, &node.children);
+        }
     }
 }
 
@@ -856,9 +869,9 @@ impl Compiler<'_, '_> {
         let split = pick(&s.split, "split", self.problems, &["row", "column"]).map(|i| [Axis::Horizontal, Axis::Vertical][i]);
         let when = s.when.as_deref().and_then(|w| self.cond(w, &format!("{at}.when")));
         let mut children: Vec<Node> = s.children.iter().enumerate().map(|(i, c)| self.node(c, &format!("{at}.children.{i}"))).collect();
-        let dock = self.dock(s, at, split, &children);
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
+        let dock = self.dock(s, at, split, &children);
         Node {
             what,
             path: at.into(),
@@ -921,32 +934,20 @@ impl Compiler<'_, '_> {
             },
         };
         let strip = match s.strip.as_deref() {
-            None => None,
+            None => {
+                self.problems.push(format!("{at}: dock \"{name}\" has no strip"));
+                None
+            },
             Some(v @ ("left" | "right")) => Some(v.to_owned().into()),
             Some(v) => {
                 self.problems.push(format!("{at}.strip: \"{v}\" is not one of left, right"));
                 None
             },
         };
-        // A part's own `fixed` and `size` give its default size; a size that
-        // isn't in pixels leaves it to share what's left.
-        let mut items: Vec<(Tree, Size)> = children
-            .iter()
-            .filter_map(|c| {
-                let What::Part(p) = c.what else { return None };
-                let fixed = c.panel.fixed.is_some();
-                let size = match c.panel.size {
-                    Some(AbsoluteLength::Pixels(px)) if fixed => Size::Px(f32::from(px)),
-                    _ => Size::Auto,
-                };
-                Some((Tree::Part(p.to_owned()), size))
-            })
-            .collect();
-        // A dock without parts has an empty split, which `prune` reads as nothing.
-        let defaults = match items.len() {
-            1 => items.remove(0).0,
-            _ => Tree::Split(dir, items),
-        };
+        for c in children.iter().filter(|c| !matches!(c.what, What::Part(_))) {
+            self.problems.push(format!("{}: a dock holds only parts", c.path));
+        }
+        let defaults = dock_defaults(dir, children);
         let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults };
         Some(Arc::new(DockNode {
             name: name.clone().into(),
@@ -957,6 +958,33 @@ impl Compiler<'_, '_> {
             part_size: self.len(&s.part_size, &format!("{at}.part_size")),
             info,
         }))
+    }
+}
+
+/// What a dock starts with: its `part` children, each once. A part's own
+/// `fixed` and `size` give its default size; a size that isn't in pixels
+/// leaves it to share what's left. A dock without parts has an empty split,
+/// which `prune` reads as nothing.
+fn dock_defaults(dir: Dir, children: &[Node]) -> Tree {
+    let mut names = BTreeSet::new();
+    let mut items: Vec<(Tree, Size)> = children
+        .iter()
+        .filter_map(|c| {
+            let What::Part(p) = c.what else { return None };
+            if !names.insert(p) {
+                return None;
+            }
+            let fixed = c.panel.fixed.is_some();
+            let size = match c.panel.size {
+                Some(AbsoluteLength::Pixels(px)) if fixed => Size::Px(f32::from(px)),
+                _ => Size::Auto,
+            };
+            Some((Tree::Part(p.to_owned()), size))
+        })
+        .collect();
+    match items.len() {
+        1 => items.remove(0).0,
+        _ => Tree::Split(dir, items),
     }
 }
 
@@ -1023,6 +1051,7 @@ mod tests {
         assert_eq!(names, ["left", "right"]);
         let a = crate::arrange::Arrangement::defaults("workspace/left+right", &docks);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@220px];right=changes");
+        assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }
 
@@ -1047,12 +1076,45 @@ mod tests {
         let props = Props::new(&over, &theme, std::path::Path::new(""));
         let specs: BTreeMap<String, Spec> = serde_json::from_str(
             r#"{"a": {"slot": "nope", "children": [{"use": "b"}, {"use": "a"}, {"layout": "diagonal"}, {"element": "x"},
-                {"part": "nope"}, {"dock": "d", "split": "row", "zones": ["middle"]}, {"dock": "d2"}]}}"#,
+                {"part": "nope"}, {"dock": "d", "split": "row", "zones": ["middle"], "strip": "left"}, {"dock": "d2", "strip": "right"},
+                {"dock": "d3", "split": "row", "accepts": ["panel"], "strip": "left",
+                    "children": [{"children": [{"part": "explorer"}]}, {"slot": "center"}, {"part": "changes"}]}]}}"#,
         )
         .unwrap();
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
-        assert_eq!(problems.len(), 10, "{problems:?}");
+        assert_eq!(problems.len(), 12, "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts")), "{problems:?}");
+    }
+
+    #[test]
+    fn drag_reads_the_docks_values() {
+        let (t, problems) = compiled(
+            r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "strip": "left",
+                "children": [{"part": "explorer", "drag": "explorer && !busy"}, {"part": "changes"}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let scope = || super::Scope::new("w").var("explorer", true);
+        assert!(t.pinned(&scope()).is_empty());
+        assert_eq!(t.pinned(&scope().var("busy", true)), ["explorer"].into());
+        // The header's own values (`part`, `title`) don't count.
+        assert_eq!(t.pinned(&super::Scope::new("h").var("part", "explorer")), ["explorer"].into());
+    }
+
+    #[test]
+    fn dock_without_strip_is_reported() {
+        let (_, problems) = compiled(r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "children": [{"part": "explorer"}]}}"#);
+        assert_eq!(problems, ["templates.w: dock \"d\" has no strip".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_dock_round_trips() {
+        let (t, problems) = compiled(r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "strip": "left"}}"#);
+        assert_eq!(problems, Vec::<String>::new());
+        let a = crate::arrange::Arrangement::defaults("w/d", &t.docks("w"));
+        assert_eq!(a.encode(), "d=");
+        assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
     }
 
     fn compiled(json: &str) -> (super::Templates, Vec<String>) {
@@ -1086,7 +1148,7 @@ mod tests {
     #[test]
     fn fixed_part_size_is_a_default() {
         let (t, problems) = compiled(
-            r#"{"w": {"dock": "left", "split": "column", "accepts": ["panel"],
+            r#"{"w": {"dock": "left", "split": "column", "accepts": ["panel"], "strip": "left",
                 "children": [{"part": "explorer"}, {"part": "scratches", "fixed": true, "size": 220}]}}"#,
         );
         assert_eq!(problems, Vec::<String>::new());
@@ -1098,12 +1160,23 @@ mod tests {
     fn part_placed_twice_is_reported() {
         let (t, problems) = compiled(
             r#"{"w": {"children": [
-                {"dock": "a", "split": "column", "accepts": ["panel"], "children": [{"part": "explorer"}]},
-                {"dock": "b", "split": "column", "accepts": ["panel"], "children": [{"part": "explorer"}]}]}}"#,
+                {"dock": "a", "split": "column", "accepts": ["panel"], "strip": "left", "children": [{"part": "explorer"}]},
+                {"dock": "b", "split": "column", "accepts": ["panel"], "strip": "right", "children": [{"part": "explorer"}]}]}}"#,
         );
         assert_eq!(problems.iter().filter(|p| p.contains("placed twice")).count(), 1, "{problems:?}");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(t.parts().iter().filter(|(n, _)| *n == "explorer").count(), 1);
+        let docks = t.docks("w");
+        assert_eq!(crate::arrange::Arrangement::defaults("w/a+b", &docks).encode(), "a=explorer;b=");
+        assert!(!docks[1].defaults.has("explorer"));
+
+        // Twice in one dock: the dock starts with it once.
+        let (t, problems) = compiled(
+            r#"{"w": {"dock": "a", "split": "column", "accepts": ["panel"], "strip": "left",
+                "children": [{"part": "explorer"}, {"part": "changes"}, {"part": "explorer"}]}}"#,
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(crate::arrange::Arrangement::defaults("w/a", &t.docks("w")).encode(), "a=[c explorer@- changes@-]");
     }
 
     #[test]
@@ -1111,7 +1184,7 @@ mod tests {
         let (t, problems) = compiled(
             r#"{"w": {"children": [{"use": "p"}, {"use": "p"}]},
                 "p": {"children": [{"part": "explorer"},
-                    {"dock": "d", "split": "column", "accepts": ["panel"], "children": [{"part": "changes"}]}]}}"#,
+                    {"dock": "d", "split": "column", "accepts": ["panel"], "strip": "left", "children": [{"part": "changes"}]}]}}"#,
         );
         assert_eq!(problems.iter().filter(|p| p.contains("part \"explorer\" placed twice")).count(), 1, "{problems:?}");
         assert_eq!(problems.iter().filter(|p| p.contains("part \"changes\" placed twice")).count(), 1, "{problems:?}");
@@ -1135,7 +1208,7 @@ mod tests {
 
     #[test]
     fn dock_without_accepts_is_reported() {
-        let (_, problems) = compiled(r#"{"w": {"dock": "d", "split": "row"}}"#);
+        let (_, problems) = compiled(r#"{"w": {"dock": "d", "split": "row", "strip": "left"}}"#);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("accepts"));
     }

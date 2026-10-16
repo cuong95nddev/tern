@@ -445,6 +445,9 @@ pub struct Workspace {
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
     /// Where the side panels sit, per template and docks (`arrange::key`).
     arrangements: Kept,
+    /// Bumped when the parts move, the layout resets or the arrangement is
+    /// fitted again: the docks' splits start over from the arrangement.
+    docks_epoch: usize,
     /// The templates generation and key the arrangement was last fitted to.
     arranged_for: Option<(u64, String)>,
     /// What fitting the stored arrangement to the templates found.
@@ -587,6 +590,7 @@ impl Workspace {
             tab_drag: false,
             drop_target: None,
             pane_ui: RefCell::new(HashMap::new()),
+            docks_epoch: 0,
             arrangements: Kept::new(saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
             arranged_for: None,
             arrange_problems: vec![],
@@ -2556,6 +2560,7 @@ impl Workspace {
             let parts = templates.parts();
             let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
             self.arrange_problems = self.arrangements.fit(&key, &docks, &parts);
+            self.docks_epoch += 1;
         }
         self.arrangements.get(&key).cloned().map(Arc::new)
     }
@@ -2571,6 +2576,8 @@ impl Workspace {
                 if !a.move_part(&part, &kind, &dock, at, &docks) {
                     return;
                 }
+                // The splits' sizes were the old parts'.
+                self.docks_epoch += 1;
                 // A part moved by hand is one the user wants to see.
                 match &*part {
                     "explorer" => self.show_explorer = true,
@@ -2594,6 +2601,7 @@ impl Workspace {
             self.arrangements.reset(&key);
         }
         self.arrange_problems.clear();
+        self.docks_epoch += 1;
         self.panels_changed(cx);
     }
 
@@ -3466,7 +3474,7 @@ impl Render for Workspace {
         settings_error.extend(self.arrange_problems.iter().cloned());
         let settings_error = settings_error.join("; ");
         let (left_strip, right_strip) = (self.strip("left", arrangement.as_deref(), cx), self.strip("right", arrangement.as_deref(), cx));
-        let mut scope = template::Scope::new("workspace");
+        let mut scope = template::Scope::new(format!("workspace-{}", self.docks_epoch));
         if let Some(a) = arrangement {
             let ws = cx.entity().downgrade();
             let on_change: OnChange = Rc::new(move |change, _, cx| {
@@ -3487,6 +3495,11 @@ impl Render for Workspace {
             .slot("scratches", self.scratches.clone())
             .slot("changes", self.changes.clone())
             .slot("center", center);
+        // The panels draw their headers after this: a pinned part's header doesn't drag.
+        let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
+        if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
+            cx.set_global(crate::dock::PinnedParts(pinned));
+        }
         let body = template::render("workspace", scope, &mut |_, _, d| d.into_any_element(), cx);
 
         div()

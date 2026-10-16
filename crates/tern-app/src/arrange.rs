@@ -185,7 +185,7 @@ fn already_there(root: Option<&Tree>, part: &str, at: &Drop) -> bool {
     match at {
         Drop::End => match root {
             Tree::Part(n) => n == part,
-            Tree::Split(_, items) => index_of(items, part) == Some(items.len() - 1),
+            Tree::Split(_, items) => items.last().is_some_and(|(t, _)| matches!(t, Tree::Part(n) if n == part)),
         },
         Drop::Before(target) | Drop::After(target) => {
             let Some(items) = parent_of(root, part) else {
@@ -244,16 +244,18 @@ fn place(root: &mut Option<Tree>, dir: Dir, part: &str, at: &Drop) -> bool {
 }
 
 impl Arrangement {
-    /// The arrangement a template's docks start with.
+    /// The arrangement a template's docks start with: a dock without parts is
+    /// empty, a split of one part is that part.
     pub fn defaults(key: &str, docks: &[DockInfo]) -> Self {
         Arrangement {
             key: key.to_string(),
-            docks: docks.iter().map(|d| (d.name.clone(), Some(d.defaults.clone()))).collect(),
+            docks: docks.iter().map(|d| (d.name.clone(), prune(&d.defaults, &|_| true))).collect(),
             widths: BTreeMap::new(),
         }
     }
 
     /// The dock `part` sits in.
+    #[cfg(test)]
     pub fn dock_of(&self, part: &str) -> Option<&str> {
         self.docks.iter().find_map(|(name, tree)| {
             let mut parts = Vec::new();
@@ -861,6 +863,46 @@ mod tests {
         assert_eq!(kept.saved().len(), 1);
         kept.fit("k", &docks(), &PARTS);
         assert!(kept.saved().is_empty());
+    }
+
+    #[test]
+    fn an_empty_dock_takes_a_part_at_its_end() {
+        let mut d = docks();
+        d[1].defaults = Tree::Split(Dir::Column, vec![]);
+        let mut a = Arrangement::defaults("k", &d);
+        assert_eq!(a.docks["right"], None);
+        assert_eq!(Arrangement::decode("k", &a.encode()), Some(a.clone()));
+        assert!(a.move_part("explorer", "panel", "right", Drop::End, &d));
+        assert_eq!(a.encode(), "left=scratches;right=explorer");
+        assert_eq!(Arrangement::decode("k", &a.encode()), Some(a));
+        // An empty split, however it got there, is no panic either.
+        let mut a = fresh();
+        a.docks.insert("right".into(), Some(Tree::Split(Dir::Column, vec![])));
+        assert!(a.move_part("changes", "panel", "right", Drop::End, &docks()));
+    }
+
+    #[test]
+    fn defaults_round_trip() {
+        let mut d = docks();
+        d[0].defaults = Tree::Split(Dir::Column, vec![(part("explorer"), Size::Auto)]);
+        let a = Arrangement::defaults("k", &d);
+        assert_eq!(a.encode(), "left=explorer;right=changes");
+        assert_eq!(Arrangement::decode("k", &a.encode()), Some(a));
+    }
+
+    #[test]
+    fn switching_keys_and_back_restores_the_first() {
+        let d = docks();
+        let other = &d[..1];
+        let mut kept = Kept::default();
+        kept.fit("a", &d, &PARTS);
+        assert!(kept.get_mut("a").unwrap().move_part("changes", "panel", "left", Drop::End, &d));
+        kept.touch("a");
+        let moved = kept.get("a").unwrap().encode();
+        kept.fit("b", other, &PARTS);
+        kept.fit("a", &d, &PARTS);
+        assert_eq!(kept.get("a").unwrap().encode(), moved);
+        assert_eq!(kept.saved(), vec![("a".to_string(), moved)]);
     }
 
     #[test]

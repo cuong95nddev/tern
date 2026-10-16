@@ -865,11 +865,7 @@ template (`\"use\"`), or a piece Tern draws (`\"slot\"`).
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
-headers are `panel_header` used with their own element. A box with
-`\"handle\": true` drags the panel it is drawn for (a header): drop it on a
-half of a panel in a dock to put it before or after that panel.
-`\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
-resizing panels.
+headers are `panel_header` used with their own element (see Moving panels).
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 
@@ -880,21 +876,24 @@ between them by their headers. In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
   (`explorer`, `scratches`, `changes`). Give it `\"drag\": false` (or a
-  condition) to pin it.
+  condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or
   kinds it takes (`[\"panel\"]`; none listed: nothing can be dropped in).
   `zones` (`before`, `after`) say where a dropped part goes, next to the parts
   there. `empty` is `hide` (an empty dock takes no room and shows a thin drop
   strip only while a part it takes is dragged) or `keep`. `strip` (`left` or
-  `right`) is the tool strip whose buttons show this dock's parts.
+  `right`) is the tool strip whose buttons show this dock's parts; a dock
+  needs one. Its children are `part`s only.
   `part_size` is the size a part gets when it arrives from another dock.
-- `\"handle\": true` on a box inside a part makes it the grip: the built-in
-  headers use `panel_header`. Dragging shows each zone as the `drop_zone`
+- `\"handle\": true` on a box inside a part makes it the grip: drop the part
+  on a half of a panel in a dock to put it before or after that panel. The
+  built-in headers use `panel_header`. Dragging shows each zone as the `drop_zone`
   element (`drop_zone.hover` under the pointer). Colors take `$name/NN`: the
   color at NN% of its opacity.
 - `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
-  resizing panels.
+  resizing the panels in docks. Pane splits and tab drags aren't locked yet:
+  they will be once the panes are a dock too.
 
 Where the panels are is kept per workspace and per template (the `workspace`
 template and the names of its docks), so another theme with other docks has its
