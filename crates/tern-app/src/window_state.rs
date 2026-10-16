@@ -120,13 +120,16 @@ pub fn save(window: &Window, cx: &App) {
     write(&file(), &encode(&uuid, bounds));
 }
 
-fn write(path: &std::path::Path, text: &str) {
+/// False when it couldn't be written (logged).
+fn write(path: &std::path::Path, text: &str) -> bool {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Err(e) = write_atomic(path, text.as_bytes()) {
         log::warn!("can't save {}: {e}", path.display());
+        return false;
     }
+    true
 }
 
 /// Replace `path`'s contents all at once: write a temp file beside it, then
@@ -435,13 +438,26 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
     out
 }
 
+/// The session text last read or written, so an unchanged session is not
+/// written again (a tab's status changing asks for a save, too).
+static LAST_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 pub fn save_session(windows: &[SavedWindow]) {
-    write(&session_file(), &encode_session(windows));
+    let text = encode_session(windows);
+    let mut last = LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    if write(&session_file(), &text) {
+        *last = Some(text);
+    }
 }
 
 /// The last session's windows, keeping only folders that still exist.
 pub fn load_session() -> Vec<SavedWindow> {
-    let mut windows = decode_session(&std::fs::read_to_string(session_file()).unwrap_or_default());
+    let text = std::fs::read_to_string(session_file()).unwrap_or_default();
+    *LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.clone());
+    let mut windows = decode_session(&text);
     for w in &mut windows {
         let before = w.workspaces.len();
         w.workspaces.retain(|ws| ws.folder.is_dir());
