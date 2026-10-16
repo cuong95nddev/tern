@@ -12,12 +12,22 @@ const CMSG_SPACE: usize = 64;
 /// Send `bytes` (at least its first byte) with `fd` attached; returns how
 /// many bytes went.
 pub fn send_with_fd(sock: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<usize> {
+    send_with_fds(sock, bytes, &[fd])
+}
+
+/// Send `bytes` (at least its first byte) with `fds` attached (a few at
+/// most); returns how many bytes went.
+pub fn send_with_fds(sock: &UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
     let mut iov = libc::iovec { iov_base: bytes.as_ptr() as *mut _, iov_len: bytes.len() };
     let mut cmsg_buf = [0u8; CMSG_SPACE];
+    let data_len = mem::size_of_val(fds) as u32;
     // SAFETY: the buffers outlive the call; the cmsg header is written within
-    // `cmsg_buf`, sized by CMSG_SPACE for one fd.
+    // `cmsg_buf`, which is checked to have room for the fds.
     unsafe {
-        let space = libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as usize;
+        let space = libc::CMSG_SPACE(data_len) as usize;
+        if fds.is_empty() || space > CMSG_SPACE {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("can't send {} fds", fds.len())));
+        }
         let mut msg: libc::msghdr = mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
@@ -26,8 +36,10 @@ pub fn send_with_fd(sock: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<us
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
-        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+        (*cmsg).cmsg_len = libc::CMSG_LEN(data_len) as _;
+        for (i, fd) in fds.iter().enumerate() {
+            std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>().add(i), *fd);
+        }
         loop {
             let n = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
             if n >= 0 {

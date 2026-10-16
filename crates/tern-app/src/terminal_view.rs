@@ -22,6 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_mux::client::{Connector, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
+use tern_term::mirror::MirrorTerm;
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
 use tern_term::palette::Palette;
@@ -29,6 +30,7 @@ use tern_term::status::next_status;
 use tern_term::vt::grid::{Dimensions, Scroll};
 use tern_term::vt::index::{Column, Line, Point as GridPoint, Side};
 use tern_term::vt::selection::{Selection, SelectionType};
+use tern_term::vt::sync::FairMutex;
 use tern_term::vt::term::TermMode;
 use tern_term::vt::term::cell::Flags;
 use tern_term::vt::vte::ansi::{ClearMode, CursorShape, Handler, Rgb};
@@ -84,6 +86,9 @@ pub enum TerminalEvent {
         token: Option<String>,
         attached: bool,
     },
+    /// The program starts again after its daemon was lost, in its last
+    /// folder and below what it showed.
+    Restored,
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
         path: PathBuf,
@@ -202,6 +207,14 @@ pub struct TerminalView {
     hook: bool,
     /// The background session to attach to at the next start.
     attach: Option<u64>,
+    /// The session the last start asked to attach to (its id isn't the
+    /// session's until the daemon answers).
+    attach_asked: Option<u64>,
+    /// What the tab showed when its daemon was lost, and at what size: the
+    /// next program starts below it.
+    lost: Option<(Arc<FairMutex<MirrorTerm>>, TermSize)>,
+    /// The folder the shell was last seen in.
+    last_cwd: Option<PathBuf>,
     /// Reattaching after the connection to the daemon was lost: if the
     /// session is gone, say so rather than start a new program.
     reattaching: bool,
@@ -285,6 +298,9 @@ impl TerminalView {
             mux,
             hook,
             attach,
+            attach_asked: None,
+            lost: None,
+            last_cwd: None,
             reattaching: false,
             attaching: false,
             output_since_ready: false,
@@ -332,16 +348,24 @@ impl TerminalView {
                 let Ok(probe) = this.update(cx, |view, _| {
                     let busy = view.last_output.elapsed() < Duration::from_secs(10);
                     idle_ticks = if busy { 0 } else { idle_ticks + 1 };
-                    (busy || idle_ticks % 5 == 0).then(|| view.session.as_ref().map(RemoteSession::foreground))
+                    (busy || idle_ticks % 5 == 0).then(|| (view.session.as_ref().map(RemoteSession::foreground), !view.hook))
                 }) else {
                     break;
                 };
-                let Some(probe) = probe else { continue };
-                let programs = match probe {
-                    Some(p) => cx.background_spawn(async move { p.programs() }).await,
-                    None => Vec::new(),
+                let Some((probe, shell)) = probe else { continue };
+                // A shell's folder, for starting it there again (a Claude
+                // tab keeps its own: `--resume` needs it).
+                let (programs, cwd) = match probe {
+                    Some(p) => cx.background_spawn(async move { (p.programs(), shell.then(|| p.cwd()).flatten()) }).await,
+                    None => (Vec::new(), None),
                 };
-                if this.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx)).is_err() {
+                let alive = this.update(cx, |view, cx| {
+                    if cwd.is_some() {
+                        view.last_cwd = cwd;
+                    }
+                    view.set_agent(Agent::detect(&programs), cx)
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -357,6 +381,7 @@ impl TerminalView {
 
     /// Start (or restart) the process: attach to the saved background
     /// session the first time, else start a new one (ending the old one).
+    /// After the daemon was lost, a new one starts where the old one was.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.spawned = true;
         self.reported_focus = false;
@@ -371,27 +396,55 @@ impl TerminalView {
         }
         self.started = Instant::now();
         self.attaching = self.attach.is_some();
-        let open = match self.attach {
+        self.attach_asked = self.attach;
+        // A shell starts in its last folder, below what it showed; a Claude
+        // tab resumes (its spawn config says so) and draws its own.
+        let lost = if self.attach.is_none() { self.lost.take() } else { None };
+        let seed_from = match &lost {
+            Some((term, size)) if !self.hook => {
+                cfg.size = *size;
+                if let Some(cwd) = self.last_cwd.clone().filter(|d| d.is_dir()) {
+                    cfg.cwd = Some(cwd);
+                }
+                Some((term.clone(), *size))
+            },
+            _ => None,
+        };
+        let hook = self.hook;
+        let attach = self.attach;
+        let spawn_cfg = cfg.clone();
+        let open = move |seed| match attach {
             Some(id) => Open::Attach { id },
-            None => Open::Spawn { cfg: cfg.clone(), hook: self.hook },
+            None => Open::Spawn { cfg: spawn_cfg, hook, seed },
         };
         self.exited = None;
         self.spawn_error = None;
-        match self.mux.ready() {
-            Some(client) => self.open_session(Ok(client), open, &cfg, sink),
-            // Connecting may start the daemon and wait for it: off the UI
-            // thread. The saved session id stays until it is open.
-            None => {
+        match (self.mux.ready(), seed_from) {
+            (Some(client), None) => self.open_session(Ok(client), open(None), &cfg, sink),
+            // Connecting may start the daemon and wait for it, and packing
+            // the old screen takes a while: off the UI thread. The saved
+            // session id stays until it is open.
+            (ready, seed_from) => {
                 let mux = self.mux.clone();
-                let task = cx.background_spawn(async move { mux.get() });
+                let task = cx.background_spawn(async move {
+                    let seed = seed_from.and_then(|(term, size)| pack_screen(&term, size));
+                    let client = match ready {
+                        Some(c) => Ok(c),
+                        None => mux.get(),
+                    };
+                    (client, seed)
+                });
                 self._connect = Some(cx.spawn(async move |this, cx| {
-                    let client = task.await;
+                    let (client, seed) = task.await;
                     let _ = this.update(cx, |view, cx| {
-                        view.open_session(client, open, &cfg, sink);
+                        view.open_session(client, open(seed), &cfg, sink);
                         cx.notify();
                     });
                 }));
             },
+        }
+        if lost.is_some() {
+            cx.emit(TerminalEvent::Restored);
         }
         cx.notify();
         self._pump = Some(cx.spawn(async move |this, cx| {
@@ -602,6 +655,7 @@ impl TerminalView {
                 // not notified again.
                 self.status = status;
                 self.reattaching = false;
+                self.lost = None;
                 self.output_since_ready = false;
                 cx.emit(TerminalEvent::Ready { token, attached: self.attaching });
                 cx.emit(TerminalEvent::TitleChanged);
@@ -624,20 +678,28 @@ impl TerminalView {
                 cx.notify();
             },
             TermEvent::ServerLost => {
-                // The connection went (the daemon dropped it or died): try the
-                // same session again once.
-                let id = self.session.take().and_then(|s| s.id());
+                // The connection went (the daemon dropped it, died, or handed
+                // its sessions to a new one): try the same session again once.
+                let session = self.session.take();
+                let id = session.as_ref().and_then(RemoteSession::id);
+                if self.exited.is_none()
+                    && id.is_some()
+                    && let Some(s) = &session
+                {
+                    // What it showed, should its program have to start again.
+                    self.lost = Some((s.term().clone(), s.size()));
+                }
+                drop(session);
                 // Restarted on purpose: its program went with the daemon.
                 if self.exited.is_none() && crate::restart::just_restarted(cx) {
                     self.reattaching = false;
                     return self.start(cx);
                 }
-                if self.exited.is_none()
-                    && !self.reattaching
-                    && let Some(id) = id
-                {
+                if self.exited.is_none() && !self.reattaching {
                     self.reattaching = true;
-                    self.attach = Some(id);
+                    // No id: lost before the daemon answered (as when it hands
+                    // off): ask again for what was asked.
+                    self.attach = id.or(self.attach_asked);
                     return self.start(cx);
                 }
                 self.server_stopped(cx);
@@ -889,13 +951,7 @@ impl TerminalView {
         MouseMods { shift: m.shift, alt: m.alt, ctrl: m.control }
     }
 
-    fn report_mouse(
-        &mut self,
-        action: MouseAction,
-        button: mouse::MouseButton,
-        pos: Point<Pixels>,
-        mods: &Modifiers,
-    ) -> bool {
+    fn report_mouse(&mut self, action: MouseAction, button: mouse::MouseButton, pos: Point<Pixels>, mods: &Modifiers) -> bool {
         let mode = self.mode();
         // Shift bypasses mouse reporting so users can still select text.
         if mods.shift || !mouse::wants(mode, action, button) {
@@ -1380,7 +1436,9 @@ impl<'a> RowBuilder<'a> {
         let underline = style.underline.map(|(color, wavy)| UnderlineStyle { thickness: px(1.), color: Some(color), wavy });
         let strikethrough = style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) });
         match self.runs.last_mut() {
-            Some(last) if self.face == face && last.color == style.fg && last.underline == underline && last.strikethrough == strikethrough => {
+            Some(last)
+                if self.face == face && last.color == style.fg && last.underline == underline && last.strikethrough == strikethrough =>
+            {
                 last.len += s.len()
             },
             _ => {
@@ -1704,6 +1762,12 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         frame.overlay = Some(TextSegment { origin: point(bounds.origin.x, y.min(bounds.bottom() - m.height)), line });
     }
     frame
+}
+
+/// `term`'s screen and scrollback, packed as `Open::Spawn`'s seed.
+fn pack_screen(term: &FairMutex<MirrorTerm>, size: TermSize) -> Option<Vec<u8>> {
+    let snap = tern_term::snapshot::capture(&mut term.lock(), size, None, ActivityStatus::None);
+    tern_mux::proto::pack_snapshot(&snap).map_err(|e| log::warn!("can't keep the old screen: {e}")).ok()
 }
 
 /// Drop C0/C1 control characters (keeping tab and newlines) so clipboard

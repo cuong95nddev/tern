@@ -19,7 +19,7 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, FrameReader, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// What the client asks who runs in a session's foreground with: the PTY
 /// the daemon passed, on Windows the shell's pid.
@@ -35,6 +35,8 @@ pub type RevealSink = Arc<dyn Fn(u64) + Send + Sync>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a handoff may take (the daemons give up on each other sooner).
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(60);
 /// Input is sent in pieces of at most this (a big paste stays under the
 /// daemon's frame limit).
 const INPUT_CHUNK: usize = 1 << 20;
@@ -43,8 +45,10 @@ const MAX_EARLY_INPUT: usize = 16 << 20;
 
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
-    /// the path of its Claude settings file.
-    Spawn { cfg: SpawnConfig, hook: bool },
+    /// the path of its Claude settings file. With `seed` (a
+    /// [`proto::pack_snapshot`] of `cfg.size`), the terminal starts with
+    /// that screen's lines in its scrollback.
+    Spawn { cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>> },
     /// Attach to a running (or exited) session.
     Attach { id: u64 },
 }
@@ -78,9 +82,13 @@ struct Inner {
     pending: Mutex<HashMap<u64, Arc<Slot>>>,
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
     lists: Mutex<HashMap<u64, mpsc::Sender<Vec<SessionInfo>>>>,
+    /// Handoffs asked for: each gets why it failed (dropped when the
+    /// connection ends, as it does when one succeeds).
+    handoffs: Mutex<HashMap<u64, mpsc::Sender<String>>>,
     hooks: HookSink,
     reveal: RevealSink,
     server_pid: u32,
+    server_minor: u32,
     server_version: String,
     server_build: String,
 }
@@ -181,10 +189,10 @@ impl MuxClient {
         )
         .map_err(gone)?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
-        let (server_pid, server_version, server_build) = match reader.read::<ServerMsg>().map_err(gone)? {
-            Some(ServerMsg::Hello { major, pid, app_version, build, .. }) if major == MAJOR => {
+        let (server_pid, server_minor, server_version, server_build) = match reader.read::<ServerMsg>().map_err(gone)? {
+            Some(ServerMsg::Hello { major, minor, pid, app_version, build }) if major == MAJOR => {
                 log::info!("connected to daemon {pid} (Tern {app_version}, build {build})");
-                (pid, app_version, build)
+                (pid, minor, app_version, build)
             },
             None => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "daemon closed the connection")),
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
@@ -200,9 +208,11 @@ impl MuxClient {
             pending: Mutex::default(),
             sessions: Mutex::default(),
             lists: Mutex::default(),
+            handoffs: Mutex::default(),
             hooks,
             reveal,
             server_pid,
+            server_minor,
             server_version,
             server_build,
         });
@@ -239,6 +249,28 @@ impl MuxClient {
         self.inner.server_version != env!("CARGO_PKG_VERSION") || !self.server_same_build()
     }
 
+    /// Whether the daemon can hand its sessions to another (Unix only).
+    pub fn can_hand_off(&self) -> bool {
+        cfg!(unix) && self.inner.server_minor >= HANDOFF_MINOR
+    }
+
+    /// Ask the daemon to hand its sessions to a new one started from `exe`.
+    /// `Ok` once it let go (this connection ends); the daemon's reason when
+    /// it didn't.
+    pub fn request_hand_off(&self, exe: PathBuf) -> io::Result<()> {
+        let req = self.inner.req();
+        let (tx, rx) = mpsc::channel();
+        self.inner.handoffs.lock().unwrap().insert(req, tx);
+        self.inner.send(&ClientMsg::HandOff { req, exe })?;
+        let r = match rx.recv_timeout(HANDOFF_TIMEOUT) {
+            Ok(message) => Err(io::Error::other(message)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::ErrorKind::TimedOut.into()),
+        };
+        self.inner.handoffs.lock().unwrap().remove(&req);
+        r
+    }
+
     /// Open a tab's session. Returns at once: the sink gets `Ready` (or
     /// `NotFound` / `SpawnError` / `ServerLost`) when the daemon answers.
     pub fn open(&self, open: Open, size: TermSize, scrollback: usize, sink: EventSink) -> RemoteSession {
@@ -259,9 +291,9 @@ impl MuxClient {
         });
         self.inner.pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
-            Open::Spawn { mut cfg, hook } => {
+            Open::Spawn { mut cfg, hook, seed } => {
                 cfg.size = size;
-                ClientMsg::Spawn { req, cfg, hook }
+                ClientMsg::Spawn { req, cfg, hook, seed }
             },
             Open::Attach { id } => ClientMsg::Attach { req, id, size },
         };
@@ -348,6 +380,31 @@ impl Connector {
     /// Whether a live connection exists (doesn't connect).
     pub fn connected(&self) -> bool {
         self.cur.lock().unwrap().as_ref().is_some_and(MuxClient::alive)
+    }
+
+    /// Move the daemon's sessions to a new daemon of this build, if it runs
+    /// another one (their programs keep running; tabs reattach). Fails when
+    /// the daemon can't (Windows, older versions) or the handoff failed,
+    /// which leaves the old daemon serving as before.
+    pub fn hand_off(&self) -> io::Result<()> {
+        let Some(c) = self.existing() else { return Ok(()) };
+        if !c.server_outdated() {
+            return Ok(());
+        }
+        if !c.can_hand_off() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "the background server can't hand off"));
+        }
+        let old = c.server_pid();
+        c.request_hand_off(std::env::current_exe()?)?;
+        drop(c);
+        *self.cur.lock().unwrap() = None;
+        // The old daemon let go once the new one listened on the socket.
+        let c = self.existing().ok_or_else(|| io::Error::other("no background server after the handoff"))?;
+        if c.server_pid() == old || c.server_outdated() {
+            return Err(io::Error::other(format!("still on daemon {} (Tern {})", c.server_pid(), c.server_version())));
+        }
+        log::info!("handed off from daemon {old} to {}", c.server_pid());
+        Ok(())
     }
 
     /// End the daemon and every program it runs, found by the pid it gave
@@ -655,9 +712,16 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                     let _ = tx.send(list);
                 }
             },
+            ServerMsg::HandOffFailed { req, message } => {
+                if let Some(tx) = inner.handoffs.lock().unwrap().remove(&req) {
+                    let _ = tx.send(message);
+                }
+            },
         }
     }
     inner.alive.store(false, Ordering::Release);
+    // A handoff asked for ends this connection.
+    inner.handoffs.lock().unwrap().clear();
     let slots: Vec<_> =
         inner.pending.lock().unwrap().drain().map(|(_, s)| s).chain(inner.sessions.lock().unwrap().drain().map(|(_, s)| s)).collect();
     for slot in slots {
@@ -677,6 +741,14 @@ impl Foreground {
         return self.0.tty.lock().unwrap().as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default();
         #[cfg(windows)]
         return self.0.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
+    }
+
+    /// See [`tern_term::procs::foreground_cwd`].
+    pub fn cwd(&self) -> Option<PathBuf> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
+        #[cfg(windows)]
+        return self.0.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
     }
 }
 

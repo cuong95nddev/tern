@@ -73,7 +73,7 @@ fn text(rec: &Recorder) -> String {
 
 #[test]
 fn output_input_and_exit() {
-    let host = Host::spawn(1, &sh("printf hello; read x; printf \"got:$x\"; exit 3"), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(1, &sh("printf hello; read x; printf \"got:$x\"; exit 3"), None, Arc::new(NoObserver)).unwrap();
     let rec = Arc::new(Recorder::default());
     let snap = host.attach(rec.clone());
     assert_eq!(snap.size, SIZE);
@@ -90,7 +90,7 @@ fn output_input_and_exit() {
 
 #[test]
 fn resize_reaches_the_program_in_order() {
-    let host = Host::spawn(2, &sh("read x; stty size; read y"), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(2, &sh("read x; stty size; read y"), None, Arc::new(NoObserver)).unwrap();
     let rec = Arc::new(Recorder::default());
     host.attach(rec.clone());
     host.resize(TermSize { cols: 70, rows: 20, ..SIZE });
@@ -104,7 +104,7 @@ fn resize_reaches_the_program_in_order() {
 
 #[test]
 fn jiggle_resizes_twice() {
-    let host = Host::spawn(3, &sh("read x"), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(3, &sh("read x"), None, Arc::new(NoObserver)).unwrap();
     let rec = Arc::new(Recorder::default());
     host.attach(rec.clone());
     host.jiggle(SIZE);
@@ -117,7 +117,7 @@ fn jiggle_resizes_twice() {
 
 #[test]
 fn kill_ends_a_program_that_ignores_sighup() {
-    let host = Host::spawn(4, &sh("trap '' HUP; while :; do sleep 1; done"), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(4, &sh("trap '' HUP; while :; do sleep 1; done"), None, Arc::new(NoObserver)).unwrap();
     std::thread::sleep(Duration::from_millis(100));
     let pid = host.pid() as i32;
     host.kill();
@@ -130,7 +130,7 @@ fn kill_ends_a_program_that_writes_on_its_way_out() {
     // On a hangup it writes more than the tty holds, so it (and, once
     // killed, its exit) waits for the output to be read.
     let script = "trap 'yes | head -c 4000000; exit' HUP; while :; do sleep 1; done";
-    let host = Host::spawn(9, &sh(script), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(9, &sh(script), None, Arc::new(NoObserver)).unwrap();
     std::thread::sleep(Duration::from_millis(100));
     let pid = host.pid() as i32;
     let start = Instant::now();
@@ -142,7 +142,8 @@ fn kill_ends_a_program_that_writes_on_its_way_out() {
 
 #[test]
 fn attach_mid_stream_loses_and_doubles_nothing() {
-    let host = Host::spawn(5, &sh("i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; read x"), Arc::new(NoObserver)).unwrap();
+    let host =
+        Host::spawn(5, &sh("i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; read x"), None, Arc::new(NoObserver)).unwrap();
     std::thread::sleep(Duration::from_millis(5));
     let events: Arc<Mutex<Vec<tern_term::TermEvent>>> = Arc::default();
     let ev = events.clone();
@@ -179,7 +180,8 @@ fn attach_mid_stream_loses_and_doubles_nothing() {
 #[test]
 fn attach_inside_a_synchronized_update() {
     // Starts a synchronized update, waits, then finishes it.
-    let host = Host::spawn(6, &sh("printf '\\033[?2026hAAA'; read x; printf 'BBB\\033[?2026l'; read y"), Arc::new(NoObserver)).unwrap();
+    let host =
+        Host::spawn(6, &sh("printf '\\033[?2026hAAA'; read x; printf 'BBB\\033[?2026l'; read y"), None, Arc::new(NoObserver)).unwrap();
     // Inside the update (it times out after 150 ms).
     std::thread::sleep(Duration::from_millis(60));
     let events: Arc<Mutex<Vec<tern_term::TermEvent>>> = Arc::default();
@@ -200,7 +202,7 @@ fn attach_inside_a_synchronized_update() {
 
 #[test]
 fn shell_in_foreground_tells_a_prompt_from_a_program() {
-    let host = Host::spawn(1, &sh("read x; exec sleep 5"), Arc::new(NoObserver)).unwrap();
+    let host = Host::spawn(1, &sh("read x; exec sleep 5"), None, Arc::new(NoObserver)).unwrap();
     wait_until("shell", || host.shell_in_foreground());
     host.input(b"\n".to_vec());
     wait_until("program", || !host.shell_in_foreground());

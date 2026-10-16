@@ -9,7 +9,7 @@
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Cursor, Grid};
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Line, Point};
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, NamedColor, Processor, StdSyncHandler};
@@ -172,6 +172,28 @@ pub fn restore<L: EventListener>(snap: Snapshot, term: &mut Term<L>, parser: &mu
     parser.advance(term, &out);
 }
 
+/// Start `term` (new, of `snap.size`) with what an earlier program left on
+/// screen: the primary grid with its scrollback, the visible lines scrolled
+/// into history, and nothing else (modes, colors and the cursor style were
+/// that program's).
+pub fn seed<L: EventListener>(snap: Snapshot, term: &mut Term<L>, parser: &mut Processor<StdSyncHandler>) {
+    let rows = snap.size.rows as usize;
+    let grid = snap.primary.unwrap_or(snap.grid);
+    // The lines in use: up to the cursor, or the last one with text below it.
+    let used = (0..rows)
+        .rev()
+        .find(|&l| grid.grid[Line(l as i32)].into_iter().any(|c| c.c != ' ' && c.c != '\0'))
+        .map_or(0, |l| l + 1)
+        .max(grid.cursor.point.line.0.max(0) as usize + 1)
+        .min(rows);
+    grid.install(term.grid_mut());
+    // From the bottom line each newline scrolls one line into history.
+    let mut out = format!("\x1b[0m\x1b[{rows};1H").into_bytes();
+    out.extend(std::iter::repeat_n(b'\n', used));
+    out.extend_from_slice(b"\x1b[H");
+    parser.advance(term, &out);
+}
+
 /// The sequences that set a fresh terminal's modes to `mode`.
 fn mode_sequences(mode: TermMode) -> Vec<u8> {
     let mut out = String::new();
@@ -274,6 +296,41 @@ mod tests {
         feed(&mut src, b"\x1b[?2004h\x1b[?1006h\x1b[?1002h\x1b[?1004h\x1b[?1h\x1b=\x1b[?25l\x1b[=5;1u");
         let dst = round_trip(&mut src);
         assert_eq!(*dst.mode(), *src.mode());
+    }
+
+    #[test]
+    fn seed_scrolls_the_old_screen_into_history() {
+        let mut src = term();
+        let text: String = (0..30).map(|i| format!("line {i}\r\n")).collect();
+        feed(&mut src, text.as_bytes());
+        feed(&mut src, b"$ \x1b[?2004h\x1b[31m");
+        let snap = capture(&mut src, SIZE, None, ActivityStatus::None);
+        let history = src.grid().history_size();
+        let mut dst = term();
+        seed(snap, &mut dst, &mut Processor::new());
+        assert!(screen(&dst).iter().all(String::is_empty), "{:?}", screen(&dst));
+        assert_eq!(dst.grid().cursor.point, Point::new(Line(0), alacritty_terminal::index::Column(0)));
+        assert_eq!(dst.grid().history_size(), history + SIZE.rows as usize);
+        assert_eq!(*dst.mode(), TermMode::default());
+        // The prompt line is the last one in history.
+        let last = &dst.grid()[Line(-1)];
+        assert_eq!(last.into_iter().map(|c| c.c).collect::<String>().trim_end(), "$");
+        // Its color was the old program's: new text is plain.
+        feed(&mut dst, b"x");
+        assert_eq!(dst.grid()[Line(0)][alacritty_terminal::index::Column(0)].fg, Cell::default().fg);
+    }
+
+    #[test]
+    fn seed_leaves_the_alt_screen_and_skips_blank_lines() {
+        let mut src = term();
+        feed(&mut src, b"one\r\ntwo\r\n$ vim\r\n\x1b[?1049h\x1b[Heditor");
+        let snap = capture(&mut src, SIZE, None, ActivityStatus::None);
+        let mut dst = term();
+        seed(snap, &mut dst, &mut Processor::new());
+        assert!(!dst.mode().contains(TermMode::ALT_SCREEN));
+        // Three lines and the cursor's (empty) line, not the whole screen.
+        assert_eq!(dst.grid().history_size(), 4);
+        assert_eq!(dst.grid()[Line(-4)].into_iter().map(|c| c.c).collect::<String>().trim_end(), "one");
     }
 
     #[test]

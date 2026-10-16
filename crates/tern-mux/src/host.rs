@@ -7,6 +7,11 @@
 //! gets every byte after its snapshot exactly once. Resizes, the end of a
 //! synchronized update and the exit are sent the same way, as markers.
 //! (alacritty's own event loop reads before it locks, so it can't do this.)
+//!
+//! For a handoff the thread can be paused: it hands back its driver, which
+//! is resumed (the handoff failed) or forgotten (the new daemon took the
+//! PTY; dropping alacritty's `Pty` would end the program). The new daemon
+//! drives an adopted PTY: not its child, so it polls for the program's end.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -15,8 +20,10 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -30,7 +37,9 @@ use tern_term::status::{ActivityStatus, next_status};
 use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
 use tern_term::vt::sync::FairMutex;
 use tern_term::vt::term::{Config, Osc52, Term};
-use tern_term::vt::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+#[cfg(unix)]
+use tern_term::vt::tty::EventedReadWrite;
+use tern_term::vt::tty::{self, ChildEvent, EventedPty, Options, Shell};
 #[cfg(windows)]
 use tern_term::vt::tty::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
 use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
@@ -55,6 +64,11 @@ const SCHEME_CHECK: Duration = Duration::from_millis(300);
 /// How long a closed program has to exit after SIGHUP before SIGKILL.
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// How often an adopted program (not our child) is checked for its end.
+const EXIT_POLL: Duration = Duration::from_millis(500);
+/// How long a pause waits for the driver to stop.
+#[cfg(unix)]
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Where an attached client gets its bytes. Called with the terminal locked:
 /// must not block (queue and return).
@@ -70,11 +84,29 @@ pub trait Observer: Send + Sync {
     fn exited(&self, id: u64, code: Option<i32>);
 }
 
+/// A driver not running yet (an adopted PTY), or stopped for a handoff.
+pub type ParkedDriver = Box<dyn Paused>;
+
+/// A driver stopped for a handoff, its PTY still open.
+pub trait Paused: Send {
+    /// Input it had not written yet.
+    fn writes(&self) -> Vec<u8>;
+    /// The program asked for color scheme reports.
+    fn scheme_reports(&self) -> bool;
+    /// Drive the PTY again.
+    fn resume(self: Box<Self>);
+    /// Let go without ending the program (another daemon drives it now).
+    fn forget(self: Box<Self>);
+}
+
 enum Msg {
     Input(Cow<'static, [u8]>),
     Resize(TermSize),
     Jiggle(TermSize),
     Shutdown,
+    /// Stop and send the driver back (see [`Host::pause`]).
+    #[cfg(unix)]
+    Pause(Sender<Box<dyn Paused>>),
 }
 
 struct Shared {
@@ -88,6 +120,18 @@ struct Shared {
 }
 
 impl Shared {
+    fn new(tx: Sender<Msg>, poller: Arc<Poller>, size: TermSize) -> Arc<Self> {
+        Arc::new(Self {
+            tx: Mutex::new(tx),
+            poller,
+            size: Mutex::new(size),
+            title: Mutex::new(None),
+            status: Mutex::new(ActivityStatus::None),
+            exited: Mutex::new(None),
+            subscriber: Mutex::new(None),
+        })
+    }
+
     fn send(&self, msg: Msg) {
         let _ = self.tx.lock().unwrap().send(msg);
         let _ = self.poller.notify();
@@ -105,6 +149,7 @@ struct Listener {
 }
 
 type HostTerm = Term<Listener>;
+type HostParser = Arc<Mutex<Processor<StdSyncHandler>>>;
 
 /// The app's terminal palette, shared by every session.
 fn theme_palette() -> &'static PaletteFile {
@@ -140,16 +185,28 @@ impl EventListener for Listener {
     }
 }
 
+/// A terminal of `size` and its parser, its listener on `shared`.
+fn new_term(shared: &Arc<Shared>, size: TermSize, scrollback: usize) -> (Arc<FairMutex<HostTerm>>, HostParser) {
+    let cell = Arc::new(OnceLock::new());
+    let listener = Listener { shared: shared.clone(), term: cell.clone() };
+    let config = Config { scrolling_history: scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
+    let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
+    let _ = cell.set(term.clone());
+    (term, Arc::new(Mutex::new(Processor::new())))
+}
+
 pub struct Host {
     id: u64,
     pid: u32,
-    /// The PTY master, for foreground-process queries and fd passing.
+    /// The PTY master, for foreground-process queries and fd passing (none
+    /// for a program that had ended when it was adopted).
     #[cfg(unix)]
-    master: File,
+    master: Option<File>,
+    scrollback: usize,
     shared: Arc<Shared>,
     term: Arc<FairMutex<HostTerm>>,
     /// Locked after `term`, never before.
-    parser: Arc<Mutex<Processor<StdSyncHandler>>>,
+    parser: HostParser,
 }
 
 fn window_size(s: TermSize) -> WindowSize {
@@ -157,23 +214,16 @@ fn window_size(s: TermSize) -> WindowSize {
 }
 
 impl Host {
-    pub fn spawn(id: u64, cfg: &SpawnConfig, observer: Arc<dyn Observer>) -> io::Result<Arc<Self>> {
+    /// Start `cfg`'s program. With `seed` (of `cfg.size`), its terminal
+    /// starts with that screen's lines in its scrollback.
+    pub fn spawn(id: u64, cfg: &SpawnConfig, seed: Option<Snapshot>, observer: Arc<dyn Observer>) -> io::Result<Arc<Self>> {
         let (tx, rx) = mpsc::channel();
         let poller = Arc::new(Poller::new()?);
-        let shared = Arc::new(Shared {
-            tx: Mutex::new(tx),
-            poller: poller.clone(),
-            size: Mutex::new(cfg.size),
-            title: Mutex::new(None),
-            status: Mutex::new(ActivityStatus::None),
-            exited: Mutex::new(None),
-            subscriber: Mutex::new(None),
-        });
-        let cell = Arc::new(OnceLock::new());
-        let listener = Listener { shared: shared.clone(), term: cell.clone() };
-        let config = Config { scrolling_history: cfg.scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
-        let term = Arc::new(FairMutex::new(Term::new(config, &cfg.size, listener)));
-        let _ = cell.set(term.clone());
+        let shared = Shared::new(tx, poller.clone(), cfg.size);
+        let (term, parser) = new_term(&shared, cfg.size, cfg.scrollback);
+        if let Some(seed) = seed.filter(|s| s.size == cfg.size) {
+            snapshot::seed(seed, &mut term.lock(), &mut parser.lock().unwrap());
+        }
 
         let mut env = cfg.env.clone();
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
@@ -194,38 +244,63 @@ impl Host {
         };
         let pty = tty::new(&opts, window_size(cfg.size), id)?;
         #[cfg(unix)]
-        let (pid, master) = (pty.child().id(), pty.file().try_clone()?);
+        let (pid, master) = (pty.child().id(), Some(pty.file().try_clone()?));
         #[cfg(windows)]
         let pid = pty.child_watcher().pid().map_or(0, |p| p.get());
-        let parser = Arc::new(Mutex::new(Processor::new()));
         let host = Arc::new(Self {
             id,
             pid,
             #[cfg(unix)]
             master,
+            scrollback: cfg.scrollback,
             shared: shared.clone(),
             term: term.clone(),
             parser: parser.clone(),
         });
-        let driver = Driver {
-            id,
-            pty,
-            poller,
-            rx,
-            term,
-            shared,
-            observer,
-            parser,
-            scanner: OscScanner::new(),
-            writes: VecDeque::new(),
-            last_probe_reply: None,
-            scheme_reports: false,
-            dark: theme_palette().get().is_dark(),
-            scheme_checked: Instant::now(),
-            jiggle: None,
-        };
+        let driver = Driver::new(id, pty, poller, rx, term, shared, observer, parser);
         std::thread::Builder::new().name(format!("host {id}")).spawn(move || driver.run())?;
         Ok(host)
+    }
+
+    /// A program handed over by another daemon: its terminal rebuilt from
+    /// `snapshot`, its PTY master `fd` (none when it had ended). The driver
+    /// comes back parked: [`Paused::resume`] starts it.
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt(
+        id: u64,
+        pid: u32,
+        fd: Option<OwnedFd>,
+        snapshot: Snapshot,
+        scrollback: usize,
+        exited: Option<Option<i32>>,
+        writes: Vec<u8>,
+        scheme_reports: bool,
+        observer: Arc<dyn Observer>,
+    ) -> io::Result<(Arc<Self>, Option<ParkedDriver>)> {
+        let (tx, rx) = mpsc::channel();
+        let poller = Arc::new(Poller::new()?);
+        let size = snapshot.size;
+        let shared = Shared::new(tx, poller.clone(), size);
+        *shared.title.lock().unwrap() = snapshot.title.clone();
+        *shared.status.lock().unwrap() = snapshot.status;
+        let (term, parser) = new_term(&shared, size, scrollback);
+        snapshot::restore(snapshot, &mut term.lock(), &mut parser.lock().unwrap());
+        let fd = fd.filter(|_| exited.is_none());
+        let master = fd.as_ref().map(|f| f.try_clone().map(File::from)).transpose()?;
+        let host = Arc::new(Self { id, pid, master, scrollback, shared: shared.clone(), term: term.clone(), parser: parser.clone() });
+        let Some(fd) = fd else {
+            *shared.exited.lock().unwrap() = Some(exited.flatten());
+            *shared.status.lock().unwrap() = ActivityStatus::None;
+            return Ok((host, None));
+        };
+        let pty = AdoptedPty::new(File::from(fd), pid as libc::pid_t)?;
+        let mut driver = Driver::new(id, pty, poller, rx, term, shared, observer, parser);
+        if !writes.is_empty() {
+            driver.writes.push_back((writes.into(), 0));
+        }
+        driver.scheme_reports = scheme_reports;
+        Ok((host, Some(Box::new(driver))))
     }
 
     pub fn id(&self) -> u64 {
@@ -237,8 +312,16 @@ impl Host {
     }
 
     #[cfg(unix)]
-    pub fn master_fd(&self) -> RawFd {
-        self.master.as_raw_fd()
+    pub fn master_fd(&self) -> Option<RawFd> {
+        self.master.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    pub fn scrollback(&self) -> usize {
+        self.scrollback
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.shared.title.lock().unwrap().clone()
     }
 
     pub fn size(&self) -> TermSize {
@@ -265,19 +348,44 @@ impl Host {
     /// still locked: whatever `f` queues goes before the bytes that follow.
     pub fn attach_with(&self, sub: Arc<dyn Subscriber>, f: impl FnOnce(Snapshot)) {
         let mut term = self.term.lock();
+        f(self.capture_locked(&mut term));
+        *self.shared.subscriber.lock().unwrap() = Some(sub);
+    }
+
+    /// The terminal's state now.
+    pub fn capture(&self) -> Snapshot {
+        self.capture_locked(&mut self.term.lock())
+    }
+
+    fn capture_locked(&self, term: &mut HostTerm) -> Snapshot {
         // Bytes held for an open synchronized update aren't in the grid yet:
         // end it, so the snapshot has them (the old client ends it too).
         let mut parser = self.parser.lock().unwrap();
         if parser.sync_bytes_count() > 0 {
-            parser.stop_sync(&mut *term);
+            parser.stop_sync(term);
             if let Some(old) = self.shared.subscriber() {
                 old.marker(self.id, &Marker::SyncFlush);
             }
         }
         drop(parser);
-        let title = self.shared.title.lock().unwrap().clone();
-        f(snapshot::capture(&mut term, self.size(), title, self.status()));
-        *self.shared.subscriber.lock().unwrap() = Some(sub);
+        snapshot::capture(term, self.size(), self.title(), self.status())
+    }
+
+    /// Stop driving the PTY, for a handoff: the driver, or `None` when the
+    /// program has ended (no driver runs).
+    #[cfg(unix)]
+    pub fn pause(&self) -> io::Result<Option<Box<dyn Paused>>> {
+        if self.exited().is_some() {
+            return Ok(None);
+        }
+        let (tx, rx) = mpsc::channel();
+        self.shared.send(Msg::Pause(tx));
+        match rx.recv_timeout(PAUSE_TIMEOUT) {
+            Ok(d) => Ok(Some(d)),
+            // It ended meanwhile.
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Err(io::Error::new(io::ErrorKind::TimedOut, format!("session {} didn't pause", self.id))),
+        }
     }
 
     /// Stop sending to `sub` (if it is still the one attached).
@@ -317,7 +425,7 @@ impl Host {
             id: self.id,
             pid: self.pid,
             exited: self.exited().is_some(),
-            title: self.shared.title.lock().unwrap().clone(),
+            title: self.title(),
             status: self.status(),
             attached: self.attached(),
             ..Default::default()
@@ -326,14 +434,14 @@ impl Host {
 
     pub fn cwd(&self) -> Option<PathBuf> {
         #[cfg(unix)]
-        return tern_term::procs::foreground_cwd(&self.master);
+        return self.master.as_ref().and_then(tern_term::procs::foreground_cwd);
         #[cfg(windows)]
         return tern_term::procs::foreground_cwd(self.pid);
     }
 
     pub fn foreground_programs(&self) -> Vec<String> {
         #[cfg(unix)]
-        return tern_term::procs::foreground_programs(&self.master);
+        return self.master.as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default();
         #[cfg(windows)]
         return tern_term::procs::foreground_programs(self.pid);
     }
@@ -354,15 +462,164 @@ impl Host {
     }
 }
 
-struct Driver {
+/// What a driver needs of its PTY besides alacritty's traits.
+trait HostPty: EventedPty + OnResize + Send + 'static {
+    /// The program isn't our child: its end is found by polling.
+    const POLLED: bool;
+    #[cfg(unix)]
+    fn pid(&self) -> libc::pid_t;
+    #[cfg(unix)]
+    fn master(&self) -> &File;
+    /// How the program ended, once it did (only for `POLLED`).
+    fn poll_exit(&mut self) -> Option<Option<i32>> {
+        None
+    }
+    /// Whether the program has ended (reaping it if it is our child).
+    #[cfg(unix)]
+    fn reaped(&mut self) -> bool;
+}
+
+impl HostPty for tty::Pty {
+    const POLLED: bool = false;
+
+    #[cfg(unix)]
+    fn pid(&self) -> libc::pid_t {
+        self.child().id() as libc::pid_t
+    }
+
+    #[cfg(unix)]
+    fn master(&self) -> &File {
+        self.file()
+    }
+
+    #[cfg(unix)]
+    fn reaped(&mut self) -> bool {
+        let mut st = 0;
+        // SAFETY: waitpid on our own child.
+        unsafe { libc::waitpid(self.pid(), &mut st, libc::WNOHANG) != 0 }
+    }
+}
+
+/// A PTY handed over by another daemon. Its program is usually not our
+/// child (it was the old daemon's; once that exits, init reaps it), so its
+/// end is found by polling the pid.
+#[cfg(unix)]
+struct AdoptedPty {
+    file: File,
+    pid: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl AdoptedPty {
+    fn new(file: File, pid: libc::pid_t) -> io::Result<Self> {
+        // SAFETY: plain fcntl on an fd we own.
+        unsafe {
+            let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+            if flags < 0 || libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(Self { file, pid })
+    }
+}
+
+#[cfg(unix)]
+impl EventedReadWrite for AdoptedPty {
+    type Reader = File;
+    type Writer = File;
+
+    unsafe fn register(&mut self, poll: &Arc<Poller>, mut interest: PollEvent, mode: PollMode) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        // SAFETY: the caller keeps the PTY open while it is registered.
+        unsafe { poll.add_with_mode(&self.file, interest, mode) }
+    }
+
+    fn reregister(&mut self, poll: &Arc<Poller>, mut interest: PollEvent, mode: PollMode) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        poll.modify_with_mode(&self.file, interest, mode)
+    }
+
+    fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+        poll.delete(&self.file)
+    }
+
+    fn reader(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    fn writer(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+
+#[cfg(unix)]
+impl EventedPty for AdoptedPty {
+    fn next_child_event(&mut self) -> Option<ChildEvent> {
+        None
+    }
+}
+
+#[cfg(unix)]
+impl OnResize for AdoptedPty {
+    fn on_resize(&mut self, size: WindowSize) {
+        let win = libc::winsize { ws_row: size.num_lines, ws_col: size.num_cols, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: TIOCSWINSZ with a winsize that outlives the call.
+        if unsafe { libc::ioctl(self.file.as_raw_fd(), libc::TIOCSWINSZ, &win as *const _) } < 0 {
+            log::warn!("resize: {}", io::Error::last_os_error());
+        }
+    }
+}
+
+#[cfg(unix)]
+impl HostPty for AdoptedPty {
+    const POLLED: bool = true;
+
+    fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    fn master(&self) -> &File {
+        &self.file
+    }
+
+    fn poll_exit(&mut self) -> Option<Option<i32>> {
+        let mut st = 0;
+        // SAFETY: plain syscalls on a pid we were given.
+        let r = unsafe { libc::waitpid(self.pid, &mut st, libc::WNOHANG) };
+        if r == self.pid {
+            // Our child after all (a handoff within one process).
+            return Some(libc::WIFEXITED(st).then(|| libc::WEXITSTATUS(st)));
+        }
+        let gone = r < 0 && unsafe { libc::kill(self.pid, 0) } < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        gone.then_some(None)
+    }
+
+    fn reaped(&mut self) -> bool {
+        self.poll_exit().is_some()
+    }
+}
+
+/// Why the driving loop stopped.
+enum Stop {
+    Exited(Option<i32>),
+    /// Asked to end the program; it did.
+    Ended,
+    /// The program won't end: let go of it without dropping the PTY.
+    #[cfg(unix)]
+    Abandon,
+    #[cfg(unix)]
+    Pause(Sender<Box<dyn Paused>>),
+}
+
+struct Driver<P: HostPty> {
     id: u64,
-    pty: tty::Pty,
+    pty: P,
     poller: Arc<Poller>,
     rx: Receiver<Msg>,
     term: Arc<FairMutex<HostTerm>>,
     shared: Arc<Shared>,
     observer: Arc<dyn Observer>,
-    parser: Arc<Mutex<Processor<StdSyncHandler>>>,
+    parser: HostParser,
     scanner: OscScanner,
     writes: VecDeque<(Cow<'static, [u8]>, usize)>,
     last_probe_reply: Option<Instant>,
@@ -373,24 +630,81 @@ struct Driver {
     scheme_checked: Instant,
     /// The size to go back to after an attach's extra row, and when.
     jiggle: Option<(Instant, TermSize)>,
+    /// When a polled program was last checked for its end.
+    exit_checked: Instant,
 }
 
-impl Driver {
+impl<P: HostPty> Driver<P> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        id: u64,
+        pty: P,
+        poller: Arc<Poller>,
+        rx: Receiver<Msg>,
+        term: Arc<FairMutex<HostTerm>>,
+        shared: Arc<Shared>,
+        observer: Arc<dyn Observer>,
+        parser: HostParser,
+    ) -> Self {
+        Self {
+            id,
+            pty,
+            poller,
+            rx,
+            term,
+            shared,
+            observer,
+            parser,
+            scanner: OscScanner::new(),
+            writes: VecDeque::new(),
+            last_probe_reply: None,
+            scheme_reports: false,
+            dark: theme_palette().get().is_dark(),
+            scheme_checked: Instant::now(),
+            jiggle: None,
+            exit_checked: Instant::now(),
+        }
+    }
+
     fn run(mut self) {
+        match self.drive() {
+            Stop::Exited(code) => self.finish(code),
+            Stop::Ended => self.finish(None),
+            #[cfg(unix)]
+            Stop::Abandon => self.abandon(),
+            #[cfg(unix)]
+            Stop::Pause(reply) => {
+                let _ = self.pty.deregister(&self.poller);
+                // Input that came with or after the request goes along.
+                while let Ok(msg) = self.rx.try_recv() {
+                    if let Msg::Input(bytes) = msg {
+                        self.writes.push_back((bytes, 0));
+                    }
+                }
+                // The pauser gave up waiting: go on.
+                if let Err(mpsc::SendError(driver)) = reply.send(Box::new(self)) {
+                    driver.resume();
+                }
+            },
+        }
+    }
+
+    fn drive(&mut self) -> Stop {
         let mut interest = PollEvent::readable(0);
         // SAFETY: the PTY's fds stay open (owned by `self.pty`) until they
-        // are deregistered below.
+        // are deregistered (in `report_exit`, or on a pause).
         if let Err(e) = unsafe { self.pty.register(&self.poller, interest, PollMode::Level) } {
             log::error!("host {}: poll registration failed: {e}", self.id);
-            return self.finish(None);
+            return Stop::Exited(None);
         }
         let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
         let mut buf = vec![0u8; READ_BUFFER];
-        let code = 'run: loop {
+        loop {
             let now = Instant::now();
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
             let scheme_check = self.scheme_reports.then(|| self.scheme_checked + SCHEME_CHECK);
-            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check];
+            let exit_check = P::POLLED.then(|| self.exit_checked + EXIT_POLL);
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -398,7 +712,7 @@ impl Driver {
                     continue;
                 }
                 log::error!("host {}: poll failed: {e}", self.id);
-                break None;
+                return Stop::Exited(None);
             }
             let now = Instant::now();
             if sync_deadline.is_some_and(|t| t <= now) {
@@ -412,6 +726,13 @@ impl Driver {
             }
             if scheme_check.is_some_and(|t| t <= now) {
                 self.check_scheme(now);
+            }
+            if exit_check.is_some_and(|t| t <= now) {
+                self.exit_checked = now;
+                if let Some(code) = self.pty.poll_exit() {
+                    let _ = self.read(&mut buf);
+                    return Stop::Exited(code);
+                }
             }
             if let Some((at, size)) = self.jiggle
                 && at <= now
@@ -437,12 +758,14 @@ impl Driver {
                         if !self.hang_up() {
                             // Dropping the PTY would wait for it forever: leave it.
                             log::warn!("host {}: the program won't end; leaving it", self.id);
-                            return self.abandon();
+                            return Stop::Abandon;
                         }
-                        return self.finish(None);
+                        return Stop::Ended;
                     },
+                    #[cfg(unix)]
+                    Ok(Msg::Pause(reply)) => return Stop::Pause(reply),
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break 'run None,
+                    Err(TryRecvError::Disconnected) => return Stop::Exited(None),
                 }
             }
             for event in events.iter() {
@@ -450,15 +773,29 @@ impl Driver {
                     PTY_CHILD_EVENT_TOKEN => {
                         if let Some(ChildEvent::Exited(status)) = self.pty.next_child_event() {
                             let _ = self.read(&mut buf);
-                            break 'run status.and_then(|s| s.code());
+                            return Stop::Exited(status.and_then(|s| s.code()));
                         }
                     },
                     PTY_READ_WRITE_TOKEN if !event.is_interrupt() => {
-                        if event.readable
-                            && let Err(e) = self.read(&mut buf)
-                        {
-                            // The program closed the PTY; its exit follows.
-                            log::debug!("host {}: read: {e}", self.id);
+                        if event.readable {
+                            match self.read(&mut buf) {
+                                Ok(true) => {},
+                                // The program closed the PTY; its exit follows.
+                                Ok(false) | Err(_) if !P::POLLED => {},
+                                // A polled program's end is only seen when
+                                // asked: ask now, and stop watching a closed
+                                // PTY (it reads as ready forever) until then.
+                                _ => {
+                                    if let Some(code) = self.pty.poll_exit() {
+                                        return Stop::Exited(code);
+                                    }
+                                    interest.readable = false;
+                                    if let Err(e) = self.pty.reregister(&self.poller, interest, PollMode::Level) {
+                                        log::error!("host {}: poll reregistration failed: {e}", self.id);
+                                        return Stop::Exited(None);
+                                    }
+                                },
+                            }
                         }
                         if event.writable
                             && let Err(e) = self.write()
@@ -474,11 +811,10 @@ impl Driver {
                 interest.writable = needs_write;
                 if let Err(e) = self.pty.reregister(&self.poller, interest, PollMode::Level) {
                     log::error!("host {}: poll reregistration failed: {e}", self.id);
-                    break None;
+                    return Stop::Exited(None);
                 }
             }
-        };
-        self.finish(code)
+        }
     }
 
     fn emit_marker(&self, marker: &Marker) {
@@ -495,14 +831,16 @@ impl Driver {
         self.emit_marker(&Marker::Resized(size));
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    /// Read what the program wrote: `Ok(false)` once the PTY is closed (its
+    /// programs are gone; on Linux an error says so instead).
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<bool> {
         let mut locked = 0;
         loop {
             let n = match self.pty.reader().read(buf) {
-                Ok(0) => return Ok(()),
+                Ok(0) => return Ok(false),
                 Ok(n) => n,
                 Err(e) if matches!(e.kind(), ErrorKind::Interrupted) => continue,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(true),
                 Err(e) => return Err(e),
             };
             let bytes = &buf[..n];
@@ -516,7 +854,7 @@ impl Driver {
             self.scan(n, buf);
             locked += n;
             if locked >= MAX_LOCKED_READ {
-                return Ok(());
+                return Ok(true);
             }
         }
     }
@@ -593,10 +931,10 @@ impl Driver {
     /// Whether it ended: a program can be stuck past SIGKILL, and this never
     /// waits for one forever.
     #[cfg(unix)]
-    fn hang_up(&self) -> bool {
-        let pid = self.pty.child().id() as libc::pid_t;
-        // SAFETY: plain syscalls on our own child and its PTY.
-        let fg = unsafe { libc::tcgetpgrp(self.pty.file().as_raw_fd()) };
+    fn hang_up(&mut self) -> bool {
+        let pid = self.pty.pid();
+        // SAFETY: plain syscalls on our program and its PTY.
+        let fg = unsafe { libc::tcgetpgrp(self.pty.master().as_raw_fd()) };
         let signal = |sig| {
             // The child leads its own session, so its group id is its pid.
             unsafe { libc::kill(-pid, sig) };
@@ -616,10 +954,8 @@ impl Driver {
             // A program on its way out still writes its last output to the
             // tty, and its exit waits until that's read: read it, or it
             // never ends (and the wait below never returns).
-            while matches!(self.pty.file().read(&mut sink), Ok(n) if n > 0) {}
-            let mut st = 0;
-            let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
-            if r != 0 {
+            while matches!(self.pty.master().read(&mut sink), Ok(n) if n > 0) {}
+            if self.pty.reaped() {
                 // Its foreground job may outlive it.
                 if fg > 0 && fg != pid {
                     unsafe { libc::kill(-fg, libc::SIGKILL) };
@@ -660,5 +996,26 @@ impl Driver {
             self.emit_marker(&Marker::Exited(code));
         }
         self.observer.exited(self.id, code);
+    }
+}
+
+impl<P: HostPty> Paused for Driver<P> {
+    fn writes(&self) -> Vec<u8> {
+        self.writes.iter().flat_map(|(bytes, done)| bytes[*done..].iter().copied()).collect()
+    }
+
+    fn scheme_reports(&self) -> bool {
+        self.scheme_reports
+    }
+
+    fn resume(self: Box<Self>) {
+        let id = self.id;
+        if let Err(e) = std::thread::Builder::new().name(format!("host {id}")).spawn(move || self.run()) {
+            log::error!("host {id}: can't resume: {e}");
+        }
+    }
+
+    fn forget(self: Box<Self>) {
+        std::mem::forget(self);
     }
 }

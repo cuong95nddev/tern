@@ -7,6 +7,9 @@
 //! so a minor version can add kinds; the major is part of the socket name,
 //! so incompatible versions never talk. Byte buffers (output, input, hook
 //! bodies, snapshots) are msgpack `bin`, not arrays of numbers (MAJOR 2).
+//!
+//! A daemon hands its sessions to a daemon of a newer build over a private
+//! socket with [`HandoffMsg`] (Unix only; see `server::hand_off`).
 
 #[cfg(unix)]
 use std::collections::VecDeque;
@@ -27,7 +30,12 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 1;
+pub const MINOR: u32 = 2;
+/// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
+pub const HANDOFF_MINOR: u32 = 2;
+/// The handoff messages' layout; a daemon adopts from every version up to
+/// its own.
+pub const HANDOFF_VERSION: u32 = 1;
 
 /// What a client is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,11 +63,15 @@ pub enum ClientMsg {
     },
     /// Start a program and attach to it. With `hook`, the daemon gives it a
     /// hook token and replaces `{tern-settings}` in its args with the path of
-    /// a Claude settings file pointing at its hook server.
+    /// a Claude settings file pointing at its hook server. With `seed` (a
+    /// [`pack_snapshot`] of `cfg.size`), the terminal starts with that
+    /// screen's lines in its scrollback (MINOR 2; older daemons ignore it).
     Spawn {
         req: u64,
         cfg: SpawnConfig,
         hook: bool,
+        #[serde(default, with = "serde_bytes")]
+        seed: Option<Vec<u8>>,
     },
     Attach {
         req: u64,
@@ -92,6 +104,13 @@ pub enum ClientMsg {
     Reveal {
         req: u64,
         id: u64,
+    },
+    /// Hand every session to a new daemon started from `exe` (MINOR 2).
+    /// On success the daemon closes every connection and exits; on failure
+    /// it answers `HandOffFailed` and goes on.
+    HandOff {
+        req: u64,
+        exe: PathBuf,
     },
 }
 
@@ -163,6 +182,63 @@ pub enum ServerMsg {
         req: u64,
         delivered: bool,
     },
+    /// The `HandOff` didn't happen; the daemon serves on.
+    HandOffFailed {
+        req: u64,
+        message: String,
+    },
+}
+
+/// Between a daemon handing off its sessions and the one adopting them. The
+/// old daemon sends `Begin`, a `Session` for each, waits for `Restored`,
+/// sends `Commit` and waits for `Committed`. Fields are added with defaults;
+/// `version` says which an old daemon knew.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HandoffMsg {
+    /// Comes with the daemon's lock fd, then its hook listener's fd when
+    /// `hook_port` is set.
+    Begin {
+        version: u32,
+        major: u32,
+        app_version: String,
+        /// Where the Claude settings files of its sessions are.
+        run_dir: PathBuf,
+        hook_port: Option<u16>,
+        sessions: u32,
+    },
+    /// Comes with the PTY master fd when `fd` is set (the program runs).
+    Session(Box<HandedSession>),
+    Restored,
+    Commit,
+    Committed,
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandedSession {
+    pub id: u64,
+    pub pid: u32,
+    pub fd: bool,
+    /// The program's end, if it ended (`Some(None)`: code unknown).
+    pub exited: Option<Option<i32>>,
+    pub size: TermSize,
+    pub scrollback: usize,
+    pub title: Option<String>,
+    pub status: ActivityStatus,
+    pub token: Option<String>,
+    pub claude_session: Option<String>,
+    /// Hook bodies that came while no one was attached.
+    pub hooks: Vec<serde_bytes::ByteBuf>,
+    /// Input not written to the program yet.
+    #[serde(with = "serde_bytes")]
+    pub writes: Vec<u8>,
+    /// The program asked for color scheme reports.
+    pub scheme_reports: bool,
+    /// [`pack_snapshot`]'s output.
+    #[serde(with = "serde_bytes")]
+    pub snapshot: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +294,14 @@ pub fn write_frame(w: &mut impl Write, msg: &impl Serialize) -> io::Result<()> {
 pub fn write_frame_with_fd(sock: &UnixStream, msg: &impl Serialize, fd: &impl AsRawFd) -> io::Result<()> {
     let frame = encode(msg)?;
     let n = fdpass::send_with_fd(sock, &frame, fd.as_raw_fd())?;
+    (&*sock).write_all(&frame[n..])
+}
+
+/// Write `msg` with `fds` attached (SCM_RIGHTS) to its first bytes.
+#[cfg(unix)]
+pub fn write_frame_with_fds(sock: &UnixStream, msg: &impl Serialize, fds: &[std::os::fd::RawFd]) -> io::Result<()> {
+    let frame = encode(msg)?;
+    let n = fdpass::send_with_fds(sock, &frame, fds)?;
     (&*sock).write_all(&frame[n..])
 }
 
@@ -353,7 +437,9 @@ mod tests {
     fn client_messages_round_trip() {
         let msgs = vec![
             ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into(), role: Role::Ui },
-            ClientMsg::Spawn { req: 1, cfg: cfg(), hook: true },
+            ClientMsg::Spawn { req: 1, cfg: cfg(), hook: true, seed: None },
+            ClientMsg::Spawn { req: 5, cfg: cfg(), hook: false, seed: Some(vec![1, 2, 3]) },
+            ClientMsg::HandOff { req: 6, exe: "/usr/bin/tern".into() },
             ClientMsg::Attach { req: 2, id: 7, size: SIZE },
             ClientMsg::Detach { id: 7 },
             ClientMsg::Input { id: 7, bytes: b"ls\r".to_vec() },

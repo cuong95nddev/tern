@@ -18,6 +18,8 @@ fn link_reports_loss_and_reconnects() {
         hooks: false,
         max_queued: 1 << 20,
         max_queued_session: usize::MAX,
+        #[cfg(unix)]
+        successor: None,
     };
     // No daemon: refused at once, nothing posted but `Lost`.
     let (tx, rx) = mpsc::channel();
