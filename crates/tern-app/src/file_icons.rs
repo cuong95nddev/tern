@@ -11,6 +11,7 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        Bot,
         ChevronsDownUp,
         CircleArrowDown,
         Columns2,

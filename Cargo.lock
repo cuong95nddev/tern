@@ -6560,6 +6560,7 @@ dependencies = [
  "libc",
  "log",
  "lyon_tessellation",
+ "raw-window-handle",
  "schemars",
  "semver",
  "serde",
@@ -6570,6 +6571,7 @@ dependencies = [
  "tern-mux",
  "tern-term",
  "tiny-skia",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

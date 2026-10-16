@@ -8,7 +8,7 @@ use gpui_kit::component::GlobalState;
 use gpui_kit::*;
 
 use crate::theme_picker::{OpenSettings, SelectTheme};
-use crate::{OpenFolder, Quit, ToggleMenuBarIcon, main_window, restart, terminal_view, update, workspace};
+use crate::{OpenFolder, Quit, ToggleMenuBarIcon, agent_monitor, main_window, restart, terminal_view, update, workspace};
 
 pub fn install(cx: &mut App) {
     cx.set_menus(menus());
@@ -43,6 +43,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Scratches", workspace::ToggleScratches),
         MenuItem::action("Reset Layout", workspace::ResetLayout),
         MenuItem::action("Focus Terminal", workspace::FocusTerminal),
+        MenuItem::action("Agent Monitor", agent_monitor::ToggleAgentMonitor),
         MenuItem::separator(),
         MenuItem::action("Split Right", workspace::SplitRight),
         MenuItem::action("Split Down", workspace::SplitDown),

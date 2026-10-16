@@ -458,7 +458,7 @@ pub struct Workspace {
     _subs: Vec<Subscription>,
 }
 
-/// A terminal tab, as the screenshot tray lists it.
+/// A terminal tab, as the screenshot tray and the agent monitor list it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
 pub struct TermTabInfo {
     pub id: EntityId,
@@ -1668,8 +1668,8 @@ impl Workspace {
         self.files_changed(&paths, window, cx);
     }
 
-    /// The terminal tabs, in tab order, for picking where a screenshot goes.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
+    /// The terminal tabs, in tab order: where a screenshot can go, and the
+    /// agents the monitor lists.
     pub fn term_tabs(&self, cx: &App) -> Vec<TermTabInfo> {
         self.tabs
             .iter()
@@ -1688,7 +1688,6 @@ impl Workspace {
     }
 
     /// Show the tab with entity `id`.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
     pub fn show_tab(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == id) {
             self.activate(ix, window, cx);

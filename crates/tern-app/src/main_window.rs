@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as AssetIcon;
+use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -61,8 +62,17 @@ pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
     out
 }
 
+/// Every workspace with its window, in a steady order: windows as they
+/// opened, and in each its tabs' order.
+pub fn all_workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
+    let mut out = Vec::new();
+    for (h, m) in windows(cx) {
+        out.extend(m.read(cx).slots.iter().map(|s| (h, s.ws.clone())));
+    }
+    out
+}
+
 /// Bring `ws` forward in its window `handle`, and Tern with it.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // for the screenshot tray
 pub fn reveal(handle: AnyWindowHandle, ws: &Entity<Workspace>, cx: &mut App) {
     let id = ws.entity_id();
     let main = windows(cx).into_iter().find(|(h, _)| *h == handle).map(|(_, m)| m);
@@ -704,6 +714,7 @@ impl MainWindow {
     }
 
     fn render_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let monitor_open = crate::agent_monitor::window(cx).is_some();
         let theme = cx.theme();
         let (warn, drop_bg) = (theme.warning, theme.list_hover);
         let look = crate::style::el("workspace_tabs", cx);
@@ -790,6 +801,15 @@ impl MainWindow {
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
                     ))
                     .child(div().flex_1())
+                    .child(button(
+                        Button::new("agent-monitor")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(AssetIcon::Bot))
+                            .selected(monitor_open)
+                            .tooltip("Agent Monitor")
+                            .on_click(|_, _, cx| crate::agent_monitor::toggle(cx)),
+                    ))
                     .children(crate::update::offered(cx).map(|(release, installing)| {
                         let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
                         button(Button::new("update"))

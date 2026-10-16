@@ -1,6 +1,7 @@
 // A release build is a GUI app on Windows: no console window of its own.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agent_monitor;
 mod agents;
 mod arrange;
 mod changes_view;
@@ -136,6 +137,7 @@ fn main() {
         menus::install(cx);
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
+        agent_monitor::init(cx);
         #[cfg(target_os = "macos")]
         shot::init(cx);
         // Reached only when no window has focus.
@@ -241,7 +243,10 @@ fn main() {
             .detach();
         }
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
+            // The agent monitor doesn't keep Tern open by itself.
+            let monitor = agent_monitor::window(cx);
+            if cx.windows().iter().all(|w| Some(*w) == monitor) {
+                agent_monitor::hide(cx);
                 // Approved up front: `cx.quit()` terminates from a main-queue
                 // block, where a "later" answer could never come.
                 quit_now(cx);
