@@ -17,7 +17,7 @@ pub type Frames<'a> = dyn FnMut(&str, Option<usize>, Div) -> AnyElement + 'a;
 /// Draws template `name` with `scope`; `frames` attaches behavior to the
 /// boxes that name a frame.
 pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyElement {
-    let Some(node) = cx.try_global::<Templates>().and_then(|t| t.0.get(name)).cloned() else {
+    let Some(node) = cx.try_global::<Templates>().and_then(|t| t.nodes.get(name)).cloned() else {
         return div().into_any_element();
     };
     let mut scope = scope;
@@ -69,7 +69,7 @@ impl Drawer<'_, '_> {
         let look = self.look(n, scope, outer);
         let mut kids: Vec<AnyElement> = vec![];
         match &n.what {
-            What::Slot(name) => {
+            What::Slot(name) | What::Part(name) => {
                 let e = scope.slots.remove(name)?;
                 if n.is_bare() {
                     return Some(e);

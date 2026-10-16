@@ -38,9 +38,16 @@ pub enum Drop {
 pub struct DockInfo {
     pub name: String,
     pub dir: Dir,
-    /// Part kinds the dock takes.
+    /// Part names or kinds the dock takes.
     pub accepts: Vec<String>,
     pub defaults: Tree,
+}
+
+impl DockInfo {
+    /// True when the dock takes the part: `accepts` holds its name or its kind.
+    pub fn takes(&self, part: &str, kind: &str) -> bool {
+        self.accepts.iter().any(|a| a == part || a == kind)
+    }
 }
 
 /// The parts of every dock, stored under a key that names the template and its docks.
@@ -193,7 +200,7 @@ impl Arrangement {
         let Some(info) = docks.iter().find(|d| d.name == dock) else {
             return false;
         };
-        if !info.accepts.iter().any(|k| k == kind) {
+        if !info.takes(part, kind) {
             return false;
         }
         if matches!(&at, Drop::Before(t) | Drop::After(t) if t == part) {
@@ -259,7 +266,7 @@ impl Arrangement {
                     return false;
                 }
                 match info {
-                    Some(i) if i.accepts.iter().any(|k| k == kind) => true,
+                    Some(i) if i.takes(part, kind) => true,
                     _ => {
                         moved_back.push(part.to_string());
                         false
@@ -295,7 +302,7 @@ impl Arrangement {
     /// Appends `part` to its default dock (or the first dock that takes its kind); the dock's name.
     fn send_to_default(&mut self, part: &str, kind: Option<&str>, docks: &[DockInfo]) -> Option<String> {
         let kind = kind?;
-        let takes = |d: &&DockInfo| d.accepts.iter().any(|k| k == kind);
+        let takes = |d: &&DockInfo| d.takes(part, kind);
         let in_defaults = |d: &&DockInfo| {
             let mut names = Vec::new();
             collect_parts(&d.defaults, &mut names);
@@ -613,5 +620,18 @@ mod tests {
         let d = docks();
         assert_eq!(key("workspace", &d), "workspace/left+right");
         assert_ne!(key("workspace", &d), key("workspace", &d[..1]));
+    }
+
+    #[test]
+    fn a_dock_takes_a_part_by_name_or_kind() {
+        let mut d = docks();
+        d[1].accepts = vec!["explorer".into()];
+        assert!(d[1].takes("explorer", "tool"));
+        assert!(!d[1].takes("scratches", "panel"));
+        assert!(d[0].takes("scratches", "panel"));
+        let mut a = fresh();
+        assert!(!a.move_part("scratches", "panel", "right", Drop::End, &d));
+        assert!(a.move_part("explorer", "tool", "right", Drop::End, &d));
+        assert_eq!(a.dock_of("explorer"), Some("right"));
     }
 }

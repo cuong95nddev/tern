@@ -25,6 +25,7 @@ use gpui_kit::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::arrange::{Dir, DockInfo, Size, Tree};
 use crate::style::{self, Props, Val};
 
 mod draw;
@@ -108,6 +109,31 @@ pub struct Spec {
     /// a condition).
     #[schemars(with = "Option<serde_json::Value>")]
     pub fixed: Option<serde_json::Value>,
+    /// A piece the user may move between docks; the code fills it like a slot
+    /// of the same name (`explorer`, `scratches`, `changes`).
+    pub part: Option<String>,
+    /// What a dock matches a part on (default `panel`).
+    pub kind: Option<String>,
+    /// This box holds parts, named so a layout can refer to it; its children
+    /// are its default parts. It needs a `split`.
+    pub dock: Option<String>,
+    /// The part names or kinds a dock takes.
+    pub accepts: Vec<String>,
+    /// Where a part may be dropped in a dock: `before` and `after`.
+    pub zones: Vec<String>,
+    /// What a dock does when it has no parts: `hide` (the default) or `keep`.
+    pub empty: Option<String>,
+    /// `left` or `right`: the tool strip whose buttons show this dock's parts.
+    pub strip: Option<String>,
+    /// Dragging this box drags the part it is drawn for.
+    pub handle: bool,
+    /// Whether the box can be dragged: `true`, `false` or a condition
+    /// (default `true`).
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub drag: Option<serde_json::Value>,
+    /// The size a part gets when it arrives in this dock from elsewhere.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub part_size: Option<serde_json::Value>,
     pub children: Vec<Spec>,
 }
 
@@ -244,7 +270,33 @@ impl Scope {
 
 /// The templates in effect, ready to draw.
 #[derive(Default)]
-pub struct Templates(HashMap<String, Arc<Node>>);
+pub struct Templates {
+    nodes: HashMap<String, Arc<Node>>,
+    /// The docks each template holds, its used templates' included.
+    docks: HashMap<String, Vec<DockInfo>>,
+    /// Every part, by name: its kind and its node.
+    parts: BTreeMap<&'static str, (String, Node)>,
+}
+
+impl Templates {
+    /// The docks `template` holds.
+    #[allow(dead_code)] // Read by the arrangement, which comes with the drawing of docks.
+    pub fn docks(&self, template: &str) -> Vec<DockInfo> {
+        self.docks.get(template).cloned().unwrap_or_default()
+    }
+
+    /// Every part's name and kind.
+    #[allow(dead_code)] // As `docks`.
+    pub fn parts(&self) -> Vec<(&'static str, String)> {
+        self.parts.iter().map(|(n, (k, _))| (*n, k.clone())).collect()
+    }
+
+    /// The node a part is drawn with.
+    #[allow(dead_code)] // As `docks`.
+    pub(crate) fn part(&self, name: &str) -> Option<&Node> {
+        self.parts.get(name).map(|(_, n)| n)
+    }
+}
 
 impl Global for Templates {}
 
@@ -276,6 +328,8 @@ enum Justify {
 enum What {
     Box,
     Slot(&'static str),
+    /// A part the user may move; filled like the slot of the same name.
+    Part(&'static str),
     Text(Vec<Part>),
     Each(SharedString, Arc<Node>),
 }
@@ -373,6 +427,20 @@ struct Panel {
     fixed: Option<Cond>,
 }
 
+/// A box that holds parts.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Drawn by the docks, which come after the format.
+pub(crate) struct DockNode {
+    name: SharedString,
+    dir: Dir,
+    accepts: Vec<String>,
+    zones: Vec<&'static str>,
+    empty_keep: bool,
+    strip: Option<SharedString>,
+    part_size: Option<AbsoluteLength>,
+    info: DockInfo,
+}
+
 /// A node, its values read.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -398,6 +466,13 @@ pub struct Node {
     split: Option<Axis>,
     panel: Panel,
     frame: Option<SharedString>,
+    dock: Option<Arc<DockNode>>,
+    /// Dragging this box drags the part it is drawn for.
+    #[allow(dead_code)] // As `DockNode`.
+    handle: bool,
+    /// Whether it can be dragged; None is always.
+    #[allow(dead_code)] // As `DockNode`.
+    drag: Option<Cond>,
     children: Vec<Node>,
 }
 
@@ -420,14 +495,33 @@ const SLOTS: &[&str] = &[
     "drop_overlay",
 ];
 
+/// The parts a template may name.
+const PARTS: &[&str] = &["explorer", "scratches", "changes"];
+
+/// The zones a dock may take a drop in.
+const ZONES: &[&str] = &["before", "after"];
+
 /// Reads `specs` (the built-in templates with the theme's and the
 /// settings' over them) with `props`; what's wrong goes to `problems`.
 pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec<String>) -> Templates {
-    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![] };
+    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![], parts: BTreeMap::new() };
     for name in specs.keys() {
         c.template(name);
     }
-    Templates(c.done)
+    let docks = c.done.iter().map(|(name, node)| (name.clone(), docks_of(node))).collect();
+    Templates { nodes: c.done, docks, parts: c.parts }
+}
+
+/// The docks in `node`, in drawing order.
+fn docks_of(node: &Node) -> Vec<DockInfo> {
+    let mut out: Vec<DockInfo> = node.dock.iter().map(|d| d.info.clone()).collect();
+    if let What::Each(_, item) = &node.what {
+        out.extend(docks_of(item));
+    }
+    for c in &node.children {
+        out.extend(docks_of(c));
+    }
+    out
 }
 
 struct Compiler<'a, 'b> {
@@ -437,6 +531,7 @@ struct Compiler<'a, 'b> {
     done: HashMap<String, Arc<Node>>,
     /// The templates being read, to catch one that uses itself.
     stack: Vec<String>,
+    parts: BTreeMap<&'static str, (String, Node)>,
 }
 
 impl Compiler<'_, '_> {
@@ -498,6 +593,10 @@ impl Compiler<'_, '_> {
                 fixed: panel.fixed.or(node.panel.fixed),
             };
             node.frame = s.frame.clone().map(Into::into).or(node.frame);
+            node.handle |= s.handle;
+            if s.drag.is_some() {
+                node.drag = self.flag(&s.drag, &format!("{at}.drag"));
+            }
         }
         node.path = at.into();
         node
@@ -513,16 +612,21 @@ impl Compiler<'_, '_> {
         ])
     }
 
-    fn panel(&mut self, s: &Spec, at: &str) -> Panel {
-        let fixed = match &s.fixed {
-            None | Some(serde_json::Value::Bool(false)) => None,
-            Some(serde_json::Value::Bool(true)) => Some(Cond(vec![vec![]])),
-            Some(serde_json::Value::String(c)) => self.cond(c, &format!("{at}.fixed")),
+    /// `true`, `false` or a condition; `false` is a condition that never holds.
+    fn flag(&mut self, v: &Option<serde_json::Value>, at: &str) -> Option<Cond> {
+        match v {
+            None => None,
+            Some(serde_json::Value::Bool(b)) => Some(Cond(if *b { vec![vec![]] } else { vec![] })),
+            Some(serde_json::Value::String(c)) => self.cond(c, at),
             Some(_) => {
-                self.problems.push(format!("{at}.fixed: true, false or a condition"));
+                self.problems.push(format!("{at}: true, false or a condition"));
                 None
             },
-        };
+        }
+    }
+
+    fn panel(&mut self, s: &Spec, at: &str) -> Panel {
+        let fixed = self.flag(&s.fixed, &format!("{at}.fixed")).filter(|c| !c.0.is_empty());
         Panel {
             size: self.len(&s.size, &format!("{at}.size")),
             min: self.len(&s.min, &format!("{at}.min")),
@@ -532,9 +636,9 @@ impl Compiler<'_, '_> {
     }
 
     fn own(&mut self, s: &Spec, at: &str) -> Node {
-        let kinds = [s.slot.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some()];
+        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some()];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, text, each and use"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each and use"));
         }
         let element = match &s.element {
             Some(name) => match style::element(name) {
@@ -551,6 +655,18 @@ impl Compiler<'_, '_> {
                 Some(n) => What::Slot(n),
                 None => {
                     self.problems.push(format!("{at}.slot: no slot \"{slot}\" (there are: {})", SLOTS.join(", ")));
+                    What::Box
+                },
+            }
+        } else if let Some(part) = &s.part {
+            match PARTS.iter().find(|n| **n == part) {
+                Some(n) if self.parts.contains_key(n) => {
+                    self.problems.push(format!("{at}.part: \"{part}\" placed twice"));
+                    What::Box
+                },
+                Some(n) => What::Part(n),
+                None => {
+                    self.problems.push(format!("{at}.part: no part \"{part}\" (there are: {})", PARTS.join(", ")));
                     What::Box
                 },
             }
@@ -593,9 +709,10 @@ impl Compiler<'_, '_> {
         let split = pick(&s.split, "split", self.problems, &["row", "column"]).map(|i| [Axis::Horizontal, Axis::Vertical][i]);
         let when = s.when.as_deref().and_then(|w| self.cond(w, &format!("{at}.when")));
         let mut children: Vec<Node> = s.children.iter().enumerate().map(|(i, c)| self.node(c, &format!("{at}.children.{i}"))).collect();
+        let dock = self.dock(s, at, split, &children);
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
-        Node {
+        let node = Node {
             what,
             path: at.into(),
             element: element.map_or("", |e| e.name),
@@ -617,8 +734,84 @@ impl Compiler<'_, '_> {
             split,
             panel: self.panel(s, at),
             frame: s.frame.clone().map(Into::into),
+            dock,
+            handle: s.handle,
+            drag: self.flag(&s.drag, &format!("{at}.drag")),
             children,
+        };
+        if let What::Part(name) = node.what {
+            let kind = s.kind.clone().unwrap_or_else(|| "panel".to_owned());
+            self.parts.insert(name, (kind, node.clone()));
         }
+        node
+    }
+
+    /// The dock `s` declares, if it does; its default parts are its children.
+    fn dock(&mut self, s: &Spec, at: &str, split: Option<Axis>, children: &[Node]) -> Option<Arc<DockNode>> {
+        let name = s.dock.as_ref()?;
+        let dir = match split {
+            Some(Axis::Horizontal) => Dir::Row,
+            Some(Axis::Vertical) => Dir::Column,
+            None => {
+                if s.split.is_none() {
+                    self.problems.push(format!("{at}.dock: a dock needs a \"split\""));
+                }
+                Dir::Column
+            },
+        };
+        let mut zones = vec![];
+        for z in &s.zones {
+            match ZONES.iter().find(|n| **n == z) {
+                Some(n) => zones.push(*n),
+                None => self.problems.push(format!("{at}.zones: \"{z}\" is not one of {}", ZONES.join(", "))),
+            }
+        }
+        let empty_keep = match s.empty.as_deref() {
+            None | Some("hide") => false,
+            Some("keep") => true,
+            Some(e) => {
+                self.problems.push(format!("{at}.empty: \"{e}\" is not one of hide, keep"));
+                false
+            },
+        };
+        let strip = match s.strip.as_deref() {
+            None => None,
+            Some(v @ ("left" | "right")) => Some(v.to_owned().into()),
+            Some(v) => {
+                self.problems.push(format!("{at}.strip: \"{v}\" is not one of left, right"));
+                None
+            },
+        };
+        // A part's own `fixed` and `size` give its default size; a size that
+        // isn't in pixels leaves it to share what's left.
+        let mut items: Vec<(Tree, Size)> = children
+            .iter()
+            .filter_map(|c| {
+                let What::Part(p) = c.what else { return None };
+                let fixed = c.panel.fixed.is_some();
+                let size = match c.panel.size {
+                    Some(AbsoluteLength::Pixels(px)) if fixed => Size::Px(f32::from(px)),
+                    _ => Size::Auto,
+                };
+                Some((Tree::Part(p.to_owned()), size))
+            })
+            .collect();
+        // A dock without parts has an empty split, which `prune` reads as nothing.
+        let defaults = match items.len() {
+            1 => items.remove(0).0,
+            _ => Tree::Split(dir, items),
+        };
+        let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults };
+        Some(Arc::new(DockNode {
+            name: name.clone().into(),
+            dir,
+            accepts: s.accepts.clone(),
+            zones,
+            empty_keep,
+            strip,
+            part_size: self.len(&s.part_size, &format!("{at}.part_size")),
+            info,
+        }))
     }
 }
 
@@ -673,7 +866,7 @@ mod tests {
         let mut problems = vec![];
         let t = compile(&builtin(), &props, &mut problems);
         assert_eq!(problems, Vec::<String>::new());
-        assert!(t.0.contains_key("window") && t.0.contains_key("pane"));
+        assert!(t.nodes.contains_key("window") && t.nodes.contains_key("pane"));
     }
 
     #[test]
@@ -682,11 +875,63 @@ mod tests {
         let theme = gpui_kit::component::ThemeColor::default();
         let props = Props::new(&over, &theme, std::path::Path::new(""));
         let specs: BTreeMap<String, Spec> = serde_json::from_str(
-            r#"{"a": {"slot": "nope", "children": [{"use": "b"}, {"use": "a"}, {"layout": "diagonal"}, {"element": "x"}]}}"#,
+            r#"{"a": {"slot": "nope", "children": [{"use": "b"}, {"use": "a"}, {"layout": "diagonal"}, {"element": "x"},
+                {"part": "nope"}, {"dock": "d", "split": "row", "zones": ["middle"]}, {"dock": "d2"}]}}"#,
         )
         .unwrap();
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
-        assert_eq!(problems.len(), 5, "{problems:?}");
+        assert_eq!(problems.len(), 8, "{problems:?}");
+    }
+
+    fn compiled(json: &str) -> (super::Templates, Vec<String>) {
+        let over = style::Overrides::default();
+        let theme = gpui_kit::component::ThemeColor::default();
+        let props = Props::new(&over, &theme, std::path::Path::new(""));
+        let specs: BTreeMap<String, Spec> = serde_json::from_str(json).unwrap();
+        let mut problems = vec![];
+        let t = compile(&specs, &props, &mut problems);
+        (t, problems)
+    }
+
+    #[test]
+    fn docks_and_parts_compile() {
+        let (t, problems) = compiled(
+            r#"{"w": {"split": "row", "children": [{"dock": "left", "split": "column", "accepts": ["panel"],
+                "zones": ["before", "after"], "strip": "left",
+                "children": [{"part": "explorer"}, {"part": "scratches"}]}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let docks = t.docks("w");
+        assert_eq!(docks.len(), 1);
+        assert_eq!(docks[0].name, "left");
+        assert_eq!(docks[0].accepts, ["panel"]);
+        let a = crate::arrange::Arrangement::defaults("w/left", &docks);
+        assert_eq!(a.encode(), "left=[c explorer@- scratches@-]");
+        assert!(t.parts().contains(&("explorer", "panel".to_string())));
+        assert!(t.part("scratches").is_some() && t.part("changes").is_none());
+    }
+
+    #[test]
+    fn fixed_part_size_is_a_default() {
+        let (t, problems) = compiled(
+            r#"{"w": {"dock": "left", "split": "column", "accepts": ["panel"],
+                "children": [{"part": "explorer"}, {"part": "scratches", "fixed": true, "size": 220}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let a = crate::arrange::Arrangement::defaults("w/left", &t.docks("w"));
+        assert_eq!(a.encode(), "left=[c explorer@- scratches@220px]");
+    }
+
+    #[test]
+    fn part_placed_twice_is_reported() {
+        let (t, problems) = compiled(
+            r#"{"w": {"children": [
+                {"dock": "a", "split": "column", "children": [{"part": "explorer"}]},
+                {"dock": "b", "split": "column", "children": [{"part": "explorer"}]}]}}"#,
+        );
+        assert_eq!(problems.iter().filter(|p| p.contains("placed twice")).count(), 1, "{problems:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(t.parts().iter().filter(|(n, _)| *n == "explorer").count(), 1);
     }
 }
