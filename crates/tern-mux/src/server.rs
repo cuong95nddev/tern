@@ -417,7 +417,7 @@ impl Server {
                 // Programs and folders change rarely and cost a process scan:
                 // asked every few ticks, kept in between.
                 let list = match &last {
-                    Some(l) if ticks % WATCH_SCANS_EVERY != 0 => server.list_keeping(l),
+                    Some(l) if !ticks.is_multiple_of(WATCH_SCANS_EVERY) => server.list_keeping(l),
                     _ => server.list(),
                 };
                 ticks = ticks.wrapping_add(1);
