@@ -18,7 +18,7 @@
 //! The built-in templates (`templates.json`) draw Tern as it looks out of the
 //! box; one given in a theme or `settings.json` replaces the one of that name.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use gpui_kit::*;
@@ -466,6 +466,8 @@ pub struct Node {
     split: Option<Axis>,
     panel: Panel,
     frame: Option<SharedString>,
+    /// As a part: what a dock matches it on (`panel` when unset).
+    kind: Option<String>,
     dock: Option<Arc<DockNode>>,
     /// Dragging this box drags the part it is drawn for.
     #[allow(dead_code)] // As `DockNode`.
@@ -504,12 +506,75 @@ const ZONES: &[&str] = &["before", "after"];
 /// Reads `specs` (the built-in templates with the theme's and the
 /// settings' over them) with `props`; what's wrong goes to `problems`.
 pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec<String>) -> Templates {
-    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![], parts: BTreeMap::new() };
+    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![] };
     for name in specs.keys() {
         c.template(name);
     }
-    let docks = c.done.iter().map(|(name, node)| (name.clone(), docks_of(node))).collect();
-    Templates { nodes: c.done, docks, parts: c.parts }
+    // A template no other uses is a root: the parts and docks of its expanded
+    // tree are the ones placed, so a repeat (also through `use`) is a problem.
+    let mut used = BTreeSet::new();
+    specs.values().for_each(|s| uses(s, &mut used));
+    let mut parts = BTreeMap::new();
+    let mut docks_seen = BTreeSet::new();
+    for name in specs.keys().filter(|n| !used.contains(n.as_str())) {
+        if let Some(root) = c.done.get(name) {
+            let mut root = (**root).clone();
+            let mut seen = Seen { parts: &mut parts, docks: &mut docks_seen, root: name, problems: c.problems };
+            seen.walk(&mut root);
+            c.done.insert(name.clone(), Arc::new(root));
+        }
+    }
+    let docks = c
+        .done
+        .iter()
+        .map(|(name, node)| {
+            let mut docks = docks_of(node);
+            let mut names = BTreeSet::new();
+            docks.retain(|d| names.insert(d.name.clone()));
+            (name.clone(), docks)
+        })
+        .collect();
+    Templates { nodes: c.done, docks, parts }
+}
+
+/// The templates `spec` uses, below it too.
+fn uses(spec: &Spec, out: &mut BTreeSet<String>) {
+    out.extend(spec.use_.clone());
+    spec.item.iter().for_each(|i| uses(i, out));
+    spec.children.iter().for_each(|c| uses(c, out));
+}
+
+/// The parts and docks placed so far.
+struct Seen<'a> {
+    parts: &'a mut BTreeMap<&'static str, (String, Node)>,
+    docks: &'a mut BTreeSet<String>,
+    root: &'a str,
+    problems: &'a mut Vec<String>,
+}
+
+impl Seen<'_> {
+    /// Indexes the parts of `node` with their use-site settings; a part or dock
+    /// seen before turns into a plain box, so it is drawn once.
+    fn walk(&mut self, node: &mut Node) {
+        if let What::Part(name) = node.what {
+            if self.parts.contains_key(name) {
+                self.problems.push(format!("templates.{}: part \"{name}\" placed twice", self.root));
+                node.what = What::Box;
+            } else {
+                self.parts.insert(name, (node.kind.clone().unwrap_or_else(|| "panel".to_owned()), node.clone()));
+            }
+        }
+        if let Some(d) = &node.dock
+            && !self.docks.insert(d.info.name.clone())
+        {
+            self.problems.push(format!("templates.{}: dock \"{}\" placed twice", self.root, d.info.name));
+            node.dock = None;
+        }
+        if let What::Each(_, item) = &mut node.what {
+            self.walk(Arc::make_mut(item));
+        }
+        node.children.iter_mut().for_each(|c| self.walk(c));
+    }
 }
 
 /// The docks in `node`, in drawing order.
@@ -531,7 +596,6 @@ struct Compiler<'a, 'b> {
     done: HashMap<String, Arc<Node>>,
     /// The templates being read, to catch one that uses itself.
     stack: Vec<String>,
-    parts: BTreeMap<&'static str, (String, Node)>,
 }
 
 impl Compiler<'_, '_> {
@@ -593,6 +657,7 @@ impl Compiler<'_, '_> {
                 fixed: panel.fixed.or(node.panel.fixed),
             };
             node.frame = s.frame.clone().map(Into::into).or(node.frame);
+            node.kind = s.kind.clone().or(node.kind);
             node.handle |= s.handle;
             if s.drag.is_some() {
                 node.drag = self.flag(&s.drag, &format!("{at}.drag"));
@@ -660,10 +725,6 @@ impl Compiler<'_, '_> {
             }
         } else if let Some(part) = &s.part {
             match PARTS.iter().find(|n| **n == part) {
-                Some(n) if self.parts.contains_key(n) => {
-                    self.problems.push(format!("{at}.part: \"{part}\" placed twice"));
-                    What::Box
-                },
                 Some(n) => What::Part(n),
                 None => {
                     self.problems.push(format!("{at}.part: no part \"{part}\" (there are: {})", PARTS.join(", ")));
@@ -712,7 +773,7 @@ impl Compiler<'_, '_> {
         let dock = self.dock(s, at, split, &children);
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
-        let node = Node {
+        Node {
             what,
             path: at.into(),
             element: element.map_or("", |e| e.name),
@@ -737,13 +798,9 @@ impl Compiler<'_, '_> {
             dock,
             handle: s.handle,
             drag: self.flag(&s.drag, &format!("{at}.drag")),
+            kind: s.kind.clone(),
             children,
-        };
-        if let What::Part(name) = node.what {
-            let kind = s.kind.clone().unwrap_or_else(|| "panel".to_owned());
-            self.parts.insert(name, (kind, node.clone()));
         }
-        node
     }
 
     /// The dock `s` declares, if it does; its default parts are its children.
@@ -759,6 +816,9 @@ impl Compiler<'_, '_> {
                 Dir::Column
             },
         };
+        if s.accepts.is_empty() {
+            self.problems.push(format!("{at}.accepts: a dock needs at least one part name or kind"));
+        }
         let mut zones = vec![];
         for z in &s.zones {
             match ZONES.iter().find(|n| **n == z) {
@@ -881,7 +941,7 @@ mod tests {
         .unwrap();
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
-        assert_eq!(problems.len(), 8, "{problems:?}");
+        assert_eq!(problems.len(), 10, "{problems:?}");
     }
 
     fn compiled(json: &str) -> (super::Templates, Vec<String>) {
@@ -927,11 +987,45 @@ mod tests {
     fn part_placed_twice_is_reported() {
         let (t, problems) = compiled(
             r#"{"w": {"children": [
-                {"dock": "a", "split": "column", "children": [{"part": "explorer"}]},
-                {"dock": "b", "split": "column", "children": [{"part": "explorer"}]}]}}"#,
+                {"dock": "a", "split": "column", "accepts": ["panel"], "children": [{"part": "explorer"}]},
+                {"dock": "b", "split": "column", "accepts": ["panel"], "children": [{"part": "explorer"}]}]}}"#,
         );
         assert_eq!(problems.iter().filter(|p| p.contains("placed twice")).count(), 1, "{problems:?}");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(t.parts().iter().filter(|(n, _)| *n == "explorer").count(), 1);
+    }
+
+    #[test]
+    fn part_and_dock_used_twice_are_reported() {
+        let (t, problems) = compiled(
+            r#"{"w": {"children": [{"use": "p"}, {"use": "p"}]},
+                "p": {"children": [{"part": "explorer"},
+                    {"dock": "d", "split": "column", "accepts": ["panel"], "children": [{"part": "changes"}]}]}}"#,
+        );
+        assert_eq!(problems.iter().filter(|p| p.contains("part \"explorer\" placed twice")).count(), 1, "{problems:?}");
+        assert_eq!(problems.iter().filter(|p| p.contains("part \"changes\" placed twice")).count(), 1, "{problems:?}");
+        assert_eq!(problems.iter().filter(|p| p.contains("dock \"d\" placed twice")).count(), 1, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(t.docks("w").len(), 1);
+        assert_eq!(t.parts().len(), 2);
+    }
+
+    #[test]
+    fn part_keeps_its_use_site_settings() {
+        let (t, problems) = compiled(
+            r#"{"w": {"children": [{"use": "sc", "fixed": true, "size": 220, "min": 90, "kind": "tool"}]},
+                "sc": {"part": "scratches"}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let n = t.part("scratches").unwrap();
+        assert!(n.panel.fixed.is_some() && n.panel.size.is_some() && n.panel.min.is_some());
+        assert_eq!(t.parts(), [("scratches", "tool".to_string())]);
+    }
+
+    #[test]
+    fn dock_without_accepts_is_reported() {
+        let (_, problems) = compiled(r#"{"w": {"dock": "d", "split": "row"}}"#);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("accepts"));
     }
 }
