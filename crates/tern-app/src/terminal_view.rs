@@ -384,6 +384,7 @@ impl TerminalView {
                 self.spawn_error = Some(format!("background server unavailable: {err}"));
             },
         }
+        cx.notify();
         self._pump = Some(cx.spawn(async move |this, cx| {
             while let Ok(first) = rx.recv_async().await {
                 let mut batch = vec![first];

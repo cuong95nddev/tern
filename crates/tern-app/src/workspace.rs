@@ -450,6 +450,9 @@ pub struct Workspace {
     docks_epoch: usize,
     /// The templates generation and key the arrangement was last fitted to.
     arranged_for: Option<(u64, String)>,
+    /// The arrangement for `arranged_for`, shared by every frame until it
+    /// changes.
+    arranged: Option<Arc<Arrangement>>,
     /// What fitting the stored arrangement to the templates found.
     arrange_problems: Vec<String>,
     _subs: Vec<Subscription>,
@@ -593,6 +596,7 @@ impl Workspace {
             docks_epoch: 0,
             arrangements: Kept::new(saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
             arranged_for: None,
+            arranged: None,
             arrange_problems: vec![],
             _subs: vec![tree_sub, changes_sub, scratches_sub],
         };
@@ -2578,12 +2582,16 @@ impl Workspace {
         let now = Some((templates.generation(), key.clone()));
         if self.arranged_for != now {
             self.arranged_for = now;
+            self.arranged = None;
             let parts = templates.parts();
             let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
             self.arrange_problems = self.arrangements.fit(&key, &docks, &parts);
             self.docks_epoch += 1;
         }
-        self.arrangements.get(&key).cloned().map(Arc::new)
+        if self.arranged.is_none() {
+            self.arranged = self.arrangements.get(&key).cloned().map(Arc::new);
+        }
+        self.arranged.clone()
     }
 
     /// The user moved or resized a part: keep it in the arrangement.
@@ -2591,6 +2599,7 @@ impl Workspace {
         let Some((_, key)) = &self.arranged_for else { return };
         let key = key.clone();
         let Some(a) = self.arrangements.get_mut(&key) else { return };
+        self.arranged = None;
         match change {
             Change::Move { part, kind, dock, at } => {
                 let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
@@ -3059,10 +3068,11 @@ impl Workspace {
         let vertical = window_state::tab_layout() == TabLayout::Vertical;
         let title = self.pane_active_ix(pane).map(|ix| self.full_title(ix, cx)).unwrap_or_default();
         let content = match self.pane_active_ix(pane).map(|ix| &self.tabs[ix]) {
-            Some(CenterTab::Term(t)) => t.view.clone().into_any_element(),
-            Some(CenterTab::File { view, .. }) => view.clone().into_any_element(),
-            Some(CenterTab::Diff(d)) => d.clone().into_any_element(),
-            Some(CenterTab::Scratch { view: s, .. }) => s.clone().into_any_element(),
+            // Cached: one terminal's output then redraws only itself.
+            Some(CenterTab::Term(t)) => t.view.clone().cached(cache_layout()).into_any_element(),
+            Some(CenterTab::File { view, .. }) => view.clone().cached(cache_layout()).into_any_element(),
+            Some(CenterTab::Diff(d)) => d.clone().cached(cache_layout()).into_any_element(),
+            Some(CenterTab::Scratch { view: s, .. }) => s.clone().cached(cache_layout()).into_any_element(),
             None => self.empty_pane(pane, cx).into_any_element(),
         };
         let scope = template::Scope::new(format!("pane-{pane}"))
@@ -3448,6 +3458,12 @@ pub fn confirm_close<T: 'static>(
     .detach();
 }
 
+/// The layout of a cached view: it fills the place it is given (a cached
+/// view isn't measured from its contents).
+fn cache_layout() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
 fn notify_system(title: &str, body: &str, cx: &mut App) {
     cx.show_system_notification(SystemNotification {
         tag: "tern".into(),
@@ -3512,9 +3528,9 @@ impl Render for Workspace {
             .var("settings_error", settings_error)
             .slot("left_strip", left_strip)
             .slot("right_strip", right_strip)
-            .slot("explorer", self.tree.clone())
-            .slot("scratches", self.scratches.clone())
-            .slot("changes", self.changes.clone())
+            .slot("explorer", self.tree.clone().cached(cache_layout()))
+            .slot("scratches", self.scratches.clone().cached(cache_layout()))
+            .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("center", center);
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
