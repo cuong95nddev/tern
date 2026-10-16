@@ -68,8 +68,9 @@ impl Watcher {
             Some(ServerMsg::Hello { major, minor, .. }) if major == MAJOR => minor,
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
         };
-        // Lists may be far apart: no read timeout from here on.
-        writer.set_read_timeout(None)?;
+        // Lists may be far apart: no read timeout from here on (on the
+        // reader's own handle: on Windows a clone's timeout is its own).
+        reader.get_ref().set_read_timeout(None)?;
         let inner = Arc::new(Inner {
             writer: Mutex::new(writer),
             alive: AtomicBool::new(true),

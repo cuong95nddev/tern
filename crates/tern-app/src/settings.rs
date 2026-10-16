@@ -205,8 +205,11 @@ pub fn init(mono_font: SharedString, cx: &mut App) {
     load(cx);
 
     let (tx, rx) = flume::unbounded::<()>();
-    match FsWatcher::new(&dir, Duration::from_millis(100), move |_| {
-        let _ = tx.send(());
+    let watched = dir.clone();
+    match FsWatcher::new(&dir, Duration::from_millis(100), move |b| {
+        if !b.paths.iter().all(|p| is_app_data(&watched, p)) {
+            let _ = tx.send(());
+        }
     }) {
         Ok(w) => cx.set_global(Watch(w)),
         Err(e) => log::warn!("settings: can't watch {}: {e}", dir.display()),
@@ -218,6 +221,18 @@ pub fn init(mono_font: SharedString, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Whether `p` is one of the files Tern keeps for itself in the config
+/// folder `dir` (on Windows it is also `dirs::data()`): the session, window
+/// places, recent folders, Claude arguments, scratches, or the temp file of
+/// one being written. They change all the time and aren't settings.
+fn is_app_data(dir: &Path, p: &Path) -> bool {
+    let Some(first) = p.strip_prefix(dir).ok().and_then(|rel| rel.components().next()) else { return false };
+    let name = first.as_os_str().to_string_lossy();
+    // `write_atomic`'s temp file: `.<name>.tern-<pid>.tmp`.
+    let name = name.strip_prefix('.').and_then(|n| n.split_once(".tern-")).map_or(&*name, |(n, _)| n);
+    matches!(name, "session" | "window" | "recent" | "claude-args" | "scratches")
 }
 
 /// The themes there are, and the one `settings.json` names.
@@ -961,7 +976,22 @@ mod tests {
     use tern_term::vt::vte::ansi::Rgb;
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, read_theme_set, terminal_palette, with_theme};
+    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, read_theme_set, terminal_palette, with_theme};
+
+    /// The session and window places live next to the settings on Windows:
+    /// saving them (every few seconds while a tab's status changes) must not
+    /// reload the theme, which repaints the terminals.
+    #[test]
+    fn own_data_files_dont_reload() {
+        let dir = std::path::Path::new("/cfg/Tern");
+        for own in ["session", "window", "recent", "claude-args", ".session.tern-42.tmp", "scratches/a.md"] {
+            assert!(is_app_data(dir, &dir.join(own)), "{own}");
+        }
+        for setting in ["settings.json", "themes/x.json", "bg.png", "sessions.json"] {
+            assert!(!is_app_data(dir, &dir.join(setting)), "{setting}");
+        }
+        assert!(!is_app_data(dir, std::path::Path::new("/elsewhere/session")));
+    }
 
     #[test]
     fn gui_only_props_are_marked() {

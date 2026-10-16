@@ -80,6 +80,22 @@ fn hook_settings_are_substituted() {
     s.close();
 }
 
+/// A program that prints nothing for longer than the hello's read timeout
+/// keeps its connection: the UI used to drop it every 3 s, reattach, and
+/// make the program repaint (a Claude Code tab flickered while idle).
+#[test]
+fn quiet_session_keeps_its_connection() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(c.alive(), "the connection dropped while the program was quiet");
+    assert!(!ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::ServerLost)));
+    s.close();
+}
+
 #[test]
 fn second_daemon_refuses_the_dir() {
     let d = daemon(Duration::from_secs(60));

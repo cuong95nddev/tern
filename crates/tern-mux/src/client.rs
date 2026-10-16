@@ -164,8 +164,10 @@ impl MuxClient {
             },
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
         };
-        // The same socket: the reader blocks from now on.
-        writer.set_read_timeout(None)?;
+        // The reader blocks from now on. Cleared on the reader's own handle:
+        // on Windows a clone's timeout is its own, and a quiet session would
+        // drop the connection every few seconds.
+        reader.get_ref().set_read_timeout(None)?;
         let inner = Arc::new(Inner {
             writer: Mutex::new(writer),
             alive: AtomicBool::new(true),

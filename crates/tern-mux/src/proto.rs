@@ -249,6 +249,11 @@ impl FrameReader {
         }
     }
 
+    /// The socket it reads.
+    pub fn get_ref(&self) -> &UnixStream {
+        &self.sock
+    }
+
     /// The next message; `Ok(None)` at end of stream. Unknown kinds are
     /// skipped.
     pub fn read<T: DeserializeOwned>(&mut self) -> io::Result<Option<T>> {
