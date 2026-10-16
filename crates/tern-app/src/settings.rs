@@ -873,6 +873,42 @@ resizing panels.
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 
+### Moving panels
+
+The explorer, scratches and changes panels sit in docks and can be dragged
+between them by their headers. In a template:
+
+- `\"part\": \"explorer\"` draws a movable view where it sits by default
+  (`explorer`, `scratches`, `changes`). Give it `\"drag\": false` (or a
+  condition) to pin it.
+- `\"dock\": \"left\"` with a `split` is an area that holds parts; its
+  children are the parts it starts with. `accepts` lists the part names or
+  kinds it takes (`[\"panel\"]`; none listed: nothing can be dropped in).
+  `zones` (`before`, `after`) say where a dropped part goes, next to the parts
+  there. `empty` is `hide` (an empty dock takes no room and shows a thin drop
+  strip only while a part it takes is dragged) or `keep`. `strip` (`left` or
+  `right`) is the tool strip whose buttons show this dock's parts.
+  `part_size` is the size a part gets when it arrives from another dock.
+- `\"handle\": true` on a box inside a part makes it the grip: the built-in
+  headers use `panel_header`. Dragging shows each zone as the `drop_zone`
+  element (`drop_zone.hover` under the pointer). Colors take `$name/NN`: the
+  color at NN% of its opacity.
+- `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
+  resizing panels.
+
+Where the panels are is kept per workspace and per template (the `workspace`
+template and the names of its docks), so another theme with other docks has its
+own arrangement and switching back restores the first. Only an arrangement you
+changed is kept: until then the template's defaults and start sizes apply, and
+a template you edit changes the layout. A panel a template no longer places is
+put back in the first dock that takes it, with a note in the status bar.
+**View > Reset Layout** drops the arrangement of the current template and goes
+back to its defaults.
+
+A `workspace` template copied from an older build that has `\"use\":
+\"workspace.left\"` must be updated: that template is gone, the docks replaced
+it. Copy the new `workspace` from `reference/templates.json`.
+
 ### Background images
 
 `window`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs` and

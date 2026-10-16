@@ -41,6 +41,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Explorer", workspace::ToggleExplorer),
         MenuItem::action("Changes", workspace::ToggleChanges),
         MenuItem::action("Scratches", workspace::ToggleScratches),
+        MenuItem::action("Reset Layout", workspace::ResetLayout),
         MenuItem::action("Focus Terminal", workspace::FocusTerminal),
         MenuItem::separator(),
         MenuItem::action("Split Right", workspace::SplitRight),

@@ -134,7 +134,7 @@ the template puts them.
 
 These fit after templates phase 4 (side panels as templates), since parts need the panels drawn by templates:
 
-A. `part`, `dock` (`accepts`, `before`/`after`, `empty`), `handle`, drop-zone element; side panels movable between
+A. **Done (2026-10-16).** `part`, `dock` (`accepts`, `before`/`after`, `empty`), `handle`, drop-zone element; side panels movable between
    left and right docks; stored per workspace; Reset Layout; `layout.locked`.
 B. Center as a dock: move the pane drop-zone code to the dock code; `edges` and `stack` for panels too.
 C. Floating parts in the window (move, resize, dock again, stored).

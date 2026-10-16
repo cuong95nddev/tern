@@ -26,7 +26,7 @@ use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::agents::Agent;
-use crate::arrange::{self, Arrangement};
+use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::DiffPane;
 use crate::dock::{ActiveDrag, Change, OnChange};
@@ -60,6 +60,7 @@ actions!(
         ToggleExplorer,
         ToggleChanges,
         ToggleScratches,
+        ResetLayout,
         FocusTerminal,
         SplitRight,
         SplitDown,
@@ -443,10 +444,7 @@ pub struct Workspace {
     drop_target: Option<(PaneId, Zone)>,
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
     /// Where the side panels sit, per template and docks (`arrange::key`).
-    arrangements: HashMap<String, Arrangement>,
-    /// The keys whose arrangement the user changed (or a session brought):
-    /// the only ones saved. The others follow the templates' defaults.
-    touched: HashSet<String>,
+    arrangements: Kept,
     /// The templates generation and key the arrangement was last fitted to.
     arranged_for: Option<(u64, String)>,
     /// What fitting the stored arrangement to the templates found.
@@ -589,9 +587,7 @@ impl Workspace {
             tab_drag: false,
             drop_target: None,
             pane_ui: RefCell::new(HashMap::new()),
-            // A key stored twice: the last one wins.
-            arrangements: saved.arrangements.iter().filter_map(|(k, e)| Some((k.clone(), Arrangement::decode(k, e)?))).collect(),
-            touched: saved.arrangements.iter().map(|(k, _)| k.clone()).collect(),
+            arrangements: Kept::new(saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
             arranged_for: None,
             arrange_problems: vec![],
             _subs: vec![tree_sub, changes_sub, scratches_sub],
@@ -2542,10 +2538,7 @@ impl Workspace {
     /// The arrangements to keep, by key: those the user changed or a session
     /// brought. Defaults aren't kept, so start sizes from the settings apply.
     fn saved_arrangements(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> =
-            self.arrangements.iter().filter(|(k, _)| self.touched.contains(*k)).map(|(k, a)| (k.clone(), a.encode())).collect();
-        out.sort();
-        out
+        self.arrangements.saved()
     }
 
     /// The arrangement of the `workspace` template's docks, fitted to the
@@ -2560,18 +2553,9 @@ impl Workspace {
         let now = Some((templates.generation(), key.clone()));
         if self.arranged_for != now {
             self.arranged_for = now;
-            self.arrange_problems = match self.arrangements.get_mut(&key).filter(|_| self.touched.contains(&key)) {
-                Some(a) => {
-                    let parts = templates.parts();
-                    let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
-                    a.reconcile(&docks, &parts)
-                },
-                // Untouched: the defaults of the templates now in effect.
-                None => {
-                    self.arrangements.insert(key.clone(), Arrangement::defaults(&key, &docks));
-                    vec![]
-                },
-            };
+            let parts = templates.parts();
+            let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
+            self.arrange_problems = self.arrangements.fit(&key, &docks, &parts);
         }
         self.arrangements.get(&key).cloned().map(Arc::new)
     }
@@ -2579,7 +2563,8 @@ impl Workspace {
     /// The user moved or resized a part: keep it in the arrangement.
     fn arrangement_changed(&mut self, change: Change, cx: &mut Context<Self>) {
         let Some((_, key)) = &self.arranged_for else { return };
-        let Some(a) = self.arrangements.get_mut(key) else { return };
+        let key = key.clone();
+        let Some(a) = self.arrangements.get_mut(&key) else { return };
         match change {
             Change::Move { part, kind, dock, at } => {
                 let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
@@ -2599,7 +2584,16 @@ impl Workspace {
                 a.widths.insert(dock.to_string(), width);
             },
         }
-        self.touched.insert(key.clone());
+        self.arrangements.touch(&key);
+        self.panels_changed(cx);
+    }
+
+    /// Puts the side panels back where the templates place them.
+    fn reset_layout(&mut self, _: &ResetLayout, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, key)) = self.arranged_for.take() {
+            self.arrangements.reset(&key);
+        }
+        self.arrange_problems.clear();
         self.panels_changed(cx);
     }
 
@@ -3372,6 +3366,10 @@ impl Workspace {
                 }
                 "ok".into()
             },
+            "layout-reset" => {
+                self.reset_layout(&ResetLayout, window, cx);
+                "ok".into()
+            },
             // What dropping PART in DOCK does: before or after TARGET, or at its end.
             cmd if cmd.starts_with("part-move ") => {
                 let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
@@ -3524,6 +3522,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenSettings, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
             .on_action(cx.listener(Self::toggle_changes))
             .on_action(cx.listener(Self::toggle_scratches))
+            .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).
             .on_action(cx.listener(|this, a: &viewer::ToggleDiff, w, cx| {

@@ -21,6 +21,7 @@
 //!   pane-drop TAB PANE ZONE (center|left|right|up|down), pane-split TAB EDGE,
 //!   pane-layout COLS ROWS, pane-tile, pane-zoom, pane-focus PANE|EDGE,
 //!   pane-close PANE   split panes (indices as `state` lists them)
+//!   layout-reset                                    put the side panels back (View > Reset Layout)
 //!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
 //!                    (as dragging its header does); `state` ends with `arrange …`
 //!   windows / ws     list windows / this window's workspaces

@@ -544,6 +544,70 @@ impl Parser<'_> {
     }
 }
 
+/// The arrangements known to a workspace, by key, and which of them the user
+/// changed. Only those are saved; the others follow the templates' defaults.
+#[derive(Debug, Default)]
+pub struct Kept {
+    arrangements: BTreeMap<String, Arrangement>,
+    touched: BTreeSet<String>,
+}
+
+impl Kept {
+    /// What a session saved, as `(key, encoded)`; a key stored twice: the last wins.
+    pub fn new<'a>(saved: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut kept = Kept::default();
+        for (key, text) in saved {
+            if let Some(a) = Arrangement::decode(key, text) {
+                kept.arrangements.insert(key.to_string(), a);
+                kept.touched.insert(key.to_string());
+            }
+        }
+        kept
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Arrangement> {
+        self.arrangements.get(key)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Arrangement> {
+        self.arrangements.get_mut(key)
+    }
+
+    /// The user changed `key`'s arrangement: keep it.
+    pub fn touch(&mut self, key: &str) {
+        self.touched.insert(key.to_string());
+    }
+
+    /// Forgets `key`'s arrangement; the next `fit` starts from the defaults.
+    pub fn reset(&mut self, key: &str) {
+        self.arrangements.remove(key);
+        self.touched.remove(key);
+    }
+
+    /// Fits `key`'s arrangement to the templates now in effect: a touched one is
+    /// reconciled, any other is rebuilt from the defaults. A kept arrangement that
+    /// ends up equal to the defaults is no longer the user's, so start sizes apply.
+    pub fn fit(&mut self, key: &str, docks: &[DockInfo], parts: &[(&str, &str)]) -> Vec<String> {
+        if self.touched.contains(key)
+            && let Some(a) = self.arrangements.get_mut(key)
+        {
+            let problems = a.reconcile(docks, parts);
+            if *a == Arrangement::defaults(key, docks) {
+                self.touched.remove(key);
+            }
+            return problems;
+        }
+        self.arrangements.insert(key.to_string(), Arrangement::defaults(key, docks));
+        self.touched.remove(key);
+        vec![]
+    }
+
+    /// The arrangements to keep, by key, sorted.
+    pub fn saved(&self) -> Vec<(String, String)> {
+        self.arrangements.iter().filter(|(k, _)| self.touched.contains(*k)).map(|(k, a)| (k.clone(), a.encode())).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,5 +806,71 @@ mod tests {
         assert!(!a.move_part("scratches", "panel", "right", Drop::End, &d));
         assert!(a.move_part("explorer", "tool", "right", Drop::End, &d));
         assert_eq!(a.dock_of("explorer"), Some("right"));
+    }
+
+    const PARTS: [(&str, &str); 3] = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
+
+    #[test]
+    fn reset_gives_defaults() {
+        let d = docks();
+        let mut a = fresh();
+        assert!(a.move_part("changes", "panel", "left", Drop::Before("explorer".into()), &d));
+        a.widths.insert("left".into(), 300.0);
+        assert_ne!(a.encode(), DEFAULT);
+        let a = Arrangement::defaults(&a.key, &d);
+        assert_eq!(a.encode(), DEFAULT);
+    }
+
+    #[test]
+    fn untouched_keys_follow_the_defaults() {
+        let mut kept = Kept::default();
+        assert!(kept.fit("k", &docks(), &PARTS).is_empty());
+        assert_eq!(kept.get("k").unwrap().encode(), DEFAULT);
+        // The templates change: an untouched key is rebuilt from the new defaults.
+        let mut d = docks();
+        d[0].defaults = part("explorer");
+        d[1].defaults = Tree::Split(Dir::Column, vec![(part("changes"), Size::Auto), (part("scratches"), Size::Auto)]);
+        kept.fit("k", &d, &PARTS);
+        assert_eq!(kept.get("k").unwrap().encode(), "left=explorer;right=[c changes@- scratches@-]");
+        assert!(kept.saved().is_empty());
+    }
+
+    #[test]
+    fn touched_keys_reconcile_and_are_saved() {
+        let mut kept = Kept::new([("k", "left=[c explorer@- ghost@-];right=changes")]);
+        let problems = kept.fit("k", &docks(), &PARTS);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(kept.get("k").unwrap().encode(), "left=[c explorer@- scratches@-];right=changes");
+        assert_eq!(kept.saved(), vec![("k".to_string(), "left=[c explorer@- scratches@-];right=changes".to_string())]);
+    }
+
+    #[test]
+    fn only_touched_keys_are_saved() {
+        let mut kept = Kept::default();
+        kept.fit("a", &docks(), &PARTS);
+        kept.fit("b", &docks(), &PARTS);
+        kept.touch("b");
+        let saved = kept.saved();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "b");
+    }
+
+    #[test]
+    fn restored_defaults_are_untouched() {
+        let mut kept = Kept::new([("k", DEFAULT)]);
+        assert_eq!(kept.saved().len(), 1);
+        kept.fit("k", &docks(), &PARTS);
+        assert!(kept.saved().is_empty());
+    }
+
+    #[test]
+    fn reset_clears_touched_and_rebuilds() {
+        let mut kept = Kept::new([("k", "left=explorer;right=[c changes@- scratches@-]")]);
+        kept.fit("k", &docks(), &PARTS);
+        kept.reset("k");
+        assert!(kept.get("k").is_none());
+        assert!(kept.saved().is_empty());
+        kept.fit("k", &docks(), &PARTS);
+        assert_eq!(kept.get("k").unwrap().encode(), DEFAULT);
     }
 }
