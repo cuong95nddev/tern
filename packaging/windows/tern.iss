@@ -125,27 +125,9 @@ begin
   end;
 end;
 
-{ The daemon runs from a copy (tern-server-*.exe), so closing the apps that
-  hold the installed tern.exe misses it, and the new Tern would keep talking to the
-  old daemon. Stop every daemon (and its shells) first; tabs start again
-  on the new one. }
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  Code: Integer;
-begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "tern-server-*"', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Result := '';
-end;
-
-function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo,
-  MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
-begin
-  Result := 'Running Tern terminals will be closed and start again afresh.' + NewLine;
-  if MemoDirInfo <> '' then
-    Result := Result + NewLine + MemoDirInfo + NewLine;
-  if MemoTasksInfo <> '' then
-    Result := Result + NewLine + MemoTasksInfo + NewLine;
-end;
+{ The background daemon runs from a copy (tern-server-*.exe), so it keeps
+  running through an install. The new Tern finds it outdated at launch and
+  asks before it ends it (restart.rs). }
 
 function PathHas(Paths, Dir: string): Boolean;
 begin
