@@ -273,6 +273,8 @@ pub struct SavedWorkspace {
     pub pane_active: Vec<Option<usize>>,
     /// Side panels the user hid: `explorer`, `changes`, `scratches`.
     pub hidden: Vec<String>,
+    /// Panel arrangements as `(key, Arrangement::encode text)`, kept opaque here.
+    pub arrangements: Vec<(String, String)>,
 }
 
 impl SavedWorkspace {
@@ -288,6 +290,7 @@ impl SavedWorkspace {
             tab_panes: vec![],
             pane_active: vec![],
             hidden: vec![],
+            arrangements: vec![],
         }
     }
 }
@@ -315,7 +318,8 @@ fn field(s: &str) -> String {
 /// kind and fields separated by tabs, after `@N` when it is in group N.
 /// A split center adds `panes`, its layout and each pane's tab (`-` for none),
 /// and `tab-panes`, each tab's pane; older builds skip both lines. `hidden`
-/// lists the side panels the user hid.
+/// lists the side panels the user hid; `arrange` is one line per panel
+/// arrangement, its key and encoded text (older builds skip it).
 fn encode_session(windows: &[SavedWindow]) -> String {
     let mut out = String::new();
     for w in windows {
@@ -327,6 +331,9 @@ fn encode_session(windows: &[SavedWindow]) -> String {
             out.push_str(&format!("\t{}\n", field(&ws.folder.display().to_string())));
             if !ws.hidden.is_empty() {
                 out.push_str(&format!("\t\thidden\t{}\n", field(&ws.hidden.join(" "))));
+            }
+            for (key, encoded) in &ws.arrangements {
+                out.push_str(&format!("\t\tarrange\t{}\t{}\n", field(key), field(encoded)));
             }
             if ws.tabs.is_empty() {
                 continue;
@@ -395,6 +402,10 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
                 ws.pane_active = active.split_whitespace().map(|a| a.parse().ok()).collect();
             } else if let Some(h) = rest.strip_prefix("hidden\t") {
                 ws.hidden = h.split_whitespace().map(str::to_owned).collect();
+            } else if let Some(a) = rest.strip_prefix("arrange\t") {
+                if let Some((key, encoded)) = a.split_once('\t') {
+                    ws.arrangements.push((key.to_owned(), encoded.to_owned()));
+                }
             } else if let Some(p) = rest.strip_prefix("tab-panes\t") {
                 ws.tab_panes = p.split_whitespace().map(|n| n.parse().unwrap_or(0)).collect();
             } else if let Some(g) = rest.strip_prefix("group\t") {
@@ -499,6 +510,7 @@ mod tests {
                         tab_panes: vec![0, 0, 1, 1, 2, 0],
                         pane_active: vec![Some(0), Some(3), None],
                         hidden: vec!["explorer".into(), "scratches".into()],
+                        arrangements: vec![("k".into(), "left=explorer".into())],
                     },
                     SavedWorkspace { hidden: vec!["changes".into()], ..SavedWorkspace::fresh(PathBuf::from("/d")) },
                 ],
@@ -507,6 +519,28 @@ mod tests {
             SavedWindow { placement: None, workspaces: vec![], active: 0 },
         ];
         assert_eq!(decode_session(&encode_session(&windows)), windows);
+    }
+
+    #[test]
+    fn arrangements_round_trip() {
+        let arrangements = vec![("workspace/left+right".to_owned(), "left=explorer;right=[c changes@- scratches@-]".to_owned())];
+        let with_tabs = SavedWorkspace {
+            tabs: vec![SavedTab::Shell { name: None, mux: None }],
+            tab_groups: vec![None],
+            tab_panes: vec![],
+            arrangements: arrangements.clone(),
+            ..SavedWorkspace::fresh(PathBuf::from("/a"))
+        };
+        let without_tabs = SavedWorkspace { arrangements, ..SavedWorkspace::fresh(PathBuf::from("/b")) };
+        let windows = vec![SavedWindow { placement: None, workspaces: vec![with_tabs, without_tabs], active: 0 }];
+        assert_eq!(decode_session(&encode_session(&windows)), windows);
+    }
+
+    #[test]
+    fn old_session_has_no_arrangement() {
+        let w = decode_session("window 0\n\t/a\n\t\thidden\texplorer\n\t\tshell\tn\n");
+        assert!(w[0].workspaces[0].arrangements.is_empty());
+        assert_eq!(w[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("n".into()), mux: None }]);
     }
 
     #[test]

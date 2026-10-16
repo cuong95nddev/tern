@@ -678,7 +678,18 @@ impl Workspace {
             .filter(|(_, shown)| !shown)
             .map(|(name, _)| name.to_owned())
             .collect();
-        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active, hidden }
+        SavedWorkspace {
+            folder: self.root.clone(),
+            tabs,
+            tab_groups,
+            groups,
+            active: self.active,
+            panes,
+            tab_panes,
+            pane_active,
+            hidden,
+            arrangements: vec![],
+        }
     }
 
     fn subscribe_viewer(viewer: &Entity<Viewer>, window: &Window, cx: &mut Context<Self>) -> Vec<Subscription> {
