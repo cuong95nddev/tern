@@ -55,7 +55,8 @@ pub struct SettingsFile {
     /// ones (`row_height`, `bar_background`, …; see `reference/elements.md`)
     /// or new ones of your own. A value is a number (pixels), `"0.875rem"`, a
     /// color, text, or `"$name"` of another token, an element property
-    /// (`"$explorer.row.height"`) or a theme color (`"$muted.foreground"`).
+    /// (`"$explorer.row.height"`) or a theme color (`"$muted.foreground"`);
+    /// a color `"$name/NN"` is that color at NN% of its opacity.
     #[schemars(with = "BTreeMap<String, serde_json::Value>")]
     pub tokens: BTreeMap<String, serde_json::Value>,
     /// Each element's own properties over its defaults, by element:
@@ -830,7 +831,8 @@ A value is a number (pixels), `\"Npx\"`, `\"Nrem\"` (scales with
 `ui.font_size`), a color (`#rrggbb`, `#rrggbbaa`, `blue-500/50`,
 `transparent`), text, or `\"$name\"`: a token, another element's property
 (`\"$explorer.row.height\"`), or a theme color by its key
-(`\"$muted.foreground\"`, `\"$tab_bar.background\"`).
+(`\"$muted.foreground\"`, `\"$tab_bar.background\"`). A color `\"$name/NN\"` is
+that color at NN% of its opacity (`\"$primary/15\"`).
 
 ## Templates
 

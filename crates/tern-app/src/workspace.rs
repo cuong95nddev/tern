@@ -3439,6 +3439,8 @@ impl Render for Workspace {
             self.drop_target = None;
             if cx.try_global::<ActiveDrag>().is_some_and(|d| d.0.is_some()) {
                 cx.set_global(ActiveDrag(None));
+                // Other windows drew zones for the drag too.
+                cx.defer(|cx| cx.refresh_windows());
             }
         }
         self.sync_panes();

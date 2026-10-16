@@ -59,7 +59,9 @@ pub fn panel_header(
     let e = style::el(element, cx);
     let own = e.text("title");
     let title = e.label(if own.is_empty() { title.into() } else { own });
-    let buttons = div().flex().items_center().gap(e.len("gap")).children(buttons);
+    // A press on a button is the button's, not the start of a panel drag.
+    let buttons =
+        div().flex().items_center().gap(e.len("gap")).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).children(buttons);
     let mut scope = template::Scope::new(element).var("part", part).var("title", title).slot("buttons", buttons);
     if let Some(n) = count {
         scope = scope.var("count", n);

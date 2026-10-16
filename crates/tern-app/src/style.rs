@@ -9,7 +9,8 @@
 //! A value is a number (logical pixels), `"0.875rem"` (scales with the UI
 //! font size), a color (`#rrggbb`, `#rrggbbaa`, `blue-500/50`,
 //! `transparent`), plain text, or `$name`: a token, another element's
-//! property (`$explorer.row.height`), or a theme color by its key.
+//! property (`$explorer.row.height`), or a theme color by its key. A color
+//! `$name` takes `/NN` for NN% of its opacity (`$primary/15`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -719,7 +720,12 @@ impl Resolver<'_> {
         if kind == Color
             && let Some((base, pct)) = name.rsplit_once('/')
         {
-            let pct: f32 = pct.trim().parse().map_err(|_| format!("\"{pct}\" is not a percentage"))?;
+            let pct: f32 = pct
+                .trim()
+                .parse()
+                .ok()
+                .filter(|p: &f32| (0. ..=100.).contains(p))
+                .ok_or_else(|| format!("\"{pct}\" is not a percentage (0 to 100)"))?;
             return match self.value_in(&format!("${base}"), kind, depth + 1, within)? {
                 Val::Color(c) => Ok(Val::Color(c.opacity(pct / 100.))),
                 v => Ok(v),
@@ -1237,6 +1243,25 @@ mod tests {
         // An element's own property shadows the box one of that name.
         let row = super::element("explorer.row").unwrap();
         assert_eq!(row.props().filter(|p| p.0 == "height").count(), 1);
+    }
+
+    #[test]
+    fn color_percentages() {
+        let mut over = Overrides::default();
+        over.elements.insert(("drop_zone", "border"), "$primary/50".into());
+        let (l, problems) = looks(&over);
+        assert_eq!(problems, Vec::<String>::new());
+        let primary = theme_color(&theme_colors(&ThemeColor::default()), "primary").unwrap();
+        assert_eq!(get(&l, "drop_zone", "border"), &Val::Color(primary.opacity(0.5)));
+        for bad in ["NaN", "inf", "-5", "500", "x"] {
+            let mut over = Overrides::default();
+            over.elements.insert(("drop_zone", "border"), format!("$primary/{bad}"));
+            let (l, problems) = looks(&over);
+            assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
+            assert!(problems[0].contains("percentage"), "{bad}: {problems:?}");
+            // The default stays.
+            assert_eq!(get(&l, "drop_zone", "border"), &Val::Color(primary.opacity(0.6)));
+        }
     }
 
     #[test]

@@ -237,7 +237,7 @@ impl Drawer<'_, '_> {
                 None => panel,
             });
         }
-        if let Some(on_change) = scope.on_change.clone().filter(|_| !docks.is_empty()) {
+        if let Some(on_change) = scope.on_change.clone().filter(|_| !docks.is_empty() && !self.locked()) {
             group = group.on_resize(move |state, window, cx| {
                 let sizes = state.read(cx).sizes().clone();
                 for (i, dock, was) in &docks {
@@ -299,13 +299,7 @@ impl Drawer<'_, '_> {
             },
             Shown::Split { dir, path, sizes, items } => (dir, path, sizes, items),
         };
-        let at: Vec<String> = path.iter().map(usize::to_string).collect();
-        let id = SharedString::from(format!("{}:dock:{}:{}", scope.id, d.name, at.join(".")));
-        let mut group = match dir {
-            arrange::Dir::Row => h_resizable(id),
-            arrange::Dir::Column => v_resizable(id),
-        };
-        let mut fixed_by_kept = vec![];
+        let mut cells = vec![];
         for (ix, child) in items {
             let part = match child {
                 Shown::Part(name) => templates.and_then(|ts| ts.part(name)).map(|p| (name, p)),
@@ -327,9 +321,21 @@ impl Drawer<'_, '_> {
                     None => (false, None),
                 },
             };
-            fixed_by_kept.push(fixed);
             let body = self.tree(d, child, scope, outer);
-            group = group.child(self.panel(&own, fixed, size, self.locked()).child(body));
+            cells.push((own, fixed, size, body));
+        }
+        if self.locked() {
+            return self.locked_tree(*dir, cells);
+        }
+        let at: Vec<String> = path.iter().map(usize::to_string).collect();
+        let id = SharedString::from(format!("{}:dock:{}:{}", scope.id, d.name, at.join(".")));
+        let mut group = match dir {
+            arrange::Dir::Row => h_resizable(id),
+            arrange::Dir::Column => v_resizable(id),
+        };
+        let fixed_by_kept: Vec<bool> = cells.iter().map(|c| c.1).collect();
+        for (own, fixed, size, body) in cells {
+            group = group.child(self.panel(&own, fixed, size, false).child(body));
         }
         if let Some(on_change) = scope.on_change.clone() {
             let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
@@ -345,6 +351,28 @@ impl Drawer<'_, '_> {
                 let sizes = arrange::merge_sizes(&stored, &kept, &shown);
                 on_change(Change::Resize { dock: dock.clone(), path: path.clone(), sizes }, window, cx);
             });
+        }
+        group.into_any_element()
+    }
+
+    /// A dock's split while the layout is locked: the same parts in a plain
+    /// row or column, with nothing to drag. Parts with a size keep it.
+    fn locked_tree(&self, dir: arrange::Dir, cells: Vec<(Panel, bool, Option<Pixels>, AnyElement)>) -> AnyElement {
+        use gpui_kit::component::ActiveTheme as _;
+        let line = self.cx.theme().border;
+        let row = dir == arrange::Dir::Row;
+        let mut group = div().flex().size_full();
+        group = if row { group.flex_row() } else { group.flex_col() };
+        for (i, (_, fixed, size, body)) in cells.into_iter().enumerate() {
+            let mut cell = div().flex().relative().size_full().min_w_0().min_h_0();
+            cell = match size.filter(|_| fixed) {
+                Some(size) => cell.flex_none().flex_basis(size),
+                None => cell.flex_1(),
+            };
+            if i > 0 {
+                cell = if row { cell.border_l_1() } else { cell.border_t_1() }.border_color(line);
+            }
+            group = group.child(cell.child(body));
         }
         group.into_any_element()
     }
