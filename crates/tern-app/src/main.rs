@@ -9,6 +9,7 @@ mod changes_view;
 mod control;
 mod diff_pane;
 mod dirs;
+mod dock;
 mod file_icons;
 mod file_tree_view;
 #[cfg(not(target_os = "macos"))]

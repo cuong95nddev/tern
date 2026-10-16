@@ -25,7 +25,8 @@ use gpui_kit::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::arrange::{Dir, DockInfo, Size, Tree};
+use crate::arrange::{Arrangement, Dir, DockInfo, Size, Tree};
+use crate::dock::OnChange;
 use crate::style::{self, Props, Val};
 
 mod draw;
@@ -235,6 +236,10 @@ pub struct Scope {
     lists: HashMap<&'static str, Vec<Scope>>,
     /// The entry's place in its list.
     index: Option<usize>,
+    /// Where the parts sit, and who hears of changes to it; docks draw their
+    /// default parts without it.
+    arrangement: Option<Arc<Arrangement>>,
+    on_change: Option<OnChange>,
 }
 
 impl Scope {
@@ -259,6 +264,13 @@ impl Scope {
         }
     }
 
+    /// The arrangement the docks draw, and where their changes go.
+    pub fn docks(mut self, arrangement: Arc<Arrangement>, on_change: OnChange) -> Self {
+        self.arrangement = Some(arrangement);
+        self.on_change = Some(on_change);
+        self
+    }
+
     // Lists come with the tab and row templates.
     #[allow(dead_code)]
     pub fn list(mut self, name: &'static str, items: Vec<Scope>) -> Self {
@@ -276,25 +288,34 @@ pub struct Templates {
     docks: HashMap<String, Vec<DockInfo>>,
     /// Every part, by name: its kind and its node.
     parts: BTreeMap<&'static str, (String, Node)>,
+    /// Which compile this is: a new one means the settings changed.
+    generation: u64,
 }
 
 impl Templates {
     /// The docks `template` holds.
-    #[allow(dead_code)] // Read by the arrangement, which comes with the drawing of docks.
     pub fn docks(&self, template: &str) -> Vec<DockInfo> {
         self.docks.get(template).cloned().unwrap_or_default()
     }
 
     /// Every part's name and kind.
-    #[allow(dead_code)] // As `docks`.
     pub fn parts(&self) -> Vec<(&'static str, String)> {
         self.parts.iter().map(|(n, (k, _))| (*n, k.clone())).collect()
     }
 
     /// The node a part is drawn with.
-    #[allow(dead_code)] // As `docks`.
     pub(crate) fn part(&self, name: &str) -> Option<&Node> {
         self.parts.get(name).map(|(_, n)| n)
+    }
+
+    /// The tool strip (`left`, `right`) that shows the parts of `dock` in `template`.
+    pub fn dock_strip(&self, template: &str, dock: &str) -> Option<SharedString> {
+        self.nodes.get(template).and_then(|n| find_dock(n, dock)).and_then(|d| d.strip.clone())
+    }
+
+    /// Bumped on every compile, so a change of settings can be noticed.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -429,7 +450,7 @@ struct Panel {
 
 /// A box that holds parts.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Drawn by the docks, which come after the format.
+#[allow(dead_code)] // `dir`, `accepts` and `zones` are read by dragging, which comes next.
 pub(crate) struct DockNode {
     name: SharedString,
     dir: Dir,
@@ -470,10 +491,10 @@ pub struct Node {
     kind: Option<String>,
     dock: Option<Arc<DockNode>>,
     /// Dragging this box drags the part it is drawn for.
-    #[allow(dead_code)] // As `DockNode`.
+    #[allow(dead_code)] // Read by dragging, which comes next.
     handle: bool,
     /// Whether it can be dragged; None is always.
-    #[allow(dead_code)] // As `DockNode`.
+    #[allow(dead_code)] // As `handle`.
     drag: Option<Cond>,
     children: Vec<Node>,
 }
@@ -534,7 +555,9 @@ pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec
             (name.clone(), docks)
         })
         .collect();
-    Templates { nodes: c.done, docks, parts }
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Templates { nodes: c.done, docks, parts, generation }
 }
 
 /// The templates `spec` uses, below it too.
@@ -575,6 +598,19 @@ impl Seen<'_> {
         }
         node.children.iter_mut().for_each(|c| self.walk(c));
     }
+}
+
+/// The dock named `name` in `node`.
+fn find_dock<'n>(node: &'n Node, name: &str) -> Option<&'n DockNode> {
+    if let Some(d) = node.dock.as_deref().filter(|d| *d.name == *name) {
+        return Some(d);
+    }
+    if let What::Each(_, item) = &node.what
+        && let Some(d) = find_dock(item, name)
+    {
+        return Some(d);
+    }
+    node.children.iter().find_map(|c| find_dock(c, name))
 }
 
 /// The docks in `node`, in drawing order.
@@ -927,6 +963,18 @@ mod tests {
         let t = compile(&builtin(), &props, &mut problems);
         assert_eq!(problems, Vec::<String>::new());
         assert!(t.nodes.contains_key("window") && t.nodes.contains_key("pane"));
+    }
+
+    #[test]
+    fn builtin_has_side_docks() {
+        let (t, problems) = compiled(super::BUILTIN);
+        assert_eq!(problems, Vec::<String>::new());
+        let docks = t.docks("workspace");
+        let names: Vec<&str> = docks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["left", "right"]);
+        let a = crate::arrange::Arrangement::defaults("workspace/left+right", &docks);
+        assert_eq!(a.encode(), "left=[c explorer@- scratches@220px];right=changes");
+        assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }
 
     #[test]

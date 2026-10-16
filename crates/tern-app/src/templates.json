@@ -30,31 +30,42 @@
             "style": { "border_bottom_width": 1, "border": "$border" },
             "split": "row",
             "children": [
-              { "use": "workspace.left", "when": "explorer || scratches", "fixed": true, "size": "$explorer.start_width", "min": 140, "max": 600 },
+              {
+                "dock": "left",
+                "split": "column",
+                "accepts": ["panel"],
+                "zones": ["before", "after"],
+                "strip": "left",
+                "fill": true,
+                "fixed": true,
+                "size": "$explorer.start_width",
+                "min": 140,
+                "max": 600,
+                "children": [
+                  { "part": "explorer", "when": "explorer" },
+                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
+                ]
+              },
               { "slot": "center" },
-              { "slot": "changes", "when": "changes", "fixed": true, "size": "$changes.start_width", "min": 180, "max": 700 }
+              {
+                "dock": "right",
+                "split": "column",
+                "accepts": ["panel"],
+                "zones": ["before", "after"],
+                "strip": "right",
+                "fill": true,
+                "fixed": true,
+                "size": "$changes.start_width",
+                "min": 180,
+                "max": 700,
+                "children": [{ "part": "changes", "when": "changes" }]
+              }
             ]
           },
           { "slot": "right_strip" }
         ]
       },
       { "use": "status_bar" }
-    ]
-  },
-  "workspace.left": {
-    "fill": true,
-    "children": [
-      {
-        "when": "explorer && scratches",
-        "fill": true,
-        "split": "column",
-        "children": [
-          { "slot": "explorer" },
-          { "slot": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
-        ]
-      },
-      { "when": "!explorer && scratches", "fill": true, "children": [{ "slot": "scratches" }] },
-      { "when": "!scratches", "fill": true, "children": [{ "slot": "explorer" }] }
     ]
   },
   "status_bar": {

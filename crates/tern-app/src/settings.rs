@@ -845,7 +845,7 @@ template (`\"use\"`), or a piece Tern draws (`\"slot\"`).
 |---|---|---|
 | `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace_tabs`, `workspace` |
 | `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
-| `workspace.left`, `status_bar` | as `workspace` | as `workspace` |
+| `status_bar` | as `workspace` | as `workspace` |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 

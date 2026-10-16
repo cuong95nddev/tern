@@ -26,8 +26,10 @@ use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::agents::Agent;
+use crate::arrange::{self, Arrangement};
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::DiffPane;
+use crate::dock::{Change, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
@@ -440,6 +442,12 @@ pub struct Workspace {
     /// Where the dragged tab would land: a pane and the part of it.
     drop_target: Option<(PaneId, Zone)>,
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
+    /// Where the side panels sit, per template and docks (`arrange::key`).
+    arrangements: HashMap<String, Arrangement>,
+    /// The templates generation and key the arrangement was last fitted to.
+    arranged_for: Option<(u64, String)>,
+    /// What fitting the stored arrangement to the templates found.
+    arrange_problems: Vec<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -578,6 +586,10 @@ impl Workspace {
             tab_drag: false,
             drop_target: None,
             pane_ui: RefCell::new(HashMap::new()),
+            // A key stored twice: the last one wins.
+            arrangements: saved.arrangements.iter().filter_map(|(k, e)| Some((k.clone(), Arrangement::decode(k, e)?))).collect(),
+            arranged_for: None,
+            arrange_problems: vec![],
             _subs: vec![tree_sub, changes_sub, scratches_sub],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
@@ -688,7 +700,7 @@ impl Workspace {
             tab_panes,
             pane_active,
             hidden,
-            arrangements: vec![],
+            arrangements: self.saved_arrangements(cx),
         }
     }
 
@@ -1941,40 +1953,46 @@ impl Workspace {
         style::el("tool_strip.button", cx).apply(Button::new(id).small().ghost().icon(Icon::new(icon)).selected(on).tooltip(tooltip))
     }
 
-    fn left_strip(&self, cx: &mut Context<Self>) -> Div {
-        let top = vec![
-            Self::strip_button(
-                "strip-explorer",
-                AssetIcon::Folder,
-                self.show_explorer,
-                format!("Explorer ({})", crate::platform::shortcut("⌘B")),
-                cx,
-            )
-            .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx))),
-            Self::strip_button(
+    /// The tool strip button of `part`.
+    fn part_button(&self, part: &str, cx: &mut Context<Self>) -> Option<Button> {
+        let shortcut = crate::platform::shortcut;
+        Some(match part {
+            "explorer" => {
+                Self::strip_button("strip-explorer", AssetIcon::Folder, self.show_explorer, format!("Explorer ({})", shortcut("⌘B")), cx)
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx)))
+            },
+            "scratches" => Self::strip_button(
                 "strip-scratches",
                 AssetIcon::StickyNote,
                 self.show_scratches,
-                format!("Scratches ({})", crate::platform::shortcut("⌘⇧S")),
+                format!("Scratches ({})", shortcut("⌘⇧S")),
                 cx,
             )
             .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
-        ];
-        Self::tool_strip("tool_strip.left", top, vec![], cx)
+            "changes" => {
+                Self::strip_button("strip-changes", AssetIcon::GitBranch, self.show_changes, format!("Changes ({})", shortcut("⌘⇧G")), cx)
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx)))
+            },
+            _ => return None,
+        })
     }
 
-    fn right_strip(&self, cx: &mut Context<Self>) -> Div {
-        let top = vec![
-            Self::strip_button(
-                "strip-changes",
-                AssetIcon::GitBranch,
-                self.show_changes,
-                format!("Changes ({})", crate::platform::shortcut("⌘⇧G")),
-                cx,
-            )
-            .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx))),
-        ];
-        Self::tool_strip("tool_strip.right", top, vec![], cx)
+    /// The `left` or `right` tool strip: a button per part in the docks it
+    /// shows, in their order (the built-in sides without an arrangement).
+    fn strip(&self, side: &str, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) -> Div {
+        let parts: Vec<String> = match (arrangement, cx.try_global::<template::Templates>()) {
+            (Some(a), Some(t)) => t
+                .docks("workspace")
+                .iter()
+                .filter(|d| t.dock_strip("workspace", &d.name).as_deref() == Some(side))
+                .filter_map(|d| a.docks.get(&d.name).cloned().flatten())
+                .flat_map(|tree| tree.parts().into_iter().map(str::to_owned).collect::<Vec<_>>())
+                .collect(),
+            _ if side == "left" => vec!["explorer".into(), "scratches".into()],
+            _ => vec!["changes".into()],
+        };
+        let top = parts.iter().filter_map(|p| self.part_button(p, cx)).collect();
+        Self::tool_strip(if side == "left" { "tool_strip.left" } else { "tool_strip.right" }, top, vec![], cx)
     }
 
     /// Where a dragged tab or group goes to the end of pane `pane`, out of any group.
@@ -2515,6 +2533,65 @@ impl Workspace {
             Err(e) => window.push_notification(e, cx),
         }
         cx.notify();
+    }
+
+    /// The arrangements to keep, by key. One that is still its template's
+    /// defaults is left out, so the start sizes in the settings keep applying.
+    fn saved_arrangements(&self, cx: &App) -> Vec<(String, String)> {
+        let defaults = cx.try_global::<template::Templates>().map(|t| {
+            let docks = t.docks("workspace");
+            Arrangement::defaults(&arrange::key("workspace", &docks), &docks)
+        });
+        let mut out: Vec<(String, String)> =
+            self.arrangements.iter().filter(|(_, a)| defaults.as_ref() != Some(*a)).map(|(k, a)| (k.clone(), a.encode())).collect();
+        out.sort();
+        out
+    }
+
+    /// The arrangement of the `workspace` template's docks, fitted to the
+    /// templates once per change of settings; None when it has no docks.
+    fn arrangement(&mut self, cx: &App) -> Option<Arc<Arrangement>> {
+        let templates = cx.try_global::<template::Templates>()?;
+        let docks = templates.docks("workspace");
+        if docks.is_empty() {
+            return None;
+        }
+        let key = arrange::key("workspace", &docks);
+        let now = Some((templates.generation(), key.clone()));
+        if self.arranged_for != now {
+            self.arranged_for = now;
+            self.arrange_problems = match self.arrangements.get_mut(&key) {
+                Some(a) => {
+                    let parts = templates.parts();
+                    let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
+                    a.reconcile(&docks, &parts)
+                },
+                None => {
+                    self.arrangements.insert(key.clone(), Arrangement::defaults(&key, &docks));
+                    vec![]
+                },
+            };
+        }
+        self.arrangements.get(&key).cloned().map(Arc::new)
+    }
+
+    /// The user moved or resized a part: keep it in the arrangement.
+    fn arrangement_changed(&mut self, change: Change, cx: &mut Context<Self>) {
+        let Some((_, key)) = &self.arranged_for else { return };
+        let Some(a) = self.arrangements.get_mut(key) else { return };
+        match change {
+            Change::Move { part, kind, dock, at } => {
+                let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
+                if !a.move_part(&part, &kind, &dock, at, &docks) {
+                    return;
+                }
+            },
+            Change::Resize { dock, path, sizes } => a.set_sizes(&dock, &path, &sizes),
+            Change::Width { dock, width } => {
+                a.widths.insert(dock.to_string(), width);
+            },
+        }
+        self.panels_changed(cx);
     }
 
     /// A side panel was shown or hidden: keep it so at the next launch.
@@ -3353,16 +3430,29 @@ impl Render for Workspace {
             Some(_) => "background: ✓".to_owned(),
             None => "background: unavailable".to_owned(),
         };
-        let settings_error = cx.try_global::<crate::settings::SettingsStatus>().and_then(|s| s.error.clone()).unwrap_or_default();
-        let scope = template::Scope::new("workspace")
+        let arrangement = self.arrangement(cx);
+        let mut settings_error: Vec<String> =
+            cx.try_global::<crate::settings::SettingsStatus>().and_then(|s| s.error.as_ref().map(|e| e.to_string())).into_iter().collect();
+        settings_error.extend(self.arrange_problems.iter().cloned());
+        let settings_error = settings_error.join("; ");
+        let (left_strip, right_strip) = (self.strip("left", arrangement.as_deref(), cx), self.strip("right", arrangement.as_deref(), cx));
+        let mut scope = template::Scope::new("workspace");
+        if let Some(a) = arrangement {
+            let ws = cx.entity().downgrade();
+            let on_change: OnChange = Rc::new(move |change, _, cx| {
+                let _ = ws.update(cx, |this, cx| this.arrangement_changed(change, cx));
+            });
+            scope = scope.docks(a, on_change);
+        }
+        let scope = scope
             .var("explorer", self.show_explorer)
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
             .var("path", self.root.display().to_string())
             .var("background", background)
             .var("settings_error", settings_error)
-            .slot("left_strip", self.left_strip(cx))
-            .slot("right_strip", self.right_strip(cx))
+            .slot("left_strip", left_strip)
+            .slot("right_strip", right_strip)
             .slot("explorer", self.tree.clone())
             .slot("scratches", self.scratches.clone())
             .slot("changes", self.changes.clone())

@@ -25,6 +25,23 @@ pub enum Tree {
     Split(Dir, Vec<(Tree, Size)>),
 }
 
+impl Tree {
+    /// The parts in the tree, in order.
+    pub fn parts(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        collect_parts(self, &mut out);
+        out
+    }
+
+    /// True when `part` is somewhere in the tree.
+    pub fn has(&self, part: &str) -> bool {
+        match self {
+            Tree::Part(name) => name == part,
+            Tree::Split(_, items) => items.iter().any(|(t, _)| t.has(part)),
+        }
+    }
+}
+
 /// Where a part is dropped, relative to a part already in the dock.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Drop {
