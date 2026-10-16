@@ -866,7 +866,6 @@ impl TerminalView {
         button: mouse::MouseButton,
         pos: Point<Pixels>,
         mods: &Modifiers,
-        cx: &mut Context<Self>,
     ) -> bool {
         let mode = self.mode();
         // Shift bypasses mouse reporting so users can still select text.
@@ -879,7 +878,6 @@ impl TerminalView {
         {
             s.write(bytes);
         }
-        cx.notify();
         true
     }
 
@@ -898,7 +896,7 @@ impl TerminalView {
             MouseButton::Right => mouse::MouseButton::Right,
             _ => return,
         };
-        if self.report_mouse(MouseAction::Press, button, ev.position, &ev.modifiers, cx) {
+        if self.report_mouse(MouseAction::Press, button, ev.position, &ev.modifiers) {
             self.mouse_button_down = Some(button);
             self.last_motion = self.grid_point(ev.position).map(|(c, r, _)| (c, r));
             return;
@@ -930,14 +928,14 @@ impl TerminalView {
         if let Some(button) = self.mouse_button_down {
             if ev.pressed_button.is_some() && cell != self.last_motion {
                 self.last_motion = cell;
-                self.report_mouse(MouseAction::Motion, button, ev.position, &ev.modifiers, cx);
+                self.report_mouse(MouseAction::Motion, button, ev.position, &ev.modifiers);
             }
             return;
         }
         if ev.pressed_button.is_none() && self.mode().contains(TermMode::MOUSE_MOTION) {
             if cell != self.last_motion {
                 self.last_motion = cell;
-                self.report_mouse(MouseAction::Motion, mouse::MouseButton::None, ev.position, &ev.modifiers, cx);
+                self.report_mouse(MouseAction::Motion, mouse::MouseButton::None, ev.position, &ev.modifiers);
             }
             return;
         }
@@ -958,7 +956,7 @@ impl TerminalView {
         if let Some(button) = self.mouse_button_down.take() {
             // Released outside the pane: report it at the nearest cell, so
             // the program doesn't think the button is still down.
-            self.report_mouse(MouseAction::Release, button, ev.position, &ev.modifiers, cx);
+            self.report_mouse(MouseAction::Release, button, ev.position, &ev.modifiers);
             return;
         }
         self.selecting = false;
@@ -1081,8 +1079,13 @@ impl TerminalView {
         let mode = self.mode();
         let button = if lines > 0 { mouse::MouseButton::WheelUp } else { mouse::MouseButton::WheelDown };
         if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
-            for _ in 0..lines.unsigned_abs().min(10) {
-                self.report_mouse(MouseAction::Press, button, ev.position, &ev.modifiers, cx);
+            // One write for every notch.
+            if mouse::wants(mode, MouseAction::Press, button)
+                && let Some((col, row, _)) = self.grid_point(ev.position)
+                && let Some(one) = mouse::encode(mode, MouseAction::Press, button, Self::mouse_mods(&ev.modifiers), col, row)
+                && let Some(s) = &self.session
+            {
+                s.write(one.repeat(lines.unsigned_abs().min(10) as usize));
             }
             return;
         }

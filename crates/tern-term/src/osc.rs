@@ -88,7 +88,7 @@ impl OscScanner {
             match self.state {
                 State::Ground => {
                     // Fast path: skip to the next ESC.
-                    match memchr(0x1b, &bytes[i..]) {
+                    match memchr::memchr(0x1b, &bytes[i..]) {
                         Some(off) => {
                             i += off + 1;
                             self.state = State::Esc;
@@ -175,10 +175,6 @@ impl OscScanner {
             emit(sig);
         }
     }
-}
-
-fn memchr(needle: u8, hay: &[u8]) -> Option<usize> {
-    hay.iter().position(|&b| b == needle)
 }
 
 /// The CSIs we act on, by parameters and final byte.

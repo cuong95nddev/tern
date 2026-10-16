@@ -197,8 +197,10 @@ impl FileTreeView {
 
     /// Git status from the changes panel (all repos under the root).
     pub fn set_git(&mut self, git: HashMap<PathBuf, GitStatus>, cx: &mut Context<Self>) {
-        self.git = git;
-        cx.notify();
+        if self.git != git {
+            self.git = git;
+            cx.notify();
+        }
     }
 
     /// Mark files Claude edited (from hooks).

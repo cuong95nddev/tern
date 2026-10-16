@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 alacritty_terminal = "0.26"
+memchr = "2.8.3"
 polling = "3.8"
 serde = { version = "1", features = ["derive"] }
 
