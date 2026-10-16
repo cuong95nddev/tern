@@ -30,6 +30,7 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 - **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
 - **Screenshots for agents**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> anywhere freezes the screen; pick a region, mark it up (boxes, arrows, text, numbered markers, mosaic), collect a few, add a prompt and send them all to an agent tab (or a new Claude Code, Codex or OpenCode tab). Needs Screen Recording access.
 - **Background sessions**: terminals keep running after you quit, and reattach on the next launch
+- **Themes and settings** in plain files: colors, fonts and sizes, applied as you save, easy for an agent to edit
 - **Automatic updates**: Tern checks for new releases and installs them in place, keeping your session (macOS; on Windows once the installer is code-signed)
 
 ## Install
@@ -90,6 +91,8 @@ Tooltips show each platform's keys.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd> | Open the file in VS Code or Cursor |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> | Capture a screenshot for an agent (works from any app) |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
+| <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> | Pick a theme |
+| <kbd>⌘</kbd><kbd>,</kbd> | Open `settings.json` |
 
 ## Background sessions
 
@@ -103,6 +106,25 @@ in `%LOCALAPPDATA%\Tern\mux`, so updates can replace `tern.exe` while it runs).
 On Windows it talks over an AF_UNIX socket and runs programs in ConPTY; who runs in a tab is found from the shell's pid.
 
 On macOS, a menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
+
+## Themes and settings
+
+Settings live in `~/.config/tern` (macOS, Linux; `XDG_CONFIG_HOME` if set) or `%APPDATA%\Tern` (Windows). Saving a file
+there applies it at once; if it can't be read, Tern keeps what it applied last and says why in the status bar.
+
+- `settings.json`: the theme (`"Tern Dark"`, `"Tern Light"` or one of yours), the UI, editor and terminal fonts, UI
+  colors over the theme's by key, terminal colors, and the look of each part of the window. Every element (a panel, its
+  rows, a bar) has its own properties (height, paddings, font size, colors, a background image); by default they point
+  at shared tokens like `$row_height`, so change a token to restyle every element that uses it, or one element's
+  property to restyle just that one. `reference/elements.md` lists them all.
+- `themes/*.json`: your themes, in [gpui-component](https://github.com/longbridge/gpui-component)'s theme format plus a
+  `terminal` palette. `reference/` has the built-in ones to copy from.
+- `settings.schema.json` (every key and what it does) and `README.md`, which Tern rewrites on each start.
+
+<kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> picks a theme, showing each as you move through the list;
+<kbd>⌘</kbd><kbd>,</kbd> opens `settings.json` in a tab.
+
+Ask an agent in a Tern tab to "make the terminal background navy" and it can do it from those files.
 
 ## Updates
 
@@ -179,6 +201,8 @@ A window holds several workspaces (one folder each) as tabs in the top bar; the 
 | Pane Layout (grid button, + menu) | Presets for big screens: 2/3/4 columns, 2/3 rows, grids 2×2, 3×2, 4×2, 3×3 (new panes start empty); **Tile All Tabs** gives each tab its own pane; Even Pane Sizes |
 | ⌃⌘←→↑↓ | Focus the pane on that side; ⌘1–9, ⌘W and ⌘⇧[ ] act on the focused pane's tabs |
 | ⌘⇧↩ | Maximize the focused pane / restore the others |
+| ⌘K ⌘T | Pick a theme (also Tern ▸ Theme…): moving through the list shows each one, ↩ saves it in `settings.json`, Esc goes back. In a terminal, ⌘K alone still clears it once the second key doesn't come |
+| ⌘, | Open `settings.json` in a tab (also Tern ▸ Settings…) |
 | ⌘-hover / ⌘-click in a terminal | Underline / open the link under the mouse: a URL (in the browser), an OSC 8 hyperlink, or a file path that exists (`src/main.rs:42:7` opens it in a tab at that line; relative paths resolve against the folder of the program running in the terminal, e.g. Claude Code's). A folder is revealed in the explorer |
 | ⌘B | Toggle explorer (or the panel buttons at the right of the tab bar) |
 | click in Changes | Preview the file's diff in a popup; **Open in Tab** moves it to a center tab |

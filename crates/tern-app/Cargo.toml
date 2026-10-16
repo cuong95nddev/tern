@@ -19,7 +19,10 @@ tiny-skia = "0.11"
 libc = "0.2.190"
 lyon_tessellation = "1"
 log = "0.4.34"
+schemars = "1.2"
 semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
 tern-menubar = { version = "0.2.2", path = "../tern-menubar" }

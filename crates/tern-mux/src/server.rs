@@ -132,6 +132,8 @@ pub(crate) struct Server {
 /// when another daemon holds the directory.
 pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     paths::ensure_private_dir(dir)?;
+    // Before an update can replace the executable.
+    paths::build_id();
     let _lock = lock(&paths::lock_path(dir))?;
     let sock = paths::socket_path(dir);
     match UnixStream::connect(&sock) {
@@ -274,7 +276,13 @@ impl Server {
 
     fn handle(self: &Arc<Self>, stream: UnixStream) -> io::Result<()> {
         let conn = Conn::start(stream.try_clone()?, self.max_queued, self.max_queued_session)?;
-        conn.send(ServerMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), pid: std::process::id() });
+        conn.send(ServerMsg::Hello {
+            major: MAJOR,
+            minor: MINOR,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            pid: std::process::id(),
+            build: paths::build_id().into(),
+        });
         let mut reader = FrameReader::new(stream, proto::MAX_CLIENT_FRAME);
         let role = match reader.read::<ClientMsg>()? {
             Some(ClientMsg::Hello { major, role, .. }) if major == MAJOR => role,

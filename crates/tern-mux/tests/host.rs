@@ -126,6 +126,21 @@ fn kill_ends_a_program_that_ignores_sighup() {
 }
 
 #[test]
+fn kill_ends_a_program_that_writes_on_its_way_out() {
+    // On a hangup it writes more than the tty holds, so it (and, once
+    // killed, its exit) waits for the output to be read.
+    let script = "trap 'yes | head -c 4000000; exit' HUP; while :; do sleep 1; done";
+    let host = Host::spawn(9, &sh(script), Arc::new(NoObserver)).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let pid = host.pid() as i32;
+    let start = Instant::now();
+    host.kill();
+    wait_until("killed", || host.exited().is_some());
+    assert!(start.elapsed() < Duration::from_secs(8), "took {:?}", start.elapsed());
+    assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "process still alive");
+}
+
+#[test]
 fn attach_mid_stream_loses_and_doubles_nothing() {
     let host = Host::spawn(5, &sh("i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; read x"), Arc::new(NoObserver)).unwrap();
     std::thread::sleep(Duration::from_millis(5));

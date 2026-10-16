@@ -23,6 +23,14 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 APP=$("$ROOT/scripts/bundle-macos.sh" "$STAGE" | tail -1)
 
+# macOS keeps privacy permissions per signing identity: a different one
+# (say Developer ID after Apple Development) means granting them again.
+req() { codesign -d -r- "$1" 2>/dev/null | sed -n 's/^designated => //p'; }
+OLD_REQ=$(req "$APP_DIR/Tern.app")
+if [ -n "$OLD_REQ" ] && [ "$OLD_REQ" != "$(req "$APP")" ]; then
+    echo "warning: signed by a different identity than the installed Tern; macOS will ask for its permissions again" >&2
+fi
+
 mkdir -p "$APP_DIR"
 rm -rf "$APP_DIR/Tern.app"
 cp -R "$APP" "$APP_DIR/Tern.app"
@@ -39,3 +47,37 @@ EOF
 chmod +x "$BIN_DIR/tern"
 
 echo "Installed $APP_DIR/Tern.app and $BIN_DIR/tern"
+
+# A running Tern, and above all its background daemon, keep running the old
+# code (the daemon even outlives Tern). Quit both and open the new one; tabs
+# come back (Claude Code ones resume their conversation). Detached, since
+# this script may run in one of the terminals that end. TERN_KEEP_RUNNING=1
+# skips it.
+# Not pgrep: it skips its own ancestors, and the daemon may be one.
+RESTART='
+exe=$1
+# Pids of $exe run as the UI (no arguments or a folder) or as "server".
+pids() {
+    ps -axo pid=,args= | awk -v exe="$exe" -v kind="$1" "{
+        pid = \$1; \$1 = \"\"; sub(/^ /, \"\")
+        if (index(\$0, exe) != 1) next
+        rest = substr(\$0, length(exe) + 1)
+        if (kind == \"server\" ? rest == \" --server\" : (rest == \"\" || rest ~ /^ [^-]/)) print pid
+    }"
+}
+[ "$2" = check ] && { [ -n "$(pids ui)$(pids server)" ]; exit; }
+if [ -n "$(pids ui)" ]; then
+    osascript -e "quit app \"Tern\"" || true
+    for _ in $(seq 50); do [ -n "$(pids ui)" ] || break; sleep 0.2; done
+    reopen=1
+fi
+p=$(pids server); [ -n "$p" ] && kill -TERM $p
+for _ in $(seq 25); do [ -n "$(pids server)" ] || break; sleep 0.2; done
+p=$(pids server); [ -n "$p" ] && kill -KILL $p
+[ -n "${reopen:-}" ] && open "$2"
+'
+EXE="$APP_DIR/Tern.app/Contents/MacOS/tern"
+if [ -z "${TERN_KEEP_RUNNING:-}" ] && sh -c "$RESTART" sh "$EXE" check; then
+    echo "Restarting Tern and its background terminals…"
+    nohup sh -c "$RESTART" sh "$EXE" "$APP_DIR/Tern.app" </dev/null >/dev/null 2>&1 &
+fi

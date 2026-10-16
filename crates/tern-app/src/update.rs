@@ -129,10 +129,18 @@ pub fn offer(r: Release, cx: &mut App) {
     let blocked = installed.as_deref().and_then(install_blocker);
     let detail = match installed {
         Some(_) if blocked.is_some() => format!("You have {}. {}", current_version(), blocked.as_deref().unwrap_or_default()),
-        Some(_) => format!(
-            "You have {}. Tern will restart to install it; your windows and workspaces come back, but running terminals are closed.",
-            current_version()
-        ),
+        Some(_) => {
+            let what = match crate::restart::running(cx) {
+                0 => String::new(),
+                1 => " 1 terminal runs now: the program in it ends.".to_owned(),
+                n => format!(" {n} terminals run now, in all windows: every program in them ends."),
+            };
+            format!(
+                "You have {}. Tern will restart to install it, and so will its background terminals, so they run the \
+                 new version too.{what} Your windows and tabs come back, and Claude Code conversations resume.",
+                current_version()
+            )
+        },
         None if !CAN_INSTALL => format!("You have {}. Download the update from the release page.", current_version()),
         None => format!("You have {}. This copy isn't an installed Tern, so download the update from the release page.", current_version()),
     };
@@ -159,12 +167,30 @@ fn install(r: Release, cx: &mut App) {
         let target = bundle.clone();
         let staged = cx.background_spawn(async move { stage(&url, &target) }).await;
         cx.update(|cx| match staged.and_then(|staged| relaunch_after_exit(&staged, &bundle)) {
-            Ok(()) => crate::quit(cx),
+            Ok(()) => stop_terminals_and_quit(cx),
             Err(e) => {
                 set_state(State::Available(r), cx);
                 alert(PromptLevel::Critical, "Couldn't install the update", &e, cx);
             },
         });
+    })
+    .detach();
+}
+
+/// End the background daemon, which would otherwise keep running the old
+/// version (and every terminal with it), then quit. The session is saved as
+/// it is first: its tabs start again at the next launch.
+fn stop_terminals_and_quit(cx: &mut App) {
+    crate::main_window::save_session(cx);
+    cx.default_global::<crate::main_window::Session>().quitting = true;
+    let mux = cx.global::<crate::AppServices>().0.mux.clone();
+    cx.spawn(async move |cx| {
+        // Waits up to a couple of seconds for the daemon to go.
+        let stopped = cx.background_spawn(async move { mux.stop_server() }).await;
+        if let Err(e) = stopped {
+            log::warn!("can't end the background server: {e}");
+        }
+        cx.update(crate::quit);
     })
     .detach();
 }

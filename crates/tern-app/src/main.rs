@@ -16,13 +16,18 @@ mod main_window;
 mod menus;
 mod panes;
 mod platform;
+mod restart;
 mod scratch;
 mod scratches_view;
 #[cfg(target_os = "macos")]
+mod settings;
 mod shot;
+mod style;
+mod template;
 mod terminal_view;
 #[cfg(target_os = "macos")]
 mod terminate;
+mod theme_picker;
 mod update;
 mod viewer;
 mod window_state;
@@ -96,7 +101,10 @@ fn main() {
     app.run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        let mono_font = platform::terminal_font(cx);
+        settings::init(mono_font, cx);
         terminal_view::bind_keys(cx);
+        theme_picker::bind_keys(cx);
         viewer::bind_keys(cx);
         file_tree_view::bind_keys(cx);
         scratch::bind_keys(cx);
@@ -131,7 +139,7 @@ fn main() {
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
         cx.on_action(|_: &main_window::NewWindow, cx| main_window::open_window(Content::Welcome, None, cx));
-        let services = workspace::services(TerminalConfig { font_family: platform::terminal_font(cx), ..TerminalConfig::default() });
+        let services = workspace::services(TerminalConfig::from_look(cx));
 
         // One receiver for hook events, fanned out to every workspace.
         let hook_events = services.hook_events.clone();

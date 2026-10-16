@@ -56,6 +56,37 @@ pub fn mux_dir() -> PathBuf {
     caches().join(if cfg!(debug_assertions) { "mux-dev" } else { "mux" })
 }
 
+/// The terminal palette of the app's theme, written by the app and read by
+/// the daemon to answer programs asking for colors.
+pub fn palette_path() -> PathBuf {
+    mux_dir().join("palette")
+}
+
+/// This executable's build: a hash of its bytes, taken on the first call
+/// (call it before an update can replace the file). Tells apart a daemon
+/// left from an earlier build of the same version, and matches the Windows
+/// daemon's copy of the app. Empty when the file can't be read.
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        use std::hash::Hasher;
+        use std::io::Read;
+        let hash = || -> io::Result<u64> {
+            let mut f = std::fs::File::open(std::env::current_exe()?)?;
+            // Fixed keys: the same bytes hash the same in every process.
+            let mut h = std::hash::DefaultHasher::new();
+            let mut buf = vec![0; 1 << 20];
+            loop {
+                match f.read(&mut buf)? {
+                    0 => return Ok(h.finish()),
+                    n => h.write(&buf[..n]),
+                }
+            }
+        };
+        hash().map(|h| format!("{h:016x}")).unwrap_or_default()
+    })
+}
+
 /// Where the daemon keeps per-session files (Claude settings).
 pub fn run_root() -> PathBuf {
     caches().join("run")

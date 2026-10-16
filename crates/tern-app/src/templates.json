@@ -1,0 +1,147 @@
+{
+  "window": {
+    "element": "window",
+    "fill": true,
+    "children": [
+      {
+        "when": "menu_bar",
+        "element": "menu_bar",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "children": [{ "slot": "menu_bar" }]
+      },
+      { "when": "!workspace", "grow": 1, "children": [{ "slot": "welcome" }] },
+      { "when": "workspace", "slot": "workspace_tabs" },
+      { "when": "workspace", "grow": 1, "children": [{ "slot": "workspace" }] }
+    ]
+  },
+  "workspace": {
+    "element": "workspace",
+    "fill": true,
+    "children": [
+      {
+        "grow": 1,
+        "layout": "row",
+        "children": [
+          { "slot": "left_strip" },
+          {
+            "grow": 1,
+            "style": { "border_bottom_width": 1, "border": "$border" },
+            "split": "row",
+            "children": [
+              { "use": "workspace.left", "when": "explorer || scratches", "fixed": true, "size": "$explorer.start_width", "min": 140, "max": 600 },
+              { "slot": "center" },
+              { "slot": "changes", "when": "changes", "fixed": true, "size": "$changes.start_width", "min": 180, "max": 700 }
+            ]
+          },
+          { "slot": "right_strip" }
+        ]
+      },
+      { "use": "status_bar" }
+    ]
+  },
+  "workspace.left": {
+    "fill": true,
+    "children": [
+      {
+        "when": "explorer && scratches",
+        "fill": true,
+        "split": "column",
+        "children": [
+          { "slot": "explorer" },
+          { "slot": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
+        ]
+      },
+      { "when": "!explorer && scratches", "fill": true, "children": [{ "slot": "scratches" }] },
+      { "when": "!scratches", "fill": true, "children": [{ "slot": "explorer" }] }
+    ]
+  },
+  "status_bar": {
+    "element": "workspace.status_bar",
+    "layout": "row",
+    "align": "center",
+    "children": [
+      { "text": "{path}" },
+      { "text": "{background}" },
+      {
+        "when": "settings_error",
+        "grow": 1,
+        "layout": "row",
+        "justify": "end",
+        "style": { "text": "$workspace.status_bar.error_text" },
+        "children": [{ "truncate": true, "text": "Settings: {settings_error}" }]
+      }
+    ]
+  },
+  "pane": {
+    "frame": "pane",
+    "element": "pane",
+    "fill": true,
+    "states": { "focused": { "border": "$pane.focused_border" } },
+    "children": [
+      {
+        "fill": true,
+        "clip": true,
+        "style": { "radius": "$pane.radius" },
+        "children": [
+          {
+            "when": "vertical",
+            "fill": true,
+            "split": "row",
+            "children": [
+              { "slot": "vertical_tabs", "fixed": true, "size": "$vertical_tabs.start_width", "min": 140, "max": 480 },
+              { "use": "pane.body" }
+            ]
+          },
+          {
+            "when": "!vertical",
+            "fill": true,
+            "children": [
+              { "slot": "tab_bar" },
+              { "grow": 1, "children": [{ "use": "pane.body" }] }
+            ]
+          }
+        ]
+      },
+      {
+        "when": "focus_line",
+        "position": { "top": 0, "left": 0, "right": 0 },
+        "style": { "height": "$pane.focus_line_height", "background": "$pane.focus_line_color" }
+      }
+    ]
+  },
+  "pane.body": {
+    "fill": true,
+    "children": [
+      {
+        "element": "pane.body",
+        "grow": 1,
+        "border_under": true,
+        "states": { "focused": { "border": "$pane.body.focused_border" } },
+        "children": [
+          {
+            "fill": true,
+            "clip": true,
+            "style": { "radius": "$pane.body.radius" },
+            "children": [{ "slot": "content" }]
+          },
+          { "slot": "drop_overlay" },
+          {
+            "when": "title",
+            "position": { "top": "$pane.title.top", "left": "$pane.title.left", "right": "$pane.title.left" },
+            "layout": "row",
+            "children": [
+              {
+                "element": "pane.title",
+                "truncate": true,
+                "text": "{title}",
+                "states": { "focused": { "text": "$pane.title.focused_text" } }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

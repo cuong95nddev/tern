@@ -236,8 +236,3 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
         _ => return None,
     })
 }
-
-#[cfg(not(debug_assertions))]
-pub fn control(_: &str, _: &mut App) -> Option<String> {
-    None
-}

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Dev loop: run a debug Tern next to the installed one, and rebuild and
 # relaunch it whenever a source file changes (a failed build keeps the old
-# one running). It leaves the installed app's saved session alone, and its
+# one running). On macOS it runs as "Tern Dev" (scripts/dev-app-macos.sh). It leaves the installed app's saved session alone, and its
 # control socket is target/dev.sock (see crates/tern-app/src/control.rs).
 #   scripts/dev.sh [FOLDER]     default: this repo
 set -u
@@ -27,9 +27,14 @@ while :; do
         last=$now
         if cargo build -p tern-app; then
             stop
-            # A relative path: socket paths are limited to ~100 bytes.
-            TERN_CONTROL=target/dev.sock target/debug/tern-app "$FOLDER" &
-            PID=$!
+            if [ "$(uname)" = Darwin ]; then
+                # As "Tern Dev", with privacy permissions of its own.
+                PID=$(scripts/dev-app-macos.sh "$FOLDER") || PID=
+            else
+                # A relative path: socket paths are limited to ~100 bytes.
+                TERN_CONTROL=target/dev.sock target/debug/tern-app "$FOLDER" &
+                PID=$!
+            fi
             echo "dev: Tern running (pid $PID)"
         else
             echo "dev: build failed, keeping the running Tern"

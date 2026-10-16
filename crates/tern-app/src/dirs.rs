@@ -24,6 +24,20 @@ pub fn data() -> PathBuf {
     }
 }
 
+/// Settings and themes the user edits: `~/.config/tern` on macOS and Linux
+/// (`XDG_CONFIG_HOME`), `%APPDATA%\Tern` on Windows.
+pub fn config() -> PathBuf {
+    if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home_or_tmp).join("Tern")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home_or_tmp().join(".config"))
+            .join("tern")
+    }
+}
+
 /// Files Tern can lose: the instance lock, per-run settings files.
 pub fn cache() -> PathBuf {
     if cfg!(target_os = "macos") {

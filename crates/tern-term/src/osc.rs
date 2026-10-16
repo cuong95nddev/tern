@@ -4,6 +4,8 @@
 //! - OSC 7501 — "program status" (`state=working:app=claude-code:...`), plus the
 //!   `OSC 7501 ; ?` capability probe which we must answer.
 //! - OSC 9 / OSC 777 — desktop notifications.
+//! - `CSI ? 2031 h` / `l` and `CSI ? 996 n` — the color scheme (light or
+//!   dark) reports Claude Code's `auto` theme asks for.
 //!
 //! The scanner never modifies the stream; bytes still flow to the VT parser.
 
@@ -19,7 +21,19 @@ pub enum OscSignal {
         title: Option<String>,
         body: String,
     },
+    /// `CSI ? 2031 h` / `l`: report color scheme changes (`CSI ? 997 ; n n`) or stop.
+    ColorSchemeReports(bool),
+    /// `CSI ? 996 n`: the program asks for the color scheme now.
+    ColorSchemeQuery,
 }
+
+/// The color scheme report: `CSI ? 997 ; 1 n` for dark, `; 2 n` for light.
+pub fn color_scheme_report(dark: bool) -> &'static [u8] {
+    if dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" }
+}
+
+/// Max parameter bytes we keep for a CSI; longer ones aren't ours.
+const MAX_CSI_LEN: usize = 32;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgramStatus {
@@ -44,6 +58,8 @@ enum State {
     Osc,
     /// Saw ESC inside OSC; expecting `\` to terminate.
     OscEsc,
+    /// Collecting a CSI's parameters.
+    Csi,
 }
 
 #[derive(Debug)]
@@ -51,6 +67,7 @@ pub struct OscScanner {
     state: State,
     buf: Vec<u8>,
     overflow: bool,
+    csi: Vec<u8>,
 }
 
 impl Default for OscScanner {
@@ -61,7 +78,7 @@ impl Default for OscScanner {
 
 impl OscScanner {
     pub fn new() -> Self {
-        Self { state: State::Ground, buf: Vec::with_capacity(256), overflow: false }
+        Self { state: State::Ground, buf: Vec::with_capacity(256), overflow: false, csi: Vec::with_capacity(MAX_CSI_LEN) }
     }
 
     /// Feed bytes, invoking `emit` for every recognised signal.
@@ -86,6 +103,9 @@ impl OscScanner {
                         self.buf.clear();
                         self.overflow = false;
                         State::Osc
+                    } else if b == b'[' {
+                        self.csi.clear();
+                        State::Csi
                     } else if b == 0x1b {
                         State::Esc
                     } else {
@@ -107,6 +127,28 @@ impl OscScanner {
                                 self.overflow = true;
                             }
                         },
+                    }
+                },
+                State::Csi => {
+                    let b = bytes[i];
+                    i += 1;
+                    match b {
+                        // Parameters and intermediates.
+                        0x20..=0x3f => {
+                            if self.csi.len() < MAX_CSI_LEN {
+                                self.csi.push(b);
+                            } else {
+                                self.state = State::Ground;
+                            }
+                        },
+                        0x40..=0x7e => {
+                            self.state = State::Ground;
+                            if let Some(sig) = parse_csi(&self.csi, b) {
+                                emit(sig);
+                            }
+                        },
+                        0x1b => self.state = State::Esc,
+                        _ => self.state = State::Ground,
                     }
                 },
                 State::OscEsc => {
@@ -137,6 +179,18 @@ impl OscScanner {
 
 fn memchr(needle: u8, hay: &[u8]) -> Option<usize> {
     hay.iter().position(|&b| b == needle)
+}
+
+/// The CSIs we act on, by parameters and final byte.
+fn parse_csi(params: &[u8], fin: u8) -> Option<OscSignal> {
+    let modes = params.strip_prefix(b"?")?;
+    let has = |n: &[u8]| modes.split(|&b| b == b';').any(|m| m == n);
+    match fin {
+        b'h' if has(b"2031") => Some(OscSignal::ColorSchemeReports(true)),
+        b'l' if has(b"2031") => Some(OscSignal::ColorSchemeReports(false)),
+        b'n' if modes == b"996" => Some(OscSignal::ColorSchemeQuery),
+        _ => None,
+    }
 }
 
 fn parse_osc(payload: &[u8]) -> Option<OscSignal> {
@@ -205,6 +259,23 @@ mod tests {
             s.feed(c, |sig| out.push(sig));
         }
         out
+    }
+
+    #[test]
+    fn color_scheme_modes_and_query() {
+        let out = scan(&[b"\x1b[?1004;20", b"31h\x1b[31mx\x1b[?996n\x1b[?2031l\x1b[?99", b"6n"]);
+        assert_eq!(
+            out,
+            [
+                OscSignal::ColorSchemeReports(true),
+                OscSignal::ColorSchemeQuery,
+                OscSignal::ColorSchemeReports(false),
+                OscSignal::ColorSchemeQuery
+            ]
+        );
+        // Not ours: other modes, a plain CSI 2031 h, an OSC still read after a CSI.
+        let out = scan(&[b"\x1b[?20310h\x1b[2031h\x1b[1;2H\x1b]7501;?\x07"]);
+        assert_eq!(out, [OscSignal::ProgramStatusProbe]);
     }
 
     #[test]

@@ -24,6 +24,7 @@
 //!   windows / ws     list windows / this window's workspaces
 //!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
 //!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window
+//!   restart-background   end the daemon now (Restart Background Terminals, no dialog)
 //!   term-type TEXT   type into the active terminal (`\n` Enter, `\e` Esc, `\a` BEL)
 //!   term-screen      the active terminal's visible text
 //!   term-info        its size, focus reporting, exit; tabs that rang; what runs

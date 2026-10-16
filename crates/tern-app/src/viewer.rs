@@ -427,19 +427,14 @@ impl Render for Viewer {
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
         let is_image = self.image.is_some();
-        let header = div()
-            .h(px(30.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.tab_bar)
-            .child(div().flex_1().truncate().text_sm().text_color(theme.foreground).child(name))
-            .when(self.dirty, |d| d.child(div().text_color(theme.warning).child("●")))
+        let look = crate::style::el("file_header", cx);
+        let button = |b: Button| crate::style::el("file_header.button", cx).apply(b);
+        let header = look
+            .apply(div().flex().items_center())
+            .child(div().flex_1().truncate().child(look.label(name)))
+            .when(self.dirty, |d| d.child(div().text_color(look.color("dirty_text")).child("●")))
             .when(markdown, |d| {
-                d.child(
+                d.child(button(
                     Button::new("preview")
                         .xsmall()
                         .ghost()
@@ -447,17 +442,17 @@ impl Render for Viewer {
                         .label(if self.mode == Mode::Preview { "Edit" } else { "Preview" })
                         .tooltip(format!("Toggle Markdown preview ({})", crate::platform::shortcut("⌘⇧V")))
                         .on_click(cx.listener(|this, _, w, cx| this.toggle_preview(&TogglePreview, w, cx))),
-                )
+                ))
             })
             .when(!is_image, |d| {
-                d.child(
+                d.child(button(
                     Button::new("diff")
                         .xsmall()
                         .ghost()
                         .selected(diff_mode)
                         .label(if diff_mode && !markdown { "Edit" } else { "Diff" })
                         .on_click(cx.listener(|this, _, w, cx| this.toggle_diff(&ToggleDiff, w, cx))),
-                )
+                ))
             })
             .child(
                 Button::new("vscode")

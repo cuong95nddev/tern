@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_mux::client::{Connector, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
@@ -127,6 +128,28 @@ impl Default for TerminalConfig {
         Self { font_family: "Menlo".into(), font_size: px(13.), line_height: 1.25, option_as_meta: OptionAsMeta::Left }
     }
 }
+
+impl TerminalConfig {
+    /// The defaults with the font of the settings in effect.
+    pub fn from_look(cx: &App) -> Self {
+        let mut c = Self::default();
+        if let Some(look) = cx.try_global::<TerminalLook>() {
+            (c.font_family, c.font_size, c.line_height) = (look.font_family.clone(), look.font_size, look.line_height);
+        }
+        c
+    }
+}
+
+/// How terminals look, from the settings ([`crate::settings`]): every
+/// terminal view follows it, so a saved change shows at once.
+pub struct TerminalLook {
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    pub line_height: f32,
+    pub palette: Arc<Palette>,
+}
+
+impl Global for TerminalLook {}
 
 /// Which Option keys are down now, `(left, right)`.
 #[cfg(target_os = "macos")]
@@ -513,7 +536,7 @@ impl TerminalView {
             TermEvent::Signal(OscSignal::Notify { title, body }) => {
                 cx.emit(TerminalEvent::Notify { title, body });
             },
-            TermEvent::Signal(OscSignal::ProgramStatusProbe) => {},
+            TermEvent::Signal(OscSignal::ProgramStatusProbe | OscSignal::ColorSchemeReports(_) | OscSignal::ColorSchemeQuery) => {},
             TermEvent::Ready { token, status, .. } => {
                 // The status it had while no one watched (e.g. Done): shown,
                 // not notified again.
@@ -525,6 +548,11 @@ impl TerminalView {
             },
             // The session is gone: start the program afresh, unless this was
             // a reconnect (the daemon died with it; Enter restarts).
+            // After a restart on purpose, start afresh on the new daemon.
+            TermEvent::NotFound if self.reattaching && crate::restart::just_restarted(cx) => {
+                self.reattaching = false;
+                self.start(cx)
+            },
             TermEvent::NotFound if self.reattaching => self.server_stopped(cx),
             TermEvent::NotFound => self.start(cx),
             TermEvent::SpawnError(err) => {
@@ -538,6 +566,11 @@ impl TerminalView {
                 // The connection went (the daemon dropped it or died): try the
                 // same session again once.
                 let id = self.session.take().and_then(|s| s.id());
+                // Restarted on purpose: its program went with the daemon.
+                if self.exited.is_none() && crate::restart::just_restarted(cx) {
+                    self.reattaching = false;
+                    return self.start(cx);
+                }
                 if self.exited.is_none()
                     && !self.reattaching
                     && let Some(id) = id
@@ -1064,6 +1097,20 @@ impl TerminalView {
         }));
     }
 
+    /// Takes the font of the settings in effect (the cell size follows) and
+    /// returns their palette.
+    fn sync_look(&mut self, cx: &App) -> Arc<Palette> {
+        let Some(look) = cx.try_global::<TerminalLook>() else {
+            return Arc::new(Palette::default());
+        };
+        let c = &mut self.config;
+        if (&c.font_family, c.font_size, c.line_height) != (&look.font_family, look.font_size, look.line_height) {
+            (c.font_family, c.font_size, c.line_height) = (look.font_family.clone(), look.font_size, look.line_height);
+            self.metrics = None;
+        }
+        look.palette.clone()
+    }
+
     fn ensure_metrics(&mut self, window: &mut Window) -> CellMetrics {
         if let Some(m) = self.metrics {
             return m;
@@ -1084,7 +1131,10 @@ impl Render for TerminalView {
             s.take_wakeup();
         }
         self.watch_focus(window, cx);
-        let bg = rgb_to_hsla(Palette::default().background);
+        let look = crate::style::el("terminal", cx);
+        let bg = rgb_to_hsla(self.sync_look(cx).background).opacity(look.num("background_opacity").clamp(0., 1.));
+        let backdrop = look.backdrop();
+        let (padding_x, padding_top) = (look.len("padding_x"), look.len("padding_top"));
         div()
             .id("terminal")
             .track_focus(&self.focus)
@@ -1114,8 +1164,11 @@ impl Render for TerminalView {
             .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             .size_full()
             .bg(bg)
-            .px_2()
-            .pt_1()
+            .px(padding_x)
+            .pt(padding_top)
+            .map(|d| look.apply(d))
+            .relative()
+            .children(backdrop)
             .child(TerminalElement { view: cx.entity() })
     }
 }
@@ -1321,6 +1374,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Frame {
         self.view.update(cx, |view, cx| {
+            let palette = view.sync_look(cx);
             let m = view.ensure_metrics(window);
             view.last_origin = bounds.origin;
             let cols = ((bounds.size.width / m.width) as u16).max(2);
@@ -1330,7 +1384,7 @@ impl Element for TerminalElement {
             let cell = |p: Pixels| (f32::from(p) * scale).round() as u16;
             let size = TermSize { cols, rows, cell_width: cell(m.width), cell_height: cell(m.height) };
             view.resize(size, cx);
-            build_frame(view, bounds, m, window)
+            build_frame(view, &palette, bounds, m, window)
         })
     }
 
@@ -1368,8 +1422,7 @@ impl Element for TerminalElement {
     }
 }
 
-fn build_frame(view: &mut TerminalView, bounds: Bounds<Pixels>, m: CellMetrics, window: &mut Window) -> Frame {
-    let palette = Palette::default();
+fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels>, m: CellMetrics, window: &mut Window) -> Frame {
     let base_font = font(view.config.font_family.clone());
     let font_size = view.config.font_size;
     let focused = view.focus.is_focused(window);

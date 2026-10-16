@@ -82,6 +82,7 @@ struct Inner {
     reveal: RevealSink,
     server_pid: u32,
     server_version: String,
+    server_build: String,
 }
 
 impl Inner {
@@ -156,10 +157,10 @@ impl MuxClient {
             &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), role: Role::Ui },
         )?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
-        let (server_pid, server_version) = match reader.read::<ServerMsg>()? {
-            Some(ServerMsg::Hello { major, pid, app_version, .. }) if major == MAJOR => {
-                log::info!("connected to daemon {pid} (Tern {app_version})");
-                (pid, app_version)
+        let (server_pid, server_version, server_build) = match reader.read::<ServerMsg>()? {
+            Some(ServerMsg::Hello { major, pid, app_version, build, .. }) if major == MAJOR => {
+                log::info!("connected to daemon {pid} (Tern {app_version}, build {build})");
+                (pid, app_version, build)
             },
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
         };
@@ -176,6 +177,7 @@ impl MuxClient {
             reveal,
             server_pid,
             server_version,
+            server_build,
         });
         let closer = Closer(inner.writer.lock().unwrap().try_clone()?);
         let i = inner.clone();
@@ -195,6 +197,12 @@ impl MuxClient {
     /// an update until it has no terminals left).
     pub fn server_version(&self) -> &str {
         &self.inner.server_version
+    }
+
+    /// Whether the daemon runs this very build (a daemon left from an
+    /// earlier build of the same version doesn't).
+    pub fn server_same_build(&self) -> bool {
+        self.inner.server_build == paths::build_id()
     }
 
     /// Open a tab's session. Returns at once: the sink gets `Ready` (or
@@ -258,6 +266,8 @@ pub struct Connector {
 
 impl Connector {
     pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> Self {
+        // Before an update can replace the executable.
+        paths::build_id();
         Self { dir, spawn_daemon, hooks, reveal, cur: Mutex::new(None) }
     }
 
@@ -287,10 +297,52 @@ impl Connector {
         self.cur.lock().unwrap().as_ref().is_some_and(MuxClient::alive)
     }
 
+    /// End the daemon and every program it runs, found by the pid it gave
+    /// (so an older daemon too, one that knows no request for it). The next
+    /// [`get`](Self::get) starts a new daemon. Fine when none runs.
+    pub fn stop_server(&self) -> io::Result<()> {
+        let Some(client) = self.existing() else { return Ok(()) };
+        let pid = client.server_pid();
+        *self.cur.lock().unwrap() = None;
+        drop(client);
+        kill_process(pid)
+    }
+
     /// The live connection's daemon version (doesn't connect).
     pub fn server_version(&self) -> Option<String> {
         self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).map(|c| c.server_version().to_owned())
     }
+
+    /// Whether the live connection's daemon runs this build (doesn't connect).
+    pub fn server_same_build(&self) -> Option<bool> {
+        self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).map(MuxClient::server_same_build)
+    }
+}
+
+/// End process `pid`: asked first, then forced.
+#[cfg(unix)]
+fn kill_process(pid: u32) -> io::Result<()> {
+    let pid = pid as libc::pid_t;
+    // SAFETY: plain signals to a pid the daemon gave us.
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    if pid <= 1 || !alive() {
+        return Ok(());
+    }
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if alive() && unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) -> io::Result<()> {
+    let status = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status()?;
+    if status.success() { Ok(()) } else { Err(io::Error::other(format!("taskkill exited with {status}"))) }
 }
 
 /// Start the daemon from this executable, detached from us.

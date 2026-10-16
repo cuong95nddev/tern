@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tern_term::mirror::Marker;
-use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY};
-use tern_term::palette::Palette;
+use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report};
+use tern_term::palette::PaletteFile;
 use tern_term::snapshot::{self, Snapshot};
 use tern_term::status::{ActivityStatus, next_status};
 use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
@@ -50,6 +50,8 @@ const MAX_LOCKED_READ: usize = 1 << 20;
 const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the rows+1 size of an attach "jiggle" lasts.
 const JIGGLE: Duration = Duration::from_millis(50);
+/// How often a program that wants color scheme reports has the theme checked.
+const SCHEME_CHECK: Duration = Duration::from_millis(300);
 /// How long a closed program has to exit after SIGHUP before SIGKILL.
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -99,11 +101,16 @@ impl Shared {
 #[derive(Clone)]
 struct Listener {
     shared: Arc<Shared>,
-    palette: Arc<Palette>,
     term: Arc<OnceLock<Arc<FairMutex<HostTerm>>>>,
 }
 
 type HostTerm = Term<Listener>;
+
+/// The app's terminal palette, shared by every session.
+fn theme_palette() -> &'static PaletteFile {
+    static FILE: OnceLock<PaletteFile> = OnceLock::new();
+    FILE.get_or_init(|| PaletteFile::new(crate::paths::palette_path()))
+}
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
@@ -113,11 +120,12 @@ impl EventListener for Listener {
             Event::ColorRequest(idx, fmt) => {
                 // Asked from inside the parser, with the lock held: overrides
                 // are read when the lock happens to be free.
+                let palette = theme_palette().get();
                 let rgb = self
                     .term
                     .get()
-                    .and_then(|t| t.try_lock_unfair().map(|t| self.palette.indexed(t.colors(), idx)))
-                    .unwrap_or_else(|| self.palette.indexed(&Default::default(), idx));
+                    .and_then(|t| t.try_lock_unfair().map(|t| palette.indexed(t.colors(), idx)))
+                    .unwrap_or_else(|| palette.indexed(&Default::default(), idx));
                 sh.send(Msg::Input(fmt(rgb).into_bytes().into()));
             },
             Event::TextAreaSizeRequest(fmt) => {
@@ -162,7 +170,7 @@ impl Host {
             subscriber: Mutex::new(None),
         });
         let cell = Arc::new(OnceLock::new());
-        let listener = Listener { shared: shared.clone(), palette: Arc::new(Palette::default()), term: cell.clone() };
+        let listener = Listener { shared: shared.clone(), term: cell.clone() };
         let config = Config { scrolling_history: cfg.scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &cfg.size, listener)));
         let _ = cell.set(term.clone());
@@ -171,6 +179,10 @@ impl Host {
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         env.entry("TERM_PROGRAM".into()).or_insert_with(|| "Tern".into());
+        // Programs that pick light or dark colors read this before asking
+        // (OSC 11, CSI ? 996 n); "foreground;background" as ANSI colors.
+        let fgbg = if theme_palette().get().is_dark() { "15;0" } else { "0;15" };
+        env.insert("COLORFGBG".into(), fgbg.into());
         let opts = Options {
             shell: cfg.program.clone().map(|p| Shell::new(tern_term::session::program_word(p), cfg.args.clone())),
             working_directory: cfg.cwd.clone(),
@@ -207,6 +219,9 @@ impl Host {
             scanner: OscScanner::new(),
             writes: VecDeque::new(),
             last_probe_reply: None,
+            scheme_reports: false,
+            dark: theme_palette().get().is_dark(),
+            scheme_checked: Instant::now(),
             jiggle: None,
         };
         std::thread::Builder::new().name(format!("host {id}")).spawn(move || driver.run())?;
@@ -348,6 +363,11 @@ struct Driver {
     scanner: OscScanner,
     writes: VecDeque<(Cow<'static, [u8]>, usize)>,
     last_probe_reply: Option<Instant>,
+    /// The program asked for color scheme reports (`CSI ? 2031 h`).
+    scheme_reports: bool,
+    /// The app's theme was dark when last looked at, and when that was.
+    dark: bool,
+    scheme_checked: Instant,
     /// The size to go back to after an attach's extra row, and when.
     jiggle: Option<(Instant, TermSize)>,
 }
@@ -366,7 +386,8 @@ impl Driver {
         let code = 'run: loop {
             let now = Instant::now();
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
-            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0)];
+            let scheme_check = self.scheme_reports.then(|| self.scheme_checked + SCHEME_CHECK);
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -385,6 +406,9 @@ impl Driver {
                     parser.stop_sync(&mut *term);
                     self.emit_marker(&Marker::SyncFlush);
                 }
+            }
+            if scheme_check.is_some_and(|t| t <= now) {
+                self.check_scheme(now);
             }
             if let Some((at, size)) = self.jiggle
                 && at <= now
@@ -407,7 +431,11 @@ impl Driver {
                         // On Windows, closing the pseudoconsole (dropping
                         // the PTY in `finish`) ends the program.
                         #[cfg(unix)]
-                        self.hang_up();
+                        if !self.hang_up() {
+                            // Dropping the PTY would wait for it forever: leave it.
+                            log::warn!("host {}: the program won't end; leaving it", self.id);
+                            return self.abandon();
+                        }
                         return self.finish(None);
                     },
                     Err(TryRecvError::Empty) => break,
@@ -506,6 +534,14 @@ impl Driver {
                     }
                 },
                 OscSignal::Notify { title, body } => self.observer.notify(self.id, title.clone(), body.clone()),
+                OscSignal::ColorSchemeReports(on) => {
+                    self.scheme_reports = *on;
+                    self.check_scheme(Instant::now());
+                },
+                OscSignal::ColorSchemeQuery => {
+                    self.dark = theme_palette().get().is_dark();
+                    self.writes.push_back((color_scheme_report(self.dark).into(), 0));
+                },
                 OscSignal::ProgramStatus(_) => {
                     let mut status = self.shared.status.lock().unwrap();
                     if let Some(new) = next_status(*status, &sig) {
@@ -514,6 +550,19 @@ impl Driver {
                         self.observer.status(self.id, old, new);
                     }
                 },
+            }
+        }
+    }
+
+    /// Tell a program that asked for it when the app's theme turned from
+    /// dark to light or back.
+    fn check_scheme(&mut self, now: Instant) {
+        self.scheme_checked = now;
+        let dark = theme_palette().get().is_dark();
+        if dark != self.dark {
+            self.dark = dark;
+            if self.scheme_reports {
+                self.writes.push_back((color_scheme_report(dark).into(), 0));
             }
         }
     }
@@ -538,8 +587,10 @@ impl Driver {
     /// End the program and the jobs it runs in the foreground: SIGHUP to
     /// their process groups (as the kernel would on a hangup, which can't
     /// come while the UI holds the PTY too), SIGKILL after a grace period.
+    /// Whether it ended: a program can be stuck past SIGKILL, and this never
+    /// waits for one forever.
     #[cfg(unix)]
-    fn hang_up(&self) {
+    fn hang_up(&self) -> bool {
         let pid = self.pty.child().id() as libc::pid_t;
         // SAFETY: plain syscalls on our own child and its PTY.
         let fg = unsafe { libc::tcgetpgrp(self.pty.file().as_raw_fd()) };
@@ -555,8 +606,14 @@ impl Driver {
         signal(libc::SIGCONT);
         // Reap it here, so the Pty's drop doesn't wait forever on a program
         // that ignores SIGHUP.
-        let deadline = Instant::now() + KILL_GRACE;
+        let mut deadline = Instant::now() + KILL_GRACE;
+        let mut killed = false;
+        let mut sink = [0u8; 4096];
         loop {
+            // A program on its way out still writes its last output to the
+            // tty, and its exit waits until that's read: read it, or it
+            // never ends (and the wait below never returns).
+            while matches!(self.pty.file().read(&mut sink), Ok(n) if n > 0) {}
             let mut st = 0;
             let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
             if r != 0 {
@@ -564,12 +621,15 @@ impl Driver {
                 if fg > 0 && fg != pid {
                     unsafe { libc::kill(-fg, libc::SIGKILL) };
                 }
-                return;
+                return true;
             }
             if Instant::now() >= deadline {
+                if killed {
+                    return false;
+                }
                 signal(libc::SIGKILL);
-                unsafe { libc::waitpid(pid, &mut st, 0) };
-                return;
+                killed = true;
+                deadline = Instant::now() + KILL_GRACE;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -577,6 +637,18 @@ impl Driver {
 
     /// The program is gone (`code` = its exit status, if known).
     fn finish(mut self, code: Option<i32>) {
+        self.report_exit(code);
+    }
+
+    /// Report the end without dropping the PTY, whose drop would wait for a
+    /// program that won't end. Its fds and this driver leak.
+    #[cfg(unix)]
+    fn abandon(mut self) {
+        self.report_exit(None);
+        std::mem::forget(self);
+    }
+
+    fn report_exit(&mut self, code: Option<i32>) {
         let _ = self.pty.deregister(&self.poller);
         {
             let _term = self.term.lock();

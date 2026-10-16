@@ -21,10 +21,11 @@ use tern_fs::{ChangeBatch, FileTree, FsWatcher, GitStatus, ops};
 
 use crate::file_icons;
 use crate::platform::bind;
+use crate::style;
 
-const ROW_HEIGHT: f32 = 22.;
-const INDENT: f32 = 14.;
 const CONTEXT: &str = "FileTree";
+/// The element a row is drawn as ([`style`]).
+const ROW: &str = "explorer.row";
 
 actions!(
     file_tree,
@@ -120,18 +121,7 @@ struct DraggedEntries {
 
 impl Render for DraggedEntries {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .shadow_md()
-            .text_sm()
-            .text_color(theme.foreground)
-            .child(self.label.clone())
+        style::drag_chip(cx).child(self.label.clone())
     }
 }
 
@@ -513,10 +503,11 @@ impl FileTreeView {
             },
         };
         let me = cx.entity().downgrade();
+        let width = style::el("dialog", cx).px("width");
         window.open_dialog(cx, move |dialog, _, _| {
             let (me, paths, question) = (me.clone(), paths.clone(), question.clone());
             dialog
-                .w(px(440.))
+                .w(width)
                 .title("Delete")
                 .content(move |c, _, cx| {
                     let muted = cx.theme().muted_foreground;
@@ -760,7 +751,7 @@ impl FileTreeView {
     /// The row likely to be widest, which the list measures for its
     /// scrollable width.
     fn widest_row(&self) -> usize {
-        let width = |r: &tern_fs::tree::Row| r.depth as f32 * INDENT + r.entry.name.chars().count() as f32 * 7.;
+        let width = |r: &tern_fs::tree::Row| r.depth as f32 * 14. + r.entry.name.chars().count() as f32 * 7.;
         let rows = self.tree.rows();
         let widest = (0..rows.len()).max_by(|&a, &b| width(&rows[a]).total_cmp(&width(&rows[b]))).unwrap_or(0);
         self.display_ix(widest)
@@ -776,8 +767,8 @@ impl FileTreeView {
             .collect()
     }
 
-    fn row_div(ix: usize, depth: usize) -> Stateful<Div> {
-        div().id(ix).h(px(ROW_HEIGHT)).w_full().flex().items_center().gap_1().pl(px(6. + INDENT * depth as f32)).pr_2().text_sm()
+    fn row_div(ix: usize, depth: usize, cx: &App) -> Stateful<Div> {
+        style::list_row(ROW, ix, depth, cx)
     }
 
     /// The name field, filling the rest of a row.
@@ -797,9 +788,9 @@ impl FileTreeView {
         let theme = cx.theme();
         let (icon, color) = if dir { file_icons::dir_icon("", false, theme) } else { file_icons::file_icon("", theme) };
         Some(
-            Self::row_div(ix, depth)
-                .child(div().size_3().flex_shrink_0())
-                .child(Icon::new(icon).size_4().text_color(color))
+            Self::row_div(ix, depth, cx)
+                .child(style::chevron_space(ROW, cx))
+                .child(style::row_icon(ROW, icon, color, cx))
                 .child(Self::name_field(&edit.input))
                 .into_any_element(),
         )
@@ -807,8 +798,11 @@ impl FileTreeView {
 
     fn render_row(&self, ix: usize, real: usize, focused: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
-        let (fg, muted, hover, active) = (theme.foreground, theme.muted_foreground, theme.list_hover, theme.list_active);
-        let (warn, ok, accent, drop_bg) = (theme.warning, theme.success, theme.accent_foreground, theme.drop_target);
+        let look = style::el(ROW, cx);
+        let (fg, hover, active) = (look.color("text"), look.color("hover_background"), look.color("selected_background"));
+        let (detail_size, focus_border) = (look.len("detail_font_size"), look.color("focus_border"));
+        let selected_text = look.is_set("selected_text").then(|| look.color("selected_text"));
+        let (accent, drop_bg) = (theme.accent_foreground, theme.drop_target);
         let row = self.tree.rows().get(real)?;
         let path: &Path = &row.entry.path;
         let selected = self.selected.iter().any(|p| p == path);
@@ -816,16 +810,12 @@ impl FileTreeView {
         let cut = self.clip.as_ref().is_some_and(|c| c.cut && c.paths.iter().any(|p| path.starts_with(p)));
         let git = self.git.get(path).copied();
         let claude = self.claude_touched.contains(path);
-        let name_color = match git {
-            Some(GitStatus::Untracked | GitStatus::Added) => ok,
-            Some(GitStatus::Modified | GitStatus::Renamed) => warn,
-            Some(GitStatus::Deleted | GitStatus::Conflicted) => theme.danger,
-            None => fg,
-        };
+        let fg = if selected { selected_text.unwrap_or(fg) } else { fg };
+        let name_color = git.map_or(fg, |g| style::git_color(g, cx));
         let name = &*row.entry.name;
         let is_dir = row.entry.is_dir;
         let (icon, icon_color) = if is_dir { file_icons::dir_icon(name, row.expanded, theme) } else { file_icons::file_icon(name, theme) };
-        let chevron = is_dir.then_some(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight });
+        let chevron = is_dir.then(|| style::chevron(ROW, row.expanded, cx));
         let renaming = self.edit.as_ref().filter(|e| e.kind == EditKind::Rename(path.to_path_buf()));
 
         let drag_paths = if selected && self.selected.len() > 1 { self.selected.clone() } else { vec![path.to_path_buf()] };
@@ -835,9 +825,9 @@ impl FileTreeView {
         };
         let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(self.root()).to_path_buf() };
 
-        let el = Self::row_div(ix, row.depth)
-            .when(selected, |d| d.bg(active))
-            .when(is_cursor && !selected, |d| d.border_1().border_color(theme.ring))
+        let el = Self::row_div(ix, row.depth, cx)
+            .when(selected, |d| d.bg(active).when_some(selected_text, |d, c| d.text_color(c)))
+            .when(is_cursor && !selected, |d| d.border_1().border_color(focus_border))
             .when(cut, |d| d.opacity(0.5))
             .hover(|d| d.bg(hover))
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(real, ev, window, cx)))
@@ -846,16 +836,18 @@ impl FileTreeView {
             .drag_over::<DraggedEntries>(move |s, _, _, _| s.bg(drop_bg))
             .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(drop_dir.clone(), &d.paths, window, cx)))
             .child(match chevron {
-                Some(c) => Icon::new(c).size_3().text_color(muted).into_any_element(),
-                None => div().size_3().flex_shrink_0().into_any_element(),
+                Some(c) => c.into_any_element(),
+                None => style::chevron_space(ROW, cx).into_any_element(),
             })
-            .child(Icon::new(icon).size_4().text_color(icon_color));
+            .child(style::row_icon(ROW, icon, icon_color, cx));
         let el = match renaming {
             Some(edit) => el.child(Self::name_field(&edit.input)),
             None => el
                 .child(div().flex_grow(1.).whitespace_nowrap().text_color(name_color).child(row.entry.name.to_string()))
-                .when(claude, |d| d.child(div().text_xs().text_color(accent).child("✦")))
-                .when_some(git.filter(|_| !is_dir), |d, g| d.child(div().text_xs().text_color(name_color).child(g.letter().to_string()))),
+                .when(claude, |d| d.child(div().text_size(detail_size).text_color(accent).child("✦")))
+                .when_some(git.filter(|_| !is_dir), |d, g| {
+                    d.child(div().text_size(detail_size).text_color(name_color).child(g.letter().to_string()))
+                }),
         };
         Some(el.into_any_element())
     }
@@ -863,11 +855,12 @@ impl FileTreeView {
 
 impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let panel = style::el("explorer", cx);
+        let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let me = cx.entity().downgrade();
         let root = self.root().to_path_buf();
-        let header_button = |id: &'static str, icon: Icon, tip: SharedString| Button::new(id).xsmall().ghost().icon(icon).tooltip(tip);
+        let header_button =
+            |id: &'static str, icon: Icon, tip: SharedString| style::header_button("explorer.header.button", id, icon, cx).tooltip(tip);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -891,20 +884,12 @@ impl Render for FileTreeView {
             .on_action(cx.listener(Self::on_open_pinned))
             .on_action(cx.listener(Self::on_cancel))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
-            .bg(theme.sidebar)
+            .map(|d| panel.container(d))
             .child(
-                div()
-                    .h(px(30.))
-                    .pl_3()
-                    .pr_1()
-                    .flex()
-                    .items_center()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child(div().flex_1().truncate().child(root_name))
+                style::panel_header("explorer.header", root_name, None, cx)
                     .child(header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into()).on_click(cx.listener(
                         |this, _, window, cx| {
                             window.focus(&this.focus, cx);
@@ -958,6 +943,7 @@ impl Render for FileTreeView {
                     )
                     // Both bars, so names wider than the panel can be scrolled to.
                     .child(Scrollbar::new(&self.scroll).id("file-tree-scrollbar"))
+                    .map(|d| style::el("explorer.list", cx).apply(d))
                     .context_menu(move |menu, _, cx| Self::context_menu(menu, &me, cx)),
             )
     }

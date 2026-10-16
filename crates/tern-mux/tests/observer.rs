@@ -75,7 +75,11 @@ fn minor_0_daemon_is_polled() {
         let mut w = sock.try_clone().unwrap();
         let mut r = proto::FrameReader::new(sock, proto::MAX_CLIENT_FRAME);
         assert!(matches!(r.read::<ClientMsg>().unwrap(), Some(ClientMsg::Hello { .. })));
-        proto::write_frame(&mut w, &ServerMsg::Hello { major: proto::MAJOR, minor: 0, app_version: "0.1.1".into(), pid: 1 }).unwrap();
+        proto::write_frame(
+            &mut w,
+            &ServerMsg::Hello { major: proto::MAJOR, minor: 0, app_version: "0.1.1".into(), pid: 1, build: String::new() },
+        )
+        .unwrap();
         while let Ok(Some(msg)) = r.read::<ClientMsg>() {
             match msg {
                 ClientMsg::List { req } => {

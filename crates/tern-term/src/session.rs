@@ -20,7 +20,7 @@ use alacritty_terminal::term::{Config, Osc52, Term};
 use alacritty_terminal::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Options, Pty, Shell};
 use polling::{Event as PollEvent, PollMode, Poller};
 
-use crate::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY};
+use crate::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report};
 use crate::palette::Palette;
 use crate::status::ActivityStatus;
 
@@ -185,6 +185,11 @@ impl Read for TapPty {
                     let _ = writer.write_all(PROGRAM_STATUS_PROBE_REPLY);
                 }
             }
+            // This palette is fixed for the session's life, so there are no
+            // changes to report; a query still gets its answer.
+            if sig == OscSignal::ColorSchemeQuery {
+                let _ = writer.write_all(color_scheme_report(shared.palette.is_dark()));
+            }
             (shared.sink)(TermEvent::Signal(sig));
         });
         Ok(n)
@@ -266,6 +271,7 @@ impl Session {
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         env.entry("TERM_PROGRAM".into()).or_insert_with(|| "Tern".into());
+        env.insert("COLORFGBG".into(), if shared.palette.is_dark() { "15;0" } else { "0;15" }.into());
         let opts = Options {
             shell: cfg.program.clone().map(|p| Shell::new(program_word(p), cfg.args.clone())),
             working_directory: cfg.cwd.clone(),

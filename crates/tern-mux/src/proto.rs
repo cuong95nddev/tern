@@ -100,6 +100,10 @@ pub enum ServerMsg {
         minor: u32,
         app_version: String,
         pid: u32,
+        /// [`paths::build_id`](crate::paths::build_id) (empty from a daemon
+        /// older than it).
+        #[serde(default)]
+        build: String,
     },
     /// Reply to `Spawn` and `Attach`. When `fd` is set, the PTY's
     /// master fd came with the frame (for foreground-process queries only).

@@ -7,7 +7,8 @@
 use gpui_kit::component::GlobalState;
 use gpui_kit::*;
 
-use crate::{OpenFolder, Quit, ToggleMenuBarIcon, main_window, terminal_view, update, workspace};
+use crate::theme_picker::{OpenSettings, SelectTheme};
+use crate::{OpenFolder, Quit, ToggleMenuBarIcon, main_window, restart, terminal_view, update, workspace};
 
 pub fn install(cx: &mut App) {
     cx.set_menus(menus());
@@ -55,6 +56,10 @@ fn menus() -> Vec<Menu> {
         let shown = tern_menubar::setting::enabled(&tern_menubar::setting::file());
         let mut items = vec![
             MenuItem::action("Check for Updates…", update::CheckForUpdates),
+            MenuItem::action("Restart Background Terminals…", restart::RestartBackground),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Theme…", SelectTheme),
             MenuItem::action(menu_bar_toggle_label(shown), ToggleMenuBarIcon),
             MenuItem::separator(),
         ];
@@ -68,9 +73,18 @@ fn menus() -> Vec<Menu> {
         let app = Menu::new("Tern").items(items);
         vec![app, Menu::new("File").items(file), edit, view]
     } else {
-        file.extend([MenuItem::separator(), MenuItem::action("Quit", Quit)]);
+        file.extend([
+            MenuItem::separator(),
+            MenuItem::action("Settings", OpenSettings),
+            MenuItem::action("Theme…", SelectTheme),
+            MenuItem::separator(),
+            MenuItem::action("Quit", Quit),
+        ]);
         let file = Menu::new("File").items(file);
-        let help = Menu::new("Help").items([MenuItem::action("Check for Updates…", update::CheckForUpdates)]);
+        let help = Menu::new("Help").items([
+            MenuItem::action("Check for Updates…", update::CheckForUpdates),
+            MenuItem::action("Restart Background Terminals…", restart::RestartBackground),
+        ]);
         vec![file, edit, view, help]
     }
 }

@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::platform::bind;
+use crate::theme_picker::{self, OpenSettings, SelectTheme};
 use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 
@@ -392,23 +393,7 @@ struct DraggedWorkspace {
 
 impl Render for DraggedWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .px_3()
-            .py_1()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .shadow_md()
-            .text_sm()
-            // Drawn outside the root view, so it doesn't inherit its text style.
-            .text_color(theme.foreground)
-            .child(Icon::new(AssetIcon::FolderOpen).xsmall())
-            .child(self.name.clone())
+        crate::style::drag_chip(cx).child(Icon::new(AssetIcon::FolderOpen).xsmall()).child(self.name.clone())
     }
 }
 
@@ -702,7 +687,9 @@ impl MainWindow {
 
     fn render_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (warn, border, drop_bg) = (theme.warning, theme.border, theme.list_hover);
+        let (warn, drop_bg) = (theme.warning, theme.list_hover);
+        let look = crate::style::el("workspace_tabs", cx);
+        let button = |b: Button| crate::style::el("workspace_tabs.button", cx).apply(b);
         let me = cx.entity().downgrade();
         let tabs = self.slots.iter().enumerate().map(|(i, slot)| {
             let ws = slot.ws.read(cx);
@@ -710,29 +697,40 @@ impl MainWindow {
             let busy = i != self.active && ws.busy(cx);
             let drag = DraggedWorkspace { ws: slot.ws.entity_id(), name: name.clone() };
             let me = me.clone();
-            Tab::new()
+            let tab_look = crate::style::el(if i == self.active { "workspace_tabs.tab_active" } else { "workspace_tabs.tab" }, cx);
+            let mut tab = crate::style::el("workspace_tabs.tab", cx).apply(Tab::new());
+            if i == self.active {
+                tab = tab_look.apply(tab);
+            }
+            let sides = (i == self.active && tab_look.is_set("border")).then(|| crate::workspace::tab_sides(tab_look.color("border")));
+            let (start, end) = sides.map_or((None, None), |(s, e)| (Some(s.into_any_element()), Some(e.into_any_element())));
+            let icon_fg = tab_look.is_set("icon_text").then(|| tab_look.color("icon_text"));
+            let close_fg = tab_look.is_set("close_text").then(|| tab_look.color("close_text"));
+            crate::workspace::tab_label(tab, &tab_look, name)
                 .prefix(
                     div()
+                        .when_some(icon_fg, |d, c| d.text_color(c))
                         .pl_2()
                         .flex()
                         .items_center()
                         .gap_1()
+                        .children(start)
                         .child(Icon::new(AssetIcon::FolderOpen).xsmall())
                         .when(busy, |d| d.child(div().text_color(warn).child("●"))),
                 )
-                .label(name)
                 .suffix(
-                    div().pr_1().child(
+                    div().pr_1().children(end).child(button(
                         Button::new(("close-ws", i))
                             .xsmall()
                             .ghost()
                             .icon(IconName::Close)
+                            .when_some(close_fg, |b, c| b.text_color(c))
                             .tooltip(format!("Close Workspace ({})", crate::platform::shortcut("⌘⇧W")))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.request_close(i, window, cx);
                             })),
-                    ),
+                    )),
                 )
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(i)))
                 .on_drag(drag, move |d, _, _, cx| {
@@ -746,7 +744,9 @@ impl MainWindow {
                     this.reorder(d.ws, i, window, cx);
                 }))
         });
-        let bar = TabBar::new("workspace-tabs")
+        let mut bar = look.apply(TabBar::new("workspace-tabs"));
+        bar.style().border_widths = Default::default();
+        let bar = bar
             .selected_index(self.active)
             .children(tabs)
             .last_empty_space(
@@ -763,18 +763,18 @@ impl MainWindow {
                         let last = this.slots.len().saturating_sub(1);
                         this.reorder(d.ws, last, window, cx);
                     }))
-                    .child(
+                    .child(button(
                         Button::new("open-workspace")
                             .xsmall()
                             .ghost()
                             .icon(Icon::new(AssetIcon::FolderPlus))
                             .tooltip(format!("Open Workspace… ({})", crate::platform::shortcut("⌘O")))
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
-                    )
+                    ))
                     .child(div().flex_1())
                     .children(crate::update::offered(cx).map(|(release, installing)| {
                         let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
-                        Button::new("update")
+                        button(Button::new("update"))
                             .xsmall()
                             .ghost()
                             .icon(Icon::new(AssetIcon::CircleArrowDown))
@@ -792,7 +792,10 @@ impl MainWindow {
             .suffix(div().w_1())
             .on_click(cx.listener(|this, ix: &usize, window, cx| this.activate(*ix, window, cx)));
         let _ = window;
-        div().id("workspace-bar").border_b_1().border_color(border).child(bar).context_menu(move |menu, _, cx| {
+        let outer = crate::style::el("workspace_tabs", cx);
+        let mut outer_div = outer.apply(div().id("workspace-bar"));
+        outer_div.style().background = None;
+        outer_div.child(bar).context_menu(move |menu, _, cx| {
             let Some(this) = me.upgrade() else { return menu };
             let this = this.read(cx);
             let Some(ix) = this.menu_ix.filter(|&ix| ix < this.slots.len()) else { return menu };
@@ -833,8 +836,11 @@ impl MainWindow {
     }
 
     fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, fg, hover, border) = (theme.muted_foreground, theme.foreground, theme.list_hover, theme.border);
+        let el = |name| crate::style::el(name, cx);
+        let (row, keys) = (el("welcome.recent"), el("welcome.keys"));
+        let (muted, fg, hover) = (row.color("detail_text"), row.color("text"), row.color("hover_background"));
+        let row_detail_size = row.len("detail_font_size");
+        let (keys_fg, keys_muted) = (keys.color("text"), keys.color("detail_text"));
         let recent = window_state::recent_folders();
         let home = crate::dirs::home();
         let pretty = move |p: &Path| match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
@@ -844,37 +850,30 @@ impl MainWindow {
         let recent_list = div().flex().flex_col().gap_0p5().children(recent.into_iter().enumerate().map(|(i, path)| {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
             let shown = pretty(&path);
-            div()
-                .id(("recent", i))
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .flex()
-                .items_center()
-                .gap_2()
-                .cursor_pointer()
+            row.apply(div().id(("recent", i)).flex().items_center().cursor_pointer())
                 .hover(move |s| s.bg(hover))
                 .child(Icon::new(AssetIcon::FolderOpen).small().text_color(muted))
                 .child(div().text_color(fg).child(name))
-                .child(div().text_xs().text_color(muted).overflow_hidden().text_ellipsis().child(shown))
+                .child(div().text_size(row_detail_size).text_color(muted).overflow_hidden().text_ellipsis().child(shown))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_folder(path.clone(), window, cx)))
         }));
         let key = |k: String, what: &'static str| {
-            div().flex().justify_between().gap_8().child(div().text_color(muted).child(what)).child(div().text_color(fg).child(k))
+            div().flex().justify_between().gap_8().child(div().text_color(keys_muted).child(what)).child(div().text_color(keys_fg).child(k))
         };
-        div().size_full().flex().items_center().justify_center().child(
-            div()
-                .w(px(520.))
-                .flex()
-                .flex_col()
-                .gap_6()
+        let welcome = el("welcome");
+        let mut outer = div().size_full().flex().items_center().justify_center();
+        // The image fills the screen; the box sizes go on the column.
+        outer.style().position = Some(Position::Relative);
+        outer.children(welcome.backdrop()).child(
+            welcome
+                .apply(div().flex().flex_col())
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Tern"))
-                        .child(div().text_color(muted).child("Terminals, files and git changes of one folder per workspace.")),
+                        .child(el("welcome.title").apply(div()).child("Tern"))
+                        .child(el("welcome.subtitle").apply(div()).child("Terminals, files and git changes of one folder per workspace.")),
                 )
                 .child(
                     div().flex().gap_2().child(
@@ -886,17 +885,12 @@ impl MainWindow {
                     ),
                 )
                 .when(!window_state::recent_folders().is_empty(), |d| {
-                    d.child(div().flex().flex_col().gap_1().child(div().text_sm().text_color(muted).child("Recent")).child(recent_list))
+                    d.child(
+                        div().flex().flex_col().gap_1().child(div().text_sm().text_color(keys_muted).child("Recent")).child(recent_list),
+                    )
                 })
                 .child(
-                    div()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(border)
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_sm()
+                    keys.apply(div().flex().flex_col())
                         .child(key(crate::platform::shortcut("⌘O"), "Open workspace"))
                         .child(key(crate::platform::shortcut("⌘⇧N"), "New window"))
                         .child(key(crate::platform::shortcut("⌘⇧W"), "Close workspace"))
@@ -1003,6 +997,10 @@ pub fn control(line: &str, cx: &mut App) -> String {
         open_window(Content::Welcome, None, cx);
         return "ok".into();
     }
+    if line.trim() == "restart-background" {
+        crate::restart::restart(cx);
+        return "ok".into();
+    }
     // Inject input outside any entity update, so handlers can update views.
     handle
         .update(cx, |_, window, cx| match crate::control::input(&line, window, cx) {
@@ -1019,42 +1017,25 @@ impl Render for MainWindow {
             window.set_window_title(&title);
             self.title = title;
         }
-        let bg = cx.theme().background;
-        let body = match self.active_ws() {
-            Some(ws) => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(self.render_bar(window, cx))
-                .child(div().flex_1().min_h_0().child(ws.clone()))
-                .into_any_element(),
-            None => self.render_welcome(cx).into_any_element(),
+        let ws = self.active_ws().cloned();
+        let scope = crate::template::Scope::new("window").var("workspace", ws.is_some());
+        let scope = match ws {
+            Some(ws) => scope.slot("workspace_tabs", self.render_bar(window, cx)).slot("workspace", ws),
+            None => scope.slot("welcome", self.render_welcome(cx)),
         };
         #[cfg(not(target_os = "macos"))]
-        let body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(30.))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().title_bar)
-                    .child(self.menu_bar.clone()),
-            )
-            .child(div().flex_1().min_h_0().child(body));
+        let scope = scope.var("menu_bar", true).slot("menu_bar", self.menu_bar.clone());
+        let body = crate::template::render("window", scope, &mut |_, _, d| d.into_any_element(), cx);
         div()
             .id("main-window")
             .key_context("MainWindow")
             .track_focus(&self.focus)
             .size_full()
-            .bg(bg)
             .on_action(cx.listener(|_, _: &OpenFolder, _, cx| prompt_open_folder(cx)))
+            .on_action(cx.listener(|_, _: &SelectTheme, window, cx| theme_picker::open(window, cx)))
+            .on_action(cx.listener(|_, _: &crate::restart::RestartBackground, window, cx| crate::restart::confirm(window, cx)))
+            // A workspace opens it in a tab; without one, the system does.
+            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| cx.open_with_system(&crate::settings::settings_path(cx))))
             .on_action(cx.listener(|_, _: &NewWindow, _, cx| open_window(Content::Welcome, None, cx)))
             .on_action(cx.listener(|this, _: &CloseWorkspace, window, cx| {
                 if !this.slots.is_empty() {
