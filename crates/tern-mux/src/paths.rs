@@ -94,7 +94,7 @@ pub fn run_root() -> PathBuf {
 
 /// The socket of this protocol major: other majors use other sockets.
 pub fn socket_path(dir: &Path) -> PathBuf {
-    dir.join(format!("mux-{MAJOR}.sock"))
+    socket_path_of(dir, MAJOR)
 }
 
 /// The lock a daemon of this protocol major holds while it serves: a
@@ -102,6 +102,30 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 /// doesn't keep this one from starting.
 pub fn lock_path(dir: &Path) -> PathBuf {
     dir.join(format!("server-{MAJOR}.lock"))
+}
+
+/// Where the daemon of this protocol major writes its pid, for when it
+/// stops answering (on Windows the locked file itself can't be read).
+pub fn pid_path(dir: &Path) -> PathBuf {
+    dir.join(format!("server-{MAJOR}.pid"))
+}
+
+/// The protocol majors other than ours that have a socket in `dir` (each
+/// may still have a daemon, an older Tern's).
+pub fn other_majors(dir: &Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let mut majors: Vec<u32> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("mux-")?.strip_suffix(".sock")?.parse().ok())
+        .filter(|&m| m != MAJOR)
+        .collect();
+    majors.sort_unstable();
+    majors
+}
+
+/// The socket of protocol major `major`.
+pub fn socket_path_of(dir: &Path, major: u32) -> PathBuf {
+    dir.join(format!("mux-{major}.sock"))
 }
 
 /// Create `dir` (0700), or check that it is a directory only we can use.
@@ -163,6 +187,16 @@ mod tests {
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(ensure_private_dir(&dir).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn other_majors_are_found_by_their_sockets() {
+        let tmp = tempfile::tempdir().unwrap();
+        for f in ["mux-1.sock", "mux-7.sock", "mux-x.sock", "server-1.lock", "palette"] {
+            std::fs::write(tmp.path().join(f), "").unwrap();
+        }
+        std::fs::write(socket_path(tmp.path()), "").unwrap();
+        assert_eq!(other_majors(tmp.path()), vec![1, 7]);
     }
 
     #[test]

@@ -186,7 +186,7 @@ fn stop_terminals_and_quit(cx: &mut App) {
     let mux = cx.global::<crate::AppServices>().0.mux.clone();
     cx.spawn(async move |cx| {
         // Waits up to a couple of seconds for the daemon to go.
-        let stopped = cx.background_spawn(async move { mux.stop_server() }).await;
+        let stopped = cx.background_spawn(async move { crate::restart::stop_all(&mux) }).await;
         if let Err(e) = stopped {
             log::warn!("can't end the background server: {e}");
         }

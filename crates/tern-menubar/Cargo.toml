@@ -7,7 +7,7 @@ edition.workspace = true
 env_logger = "0.11.11"
 log = "0.4.34"
 semver = "1"
-tern-mux = { version = "0.1.0", path = "../tern-mux" }
+tern-mux = { path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
 
 [target.'cfg(unix)'.dependencies]

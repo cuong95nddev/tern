@@ -200,6 +200,9 @@ fn main() {
         if let Some(id) = open_session {
             main_window::reveal_session(id, cx);
         }
+        if !scripted {
+            restart::check_at_launch(cx);
+        }
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv_async().await {
                 cx.update(|cx| {

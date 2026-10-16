@@ -6613,7 +6613,7 @@ dependencies = [
 
 [[package]]
 name = "tern-mux"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "block2 0.6.2",
  "getrandom 0.4.3",

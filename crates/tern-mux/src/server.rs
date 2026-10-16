@@ -137,6 +137,10 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     // Before an update can replace the executable.
     paths::build_id();
     let _lock = lock(&paths::lock_path(dir))?;
+    let pid_file = paths::pid_path(dir);
+    if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
+        log::warn!("can't write {}: {e}", pid_file.display());
+    }
     let sock = paths::socket_path(dir);
     match UnixStream::connect(&sock) {
         Ok(_) => return Err(io::ErrorKind::AddrInUse.into()),
@@ -226,6 +230,7 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
         });
     }
     let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_file(&pid_file);
     let _ = std::fs::remove_dir_all(&server.run_dir);
     // Observers learn at once that this daemon is gone.
     let observers = std::mem::take(&mut server.state.lock().unwrap().observers);

@@ -204,7 +204,14 @@ impl MuxClient {
     /// Whether the daemon runs this very build (a daemon left from an
     /// earlier build of the same version doesn't).
     pub fn server_same_build(&self) -> bool {
-        self.inner.server_build == paths::build_id()
+        let ours = paths::build_id();
+        // A build that couldn't be read tells nothing.
+        self.inner.server_build.is_empty() || ours.is_empty() || self.inner.server_build == ours
+    }
+
+    /// Whether the daemon runs another version or build than this app.
+    pub fn server_outdated(&self) -> bool {
+        self.inner.server_version != env!("CARGO_PKG_VERSION") || !self.server_same_build()
     }
 
     /// Open a tab's session. Returns at once: the sink gets `Ready` (or
@@ -273,12 +280,25 @@ impl Connector {
         Self { dir, spawn_daemon, hooks, reveal, cur: Mutex::new(None) }
     }
 
+    /// The connection, starting a daemon if none runs. A daemon of another
+    /// build that runs no program is replaced by one of this build (nothing
+    /// is lost), so an update applies once its terminals are gone.
     pub fn get(&self) -> io::Result<MuxClient> {
         let mut cur = self.cur.lock().unwrap();
-        if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
-            return Ok(c.clone());
+        let c = match cur.as_ref().filter(|c| c.alive()) {
+            Some(c) => c.clone(),
+            None => MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone(), self.reveal.clone())?,
+        };
+        if self.spawn_daemon && c.server_outdated() && c.list().is_ok_and(|l| l.iter().all(|s| s.exited)) {
+            log::info!("replacing idle daemon {} (Tern {})", c.server_pid(), c.server_version());
+            let pid = c.server_pid();
+            drop(c);
+            *cur = None;
+            kill_process(pid)?;
+            let c = MuxClient::connect(&self.dir, true, self.hooks.clone(), self.reveal.clone())?;
+            *cur = Some(c.clone());
+            return Ok(c);
         }
-        let c = MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone(), self.reveal.clone())?;
         *cur = Some(c.clone());
         Ok(c)
     }
@@ -303,13 +323,65 @@ impl Connector {
     /// (so an older daemon too, one that knows no request for it). The next
     /// [`get`](Self::get) starts a new daemon. Fine when none runs.
     pub fn stop_server(&self) -> io::Result<()> {
-        let Some(client) = self.existing() else { return Ok(()) };
-        let pid = client.server_pid();
+        let pid = match self.existing() {
+            Some(client) => client.server_pid(),
+            // Not answering: a stuck daemon still holds its lock.
+            None => match stuck_daemon_pid(&self.dir) {
+                Some(pid) => pid,
+                None => return Ok(()),
+            },
+        };
         *self.cur.lock().unwrap() = None;
-        drop(client);
         kill_process(pid)
     }
 
+    /// Daemons of other protocol majors (an older Tern's) that still run.
+    /// No window can show their terminals.
+    pub fn other_daemons(&self) -> Vec<OtherDaemon> {
+        paths::other_majors(&self.dir).into_iter().filter_map(|major| OtherDaemon::probe(&self.dir, major)).collect()
+    }
+}
+
+/// A daemon of another protocol major.
+#[derive(Clone, Debug)]
+pub struct OtherDaemon {
+    pub major: u32,
+    pub pid: u32,
+    pub version: String,
+}
+
+impl OtherDaemon {
+    /// Its `Hello`, which every major sends first and encodes alike.
+    fn probe(dir: &Path, major: u32) -> Option<Self> {
+        let stream = UnixStream::connect(paths::socket_path_of(dir, major)).ok()?;
+        if !paths::peer_uid_ok(&stream) {
+            return None;
+        }
+        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        match FrameReader::new(stream, proto::MAX_SERVER_FRAME).read::<ServerMsg>() {
+            Ok(Some(ServerMsg::Hello { major, pid, app_version, .. })) => Some(Self { major, pid, version: app_version }),
+            _ => None,
+        }
+    }
+
+    /// End it and every program it runs.
+    pub fn stop(&self) -> io::Result<()> {
+        kill_process(self.pid)
+    }
+}
+
+/// The pid of a daemon that holds the lock in `dir` (so runs) but doesn't
+/// answer.
+fn stuck_daemon_pid(dir: &Path) -> Option<u32> {
+    let lock = std::fs::OpenOptions::new().write(true).open(paths::lock_path(dir)).ok()?;
+    if lock.try_lock().is_ok() {
+        // Free: no daemon.
+        return None;
+    }
+    std::fs::read_to_string(paths::pid_path(dir)).ok()?.trim().parse().ok()
+}
+
+impl Connector {
     /// The live connection's daemon version (doesn't connect).
     pub fn server_version(&self) -> Option<String> {
         self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).map(|c| c.server_version().to_owned())
@@ -360,20 +432,23 @@ fn spawn() -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let dir = paths::mux_dir();
     paths::ensure_private_dir(&dir)?;
-    // Named for the protocol too: a running daemon's copy can't be replaced,
-    // and another major's would only find its own daemon's lock taken.
-    let name = format!("tern-server-{}-p{MAJOR}", env!("CARGO_PKG_VERSION"));
+    // Named for the protocol (a running daemon's copy can't be replaced,
+    // and another major's would only find its own daemon's lock taken) and
+    // for the build, so a copy of that name is this very executable.
+    let build = paths::build_id();
+    let name = format!("tern-server-{}-p{MAJOR}-{}", env!("CARGO_PKG_VERSION"), build.get(..12).unwrap_or(build));
     let copy = dir.join(format!("{name}.exe"));
-    let same = |a: &Path, b: &Path| std::fs::metadata(a).ok().map(|m| m.len()) == std::fs::metadata(b).ok().map(|m| m.len());
-    if !same(&exe, &copy) {
+    let same_len = || std::fs::metadata(&exe).ok().map(|m| m.len()) == std::fs::metadata(&copy).ok().map(|m| m.len());
+    // An unknown build is only told by its size.
+    if !copy.is_file() || (build.is_empty() && !same_len()) {
         // Another UI may be copying it too: copy beside it, then move.
         let tmp = dir.join(format!("{name}.exe.{}", std::process::id()));
         std::fs::copy(&exe, &tmp)?;
-        if std::fs::rename(&tmp, &copy).is_err() {
+        if let Err(e) = std::fs::rename(&tmp, &copy) {
             let _ = std::fs::remove_file(&tmp);
-            // Running already (another UI started it): use it as it is.
+            // Another UI put it there first: the same build, use it.
             if !copy.is_file() {
-                return spawn_detached_exe(&exe, &["--server"], log_file().as_deref());
+                return Err(e);
             }
         }
     }
@@ -381,14 +456,21 @@ fn spawn() -> io::Result<()> {
     spawn_detached_exe(&copy, &["--server"], log_file().as_deref())
 }
 
-/// Delete the daemon copies of other versions (those still running stay).
+/// Delete the daemon copies of other builds (those still running stay), and
+/// copies left half made a while ago.
 #[cfg(windows)]
 fn sweep_old_copies(dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let stale =
+        |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|d| d > Duration::from_secs(600)));
     for e in entries.flatten() {
         let p = e.path();
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("tern-server-") && name.ends_with(".exe") && p != keep {
+        if !name.starts_with("tern-server-") || p == keep {
+            continue;
+        }
+        // Another UI may be copying into a fresh one.
+        if name.ends_with(".exe") || stale(&p) {
             let _ = std::fs::remove_file(&p);
         }
     }
