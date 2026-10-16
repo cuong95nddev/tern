@@ -360,11 +360,14 @@ fn spawn() -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let dir = paths::mux_dir();
     paths::ensure_private_dir(&dir)?;
-    let copy = dir.join(format!("tern-server-{}.exe", env!("CARGO_PKG_VERSION")));
+    // Named for the protocol too: a running daemon's copy can't be replaced,
+    // and another major's would only find its own daemon's lock taken.
+    let name = format!("tern-server-{}-p{MAJOR}", env!("CARGO_PKG_VERSION"));
+    let copy = dir.join(format!("{name}.exe"));
     let same = |a: &Path, b: &Path| std::fs::metadata(a).ok().map(|m| m.len()) == std::fs::metadata(b).ok().map(|m| m.len());
     if !same(&exe, &copy) {
         // Another UI may be copying it too: copy beside it, then move.
-        let tmp = dir.join(format!("tern-server-{}.exe.{}", env!("CARGO_PKG_VERSION"), std::process::id()));
+        let tmp = dir.join(format!("{name}.exe.{}", std::process::id()));
         std::fs::copy(&exe, &tmp)?;
         if std::fs::rename(&tmp, &copy).is_err() {
             let _ = std::fs::remove_file(&tmp);

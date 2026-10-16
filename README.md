@@ -100,7 +100,7 @@ Terminals run in a small background process (`tern --server`, started by Tern), 
 
 The background process quits by itself once no tab is left. Its log is `daemon.log` in `~/Library/Logs/Tern` (macOS),
 `~/.local/state/tern` (Linux) or `%LOCALAPPDATA%\Tern\logs` (Windows). To end it and everything running in it:
-`pkill -f 'tern --server'` (macOS, Linux), or end `tern-server-x.y.z.exe` in Task Manager (Windows, where it runs from a copy
+`pkill -f 'tern --server'` (macOS, Linux), or end `tern-server-x.y.z-pN.exe` in Task Manager (Windows, where it runs from a copy
 in `%LOCALAPPDATA%\Tern\mux`, so updates can replace `tern.exe` while it runs).
 
 On Windows it talks over an AF_UNIX socket and runs programs in ConPTY; who runs in a tab is found from the shell's pid.
