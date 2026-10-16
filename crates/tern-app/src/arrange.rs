@@ -63,10 +63,15 @@ pub fn key(template: &str, docks: &[DockInfo]) -> String {
 
 /// `tree` with the parts `shown` rejects removed; a split left with one child becomes that child; None when empty.
 pub fn prune(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Tree> {
+    prune_mut(tree, &mut |n| shown(n))
+}
+
+/// `prune` with a stateful filter, asked once per part in tree order.
+fn prune_mut(tree: &Tree, shown: &mut dyn FnMut(&str) -> bool) -> Option<Tree> {
     match tree {
         Tree::Part(name) => shown(name).then(|| tree.clone()),
         Tree::Split(dir, items) => {
-            let mut kept: Vec<(Tree, Size)> = items.iter().filter_map(|(t, s)| prune(t, shown).map(|t| (t, *s))).collect();
+            let mut kept: Vec<(Tree, Size)> = items.iter().filter_map(|(t, s)| prune_mut(t, shown).map(|t| (t, *s))).collect();
             match kept.len() {
                 0 => None,
                 1 => kept.pop().map(|(t, _)| t),
@@ -80,6 +85,40 @@ fn collect_parts<'a>(tree: &'a Tree, out: &mut Vec<&'a str>) {
     match tree {
         Tree::Part(name) => out.push(name),
         Tree::Split(_, items) => items.iter().for_each(|(t, _)| collect_parts(t, out)),
+    }
+}
+
+/// The children of the split that directly holds `part`.
+fn parent_of<'a>(tree: &'a Tree, part: &str) -> Option<&'a [(Tree, Size)]> {
+    let Tree::Split(_, items) = tree else {
+        return None;
+    };
+    if items.iter().any(|(t, _)| matches!(t, Tree::Part(n) if n == part)) {
+        return Some(items);
+    }
+    items.iter().find_map(|(t, _)| parent_of(t, part))
+}
+
+/// True when dropping `part` at `at` would put it where it already is.
+fn already_there(root: Option<&Tree>, part: &str, at: &Drop) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    let index_of = |items: &[(Tree, Size)], name: &str| items.iter().position(|(t, _)| matches!(t, Tree::Part(n) if n == name));
+    match at {
+        Drop::End => match root {
+            Tree::Part(n) => n == part,
+            Tree::Split(_, items) => index_of(items, part) == Some(items.len() - 1),
+        },
+        Drop::Before(target) | Drop::After(target) => {
+            let Some(items) = parent_of(root, part) else {
+                return false;
+            };
+            let (Some(i), Some(j)) = (index_of(items, part), index_of(items, target)) else {
+                return false;
+            };
+            if matches!(at, Drop::Before(_)) { i + 1 == j } else { j + 1 == i }
+        },
     }
 }
 
@@ -160,6 +199,9 @@ impl Arrangement {
         if matches!(&at, Drop::Before(t) | Drop::After(t) if t == part) {
             return false;
         }
+        if already_there(self.docks.get(dock).and_then(|t| t.as_ref()), part, &at) {
+            return false;
+        }
         let mut next = self.clone();
         let not_part = |name: &str| name != part;
         for tree in next.docks.values_mut() {
@@ -207,29 +249,25 @@ impl Arrangement {
         let stored = std::mem::take(&mut self.docks);
         for (name, tree) in stored {
             let info = info_of(&name);
-            let mut names = Vec::new();
-            if let Some(tree) = &tree {
-                collect_parts(tree, &mut names);
-            }
-            let mut keep: BTreeSet<String> = BTreeSet::new();
-            for part in names {
+            let mut keep = |part: &str| {
                 let Some(kind) = kind_of(part) else {
                     problems.push(format!("layout: \"{part}\" is not a part any more"));
-                    continue;
+                    return false;
                 };
                 if !seen.insert(part.to_string()) {
                     problems.push(format!("layout: \"{part}\" is placed twice"));
-                    continue;
+                    return false;
                 }
                 match info {
-                    Some(i) if i.accepts.iter().any(|k| k == kind) => {
-                        keep.insert(part.to_string());
+                    Some(i) if i.accepts.iter().any(|k| k == kind) => true,
+                    _ => {
+                        moved_back.push(part.to_string());
+                        false
                     },
-                    _ => moved_back.push(part.to_string()),
                 }
-            }
+            };
+            let tree = tree.and_then(|t| prune_mut(&t, &mut keep));
             if let Some(info) = info {
-                let tree = tree.and_then(|t| prune(&t, &|n| keep.contains(n)));
                 self.docks.insert(info.name.clone(), tree);
             }
         }
@@ -238,15 +276,18 @@ impl Arrangement {
         }
 
         for part in moved_back {
-            if let Some(dock) = self.send_to_default(&part, kind_of(&part), docks) {
-                problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\""));
+            match self.send_to_default(&part, kind_of(&part), docks) {
+                Some(dock) => problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\"")),
+                None => problems.push(format!("layout: \"{part}\" has no dock")),
             }
         }
         for (part, kind) in parts {
             if seen.contains(*part) {
                 continue;
             }
-            self.send_to_default(part, Some(kind), docks);
+            if self.send_to_default(part, Some(kind), docks).is_none() {
+                problems.push(format!("layout: \"{part}\" has no dock"));
+            }
         }
         problems
     }
@@ -311,7 +352,7 @@ impl Arrangement {
             let tree = if tree.is_empty() {
                 None
             } else {
-                let mut p = Parser { s: tree.as_bytes(), i: 0 };
+                let mut p = Parser { s: tree.as_bytes(), i: 0, depth: 0 };
                 let t = p.tree()?;
                 if p.i != p.s.len() {
                     return None;
@@ -357,9 +398,13 @@ fn encode_tree(tree: &Tree, out: &mut String) {
     }
 }
 
+/// Deepest nesting `decode` accepts.
+const MAX_DEPTH: usize = 32;
+
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -376,6 +421,13 @@ impl Parser<'_> {
     }
 
     fn tree(&mut self) -> Option<Tree> {
+        self.depth += 1;
+        let tree = if self.depth > MAX_DEPTH { None } else { self.tree_inner() };
+        self.depth -= 1;
+        tree
+    }
+
+    fn tree_inner(&mut self) -> Option<Tree> {
         if self.peek() != Some(b'[') {
             return self.word(is_name_byte).map(|n| Tree::Part(n.to_string()));
         }
@@ -479,6 +531,9 @@ mod tests {
         let mut a = fresh();
         assert!(!a.move_part("explorer", "panel", "left", Drop::Before("explorer".into()), &d));
         assert!(!a.move_part("explorer", "panel", "left", Drop::After("explorer".into()), &d));
+        assert!(!a.move_part("explorer", "panel", "left", Drop::Before("scratches".into()), &d));
+        assert!(!a.move_part("scratches", "panel", "left", Drop::After("explorer".into()), &d));
+        assert!(!a.move_part("scratches", "panel", "left", Drop::End, &d));
         assert!(!a.move_part("changes", "panel", "right", Drop::End, &d));
         assert!(!a.move_part("changes", "panel", "nowhere", Drop::End, &d));
         assert_eq!(a.encode(), DEFAULT);
@@ -514,6 +569,31 @@ mod tests {
         let problems = a.reconcile(&docks(), &parts);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes");
         assert_eq!(problems, vec!["layout: \"explorer\" is placed twice".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_keeps_a_part_once_within_a_dock() {
+        let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
+        let mut a = Arrangement::decode("k", "left=[c explorer@- explorer@-];right=changes").unwrap();
+        let problems = a.reconcile(&docks(), &parts);
+        assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes");
+        assert_eq!(problems, vec!["layout: \"explorer\" is placed twice".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_reports_parts_no_dock_takes() {
+        let parts = [("explorer", "panel"), ("odd", "weird")];
+        let mut a = Arrangement::decode("k", "left=explorer;right=odd").unwrap();
+        let problems = a.reconcile(&docks(), &parts);
+        assert_eq!(a.encode(), "left=explorer;right=");
+        assert_eq!(problems, vec!["layout: \"odd\" has no dock".to_string()]);
+    }
+
+    #[test]
+    fn decode_caps_nesting() {
+        let deep = |n: usize| format!("left={}x{}", "[c ".repeat(n), "@-]".repeat(n));
+        assert!(Arrangement::decode("k", &deep(10)).is_some());
+        assert_eq!(Arrangement::decode("k", &deep(10_000)), None);
     }
 
     #[test]
