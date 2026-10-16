@@ -114,10 +114,9 @@ pub fn placement(window: &Window, cx: &App) -> Option<(String, WindowBounds)> {
     Some((uuid.to_string(), bounds))
 }
 
-/// Remember `window`'s placement for the next new window.
-pub fn save(window: &Window, cx: &App) {
-    let Some((uuid, bounds)) = placement(window, cx) else { return };
-    write(&file(), &encode(&uuid, bounds));
+/// Remember a [`placement`] for the next new window.
+pub fn save_placement(uuid: &str, bounds: WindowBounds) {
+    write(&file(), &encode(uuid, bounds));
 }
 
 /// False when it couldn't be written (logged).

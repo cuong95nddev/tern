@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -414,14 +415,23 @@ pub struct MainWindow {
     #[cfg(not(target_os = "macos"))]
     menu_bar: Entity<gpui_kit::component::menu::AppMenuBar>,
     _subs: Vec<Subscription>,
+    _save_placement: Task<()>,
 }
 
 impl MainWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // A drag or a resize sends many: kept once they stop.
         let bounds_sub = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
-            window_state::save(window, cx);
             this.placement = window_state::placement(window, cx);
-            this.changed(cx);
+            this._save_placement = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some((uuid, bounds)) = &this.placement {
+                        window_state::save_placement(uuid, *bounds);
+                    }
+                    this.changed(cx);
+                });
+            });
         });
         // The agent's own menu may have hidden it meanwhile.
         let activation_sub = cx.observe_window_activation(window, |_: &mut Self, window, cx| {
@@ -481,6 +491,7 @@ impl MainWindow {
             #[cfg(not(target_os = "macos"))]
             menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             _subs: vec![bounds_sub, activation_sub],
+            _save_placement: Task::ready(()),
         }
     }
 
