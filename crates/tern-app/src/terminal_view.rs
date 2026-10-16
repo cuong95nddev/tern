@@ -321,9 +321,24 @@ impl TerminalView {
             if this.update(cx, |view, cx| view.start_once(cx)).is_err() {
                 return;
             }
+            // Each second while the program writes (an agent starting or
+            // ending shows), else every few: a scan reads every process.
+            let mut idle_ticks = 0;
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |view, cx| view.detect_agent(cx)).is_err() {
+                let Ok(probe) = this.update(cx, |view, _| {
+                    let busy = view.last_output.elapsed() < Duration::from_secs(10);
+                    idle_ticks = if busy { 0 } else { idle_ticks + 1 };
+                    (busy || idle_ticks % 5 == 0).then(|| view.session.as_ref().map(RemoteSession::foreground))
+                }) else {
+                    break;
+                };
+                let Some(probe) = probe else { continue };
+                let programs = match probe {
+                    Some(p) => cx.background_spawn(async move { p.programs() }).await,
+                    None => Vec::new(),
+                };
+                if this.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx)).is_err() {
                     break;
                 }
             }
@@ -491,8 +506,9 @@ impl TerminalView {
         })
     }
 
-    fn detect_agent(&mut self, cx: &mut Context<Self>) {
-        let agent = self.session.as_ref().and_then(|s| Agent::detect(&s.foreground_programs()));
+    fn set_agent(&mut self, agent: Option<Agent>, cx: &mut Context<Self>) {
+        // The session may have ended while its programs were read.
+        let agent = agent.filter(|_| self.session.is_some());
         if agent != self.agent {
             self.agent = agent;
             cx.emit(TerminalEvent::TitleChanged);

@@ -550,6 +550,19 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
     }
 }
 
+/// What runs in a session's foreground, read from any thread.
+pub struct Foreground(Arc<Slot>);
+
+impl Foreground {
+    /// See [`tern_term::procs::foreground_programs`].
+    pub fn programs(&self) -> Vec<String> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default();
+        #[cfg(windows)]
+        return self.0.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
+    }
+}
+
 /// A tab's session in the daemon. Dropping it detaches (the program keeps
 /// running); [`RemoteSession::close`] ends it.
 pub struct RemoteSession {
@@ -611,10 +624,13 @@ impl RemoteSession {
 
     /// See [`tern_term::procs::foreground_programs`].
     pub fn foreground_programs(&self) -> Vec<String> {
-        #[cfg(unix)]
-        return self.slot.tty.lock().unwrap().as_ref().map(tern_term::procs::foreground_programs).unwrap_or_default();
-        #[cfg(windows)]
-        return self.slot.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
+        self.foreground().programs()
+    }
+
+    /// Reads [`Self::foreground_programs`] off the UI thread: a scan of
+    /// every process can take a while.
+    pub fn foreground(&self) -> Foreground {
+        Foreground(self.slot.clone())
     }
 
     /// See [`tern_term::procs::foreground_cwd`].

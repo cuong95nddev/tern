@@ -10,6 +10,34 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+/// How long a scan of every process serves later asks: each tab (and the
+/// daemon, for each session) asks about its own, all within one tick.
+#[cfg(any(windows, target_os = "linux"))]
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// `scan()`'s result, shared while it is younger than [`SCAN_TTL`].
+#[cfg(any(windows, target_os = "linux"))]
+struct ScanCache<T>(std::sync::Mutex<Option<(std::time::Instant, std::sync::Arc<T>)>>);
+
+#[cfg(any(windows, target_os = "linux"))]
+impl<T> ScanCache<T> {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn get(&self, scan: impl FnOnce() -> T) -> std::sync::Arc<T> {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = &*slot
+            && at.elapsed() < SCAN_TTL
+        {
+            return v.clone();
+        }
+        let v = std::sync::Arc::new(scan());
+        *slot = Some((std::time::Instant::now(), v.clone()));
+        v
+    }
+}
+
 /// Adds the lowercase file stem of `arg` to `names` once.
 fn push_stem(names: &mut Vec<String>, arg: &str) {
     if let Some(stem) = Path::new(arg).file_stem() {
@@ -78,16 +106,23 @@ fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
 
 #[cfg(target_os = "linux")]
 fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
-    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
-    dir.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            // `pid (comm) state ppid pgrp ...`; comm may hold spaces.
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
-            let Some((_, after)) = stat.rsplit_once(')') else { return false };
-            after.split_whitespace().nth(2).and_then(|g| g.parse::<libc::pid_t>().ok()) == Some(pgid)
-        })
-        .filter_map(|pid| {
+    static GROUPS: ScanCache<Vec<(u32, libc::pid_t)>> = ScanCache::new();
+    let groups = GROUPS.get(|| {
+        let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+        dir.flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|pid| {
+                // `pid (comm) state ppid pgrp ...`; comm may hold spaces.
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                let (_, after) = stat.rsplit_once(')')?;
+                Some((pid, after.split_whitespace().nth(2)?.parse::<libc::pid_t>().ok()?))
+            })
+            .collect()
+    });
+    groups
+        .iter()
+        .filter(|(_, g)| *g == pgid)
+        .filter_map(|&(pid, _)| {
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
             let args: Vec<String> =
                 cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(2).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
@@ -194,24 +229,34 @@ mod win {
 
     /// `root` and every process below it with its executable name, breadth first.
     pub fn descendants(root: u32) -> Vec<(u32, String)> {
-        let procs = snapshot();
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut exes = HashMap::new();
-        for (pid, ppid, exe) in procs {
-            // The idle process is its own parent.
-            if pid != ppid {
-                children.entry(ppid).or_default().push(pid);
+        static TREE: super::ScanCache<Tree> = super::ScanCache::new();
+        let tree = TREE.get(|| {
+            let mut t = Tree::default();
+            for (pid, ppid, exe) in snapshot() {
+                // The idle process is its own parent.
+                if pid != ppid {
+                    t.children.entry(ppid).or_default().push(pid);
+                }
+                t.exes.insert(pid, exe);
             }
-            exes.insert(pid, exe);
-        }
+            t
+        });
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::from([root]);
         while let Some(pid) = queue.pop_front() {
-            let Some(exe) = exes.remove(&pid) else { continue };
-            out.push((pid, exe));
-            queue.extend(children.get(&pid).into_iter().flatten());
+            let Some(exe) = tree.exes.get(&pid).filter(|_| seen.insert(pid)) else { continue };
+            out.push((pid, exe.clone()));
+            queue.extend(tree.children.get(&pid).into_iter().flatten());
         }
         out
+    }
+
+    /// Every process's children and executable name.
+    #[derive(Default)]
+    struct Tree {
+        children: HashMap<u32, Vec<u32>>,
+        exes: HashMap<u32, String>,
     }
 
     /// Every process: `(pid, parent pid, executable file name)`.
