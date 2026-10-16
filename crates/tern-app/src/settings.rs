@@ -659,7 +659,8 @@ fn style_schema() -> (serde_json::Value, serde_json::Value) {
                         style::Kind::Text => "Text",
                     };
                     let ty = if *kind == style::Kind::Color || *kind == style::Kind::Text { json!("string") } else { any.clone() };
-                    (name.to_string(), json!({ "description": format!("{what}, or \"$name\". Default: {shown}"), "type": ty }))
+                    let gui = if style::GUI_ONLY.contains(name) { "GUI only: " } else { "" };
+                    (name.to_string(), json!({ "description": format!("{gui}{what}, or \"$name\". Default: {shown}"), "type": ty }))
                 })
                 .collect();
             (e.name.to_string(), json!({ "description": e.about, "type": "object", "properties": props, "additionalProperties": false }))
@@ -698,7 +699,8 @@ fn elements_doc() -> String {
         out += &format!("\n### `{}`\n\n{}.\n\n| Property | Default |\n|---|---|\n", e.name, e.about);
         for (name, _, default) in e.props() {
             let shown = if default.is_empty() { "none".to_owned() } else { format!("`{default}`") };
-            out += &format!("| `{name}` | {shown} |\n");
+            let gui = if style::GUI_ONLY.contains(name) { " (GUI only)" } else { "" };
+            out += &format!("| `{name}` | {shown}{gui} |\n");
         }
     }
     out
@@ -822,6 +824,11 @@ A value is a number (pixels), `\"Npx\"`, `\"Nrem\"` (scales with
 
 ## Templates
 
+Templates and elements describe structure and look for any front end. The
+properties only a GUI can draw (`radius`, `shadow`, `opacity`, background
+images) are marked \"GUI only\" in `{SCHEMA}` and `reference/{ELEMENTS_DOC}`;
+other front ends ignore them.
+
 Where things go is in `templates` (in `{SETTINGS}` or a theme): the window's
 parts as trees of boxes. `reference/templates.json` holds the built-in ones;
 copy one into `templates` under its name and change it. A box takes an element's
@@ -897,7 +904,16 @@ mod tests {
     use tern_term::vt::vte::ansi::Rgb;
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{SettingsFile, TerminalColors, TernTheme, read_theme_set, terminal_palette, with_theme};
+    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, read_theme_set, terminal_palette, with_theme};
+
+    #[test]
+    fn gui_only_props_are_marked() {
+        let doc = elements_doc();
+        assert!(doc.contains("`shadow`") && doc.contains("GUI only"));
+        for p in crate::style::GUI_ONLY {
+            assert!(crate::style::ELEMENTS.iter().any(|e| e.prop(p).is_some()), "{p} is not a property");
+        }
+    }
 
     #[test]
     fn choosing_a_theme_keeps_the_rest_of_the_file() {

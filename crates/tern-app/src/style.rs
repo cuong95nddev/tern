@@ -84,7 +84,7 @@ impl Element {
         own.clone().chain(BOX.iter().filter(move |b| !self.groups.iter().any(|g| g.iter().any(|p| p.0 == b.0))))
     }
 
-    fn prop(&self, name: &str) -> Option<&'static Prop> {
+    pub(crate) fn prop(&self, name: &str) -> Option<&'static Prop> {
         self.props().find(|p| p.0 == name)
     }
 }
@@ -202,6 +202,20 @@ macro_rules! simple {
         Element { name: $name, about: $about, groups: &[] }
     };
 }
+
+/// Properties only the GUI front end draws; others ignore them.
+pub const GUI_ONLY: &[&str] = &[
+    "radius",
+    "radius_top_left",
+    "radius_top_right",
+    "radius_bottom_right",
+    "radius_bottom_left",
+    "shadow",
+    "opacity",
+    "background_image",
+    "background_image_fit",
+    "background_image_opacity",
+];
 
 pub const ELEMENTS: &[Element] = &[
     Element { name: "window", about: "The whole window, behind everything", groups: &[&[("background", Color, "$background")], IMAGE] },
