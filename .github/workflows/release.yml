@@ -93,10 +93,7 @@ jobs:
           name: tern-macos
           path: ${{ steps.dmg.outputs.path }}
 
-  # 0.2.1 is released for macOS only: Windows and Linux don't build until the
-  # daemon is ported (branch daemon-all-platforms). Revert this after it merges.
   windows:
-    if: false
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -206,7 +203,6 @@ jobs:
           path: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && 'signed-setup/*-setup.exe' || steps.setup.outputs.path }}
 
   linux:
-    if: false
     # The oldest supported runner, so the binary runs on older glibc too.
     runs-on: ubuntu-22.04
     steps:
@@ -233,7 +229,7 @@ jobs:
           path: ${{ steps.tar.outputs.path }}
 
   publish:
-    needs: [macos]
+    needs: [macos, windows, linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -271,5 +267,22 @@ jobs:
                exec open -a Tern "$dir"
                ```
 
-            This release is macOS only; Windows and Linux follow in the next one.
+            ## Install (Windows 10 1809+ / 11, x64)
 
+            Run `Tern-*-windows-x64-setup.exe`. It installs for your user (no admin
+            rights), adds Tern to the Start menu and, optionally, the `tern` command
+            to PATH and "Open in Tern" to the folder context menu. Until SignPath
+            signs it, SmartScreen asks first (More info ▸ Run anyway).
+
+            ## Code signing policy
+
+            Free code signing provided by [SignPath.io](https://about.signpath.io),
+            certificate by [SignPath Foundation](https://signpath.org). See the
+            [code signing policy](https://github.com/cuong95nddev/tern#code-signing-policy).
+
+            ## Install (Linux x86_64)
+
+            ```sh
+            tar xzf Tern-*-linux-x86_64.tar.gz
+            Tern-*/install.sh   # tern in ~/.local/bin, menu entry and icon
+            ```

@@ -6546,7 +6546,7 @@ dependencies = [
 
 [[package]]
 name = "tern-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ab_glyph",
  "dunce",
@@ -6593,7 +6593,7 @@ dependencies = [
 
 [[package]]
 name = "tern-menubar"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dispatch2",
  "env_logger",
