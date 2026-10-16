@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod agents;
+#[allow(dead_code)] // the dock and panel tasks that follow use the arrangement model
+mod arrange;
 mod changes_view;
 #[cfg(debug_assertions)]
 mod control;
