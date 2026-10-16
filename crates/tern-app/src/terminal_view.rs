@@ -70,10 +70,13 @@ pub enum TerminalEvent {
         body: String,
     },
     Bell,
-    /// The process ended; `quick` when it ran only a few seconds.
+    /// The process ended; `quick` when it ran only a few seconds; `live`
+    /// when it ended while shown (not an exit replayed on attaching to a
+    /// session that ended while no one watched).
     Exited {
         code: Option<i32>,
         quick: bool,
+        live: bool,
     },
     /// The background session is known (see `mux_id`), with its hook token;
     /// `attached`: it was already running (no new program started).
@@ -204,6 +207,9 @@ pub struct TerminalView {
     reattaching: bool,
     /// The last start attached to a running session (vs. spawned one).
     attaching: bool,
+    /// Output arrived since the session was ready: an exit after it was
+    /// seen, not one the daemon replays on attach.
+    output_since_ready: bool,
     config: TerminalConfig,
     focus: FocusHandle,
     title: SharedString,
@@ -279,6 +285,7 @@ impl TerminalView {
             attach,
             reattaching: false,
             attaching: false,
+            output_since_ready: false,
             config,
             focus: cx.focus_handle(),
             title: title.clone(),
@@ -452,6 +459,11 @@ impl TerminalView {
         self.spawn_cfg = cfg;
     }
 
+    /// Whether the next start gets a Claude hook token.
+    pub fn set_hook(&mut self, hook: bool) {
+        self.hook = hook;
+    }
+
     /// The program running in the foreground when it isn't the shell.
     pub fn foreground_job(&self) -> Option<String> {
         let s = self.session.as_ref().filter(|_| self.exited.is_none())?;
@@ -506,6 +518,7 @@ impl TerminalView {
         match ev {
             TermEvent::Wakeup => {
                 self.last_output = Instant::now();
+                self.output_since_ready = true;
                 if self.hover_link.is_some() {
                     self.update_hover(true, cx);
                 }
@@ -525,7 +538,8 @@ impl TerminalView {
                 self.exited = Some(code);
                 self.set_status(ActivityStatus::None, cx);
                 let quick = self.started.elapsed() < Duration::from_secs(5);
-                cx.emit(TerminalEvent::Exited { code, quick });
+                let live = !self.attaching || self.output_since_ready;
+                cx.emit(TerminalEvent::Exited { code, quick, live });
                 cx.notify();
             },
             TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
@@ -542,6 +556,7 @@ impl TerminalView {
                 // not notified again.
                 self.status = status;
                 self.reattaching = false;
+                self.output_since_ready = false;
                 cx.emit(TerminalEvent::Ready { token, attached: self.attaching });
                 cx.emit(TerminalEvent::TitleChanged);
                 cx.notify();
@@ -590,7 +605,7 @@ impl TerminalView {
             self.exited = Some(None);
             self.spawn_error = Some("background server stopped".into());
             self.set_status(ActivityStatus::None, cx);
-            cx.emit(TerminalEvent::Exited { code: None, quick: false });
+            cx.emit(TerminalEvent::Exited { code: None, quick: false, live: false });
         }
         cx.notify();
     }

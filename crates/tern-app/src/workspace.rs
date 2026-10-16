@@ -1526,7 +1526,28 @@ impl Workspace {
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
             },
-            TerminalEvent::Exited { code, quick } => {
+            TerminalEvent::Exited { code, quick, live } => {
+                // Claude ended on purpose (/exit): the tab goes on as a
+                // shell, as if Claude had been started from one.
+                if *live
+                    && *code == Some(0)
+                    && let Some(t) = self.term_tab_mut(view)
+                    && t.kind == TabKind::Claude
+                {
+                    t.kind = TabKind::Shell;
+                    t.token = None;
+                    t.session = None;
+                    t.resuming = false;
+                    let (cfg, _) = self.spawn_config(TabKind::Shell, None);
+                    view.update(cx, |v, cx| {
+                        v.set_spawn_config(cfg);
+                        v.set_hook(false);
+                        v.start(cx);
+                    });
+                    cx.emit(WorkspaceEvent::TabsChanged);
+                    cx.notify();
+                    return;
+                }
                 // `claude --resume` failing at once: the conversation is
                 // gone; start a new one in its place.
                 let restart = match self.term_tab_mut(view) {
