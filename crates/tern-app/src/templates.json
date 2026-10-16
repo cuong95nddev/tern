@@ -68,6 +68,28 @@
       { "use": "status_bar" }
     ]
   },
+  "panel_header": {
+    "element": "$element",
+    "handle": true,
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "children": [
+      {
+        "grow": 1,
+        "layout": "row",
+        "style": { "gap": "$element.count_gap" },
+        "children": [
+          { "truncate": true, "text": "{title}" },
+          { "when": "count > 0", "style": { "text": "$element.count_text" }, "text": "{count}" }
+        ]
+      },
+      { "slot": "buttons" }
+    ]
+  },
+  "explorer.header": { "use": "panel_header", "element": "explorer.header" },
+  "changes.header": { "use": "panel_header", "element": "changes.header" },
+  "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "status_bar": {
     "element": "workspace.status_bar",
     "layout": "row",

@@ -29,7 +29,7 @@ use crate::agents::Agent;
 use crate::arrange::{self, Arrangement};
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::DiffPane;
-use crate::dock::{Change, OnChange};
+use crate::dock::{ActiveDrag, Change, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
@@ -2586,6 +2586,13 @@ impl Workspace {
                 if !a.move_part(&part, &kind, &dock, at, &docks) {
                     return;
                 }
+                // A part moved by hand is one the user wants to see.
+                match &*part {
+                    "explorer" => self.show_explorer = true,
+                    "scratches" => self.show_scratches = true,
+                    "changes" => self.show_changes = true,
+                    _ => {},
+                }
             },
             Change::Resize { dock, path, sizes } => a.set_sizes(&dock, &path, &sizes),
             Change::Width { dock, width } => {
@@ -3109,9 +3116,8 @@ impl Workspace {
     /// Over pane `pane`'s content while a tab is dragged: the part under
     /// the pointer lights up where the tab would go (VS Code's drop zones).
     fn drop_overlay(&self, pane: PaneId, cx: &mut Context<Self>) -> Div {
-        let accent = cx.theme().primary;
         let hint = self.drop_target.filter(|t| t.0 == pane).map(|(_, zone)| {
-            let d = div().absolute().rounded_md().bg(accent.opacity(0.15)).border_2().border_color(accent.opacity(0.6));
+            let d = style::el("drop_zone", cx).apply(div().absolute());
             match zone {
                 Zone::Center => d.inset_0(),
                 Zone::Edge(Edge::Left) => d.top_0().bottom_0().left_0().w(relative(0.5)),
@@ -3184,8 +3190,10 @@ impl Workspace {
                 let order = self.layout.panes();
                 let pane_tabs: Vec<Vec<usize>> = order.iter().map(|p| self.pane_tabs(*p)).collect();
                 let shown: Vec<Option<usize>> = order.iter().map(|p| self.pane_active_ix(*p)).collect();
+                let arrange =
+                    self.arranged_for.as_ref().and_then(|(_, k)| self.arrangements.get(k)).map(Arrangement::encode).unwrap_or_default();
                 format!(
-                    "tabs={tabs:?} groups={groups:?} panes={} pane_tabs={pane_tabs:?} shown={shown:?} focused={} zoomed={} slots={} active={} dialog={} changes={} scratches={}",
+                    "tabs={tabs:?} groups={groups:?} panes={} pane_tabs={pane_tabs:?} shown={shown:?} focused={} zoomed={} slots={} active={} dialog={} changes={} scratches={} arrange {arrange}",
                     self.layout.encode(&order),
                     order.iter().position(|p| *p == self.focused).unwrap_or(0),
                     self.zoomed.is_some(),
@@ -3364,6 +3372,23 @@ impl Workspace {
                 }
                 "ok".into()
             },
+            // What dropping PART in DOCK does: before or after TARGET, or at its end.
+            cmd if cmd.starts_with("part-move ") => {
+                let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+                let at = match (args.get(2).copied(), args.get(3)) {
+                    (Some("before"), Some(t)) => arrange::Drop::Before((*t).to_owned()),
+                    (Some("after"), Some(t)) => arrange::Drop::After((*t).to_owned()),
+                    (Some("end"), None) => arrange::Drop::End,
+                    _ => return "error: part-move PART DOCK before|after|end [TARGET]".into(),
+                };
+                let (part, dock) = (args[0], args[1]);
+                let kind =
+                    cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| *n == part).map(|(_, k)| k));
+                let Some(kind) = kind else { return format!("error: no part {part:?}") };
+                let change = Change::Move { part: part.to_owned().into(), kind: kind.into(), dock: dock.to_owned().into(), at };
+                self.arrangement_changed(change, cx);
+                "ok".into()
+            },
             cmd if cmd.starts_with("file-open ") => {
                 let path = self.root.join(cmd["file-open ".len()..].trim());
                 self.open_file(path, true, window, cx);
@@ -3412,6 +3437,9 @@ impl Render for Workspace {
         if !cx.has_active_drag() {
             self.tab_drag = false;
             self.drop_target = None;
+            if cx.try_global::<ActiveDrag>().is_some_and(|d| d.0.is_some()) {
+                cx.set_global(ActiveDrag(None));
+            }
         }
         self.sync_panes();
         let center = match self.zoomed.filter(|z| self.layout.contains(*z)) {

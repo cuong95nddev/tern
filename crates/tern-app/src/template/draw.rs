@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::{Align, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, What};
 use crate::arrange::{self, Shown, Size};
-use crate::dock::Change;
+use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange};
 use crate::style::{self, Val};
 
 /// Attaches behavior to a box named by `frame`: gets the frame's name, the
@@ -61,8 +61,14 @@ impl Drawer<'_, '_> {
     }
 
     fn node(&mut self, n: &Node, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<AnyElement> {
-        if !self.holds(&n.when, scope, outer) || self.dock_hidden(n, scope, outer) {
+        if !self.holds(&n.when, scope, outer) {
             return None;
+        }
+        if self.dock_hidden(n, scope, outer) {
+            // Out of a split, an empty dock takes a dragged part on a strip of its own.
+            let d = n.dock.as_ref()?;
+            let size = style::el("drop_zone", self.cx).px("size");
+            return self.end_zone(d, scope).map(|z| z.flex_none().w(size).into_any_element());
         }
         self.draw(n, scope, outer)
     }
@@ -101,9 +107,29 @@ impl Drawer<'_, '_> {
             What::Box => {},
         }
         if let Some(d) = &n.dock {
-            kids.extend(self.dock_tree(d, scope, outer).map(|t| self.tree(d, &t, scope, outer)));
+            match self.dock_tree(d, scope, outer) {
+                Some(t) => kids.push(self.tree(d, &t, scope, outer)),
+                // An empty dock that stays: all of it takes a dragged part.
+                None => kids.extend(self.end_zone(d, scope).map(|z| z.absolute().inset_0().into_any_element())),
+            }
         } else if let Some(axis) = n.split {
             kids.push(self.split(n, axis, scope, outer));
+            // The split's empty docks take a dragged part on a strip along their edge.
+            let size = style::el("drop_zone", self.cx).px("size");
+            for (i, c) in n.children.iter().enumerate() {
+                let Some(d) = c.dock.as_ref().filter(|_| self.holds(&c.when, scope, outer) && self.dock_hidden(c, scope, outer)) else {
+                    continue;
+                };
+                let Some(z) = self.end_zone(d, scope) else { continue };
+                let start = i * 2 < n.children.len();
+                let z = match (axis, start) {
+                    (Axis::Horizontal, true) => z.absolute().top_0().bottom_0().left_0().w(size),
+                    (Axis::Horizontal, false) => z.absolute().top_0().bottom_0().right_0().w(size),
+                    (Axis::Vertical, true) => z.absolute().left_0().right_0().top_0().h(size),
+                    (Axis::Vertical, false) => z.absolute().left_0().right_0().bottom_0().h(size),
+                };
+                kids.push(z.into_any_element());
+            }
         } else {
             for c in &n.children {
                 if let Some(e) = self.node(c, scope, outer) {
@@ -111,7 +137,75 @@ impl Drawer<'_, '_> {
                 }
             }
         }
-        Some(self.boxed(n, &look, kids, scope.index))
+        let drag = if n.handle { self.dragged_part(n, scope, outer) } else { None };
+        Some(self.boxed(n, &look, kids, scope.index, drag))
+    }
+
+    /// What dragging handle `n` drags: the part its scope names, when it may be dragged.
+    fn dragged_part(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<DraggedPart> {
+        if self.locked() || !self.holds(&n.drag, scope, outer) {
+            return None;
+        }
+        let get = lookup(scope, outer);
+        let part = get("part")?.text();
+        let templates = self.cx.try_global::<Templates>()?;
+        let (kind, node) = templates.parts.get(part.as_ref())?;
+        if !self.holds(&node.drag, scope, outer) {
+            return None;
+        }
+        let title = get("title").map(|t| t.text()).unwrap_or_else(|| part.clone());
+        Some(DraggedPart { part, kind: kind.clone().into(), title })
+    }
+
+    /// Whether moving and resizing panels is turned off.
+    fn locked(&self) -> bool {
+        self.cx.try_global::<LayoutLock>().is_some_and(|l| l.0)
+    }
+
+    /// The part being dragged, when dock `d` takes it, and where a drop goes.
+    fn drop_for(&self, d: &DockNode, scope: &Scope) -> Option<(DraggedPart, OnChange)> {
+        let p = self.cx.try_global::<ActiveDrag>()?.0.clone()?;
+        let on_change = scope.on_change.clone()?;
+        d.info.takes(&p.part, &p.kind).then_some((p, on_change))
+    }
+
+    /// A box that drops the dragged part at `at` in dock `d`.
+    fn zone(&self, d: &DockNode, at: arrange::Drop, on_change: OnChange) -> Div {
+        let hover = style::el("drop_zone.hover", self.cx);
+        let dock = d.name.clone();
+        style::el("drop_zone", self.cx).apply(div()).drag_over::<DraggedPart>(move |s, _, _, _| hover.apply(s)).on_drop(
+            move |p: &DraggedPart, window, cx| {
+                let change = Change::Move { part: p.part.clone(), kind: p.kind.clone(), dock: dock.clone(), at: at.clone() };
+                on_change(change, window, cx);
+            },
+        )
+    }
+
+    /// Where a dragged part goes to the end of dock `d`, while one it takes is dragged.
+    fn end_zone(&self, d: &DockNode, scope: &Scope) -> Option<Div> {
+        let (_, on_change) = self.drop_for(d, scope)?;
+        Some(self.zone(d, arrange::Drop::End, on_change))
+    }
+
+    /// Part `name`'s body in dock `d`, with its `before`/`after` halves over
+    /// it while a part the dock takes is dragged.
+    fn leaf(&self, d: &DockNode, name: &str, body: AnyElement, scope: &Scope) -> AnyElement {
+        let Some((_, on_change)) = self.drop_for(d, scope) else { return body };
+        let mut zones = vec![];
+        for zone in &d.zones {
+            let (at, start) = match *zone {
+                "before" => (arrange::Drop::Before(name.to_owned()), true),
+                _ => (arrange::Drop::After(name.to_owned()), false),
+            };
+            let z = self.zone(d, at, on_change.clone()).absolute();
+            zones.push(match (d.dir, start) {
+                (arrange::Dir::Row, true) => z.top_0().bottom_0().left_0().w(relative(0.5)),
+                (arrange::Dir::Row, false) => z.top_0().bottom_0().right_0().w(relative(0.5)),
+                (arrange::Dir::Column, true) => z.left_0().right_0().top_0().h(relative(0.5)),
+                (arrange::Dir::Column, false) => z.left_0().right_0().bottom_0().h(relative(0.5)),
+            });
+        }
+        div().relative().size_full().flex().flex_col().child(body).children(zones).into_any_element()
     }
 
     fn split(&mut self, n: &Node, axis: Axis, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
@@ -136,7 +230,8 @@ impl Drawer<'_, '_> {
                 }
             }
             let body = if shown { self.draw(c, scope, outer) } else { None };
-            let panel = self.panel(&c.panel, fixed, size).visible(shown);
+            let locked = c.dock.is_some() && self.locked();
+            let panel = self.panel(&c.panel, fixed, size, locked).visible(shown);
             group = group.child(match body {
                 Some(b) => panel.child(b),
                 None => panel,
@@ -156,8 +251,9 @@ impl Drawer<'_, '_> {
         group.into_any_element()
     }
 
-    /// A split's panel with `p`'s range, `size` and, when `fixed`, kept at its size.
-    fn panel(&self, p: &Panel, fixed: bool, size: Option<Pixels>) -> ResizablePanel {
+    /// A split's panel with `p`'s range, `size` and, when `fixed`, kept at
+    /// its size; `locked` keeps it at `size` whatever the user drags.
+    fn panel(&self, p: &Panel, fixed: bool, size: Option<Pixels>, locked: bool) -> ResizablePanel {
         let px = |l: Option<AbsoluteLength>| l.map(|l| l.to_pixels(self.rem));
         let mut panel = resizable_panel();
         if fixed {
@@ -168,6 +264,9 @@ impl Drawer<'_, '_> {
         }
         if p.min.is_some() || p.max.is_some() {
             panel = panel.size_range(px(p.min).unwrap_or(px_(20.))..px(p.max).unwrap_or(px_(100_000.)));
+        }
+        if let Some(size) = size.filter(|_| locked) {
+            panel = panel.size_range(size..size);
         }
         panel
     }
@@ -196,7 +295,7 @@ impl Drawer<'_, '_> {
         let (dir, path, sizes, items) = match t {
             Shown::Part(name) => {
                 let body = templates.and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
-                return body.unwrap_or_else(|| div().into_any_element());
+                return self.leaf(d, name, body.unwrap_or_else(|| div().into_any_element()), scope);
             },
             Shown::Split { dir, path, sizes, items } => (dir, path, sizes, items),
         };
@@ -230,7 +329,7 @@ impl Drawer<'_, '_> {
             };
             fixed_by_kept.push(fixed);
             let body = self.tree(d, child, scope, outer);
-            group = group.child(self.panel(&own, fixed, size).child(body));
+            group = group.child(self.panel(&own, fixed, size, self.locked()).child(body));
         }
         if let Some(on_change) = scope.on_change.clone() {
             let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
@@ -266,7 +365,7 @@ impl Drawer<'_, '_> {
         style::el_with(n.element, inline, self.cx)
     }
 
-    fn boxed(&mut self, n: &Node, look: &style::El, kids: Vec<AnyElement>, index: Option<usize>) -> AnyElement {
+    fn boxed(&mut self, n: &Node, look: &style::El, kids: Vec<AnyElement>, index: Option<usize>, drag: Option<DraggedPart>) -> AnyElement {
         let mut d = div().flex();
         d = match n.layout {
             Layout::Column => d.flex_col(),
@@ -348,9 +447,18 @@ impl Drawer<'_, '_> {
             under = Some(b);
         }
         let d = d.children(look.backdrop()).children(under).children(kids);
-        let e = match &n.frame {
-            Some(f) => (self.frames)(f, index, d),
-            None => d.into_any_element(),
+        let e = match (drag, &n.frame) {
+            // gpui doesn't say what is dragged: the drag's start keeps it for the docks.
+            (Some(p), _) => d
+                .id(ElementId::Name(format!("handle:{}", p.part).into()))
+                .on_drag(p, |p, _, _, cx| {
+                    cx.set_global(ActiveDrag(Some(p.clone())));
+                    cx.refresh_windows();
+                    cx.new(|_| p.clone())
+                })
+                .into_any_element(),
+            (None, Some(f)) => (self.frames)(f, index, d),
+            (None, None) => d.into_any_element(),
         };
         if n.overlay { deferred(e).with_priority(n.z.max(0) as usize).into_any_element() } else { e }
     }

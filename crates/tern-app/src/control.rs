@@ -21,6 +21,8 @@
 //!   pane-drop TAB PANE ZONE (center|left|right|up|down), pane-split TAB EDGE,
 //!   pane-layout COLS ROWS, pane-tile, pane-zoom, pane-focus PANE|EDGE,
 //!   pane-close PANE   split panes (indices as `state` lists them)
+//!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
+//!                    (as dragging its header does); `state` ends with `arrange …`
 //!   windows / ws     list windows / this window's workspaces
 //!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
 //!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window

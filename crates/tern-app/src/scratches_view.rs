@@ -159,8 +159,8 @@ fn ago(d: Duration) -> String {
 impl Render for ScratchesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity().downgrade();
-        let header = style::panel_header("scratches.header", "Scratches", Some(self.files.len()), cx)
-            .child({
+        let buttons = [
+            {
                 let me = me.clone();
                 style::header_button("scratches.header.button", "new-scratch", IconName::Plus, cx)
                     .tooltip("New Scratch File")
@@ -173,22 +173,18 @@ impl Render for ScratchesView {
                         }
                         menu
                     })
-            })
-            .child(
-                style::header_button(
-                    "scratches.header.button",
-                    "open-scratches-folder",
-                    Icon::new(gpui_kit::assets::IconName::FolderOpen),
-                    cx,
-                )
+                    .into_any_element()
+            },
+            style::header_button("scratches.header.button", "open-scratches-folder", Icon::new(gpui_kit::assets::IconName::FolderOpen), cx)
                 .tooltip("Open Scratches Folder")
-                .on_click(cx.listener(|this, _, _, cx| cx.open_with_system(&this.dir))),
-            )
-            .child(
-                style::header_button("scratches.header.button", "hide-scratches", IconName::Close, cx)
-                    .tooltip(format!("Hide Scratches ({})", crate::platform::shortcut("⌘⇧S")))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ScratchesEvent::Hide))),
-            );
+                .on_click(cx.listener(|this, _, _, cx| cx.open_with_system(&this.dir)))
+                .into_any_element(),
+            style::header_button("scratches.header.button", "hide-scratches", IconName::Close, cx)
+                .tooltip(format!("Hide Scratches ({})", crate::platform::shortcut("⌘⇧S")))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ScratchesEvent::Hide)))
+                .into_any_element(),
+        ];
+        let header = crate::dock::panel_header("scratches", "scratches.header", "Scratches", Some(self.files.len()), buttons, cx);
         let body: AnyElement = if self.files.is_empty() {
             style::el("scratches.empty", cx)
                 .apply(div().flex_1().flex().flex_col().items_center().justify_center())

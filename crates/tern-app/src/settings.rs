@@ -49,6 +49,8 @@ pub struct SettingsFile {
     pub editor: EditorSettings,
     /// Terminal tabs.
     pub terminal: TerminalSettings,
+    /// Where the side panels sit.
+    pub layout: LayoutSettings,
     /// Shared values that elements point at with `"$name"`: the built-in
     /// ones (`row_height`, `bar_background`, …; see `reference/elements.md`)
     /// or new ones of your own. A value is a number (pixels), `"0.875rem"`, a
@@ -70,6 +72,13 @@ pub struct SettingsFile {
     /// `blue-500/50`.
     #[schemars(with = "ThemeConfigColors")]
     pub colors: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayoutSettings {
+    /// Turns off moving and resizing panels.
+    pub locked: bool,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -341,6 +350,7 @@ fn load(cx: &mut App) {
     specs.extend(settings.templates.clone());
     let templates = crate::template::compile(&specs, &style::Props::new(&over, &colors, dir), &mut problems);
     cx.set_global(templates);
+    cx.set_global(crate::dock::LayoutLock(settings.layout.locked));
 
     let t = &settings.terminal;
     cx.set_global(TerminalLook {
@@ -848,6 +858,16 @@ template (`\"use\"`), or a piece Tern draws (`\"slot\"`).
 | `status_bar` | as `workspace` | as `workspace` |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
+| `panel_header` | `part`, `title`, `count` | `buttons` |
+| `explorer.header`, `changes.header`, `scratches.header` | as `panel_header` | as `panel_header` |
+
+`\"element\"` on a `\"use\"` gives the used template's root that element, and
+`$element` inside it names it (`\"$element.count_gap\"`): the three panel
+headers are `panel_header` used with their own element. A box with
+`\"handle\": true` drags the panel it is drawn for (a header): drop it on a
+half of a panel in a dock to put it before or after that panel.
+`\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
+resizing panels.
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 

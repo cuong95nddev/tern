@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, ThemeColor, try_parse_color};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_fs::GitStatus;
 
@@ -438,6 +437,18 @@ pub const ELEMENTS: &[Element] = &[
             ("shadow", Text, "md"),
         ]],
     },
+    Element {
+        name: "drop_zone",
+        about: "Where a dragged panel or tab would go; `size` is the strip an empty dock shows while a panel is dragged",
+        groups: &[&[
+            ("background", Color, "$primary/15"),
+            ("border", Color, "$primary/60"),
+            ("border_width", Len, "2"),
+            ("radius", Len, "$radius"),
+            ("size", Len, "24"),
+        ]],
+    },
+    Element { name: "drop_zone.hover", about: "A drop zone under the pointer", groups: &[&[("background", Color, "$primary/30")]] },
     Element { name: "dialog", about: "Prompts and confirmations", groups: &[&[("width", Len, "420"), ("wide_width", Len, "520")]] },
     Element { name: "welcome", about: "The window with no workspace open", groups: &[&[("width", Len, "520"), ("gap", Len, "24")], IMAGE] },
     Element {
@@ -704,6 +715,16 @@ impl Resolver<'_> {
     /// is the theme color of that name, so `"border": "$border"` works.
     fn value_in(&self, raw: &str, kind: Kind, depth: usize, within: Option<&str>) -> Result<Val, String> {
         let Some(name) = raw.strip_prefix('$') else { return self.literal(raw, kind) };
+        // `$name/NN`: the color at NN% of its opacity.
+        if kind == Color
+            && let Some((base, pct)) = name.rsplit_once('/')
+        {
+            let pct: f32 = pct.trim().parse().map_err(|_| format!("\"{pct}\" is not a percentage"))?;
+            return match self.value_in(&format!("${base}"), kind, depth + 1, within)? {
+                Val::Color(c) => Ok(Val::Color(c.opacity(pct / 100.))),
+                v => Ok(v),
+            };
+        }
         if depth > 16 {
             return Err(format!("\"${name}\" refers to itself"));
         }
@@ -1071,25 +1092,6 @@ fn set<T>(slot: &mut Option<T>, v: Option<T>) {
     if v.is_some() {
         *slot = v;
     }
-}
-
-/// A panel's title bar (EXPLORER, CHANGES, …), drawn as element `name`:
-/// its title (or the element's `title`) and an optional count on the left;
-/// the caller adds the buttons, made by [`header_button`].
-pub fn panel_header(name: &'static str, title: impl Into<SharedString>, count: Option<usize>, cx: &App) -> Div {
-    let e = el(name, cx);
-    let own = e.text("title");
-    let title = e.label(if own.is_empty() { title.into() } else { own });
-    let count_color = e.color_opt("count_text");
-    e.apply(div().flex_shrink_0().flex().items_center()).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .gap(e.len("count_gap"))
-            .child(div().truncate().child(title))
-            .children(count.filter(|n| *n > 0).map(|n| div().when_some(count_color, |d, c| d.text_color(c)).child(n.to_string()))),
-    )
 }
 
 /// An icon button in a bar, drawn as element `name`.

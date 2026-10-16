@@ -888,37 +888,40 @@ impl Render for FileTreeView {
             .flex()
             .flex_col()
             .map(|d| panel.container(d))
-            .child(
-                style::panel_header("explorer.header", root_name, None, cx)
-                    .child(header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into()).on_click(cx.listener(
-                        |this, _, window, cx| {
+            .child(crate::dock::panel_header(
+                "explorer",
+                "explorer.header",
+                root_name,
+                None,
+                [
+                    header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(false, window, cx);
-                        },
-                    )))
-                    .child(header_button("new-folder", Icon::new(AssetIcon::FolderPlus), "New Folder…".into()).on_click(cx.listener(
-                        |this, _, window, cx| {
+                        }))
+                        .into_any_element(),
+                    header_button("new-folder", Icon::new(AssetIcon::FolderPlus), "New Folder…".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(true, window, cx);
-                        },
-                    )))
-                    .child(
-                        header_button("refresh-explorer", Icon::new(IconName::RefreshCw), "Refresh Explorer".into())
-                            .on_click(cx.listener(|this, _, window, cx| this.on_refresh(&Refresh, window, cx))),
+                        }))
+                        .into_any_element(),
+                    header_button("refresh-explorer", Icon::new(IconName::RefreshCw), "Refresh Explorer".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.on_refresh(&Refresh, window, cx)))
+                        .into_any_element(),
+                    header_button("collapse-all", Icon::new(AssetIcon::ChevronsDownUp), "Collapse Folders in Explorer".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.on_collapse_all(&CollapseAll, window, cx)))
+                        .into_any_element(),
+                    header_button(
+                        "hide-explorer",
+                        Icon::new(IconName::Close),
+                        format!("Hide Explorer ({})", crate::platform::shortcut("⌘B")).into(),
                     )
-                    .child(
-                        header_button("collapse-all", Icon::new(AssetIcon::ChevronsDownUp), "Collapse Folders in Explorer".into())
-                            .on_click(cx.listener(|this, _, window, cx| this.on_collapse_all(&CollapseAll, window, cx))),
-                    )
-                    .child(
-                        header_button(
-                            "hide-explorer",
-                            Icon::new(IconName::Close),
-                            format!("Hide Explorer ({})", crate::platform::shortcut("⌘B")).into(),
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Hide))),
-                    ),
-            )
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Hide)))
+                    .into_any_element(),
+                ],
+                cx,
+            ))
             .child(
                 div()
                     .id("file-tree-body")

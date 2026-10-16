@@ -57,6 +57,8 @@ pub struct Spec {
     /// A name the code attaches behavior to (clicks, drags, focus).
     pub frame: Option<String>,
     /// The element whose properties this box takes (see `reference/elements.md`).
+    /// On a `use` site: the element the used template's root takes, and the
+    /// one `$element` names in it (`"$element"`, `"$element.count_gap"`).
     pub element: Option<String>,
     /// Properties of the box, over its element's: any of an element's box
     /// properties (`padding`, `background`, `border_width`, …).
@@ -317,6 +319,12 @@ impl Templates {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Whether `template`'s root is a drag handle.
+    #[cfg(test)]
+    pub fn is_handle(&self, template: &str) -> bool {
+        self.nodes.get(template).is_some_and(|n| n.handle)
+    }
 }
 
 impl Global for Templates {}
@@ -450,11 +458,9 @@ struct Panel {
 
 /// A box that holds parts.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `dir`, `accepts` and `zones` are read by dragging, which comes next.
 pub(crate) struct DockNode {
     name: SharedString,
     dir: Dir,
-    accepts: Vec<String>,
     zones: Vec<&'static str>,
     empty_keep: bool,
     strip: Option<SharedString>,
@@ -491,10 +497,8 @@ pub struct Node {
     kind: Option<String>,
     dock: Option<Arc<DockNode>>,
     /// Dragging this box drags the part it is drawn for.
-    #[allow(dead_code)] // Read by dragging, which comes next.
     handle: bool,
     /// Whether it can be dragged; None is always.
-    #[allow(dead_code)] // As `handle`.
     drag: Option<Cond>,
     children: Vec<Node>,
 }
@@ -516,6 +520,7 @@ const SLOTS: &[&str] = &[
     "vertical_tabs",
     "content",
     "drop_overlay",
+    "buttons",
 ];
 
 /// The parts a template may name.
@@ -527,7 +532,8 @@ const ZONES: &[&str] = &["before", "after"];
 /// Reads `specs` (the built-in templates with the theme's and the
 /// settings' over them) with `props`; what's wrong goes to `problems`.
 pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec<String>) -> Templates {
-    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![] };
+    let start = problems.len();
+    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![], element: None };
     for name in specs.keys() {
         c.template(name);
     }
@@ -555,9 +561,17 @@ pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec
             (name.clone(), docks)
         })
         .collect();
+    // A template used with an `element` is read once for each use: say each problem once.
+    let nodes = c.done;
+    let mut said = BTreeSet::new();
+    let mut ix = 0;
+    problems.retain(|p| {
+        ix += 1;
+        ix <= start || said.insert(p.clone())
+    });
     static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Templates { nodes: c.done, docks, parts, generation }
+    Templates { nodes, docks, parts, generation }
 }
 
 /// The templates `spec` uses, below it too.
@@ -632,6 +646,8 @@ struct Compiler<'a, 'b> {
     done: HashMap<String, Arc<Node>>,
     /// The templates being read, to catch one that uses itself.
     stack: Vec<String>,
+    /// What `$element` names: the element given where the template being read is used.
+    element: Option<&'static str>,
 }
 
 impl Compiler<'_, '_> {
@@ -639,16 +655,46 @@ impl Compiler<'_, '_> {
         if let Some(n) = self.done.get(name) {
             return Some(n.clone());
         }
+        let node = Arc::new(self.read(name, None)?);
+        self.done.insert(name.to_owned(), node.clone());
+        Some(node)
+    }
+
+    /// Template `name` read with `$element` naming `element`.
+    fn read(&mut self, name: &str, element: Option<&'static str>) -> Option<Node> {
         let spec = self.specs.get(name)?;
         if self.stack.iter().any(|s| s == name) {
             self.problems.push(format!("templates.{name}: uses itself"));
             return None;
         }
         self.stack.push(name.to_owned());
-        let node = Arc::new(self.node(spec, &format!("templates.{name}")));
+        let outer = std::mem::replace(&mut self.element, element);
+        let node = self.node(spec, &format!("templates.{name}"));
+        self.element = outer;
         self.stack.pop();
-        self.done.insert(name.to_owned(), node.clone());
         Some(node)
+    }
+
+    /// `raw` with `$element.` naming the element in effect; without one, those values go.
+    fn bind(&self, raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<String, serde_json::Value> {
+        raw.iter()
+            .filter_map(|(k, v)| match v.as_str().and_then(|t| t.strip_prefix("$element.")) {
+                Some(prop) => self.element.map(|e| (k.clone(), serde_json::Value::String(format!("${e}.{prop}")))),
+                None => Some((k.clone(), v.clone())),
+            })
+            .collect()
+    }
+
+    /// The element `name` names (`$element`: the one in effect); an unknown one is a problem.
+    fn element(&mut self, name: &str, at: &str) -> Option<&'static style::Element> {
+        if name == "$element" {
+            return self.element.and_then(style::element);
+        }
+        let e = style::element(name);
+        if e.is_none() {
+            self.problems.push(format!("{at}.element: no element \"{name}\""));
+        }
+        e
     }
 
     fn len(&mut self, v: &Option<serde_json::Value>, at: &str) -> Option<AbsoluteLength> {
@@ -661,7 +707,16 @@ impl Compiler<'_, '_> {
 
     fn node(&mut self, s: &Spec, at: &str) -> Node {
         let mut node = match &s.use_ {
-            Some(name) => match self.template(name) {
+            Some(name) => match match s.element.as_deref() {
+                Some(e) => match self.element(e, at) {
+                    Some(e) => self.read(name, Some(e.name)).map(|mut n| {
+                        n.element = e.name;
+                        Arc::new(n)
+                    }),
+                    None => self.template(name),
+                },
+                None => self.template(name),
+            } {
                 Some(n) => (*n).clone(),
                 None => {
                     if !self.stack.iter().any(|t| t == name) {
@@ -742,13 +797,7 @@ impl Compiler<'_, '_> {
             self.problems.push(format!("{at}: a node is one of slot, part, text, each and use"));
         }
         let element = match &s.element {
-            Some(name) => match style::element(name) {
-                Some(e) => Some(e),
-                None => {
-                    self.problems.push(format!("{at}.element: no element \"{name}\""));
-                    None
-                },
-            },
+            Some(name) => self.element(name, at),
             None => None,
         };
         let what = if let Some(slot) = &s.slot {
@@ -780,11 +829,12 @@ impl Compiler<'_, '_> {
         } else {
             What::Box
         };
-        let style = self.props.compile(element, &s.style, &format!("{at}.style"), self.problems);
+        let style = self.props.compile(element, &self.bind(&s.style), &format!("{at}.style"), self.problems);
         let mut states = vec![];
         for (cond, props) in &s.states {
             let Some(c) = self.cond(cond, &format!("{at}.states")) else { continue };
-            states.push((c, self.props.compile(element, props, &format!("{at}.states.{cond}"), self.problems)));
+            let props = self.bind(props);
+            states.push((c, self.props.compile(element, &props, &format!("{at}.states.{cond}"), self.problems)));
         }
         let pick = |v: &Option<String>, what: &str, problems: &mut Vec<String>, opts: &[&str]| -> Option<usize> {
             let v = v.as_deref()?;
@@ -901,7 +951,6 @@ impl Compiler<'_, '_> {
         Some(Arc::new(DockNode {
             name: name.clone().into(),
             dir,
-            accepts: s.accepts.clone(),
             zones,
             empty_keep,
             strip,
@@ -975,6 +1024,20 @@ mod tests {
         let a = crate::arrange::Arrangement::defaults("workspace/left+right", &docks);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@220px];right=changes");
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn panel_header_template_compiles() {
+        let (t, problems) = compiled(super::BUILTIN);
+        assert_eq!(problems, Vec::<String>::new());
+        assert!(t.is_handle("panel_header"));
+        // Each panel's use site gives the header its element, and `$element` in its style.
+        for name in ["explorer.header", "changes.header", "scratches.header"] {
+            let n = &t.nodes[name];
+            assert!(t.is_handle(name), "{name}");
+            assert_eq!(n.element, name);
+            assert!(n.children[0].style.contains_key("gap"), "{name}");
+        }
     }
 
     #[test]

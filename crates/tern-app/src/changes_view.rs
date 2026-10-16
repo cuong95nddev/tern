@@ -233,18 +233,18 @@ impl ChangesView {
 impl Render for ChangesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.total();
-        let header = style::panel_header("changes.header", "Changes", Some(total), cx)
-            .child(
-                style::header_button("changes.header.button", "refresh", IconName::RefreshCw, cx)
-                    .loading(self.refreshing)
-                    .tooltip("Refresh")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx))),
-            )
-            .child(
-                style::header_button("changes.header.button", "hide-changes", IconName::Close, cx)
-                    .tooltip(format!("Hide Changes ({})", crate::platform::shortcut("⌘⇧G")))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Hide))),
-            );
+        let buttons = [
+            style::header_button("changes.header.button", "refresh", IconName::RefreshCw, cx)
+                .loading(self.refreshing)
+                .tooltip("Refresh")
+                .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx)))
+                .into_any_element(),
+            style::header_button("changes.header.button", "hide-changes", IconName::Close, cx)
+                .tooltip(format!("Hide Changes ({})", crate::platform::shortcut("⌘⇧G")))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Hide)))
+                .into_any_element(),
+        ];
+        let header = crate::dock::panel_header("changes", "changes.header", "Changes", Some(total), buttons, cx);
         let body: AnyElement = if self.repos.is_empty() {
             style::el("changes.empty", cx)
                 .apply(div().flex_1().flex().items_center().justify_center())
