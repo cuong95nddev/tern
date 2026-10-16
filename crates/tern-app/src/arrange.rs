@@ -90,6 +90,59 @@ pub fn prune(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Tree> {
     prune_mut(tree, &mut |n| shown(n))
 }
 
+/// What a dock shows of its tree: the parts `shown` keeps, each split with
+/// where it is in the stored tree, so a resize lands on the stored split.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shown {
+    Part(String),
+    Split {
+        dir: Dir,
+        /// Child indices from the dock's root to this split, in the stored tree.
+        path: Vec<usize>,
+        /// The stored sizes of all its children, the hidden ones' too.
+        sizes: Vec<Size>,
+        /// The kept children, each with its index among the stored ones.
+        items: Vec<(usize, Shown)>,
+    },
+}
+
+/// `tree` pruned as `prune` does, keeping the stored place of every split.
+pub fn shown(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
+    fn walk(tree: &Tree, path: &mut Vec<usize>, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
+        match tree {
+            Tree::Part(name) => shown(name).then(|| Shown::Part(name.clone())),
+            Tree::Split(dir, items) => {
+                let mut kept = Vec::new();
+                for (i, (t, _)) in items.iter().enumerate() {
+                    path.push(i);
+                    if let Some(s) = walk(t, path, shown) {
+                        kept.push((i, s));
+                    }
+                    path.pop();
+                }
+                match kept.len() {
+                    0 => None,
+                    1 => kept.pop().map(|(_, s)| s),
+                    _ => Some(Shown::Split { dir: *dir, path: path.clone(), sizes: items.iter().map(|(_, s)| *s).collect(), items: kept }),
+                }
+            },
+        }
+    }
+    walk(tree, &mut Vec::new(), shown)
+}
+
+/// The stored sizes of a split with `new` put in for its kept children
+/// (`kept`: their stored indices, in order).
+pub fn merge_sizes(stored: &[Size], kept: &[usize], new: &[Size]) -> Vec<Size> {
+    let mut out = stored.to_vec();
+    for (i, size) in kept.iter().zip(new) {
+        if let Some(slot) = out.get_mut(*i) {
+            *slot = *size;
+        }
+    }
+    out
+}
+
 /// `prune` with a stateful filter, asked once per part in tree order.
 fn prune_mut(tree: &Tree, shown: &mut dyn FnMut(&str) -> bool) -> Option<Tree> {
     match tree {
@@ -568,6 +621,45 @@ mod tests {
         let mut a = fresh();
         assert!(!a.move_part("explorer", "pane", "left", Drop::End, &docks()));
         assert_eq!(a.encode(), DEFAULT);
+    }
+
+    #[test]
+    fn shown_keeps_stored_places() {
+        let a = Arrangement::decode("k", "left=[c a@- b@100px c@-]").unwrap();
+        let tree = a.docks["left"].clone().unwrap();
+        let s = shown(&tree, &|n| n != "b").unwrap();
+        let Shown::Split { path, items, sizes, .. } = &s else { panic!("{s:?}") };
+        assert!(path.is_empty());
+        assert_eq!(items.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(sizes.len(), 3);
+
+        let a = Arrangement::decode("k", "left=[c a@- [r b@- c@-]@-]").unwrap();
+        let tree = a.docks["left"].clone().unwrap();
+        let s = shown(&tree, &|n| n != "a").unwrap();
+        let Shown::Split { dir, path, items, .. } = &s else { panic!("{s:?}") };
+        assert_eq!((*dir, path.as_slice()), (Dir::Row, &[1][..]));
+        assert_eq!(items.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(shown(&tree, &|n| n == "c"), Some(Shown::Part("c".into())));
+        assert_eq!(shown(&tree, &|_| false), None);
+    }
+
+    #[test]
+    fn resize_after_hiding_lands_on_the_stored_split() {
+        // `b` hidden: the two shown sizes go to `a` and `c`, `b` keeps its own.
+        let mut a = Arrangement::decode("k", "left=[c a@- b@100px c@-]").unwrap();
+        let tree = a.docks["left"].clone().unwrap();
+        let Some(Shown::Split { path, sizes, items, .. }) = shown(&tree, &|n| n != "b") else { panic!() };
+        let kept: Vec<usize> = items.iter().map(|(i, _)| *i).collect();
+        a.set_sizes("left", &path, &merge_sizes(&sizes, &kept, &[Size::Auto, Size::Px(50.)]));
+        assert_eq!(a.encode(), "left=[c a@- b@100px c@50px]");
+
+        // `a` hidden: the shown row is the stored one at [1], not the root.
+        let mut a = Arrangement::decode("k", "left=[c a@- [r b@- c@-]@-]").unwrap();
+        let tree = a.docks["left"].clone().unwrap();
+        let Some(Shown::Split { path, sizes, items, .. }) = shown(&tree, &|n| n != "a") else { panic!() };
+        let kept: Vec<usize> = items.iter().map(|(i, _)| *i).collect();
+        a.set_sizes("left", &path, &merge_sizes(&sizes, &kept, &[Size::Px(70.), Size::Auto]));
+        assert_eq!(a.encode(), "left=[c a@- [r b@70px c@-]@-]");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use gpui_kit::*;
 use std::sync::Arc;
 
 use super::{Align, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, What};
-use crate::arrange::{self, Size, Tree};
+use crate::arrange::{self, Shown, Size};
 use crate::dock::Change;
 use crate::style::{self, Val};
 
@@ -101,7 +101,7 @@ impl Drawer<'_, '_> {
             What::Box => {},
         }
         if let Some(d) = &n.dock {
-            kids.extend(self.dock_tree(d, scope, outer).map(|t| self.tree(d, &t, &mut vec![], scope, outer)));
+            kids.extend(self.dock_tree(d, scope, outer).map(|t| self.tree(d, &t, scope, outer)));
         } else if let Some(axis) = n.split {
             kids.push(self.split(n, axis, scope, outer));
         } else {
@@ -120,8 +120,9 @@ impl Drawer<'_, '_> {
             Axis::Horizontal => h_resizable(id),
             Axis::Vertical => v_resizable(id),
         };
-        // The docks shown here, by panel: a resize stores their widths.
-        let mut docks: Vec<(usize, SharedString)> = vec![];
+        // The docks shown here, by panel, with the width they start the drag at:
+        // a resize stores the widths that changed.
+        let mut docks: Vec<(usize, SharedString, Option<Pixels>)> = vec![];
         for (i, c) in n.children.iter().enumerate() {
             let shown = self.holds(&c.when, scope, outer) && !self.dock_hidden(c, scope, outer);
             let fixed = c.panel.fixed.as_ref().is_some_and(|f| f.holds(&lookup(scope, outer)));
@@ -131,7 +132,7 @@ impl Drawer<'_, '_> {
                     size = Some(px(*w));
                 }
                 if shown {
-                    docks.push((i, d.name.clone()));
+                    docks.push((i, d.name.clone(), size));
                 }
             }
             let body = if shown { self.draw(c, scope, outer) } else { None };
@@ -144,8 +145,9 @@ impl Drawer<'_, '_> {
         if let Some(on_change) = scope.on_change.clone().filter(|_| !docks.is_empty()) {
             group = group.on_resize(move |state, window, cx| {
                 let sizes = state.read(cx).sizes().clone();
-                for (i, dock) in &docks {
-                    if let Some(w) = sizes.get(*i) {
+                for (i, dock, was) in &docks {
+                    let Some(w) = sizes.get(*i) else { continue };
+                    if was.is_none_or(|was| (f32::from(was) - f32::from(*w)).abs() >= 0.5) {
                         on_change(Change::Width { dock: dock.clone(), width: f32::from(*w) }, window, cx);
                     }
                 }
@@ -177,49 +179,42 @@ impl Drawer<'_, '_> {
 
     /// The parts of dock `d` to draw: the arrangement's (the template's
     /// defaults without one), less those whose `when` doesn't hold.
-    fn dock_tree(&self, d: &DockNode, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<Tree> {
+    fn dock_tree(&self, d: &DockNode, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<Shown> {
         let templates = self.cx.try_global::<Templates>()?;
         let tree = match scope.arrangement.as_ref().and_then(|a| a.docks.get(&*d.name)) {
             Some(t) => t.as_ref()?,
             None => &d.info.defaults,
         };
         let shown = |part: &str| templates.part(part).is_some_and(|p| self.holds(&p.when, scope, outer));
-        arrange::prune(tree, &shown)
+        arrange::shown(tree, &shown)
     }
 
-    /// Part tree `t` of dock `d`, at `path` (child indices from the dock's root).
-    fn tree(
-        &mut self,
-        d: &DockNode,
-        t: &Tree,
-        path: &mut Vec<usize>,
-        scope: &mut Scope,
-        outer: &[&HashMap<&'static str, Value>],
-    ) -> AnyElement {
+    /// What dock `d` shows of its tree: ids and resizes go by the stored tree's places.
+    fn tree(&mut self, d: &DockNode, t: &Shown, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
         let cx = self.cx;
         let templates = cx.try_global::<Templates>();
-        let items = match t {
-            Tree::Part(name) => {
+        let (dir, path, sizes, items) = match t {
+            Shown::Part(name) => {
                 let body = templates.and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
                 return body.unwrap_or_else(|| div().into_any_element());
             },
-            Tree::Split(_, items) => items,
+            Shown::Split { dir, path, sizes, items } => (dir, path, sizes, items),
         };
         let at: Vec<String> = path.iter().map(usize::to_string).collect();
         let id = SharedString::from(format!("{}:dock:{}:{}", scope.id, d.name, at.join(".")));
-        let mut group = match t {
-            Tree::Split(arrange::Dir::Row, _) => h_resizable(id),
-            _ => v_resizable(id),
+        let mut group = match dir {
+            arrange::Dir::Row => h_resizable(id),
+            arrange::Dir::Column => v_resizable(id),
         };
-        let mut fixed_by_ix = vec![];
-        for (i, (child, size)) in items.iter().enumerate() {
+        let mut fixed_by_kept = vec![];
+        for (ix, child) in items {
             let part = match child {
-                Tree::Part(name) => templates.and_then(|ts| ts.part(name)).map(|p| (name, p)),
-                Tree::Split(..) => None,
+                Shown::Part(name) => templates.and_then(|ts| ts.part(name)).map(|p| (name, p)),
+                Shown::Split { .. } => None,
             };
             let own = part.map(|(_, p)| p.panel.clone()).unwrap_or_default();
-            let (fixed, size) = match size {
-                Size::Px(v) => (true, Some(px(*v))),
+            let (fixed, size) = match sizes.get(*ix).copied().unwrap_or(Size::Auto) {
+                Size::Px(v) => (true, Some(px(v))),
                 Size::Auto | Size::Frac(_) => match part {
                     Some((name, p)) if d.info.defaults.has(name) => {
                         let fixed = p.panel.fixed.as_ref().is_some_and(|f| f.holds(&lookup(scope, outer)));
@@ -233,17 +228,22 @@ impl Drawer<'_, '_> {
                     None => (false, None),
                 },
             };
-            fixed_by_ix.push(fixed);
-            path.push(i);
-            let body = self.tree(d, child, path, scope, outer);
-            path.pop();
+            fixed_by_kept.push(fixed);
+            let body = self.tree(d, child, scope, outer);
             group = group.child(self.panel(&own, fixed, size).child(body));
         }
         if let Some(on_change) = scope.on_change.clone() {
-            let (dock, path) = (d.name.clone(), path.clone());
+            let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
+            let kept: Vec<usize> = items.iter().map(|(i, _)| *i).collect();
             group = group.on_resize(move |state, window, cx| {
-                let sizes = state.read(cx).sizes();
-                let sizes = sizes.iter().zip(&fixed_by_ix).map(|(s, f)| if *f { Size::Px(f32::from(*s)) } else { Size::Auto }).collect();
+                let shown: Vec<Size> = state
+                    .read(cx)
+                    .sizes()
+                    .iter()
+                    .zip(&fixed_by_kept)
+                    .map(|(s, f)| if *f { Size::Px(f32::from(*s)) } else { Size::Auto })
+                    .collect();
+                let sizes = arrange::merge_sizes(&stored, &kept, &shown);
                 on_change(Change::Resize { dock: dock.clone(), path: path.clone(), sizes }, window, cx);
             });
         }

@@ -444,6 +444,9 @@ pub struct Workspace {
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
     /// Where the side panels sit, per template and docks (`arrange::key`).
     arrangements: HashMap<String, Arrangement>,
+    /// The keys whose arrangement the user changed (or a session brought):
+    /// the only ones saved. The others follow the templates' defaults.
+    touched: HashSet<String>,
     /// The templates generation and key the arrangement was last fitted to.
     arranged_for: Option<(u64, String)>,
     /// What fitting the stored arrangement to the templates found.
@@ -588,6 +591,7 @@ impl Workspace {
             pane_ui: RefCell::new(HashMap::new()),
             // A key stored twice: the last one wins.
             arrangements: saved.arrangements.iter().filter_map(|(k, e)| Some((k.clone(), Arrangement::decode(k, e)?))).collect(),
+            touched: saved.arrangements.iter().map(|(k, _)| k.clone()).collect(),
             arranged_for: None,
             arrange_problems: vec![],
             _subs: vec![tree_sub, changes_sub, scratches_sub],
@@ -700,7 +704,7 @@ impl Workspace {
             tab_panes,
             pane_active,
             hidden,
-            arrangements: self.saved_arrangements(cx),
+            arrangements: self.saved_arrangements(),
         }
     }
 
@@ -2535,15 +2539,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The arrangements to keep, by key. One that is still its template's
-    /// defaults is left out, so the start sizes in the settings keep applying.
-    fn saved_arrangements(&self, cx: &App) -> Vec<(String, String)> {
-        let defaults = cx.try_global::<template::Templates>().map(|t| {
-            let docks = t.docks("workspace");
-            Arrangement::defaults(&arrange::key("workspace", &docks), &docks)
-        });
+    /// The arrangements to keep, by key: those the user changed or a session
+    /// brought. Defaults aren't kept, so start sizes from the settings apply.
+    fn saved_arrangements(&self) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> =
-            self.arrangements.iter().filter(|(_, a)| defaults.as_ref() != Some(*a)).map(|(k, a)| (k.clone(), a.encode())).collect();
+            self.arrangements.iter().filter(|(k, _)| self.touched.contains(*k)).map(|(k, a)| (k.clone(), a.encode())).collect();
         out.sort();
         out
     }
@@ -2560,12 +2560,13 @@ impl Workspace {
         let now = Some((templates.generation(), key.clone()));
         if self.arranged_for != now {
             self.arranged_for = now;
-            self.arrange_problems = match self.arrangements.get_mut(&key) {
+            self.arrange_problems = match self.arrangements.get_mut(&key).filter(|_| self.touched.contains(&key)) {
                 Some(a) => {
                     let parts = templates.parts();
                     let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
                     a.reconcile(&docks, &parts)
                 },
+                // Untouched: the defaults of the templates now in effect.
                 None => {
                     self.arrangements.insert(key.clone(), Arrangement::defaults(&key, &docks));
                     vec![]
@@ -2591,6 +2592,7 @@ impl Workspace {
                 a.widths.insert(dock.to_string(), width);
             },
         }
+        self.touched.insert(key.clone());
         self.panels_changed(cx);
     }
 
