@@ -482,7 +482,8 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                         continue;
                     },
                 };
-                slot.mirror.lock().unwrap().install(&snap);
+                let status = snap.status;
+                slot.mirror.lock().unwrap().install(snap);
                 let early = {
                     let mut early = slot.early.lock().unwrap();
                     *slot.id.lock().unwrap() = Some(id);
@@ -496,7 +497,7 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 }
                 *slot.tty.lock().unwrap() = tty;
                 inner.sessions.lock().unwrap().insert(id, slot.clone());
-                (slot.sink)(TermEvent::Ready { id, token, status: snap.status });
+                (slot.sink)(TermEvent::Ready { id, token, status });
                 // The daemon sized it as the request said; the view may
                 // have moved on since.
                 let want = *slot.want.lock().unwrap();

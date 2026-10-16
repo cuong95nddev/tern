@@ -149,7 +149,7 @@ fn attach_mid_stream_loses_and_doubles_nothing() {
     let mirror = Mirror::new(SIZE, 1000, Arc::new(move |e| ev.lock().unwrap().push(e)));
     let sub = Arc::new(MirrorSub(Mutex::new(mirror)));
     let snap = host.attach(sub.clone());
-    sub.0.lock().unwrap().install(&snap);
+    sub.0.lock().unwrap().install(snap);
     wait_until("all lines", || {
         let m = sub.0.lock().unwrap();
         let term = m.term().lock();
@@ -187,7 +187,7 @@ fn attach_inside_a_synchronized_update() {
     let mirror = Mirror::new(SIZE, 1000, Arc::new(move |e| ev.lock().unwrap().push(e)));
     let sub = Arc::new(MirrorSub(Mutex::new(mirror)));
     let snap = host.attach(sub.clone());
-    sub.0.lock().unwrap().install(&snap);
+    sub.0.lock().unwrap().install(snap);
     host.input(b"\n".to_vec());
     wait_until("both halves", || {
         let m = sub.0.lock().unwrap();

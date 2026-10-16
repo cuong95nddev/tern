@@ -129,16 +129,17 @@ impl Mirror {
     }
 
     /// Replace the terminal's state with `snap`.
-    pub fn install(&mut self, snap: &Snapshot) {
+    pub fn install(&mut self, snap: Snapshot) {
+        let (size, title) = (snap.size, snap.title.clone());
         let mut parser = Processor::new();
-        let mut term = Term::new(config(self.scrollback), &snap.size, self.listener.clone());
+        let mut term = Term::new(config(self.scrollback), &size, self.listener.clone());
         snapshot::restore(snap, &mut term, &mut parser);
         *self.term.lock() = term;
         self.parser = parser;
         self.scanner = OscScanner::new();
-        self.size = snap.size;
-        if let Some(t) = &snap.title {
-            (self.listener.sink)(TermEvent::Title(t.clone()));
+        self.size = size;
+        if let Some(t) = title {
+            (self.listener.sink)(TermEvent::Title(t));
         }
         self.listener.wakeup();
     }
@@ -206,7 +207,7 @@ mod tests {
         let snap = snapshot::capture(&mut src, SIZE, Some("t".into()), ActivityStatus::None);
         let (mut m, events) = mirror();
         m.feed(b"old");
-        m.install(&snap);
+        m.install(snap);
         assert_eq!(text(&*m.term().lock())[0], "from the daemon");
         assert!(events.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Title(t) if t == "t")));
     }

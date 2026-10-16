@@ -68,8 +68,16 @@ impl GridState {
         Self { grid: grid.clone(), cursor: CursorState::of(&grid.cursor), saved_cursor: CursorState::of(&grid.saved_cursor) }
     }
 
-    fn install(&self, grid: &mut Grid<Cell>) {
+    /// Put a copy back (the capture keeps it).
+    fn put_back(&self, grid: &mut Grid<Cell>) {
         *grid = self.grid.clone();
+        self.cursor.apply(&mut grid.cursor);
+        self.saved_cursor.apply(&mut grid.saved_cursor);
+    }
+
+    /// Make it `grid`, moving its scrollback rather than copying it.
+    fn install(self, grid: &mut Grid<Cell>) {
+        *grid = self.grid;
         self.cursor.apply(&mut grid.cursor);
         self.saved_cursor.apply(&mut grid.saved_cursor);
     }
@@ -113,7 +121,7 @@ pub fn capture<L: EventListener>(term: &mut Term<L>, size: TermSize, title: Opti
         term.swap_alt();
         let primary = GridState::of(term.grid());
         term.swap_alt();
-        alt.install(term.grid_mut());
+        alt.put_back(term.grid_mut());
         (alt, Some(primary))
     } else {
         (GridState::of(term.grid()), None)
@@ -132,23 +140,25 @@ pub fn capture<L: EventListener>(term: &mut Term<L>, size: TermSize, title: Opti
     Snapshot { size, grid, primary, mode: mode.bits(), cursor_style, colors, title, status }
 }
 
-/// Rebuild `snap` into `term`, which must be new and of `snap.size`.
-pub fn restore<L: EventListener>(snap: &Snapshot, term: &mut Term<L>, parser: &mut Processor<StdSyncHandler>) {
-    let mode = TermMode::from_bits_truncate(snap.mode);
-    match &snap.primary {
+/// Rebuild `snap` into `term`, which must be new and of `snap.size`. Its
+/// grids move into `term`.
+pub fn restore<L: EventListener>(snap: Snapshot, term: &mut Term<L>, parser: &mut Processor<StdSyncHandler>) {
+    let Snapshot { grid, primary, mode, cursor_style, colors, .. } = snap;
+    let mode = TermMode::from_bits_truncate(mode);
+    match primary {
         Some(primary) => {
             primary.install(term.grid_mut());
             parser.advance(term, b"\x1b[?1049h");
-            snap.grid.install(term.grid_mut());
+            grid.install(term.grid_mut());
         },
-        None => snap.grid.install(term.grid_mut()),
+        None => grid.install(term.grid_mut()),
     }
     parser.advance(term, &mode_sequences(mode));
     let mut out = Vec::new();
-    if let Some(n) = snap.cursor_style {
+    if let Some(n) = cursor_style {
         out.extend_from_slice(format!("\x1b[{n} q").as_bytes());
     }
-    for &(i, [r, g, b]) in &snap.colors {
+    for &(i, [r, g, b]) in &colors {
         let rgb = format!("rgb:{r:02x}/{g:02x}/{b:02x}");
         let seq = match i {
             i if i < 256 => format!("\x1b]4;{i};{rgb}\x07"),
@@ -216,7 +226,7 @@ mod tests {
         let bytes = serde_json::to_vec(&snap).unwrap();
         let snap: Snapshot = serde_json::from_slice(&bytes).unwrap();
         let mut dst = term();
-        restore(&snap, &mut dst, &mut Processor::new());
+        restore(snap, &mut dst, &mut Processor::new());
         dst
     }
 
