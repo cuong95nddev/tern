@@ -14,3 +14,14 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# The terminal path (parsing, the mux, drawing frames) is too slow unoptimized
+# to judge how a debug build feels; level 1 keeps builds quick.
+[profile.dev.package.tern-term]
+opt-level = 1
+
+[profile.dev.package.tern-mux]
+opt-level = 1
+
+[profile.dev.package.tern-app]
+opt-level = 1
