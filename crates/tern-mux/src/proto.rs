@@ -5,7 +5,8 @@
 //! way is `Hello`; a client says whether it is a UI or an observer (the menu
 //! bar agent). A message of a kind the receiver doesn't know is skipped,
 //! so a minor version can add kinds; the major is part of the socket name,
-//! so incompatible versions never talk.
+//! so incompatible versions never talk. Byte buffers (output, input, hook
+//! bodies, snapshots) are msgpack `bin`, not arrays of numbers (MAJOR 2).
 
 #[cfg(unix)]
 use std::collections::VecDeque;
@@ -25,7 +26,7 @@ use crate::UnixStream;
 #[cfg(unix)]
 use crate::fdpass;
 
-pub const MAJOR: u32 = 1;
+pub const MAJOR: u32 = 2;
 pub const MINOR: u32 = 1;
 
 /// What a client is.
@@ -70,6 +71,7 @@ pub enum ClientMsg {
     },
     Input {
         id: u64,
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     Resize {
@@ -114,6 +116,7 @@ pub enum ServerMsg {
         token: Option<String>,
         pid: u32,
         fd: bool,
+        #[serde(with = "serde_bytes")]
         snapshot: Vec<u8>,
     },
     NotFound {
@@ -126,6 +129,7 @@ pub enum ServerMsg {
     },
     Output {
         id: u64,
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     Marker {
@@ -135,6 +139,7 @@ pub enum ServerMsg {
     /// A Claude Code hook request for `token` (JSON body).
     Hook {
         token: String,
+        #[serde(with = "serde_bytes")]
         body: Vec<u8>,
     },
     /// Another connection attached to `id`.
@@ -196,11 +201,11 @@ pub fn unpack_snapshot(bytes: &[u8]) -> io::Result<Snapshot> {
 }
 
 pub fn encode(msg: &impl Serialize) -> io::Result<Vec<u8>> {
-    let body = rmp_serde::to_vec_named(msg).map_err(io::Error::other)?;
-    let len = u32::try_from(body.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&body);
+    // The length goes in front once the body is written after it.
+    let mut out = vec![0u8; 4];
+    rmp_serde::encode::write_named(&mut out, msg).map_err(io::Error::other)?;
+    let len = u32::try_from(out.len() - 4).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+    out[..4].copy_from_slice(&len.to_le_bytes());
     Ok(out)
 }
 
@@ -228,11 +233,16 @@ fn decode<T: DeserializeOwned>(body: &[u8]) -> io::Result<Option<T>> {
     }
 }
 
+/// How much one read of the socket takes at most.
+const READ_CHUNK: usize = 64 << 10;
+
 /// Reads frames, and the fds that come with them (not on Windows), from a
 /// Unix socket.
 pub struct FrameReader {
     sock: UnixStream,
+    /// Bytes read; those before `start` are decoded already.
     buf: Vec<u8>,
+    start: usize,
     #[cfg(unix)]
     fds: VecDeque<OwnedFd>,
     max: usize,
@@ -242,7 +252,8 @@ impl FrameReader {
     pub fn new(sock: UnixStream, max: usize) -> Self {
         Self {
             sock,
-            buf: Vec::with_capacity(64 << 10),
+            buf: Vec::with_capacity(READ_CHUNK),
+            start: 0,
             #[cfg(unix)]
             fds: VecDeque::new(),
             max,
@@ -258,34 +269,44 @@ impl FrameReader {
     /// skipped.
     pub fn read<T: DeserializeOwned>(&mut self) -> io::Result<Option<T>> {
         loop {
-            if self.buf.len() >= 4 {
-                let len = u32::from_le_bytes(self.buf[..4].try_into().unwrap()) as usize;
+            let pending = &self.buf[self.start..];
+            if pending.len() >= 4 {
+                let len = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
                 if len > self.max {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame of {len} bytes")));
                 }
-                if self.buf.len() >= 4 + len {
-                    let msg = decode(&self.buf[4..4 + len]);
-                    self.buf.drain(..4 + len);
+                if pending.len() >= 4 + len {
+                    let msg = decode(&pending[4..4 + len]);
+                    self.start += 4 + len;
                     match msg? {
                         Some(m) => return Ok(Some(m)),
                         None => continue,
                     }
                 }
             }
-            let mut chunk = [0u8; 64 << 10];
-            #[cfg(unix)]
-            let n = fdpass::recv_with_fds(&self.sock, &mut chunk, &mut self.fds)?;
-            #[cfg(windows)]
-            let n = loop {
-                match (&self.sock).read(&mut chunk) {
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    r => break r?,
-                }
+            // Only the undecoded rest moves to the front, once per read.
+            self.buf.drain(..self.start);
+            self.start = 0;
+            let filled = self.buf.len();
+            self.buf.resize(filled + READ_CHUNK, 0);
+            let read = {
+                let chunk = &mut self.buf[filled..];
+                #[cfg(unix)]
+                let n = fdpass::recv_with_fds(&self.sock, chunk, &mut self.fds);
+                #[cfg(windows)]
+                let n = loop {
+                    match (&self.sock).read(chunk) {
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        r => break r,
+                    }
+                };
+                n
             };
+            self.buf.truncate(filled + *read.as_ref().unwrap_or(&0));
+            let n = read?;
             if n == 0 {
                 return if self.buf.is_empty() { Ok(None) } else { Err(io::ErrorKind::UnexpectedEof.into()) };
             }
-            self.buf.extend_from_slice(&chunk[..n]);
         }
     }
 
@@ -360,6 +381,42 @@ mod tests {
             matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Marker { id: 1, marker: Marker::Resized(s) }) if s == SIZE)
         );
         assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Output { bytes, .. }) if bytes == b"\x1b[1mhi"));
+    }
+
+    #[test]
+    fn bytes_travel_as_bin() {
+        // Box drawing: every byte is >= 0x80, which as an array of numbers
+        // took two bytes each.
+        let bytes = "─".repeat(1000).into_bytes();
+        let frame = encode(&ServerMsg::Output { id: 1, bytes: bytes.clone() }).unwrap();
+        assert!(frame.len() < bytes.len() + 64, "{} bytes for {}", frame.len(), bytes.len());
+        let back = read_frame::<ServerMsg>(&mut Cursor::new(frame), MAX_SERVER_FRAME).unwrap();
+        assert!(matches!(back, Some(ServerMsg::Output { bytes: b, .. }) if b == bytes));
+    }
+
+    #[test]
+    fn many_frames_in_one_read() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut all = vec![];
+        for i in 0..500u64 {
+            all.extend(encode(&ServerMsg::Output { id: i, bytes: vec![b'x'; (i % 300) as usize] }).unwrap());
+        }
+        // Then one frame split across writes.
+        let big = encode(&ServerMsg::Output { id: 999, bytes: vec![7; 3 * READ_CHUNK] }).unwrap();
+        let writer = std::thread::spawn(move || {
+            (&a).write_all(&all).unwrap();
+            for part in big.chunks(1000) {
+                (&a).write_all(part).unwrap();
+            }
+        });
+        let mut r = FrameReader::new(b, MAX_SERVER_FRAME);
+        for i in 0..500u64 {
+            let Some(ServerMsg::Output { id, bytes }) = r.read().unwrap() else { panic!("frame {i}") };
+            assert_eq!((id, bytes.len()), (i, (i % 300) as usize));
+        }
+        let Some(ServerMsg::Output { id, bytes }) = r.read().unwrap() else { panic!("big frame") };
+        assert_eq!((id, bytes.len()), (999, 3 * READ_CHUNK));
+        writer.join().unwrap();
     }
 
     #[test]

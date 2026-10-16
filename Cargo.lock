@@ -6626,6 +6626,7 @@ dependencies = [
  "polling",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "tern-bridge",
