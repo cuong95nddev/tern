@@ -67,17 +67,17 @@ Medians:
    the render, prepaint and paint parts.
 3. **Input jank.** Done (see below).
 4. **Idle wakeups.**
-   - One app-wide 1s ticker instead of one per tab (`terminal_view.rs` ~343), with one shared process scan.
-   - Agent monitor: `agent_monitor.rs:24,171` notifies every 500ms while open; make it event-driven.
-   - Daemon: an observer thread ticks every 250ms (`server.rs:463`), the idle thread every 1s (`server.rs:198`),
-     and `check_scheme` polls every 300ms per 2031 session (`host.rs:392`). Use Condvar/events instead.
+   - Done: one app-wide 1s `Ticker` for all tabs (`terminal_view.rs`), one process scan per tick.
+   - Left, judged low value: the agent monitor refreshes every 500ms, but only while open. Daemon: the
+     `watch` thread ticks every 250ms, only while the menu bar agent is connected, and uses cheap
+     `list_keeping` between scans. The `idle` thread ticks every 1s and only compares a time.
+     `check_scheme` polls every 300ms, only for programs in 2031 mode. Making them event-driven means hooks
+     at every state change.
 5. **Mux overhead per PTY read** (`server.rs:760-821`): about 3 copies and about 4 mutexes per chunk, and one
    `write_all` per frame. Batch frames in the writer and use a borrowed `&[u8]`.
    - Queue limits are too loose: `MAX_QUEUED_SESSION` is 64MB and `MAX_QUEUED` 256MB (`server.rs:38`).
    - `host.rs:161` and `host.rs:367` have unbounded queues.
-6. **Screenshot editor:** unlimited undo of full RGBA images (`shot/editor.rs:108,152`, ~33MB per step at 4K).
-   Old `RenderImage`s are never `drop_image`d, `EditorData.clip` is kept after close (`editor.rs:603`), and tray
-   thumbnails decode full images (`tray.rs:386`).
+6. **Screenshot editor:** done (see below).
 7. **Smaller items:** all done (below).
 
 ## Done after the handoff: git status refresh and small items
@@ -117,6 +117,18 @@ Medians:
 - `terminal_view.rs`: ⌘-hover path lookup (`links::resolve` + the foreground cwd) runs in the background,
   with a cache of 64 entries cleared when ⌘ goes down. A ⌘-click still resolves inline when the path isn't
   cached.
+
+## Done after the handoff: screenshot and image memory
+
+- `shot/editor.rs`:
+  - The undo history keeps at most 256MB of images other than the current one; the oldest steps are
+    dropped first. Shape-only steps share the image, so they cost nothing.
+  - Pictures no longer used (checked each render) are `drop_image`d from the window's atlas.
+  - `EditorData.clip` holds PNG bytes, not RGBA.
+- `shot/tray.rs`: thumbnails are made in the background at the shown size (`TrayData.thumbs`).
+  `img(path)` kept every full-size capture in gpui's app-wide asset cache for good.
+- `viewer.rs`: the image shown before is `remove_asset`ed when replaced or when the viewer is released.
+  GPU atlas entries for it stay until the window closes.
 
 ## Notes
 

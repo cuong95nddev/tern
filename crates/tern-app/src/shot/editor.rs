@@ -29,12 +29,16 @@ const HANDLE: f32 = 8.;
 const PAD: f32 = 24.;
 /// A new page's size, in points.
 const BLANK: (f32, f32) = (960., 640.);
+/// A page's undo history keeps at most this many bytes of images other than
+/// its current one (a step that only adds shapes shares the image): the
+/// oldest steps go first. About seven pastes or erases on a 4K capture.
+const MAX_UNDO_BYTES: usize = 256 << 20;
 
 #[derive(Default)]
 struct EditorData {
     open: Option<(AnyWindowHandle, WeakEntity<Editor>)>,
-    /// What was last copied, for when the system clipboard has no image.
-    clip: Option<Arc<RgbaImage>>,
+    /// What was last copied (PNG), for when the system clipboard has no image.
+    clip: Option<Arc<Vec<u8>>>,
 }
 
 impl Global for EditorData {}
@@ -152,6 +156,23 @@ impl Page {
         self.undo.push(self.snapshot());
         self.redo.clear();
         self.changed = true;
+        while self.undo.len() > 1 && self.undo_bytes() > MAX_UNDO_BYTES {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Bytes of the images the undo history holds, other than the current one.
+    fn undo_bytes(&self) -> usize {
+        let mut seen = vec![Arc::as_ptr(&self.base)];
+        let mut bytes = 0;
+        for s in &self.undo {
+            let ptr = Arc::as_ptr(&s.base);
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                bytes += s.base.as_raw().len();
+            }
+        }
+        bytes
     }
 
     fn undo(&mut self) -> bool {
@@ -315,6 +336,9 @@ pub struct Editor {
     /// New pages so far, to name the next.
     blanks: usize,
     done: bool,
+    /// The pictures the last render used: one no longer used is dropped
+    /// from the window's sprite atlas, which would keep it otherwise.
+    shown: Vec<Arc<RenderImage>>,
 }
 
 impl Editor {
@@ -343,6 +367,7 @@ impl Editor {
             scale,
             blanks: 0,
             done: false,
+            shown: Vec::new(),
         };
         for path in shots {
             this.load(path);
@@ -600,9 +625,11 @@ impl Editor {
                 None => page.flat(),
             }
         };
-        cx.default_global::<EditorData>().clip = Some(Arc::new(img.clone()));
         match super::overlay::png_bytes(&img) {
-            Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
+            Ok(bytes) => {
+                cx.default_global::<EditorData>().clip = Some(Arc::new(bytes.clone()));
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes)));
+            },
             Err(e) => log::warn!("can't copy the image: {e}"),
         }
         Some(img)
@@ -640,7 +667,7 @@ impl Editor {
                 ClipboardEntry::String(_) => None,
             })
         });
-        from_system.or_else(|| cx.default_global::<EditorData>().clip.as_deref().cloned())
+        from_system.or_else(|| cx.default_global::<EditorData>().clip.clone().and_then(|png| raster::decode(&png)))
     }
 
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -949,7 +976,14 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let live: Vec<_> = self.pages.iter().map(|p| p.picture.clone()).chain(self.floating.as_ref().map(|f| f.picture.clone())).collect();
+        for old in std::mem::take(&mut self.shown) {
+            if !live.iter().any(|l| Arc::ptr_eq(l, &old)) {
+                let _ = window.drop_image(old);
+            }
+        }
+        self.shown = live;
         let theme = cx.theme().clone();
         let cursor = if self.tool.is_some() { CursorStyle::Crosshair } else { CursorStyle::Arrow };
         let mut area = div()
@@ -1133,6 +1167,18 @@ mod tests {
         assert!(page.redo());
         assert_eq!(page.base.dimensions(), (45, 30));
         assert!(page.changed);
+    }
+
+    #[test]
+    fn undo_counts_each_old_image_once() {
+        let mut page = Page::new("t".into(), None, raster::blank(10, 10), 1.);
+        let shape = || Shape::Rect { a: p(1., 1.), b: p(5., 5.), style: Style::default() };
+        page.push(shape());
+        assert_eq!(page.undo_bytes(), 0, "shapes share the current image");
+        page.erase((p(0., 0.), p(2., 2.)));
+        page.push(shape());
+        page.push(shape());
+        assert_eq!(page.undo_bytes(), 10 * 10 * 4, "the image before the erase, once");
     }
 
     #[test]

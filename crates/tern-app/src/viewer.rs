@@ -191,7 +191,8 @@ impl Viewer {
             go_to: None,
             message: None,
             focus: cx.focus_handle(),
-            _subs: vec![sub],
+            // The decoded image stays in the app's asset cache until removed.
+            _subs: vec![sub, cx.on_release(|this: &mut Self, cx| this.set_image(None, cx))],
             _load: None,
         }
     }
@@ -208,8 +209,19 @@ impl Viewer {
         self.path = Some(path);
         self.dirty = false;
         self.diff = None;
-        self.image = None;
+        self.set_image(None, cx);
         self.reload(window, cx);
+    }
+
+    /// Show `image` (or none), dropping the one shown before from the app's
+    /// asset cache, which keeps every image decoded for good otherwise.
+    fn set_image(&mut self, image: Option<Arc<Image>>, cx: &mut App) {
+        if let Some(old) = self.image.take()
+            && image.as_ref().is_none_or(|new| new.id != old.id)
+        {
+            old.remove_asset(cx);
+        }
+        self.image = image;
     }
 
     /// Put the cursor on 1-based `line` (and `col`) once the file loads.
@@ -234,11 +246,11 @@ impl Viewer {
                 match loaded {
                     Loaded::Image(image) => {
                         this.message = None;
-                        this.image = Some(image);
+                        this.set_image(Some(image), cx);
                     },
                     Loaded::Text(text) => {
                         this.message = None;
-                        this.image = None;
+                        this.set_image(None, cx);
                         this.loading = true;
                         // Restoring the cursor focuses the editor; a reload
                         // must not take focus from where it is.
