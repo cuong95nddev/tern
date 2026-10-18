@@ -1,10 +1,12 @@
 //! Screenshots for agents: capture part of the screen, mark it up, collect
 //! a few, and send them with a prompt to an agent tab.
 
+mod editor;
 pub mod grab;
 mod icons;
 pub mod model;
 mod overlay;
+mod paint;
 pub mod raster;
 pub mod targets;
 mod tray;
@@ -190,6 +192,8 @@ fn notify(title: &str, body: &str, cx: &mut App) {
 ///   shot             start a capture
 ///   @shot CMD        input CMD (click, drag, key) to the first overlay
 ///   @tray CMD        input CMD to the tray
+///   @editor CMD      input CMD to the editor
+///   editor [N]       open the editor on the tray's captures, at tab N
 ///   shot-fake PNG    the overlay over PNG instead of the screen
 ///   shot-state       the overlay's and the tray's state
 ///   tray-add PATH    add a PNG to the tray
@@ -219,6 +223,14 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             let tray = tray::window(cx);
             input_to(tray, arg, cx)
         },
+        "@editor" => {
+            let editor = editor::window(cx);
+            input_to(editor, arg, cx)
+        },
+        "editor" => {
+            tray::edit(arg.parse().unwrap_or(0), cx);
+            "ok".into()
+        },
         "shot-state" => {
             let overlays = cx.default_global::<Capture>().overlays.clone();
             let mut out: Vec<String> = overlays
@@ -231,6 +243,7 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
                 })
                 .collect();
             out.push(tray::debug_state(cx));
+            out.push(editor::debug_state(cx));
             out.join(" | ")
         },
         "shot-fake" => {
@@ -243,7 +256,7 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             "ok".into()
         },
         "tray-add" => {
-            tray::add(arg.into(), cx);
+            tray::add(arg.into(), None, cx);
             "ok".into()
         },
         "tray-prompt" | "tray-target" | "tray-send" => tray::control(cmd, arg, cx),

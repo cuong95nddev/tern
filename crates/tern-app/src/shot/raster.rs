@@ -72,6 +72,46 @@ pub fn render(base: &RgbaImage, crop: Crop, doc: &Doc, font: Option<&FontVec>) -
     out
 }
 
+/// `base` with `doc`'s shapes drawn on it, whole.
+pub fn flatten(base: &RgbaImage, doc: &Doc, font: Option<&FontVec>) -> RgbaImage {
+    render(base, Crop { x: 0, y: 0, w: base.width(), h: base.height() }, doc, font)
+}
+
+/// The colour new canvas is filled with.
+pub const PAPER: Rgba = [0xFF; 4];
+
+/// A blank canvas.
+pub fn blank(w: u32, h: u32) -> RgbaImage {
+    RgbaImage::from_pixel(w.max(1), h.max(1), image::Rgba(PAPER))
+}
+
+/// `img` scaled to `w`×`h` and laid over `canvas` with its top left at
+/// (`x`, `y`). The canvas grows, in blank paper, to hold all of it; the
+/// result is the new canvas and where the old one's top left went.
+pub fn place(canvas: &RgbaImage, img: &RgbaImage, x: i64, y: i64, w: u32, h: u32) -> (RgbaImage, (u32, u32)) {
+    let (w, h) = (w.max(1), h.max(1));
+    let scaled =
+        if img.dimensions() == (w, h) { img.clone() } else { image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle) };
+    let (cw, ch) = (i64::from(canvas.width()), i64::from(canvas.height()));
+    let (left, top) = (x.min(0), y.min(0));
+    let (right, bottom) = ((x + i64::from(w)).max(cw), (y + i64::from(h)).max(ch));
+    let shift = ((-left) as u32, (-top) as u32);
+    let mut out = if (left, top, right, bottom) == (0, 0, cw, ch) {
+        canvas.clone()
+    } else {
+        let mut grown = blank((right - left) as u32, (bottom - top) as u32);
+        image::imageops::replace(&mut grown, canvas, i64::from(shift.0), i64::from(shift.1));
+        grown
+    };
+    image::imageops::overlay(&mut out, &scaled, x - left, y - top);
+    (out, shift)
+}
+
+/// An image read from encoded bytes (a clipboard's).
+pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
+    image::load_from_memory(bytes).map(|i| i.to_rgba8()).map_err(|e| log::warn!("can't read the pasted image: {e}")).ok()
+}
+
 fn clamp(c: Crop, w: u32, h: u32) -> Crop {
     let x = c.x.min(w.saturating_sub(1));
     let y = c.y.min(h.saturating_sub(1));
@@ -305,6 +345,43 @@ mod tests {
         assert_ne!(out.get_pixel(8, 0).0, block);
         // Outside the mosaic nothing changes.
         assert_eq!(out.get_pixel(20, 20).0, base.get_pixel(20, 20).0);
+    }
+
+    #[test]
+    fn place_lays_an_image_over_the_canvas() {
+        let canvas = gray(50, 40);
+        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
+        let (out, shift) = place(&canvas, &red, 5, 5, 10, 10);
+        assert_eq!((out.dimensions(), shift), ((50, 40), (0, 0)));
+        assert_eq!(out.get_pixel(5, 5).0, COLORS[0]);
+        assert_eq!(out.get_pixel(15, 15).0, [100, 100, 100, 255]);
+    }
+
+    #[test]
+    fn place_scales_the_image() {
+        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
+        let (out, _) = place(&gray(50, 40), &red, 0, 0, 20, 30);
+        assert_eq!(out.get_pixel(19, 29).0, COLORS[0]);
+        assert_eq!(out.get_pixel(20, 29).0, [100, 100, 100, 255]);
+    }
+
+    #[test]
+    fn place_grows_the_canvas_to_hold_the_image() {
+        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
+        let (out, shift) = place(&gray(50, 40), &red, -5, 35, 10, 10);
+        assert_eq!(out.dimensions(), (55, 45));
+        assert_eq!(shift, (5, 0));
+        assert_eq!(out.get_pixel(0, 35).0, COLORS[0]);
+        assert_eq!(out.get_pixel(5, 0).0, [100, 100, 100, 255], "the old canvas moved right");
+        assert_eq!(out.get_pixel(54, 44).0, PAPER, "new room is blank");
+    }
+
+    #[test]
+    fn decode_reads_a_png() {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        gray(3, 2).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        assert_eq!(decode(bytes.get_ref()).map(|i| i.dimensions()), Some((3, 2)));
+        assert!(decode(b"nope").is_none());
     }
 
     #[test]

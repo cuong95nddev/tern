@@ -35,6 +35,14 @@ pub const CAMERA: &str = svg!(
     r#"<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/>"#
     r#"<circle cx="12" cy="13" r="3"/>"#
 );
+pub const SELECT: &str = svg!(r#"<path d="M4 4l7 17 2.5-7.5L21 11z"/>"#);
+pub const CROP: &str = svg!(r#"<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>"#);
+pub const PASTE: &str = svg!(
+    r#"<rect x="8" y="2" width="8" height="4" rx="1"/>"#
+    r#"<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>"#
+);
+pub const EDIT: &str = svg!(r#"<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>"#);
+pub const PLUS: &str = svg!(r#"<path d="M12 5v14"/><path d="M5 12h14"/>"#);
 pub const SEND: &str = svg!(r#"<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>"#);
 
 pub fn icon(svg: &str) -> Icon {

@@ -10,10 +10,10 @@ use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
-use lyon_tessellation::{LineCap, LineJoin, StrokeOptions};
 
 use super::icons;
-use super::model::{self, COLORS, Doc, MOSAIC_BLOCK, P, Rgba, Shape, Style, Tool, p};
+use super::model::{self, COLORS, Doc, P, Shape, Style, Tool, p};
+use super::paint::{self, View, from_point, hsla, picture, to_point};
 use super::raster::{self, Crop};
 
 const HANDLE: f32 = 8.;
@@ -59,27 +59,6 @@ pub struct Overlay {
     style: Style,
     doc: Doc,
     text: Option<TextEdit>,
-}
-
-fn hsla(c: Rgba) -> Hsla {
-    gpui_kit::Rgba { r: f32::from(c[0]) / 255., g: f32::from(c[1]) / 255., b: f32::from(c[2]) / 255., a: f32::from(c[3]) / 255. }.into()
-}
-
-fn to_point(q: P) -> Point<Pixels> {
-    point(px(q.x), px(q.y))
-}
-
-fn from_point(q: Point<Pixels>) -> P {
-    p(q.x.as_f32(), q.y.as_f32())
-}
-
-/// The frozen screen as GPUI wants it (BGRA).
-fn picture(img: &RgbaImage) -> Arc<RenderImage> {
-    let mut bgra = img.clone();
-    for px in bgra.as_chunks_mut::<4>().0 {
-        px.swap(0, 2);
-    }
-    Arc::new(RenderImage::new(vec![image::Frame::new(bgra)]))
 }
 
 impl Overlay {
@@ -313,12 +292,14 @@ impl Overlay {
         }
     }
 
-    fn add(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_text(cx);
         let Some(img) = self.export() else { return };
+        // The tray opens by the region; the overlay covers its display.
+        let near = window.display(cx).zip(self.sel).map(|(d, (lo, hi))| (d.id(), Bounds::from_corners(to_point(lo), to_point(hi))));
         super::cancel(cx);
         match super::grab::save(&img, &super::grab::dir()) {
-            Ok(path) => super::tray::add(path, cx),
+            Ok(path) => super::tray::add(path, near, cx),
             Err(e) => super::notify("Couldn't save the screenshot", &e, cx),
         }
     }
@@ -502,7 +483,7 @@ impl Overlay {
     }
 }
 
-fn png_bytes(img: &RgbaImage) -> Result<Vec<u8>, String> {
+pub(super) fn png_bytes(img: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png).map_err(|e| e.to_string())?;
     Ok(buf.into_inner())
@@ -609,40 +590,7 @@ struct Scene {
     accent: Hsla,
 }
 
-fn stroke(points: &[Point<Pixels>], closed: bool, width: f32, color: Hsla, window: &mut Window) {
-    if points.len() < 2 {
-        return;
-    }
-    let opts = StrokeOptions::default().with_line_width(width).with_line_cap(LineCap::Round).with_line_join(LineJoin::Round);
-    let mut pb = PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(opts));
-    pb.add_polygon(points, closed);
-    if let Ok(path) = pb.build() {
-        window.paint_path(path, color);
-    }
-}
-
-fn fill_poly(points: &[Point<Pixels>], color: Hsla, window: &mut Window) {
-    if points.len() < 3 {
-        return;
-    }
-    let mut pb = PathBuilder::fill();
-    pb.add_polygon(points, true);
-    if let Ok(path) = pb.build() {
-        window.paint_path(path, color);
-    }
-}
-
-fn text_line(text: &str, size: f32, color: Hsla, window: &Window) -> ShapedLine {
-    let run = TextRun { len: text.len(), font: font(".SystemUIFont"), color, background_color: None, underline: None, strikethrough: None };
-    window.text_system().shape_line(text.to_owned().into(), px(size), &[run], None)
-}
-
 impl Scene {
-    /// Image pixels to window points.
-    fn pt(&self, q: P) -> Point<Pixels> {
-        to_point(q.scale(1. / self.scale))
-    }
-
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let size = window.viewport_size();
         let dim = hsla([0, 0, 0, 0x73]);
@@ -659,8 +607,9 @@ impl Scene {
 
         let region = Bounds::from_corners(to_point(lo), to_point(hi));
         window.with_content_mask(Some(ContentMask { bounds: region }), |window| {
+            let view = View { origin: P::default(), k: 1. / self.scale, scale: self.scale };
             for shape in &self.shapes {
-                self.paint_shape(shape, window, cx);
+                paint::shape(view, shape, &self.base, window, cx);
             }
         });
         window.paint_quad(outline(region, self.accent, BorderStyle::Solid));
@@ -668,87 +617,6 @@ impl Scene {
             let b = Bounds::new(point(px(c.x - 4.), px(c.y - 4.)), gpui_kit::size(px(8.), px(8.)));
             window.paint_quad(fill(b, gpui_kit::white()));
             window.paint_quad(outline(b, self.accent, BorderStyle::Solid));
-        }
-    }
-
-    fn paint_shape(&self, shape: &Shape, window: &mut Window, cx: &mut App) {
-        let k = self.scale;
-        match shape {
-            Shape::Rect { a, b, style } => {
-                let (lo, hi) = model::norm(*a, *b);
-                let pts = [lo, p(hi.x, lo.y), hi, p(lo.x, hi.y)].map(|q| self.pt(q));
-                stroke(&pts, true, style.stroke(), hsla(style.color), window);
-            },
-            Shape::Ellipse { a, b, style } => {
-                let pts: Vec<_> = model::ellipse(*a, *b, 96).into_iter().map(|q| self.pt(q)).collect();
-                stroke(&pts, true, style.stroke(), hsla(style.color), window);
-            },
-            Shape::Line { a, b, style } => stroke(&[self.pt(*a), self.pt(*b)], false, style.stroke(), hsla(style.color), window),
-            Shape::Arrow { a, b, style } => {
-                let (shaft, head) = model::arrow(*a, *b, style.stroke() * k);
-                stroke(&[self.pt(*a), self.pt(shaft)], false, style.stroke(), hsla(style.color), window);
-                fill_poly(&head.map(|q| self.pt(q)), hsla(style.color), window);
-            },
-            Shape::Pen { points, style } => {
-                let pts: Vec<_> = points.iter().map(|q| self.pt(*q)).collect();
-                if pts.len() == 1 {
-                    let r = style.stroke() / 2. * k;
-                    let dot: Vec<_> =
-                        model::ellipse(points[0] - p(r, r), points[0] + p(r, r), 16).into_iter().map(|q| self.pt(q)).collect();
-                    fill_poly(&dot, hsla(style.color), window);
-                } else {
-                    stroke(&pts, false, style.stroke(), hsla(style.color), window);
-                }
-            },
-            Shape::Text { at, text, style } => {
-                let line = text_line(text, style.font(), hsla(style.color), window);
-                let _ = line.paint(self.pt(*at), px(style.font() * 1.2), TextAlign::Left, None, window, cx);
-            },
-            Shape::Marker { at, n, style } => {
-                let r = style.marker_radius() * k;
-                let disc: Vec<_> = model::ellipse(*at - p(r, r), *at + p(r, r), 48).into_iter().map(|q| self.pt(q)).collect();
-                fill_poly(&disc, hsla(style.color), window);
-                let size = style.marker_radius() * 1.25;
-                let line = text_line(&n.to_string(), size, hsla(style.marker_text()), window);
-                let c = self.pt(*at);
-                let lh = px(size * 1.2);
-                let _ = line.paint(point(c.x - line.width / 2., c.y - lh / 2.), lh, TextAlign::Left, None, window, cx);
-            },
-            Shape::Mosaic { a, b } => self.paint_mosaic(*a, *b, window),
-        }
-    }
-
-    /// The mosaic as it will be exported, from the frozen screen.
-    fn paint_mosaic(&self, a: P, b: P, window: &mut Window) {
-        let (lo, hi) = model::norm(a, b);
-        let (iw, ih) = (self.base.width() as i64, self.base.height() as i64);
-        let block = (MOSAIC_BLOCK * self.scale).round().max(2.) as i64;
-        let x0 = (lo.x.floor() as i64).clamp(0, iw);
-        let y0 = (lo.y.floor() as i64).clamp(0, ih);
-        let x1 = (hi.x.ceil() as i64).clamp(0, iw);
-        let y1 = (hi.y.ceil() as i64).clamp(0, ih);
-        let mut by = y0;
-        while by < y1 {
-            let ey = (by + block).min(y1);
-            let mut bx = x0;
-            while bx < x1 {
-                let ex = (bx + block).min(x1);
-                let mut sum = [0u64; 4];
-                for y in by..ey {
-                    for x in bx..ex {
-                        let px = self.base.get_pixel(x as u32, y as u32).0;
-                        for c in 0..4 {
-                            sum[c] += u64::from(px[c]);
-                        }
-                    }
-                }
-                let n = ((ey - by) * (ex - bx)) as u64;
-                let color = hsla(sum.map(|s| (s / n) as u8));
-                let cell = Bounds::from_corners(self.pt(p(bx as f32, by as f32)), self.pt(p(ex as f32, ey as f32)));
-                window.paint_quad(fill(cell, color));
-                bx = ex;
-            }
-            by = ey;
         }
     }
 }

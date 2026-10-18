@@ -17,6 +17,10 @@ use super::targets::{self, Choice, Dest};
 const WIDTH: f32 = 420.;
 /// The starting height; the window then fits its content.
 const HEIGHT: f32 = 200.;
+/// About the height with one capture, to place the tray by a region.
+const PLACE_H: f32 = 240.;
+/// The gap between the tray and the region or the display's edges.
+const GAP: f32 = 8.;
 
 /// What the tray holds; it outlives the tray window, which closes while a
 /// capture is on screen.
@@ -30,10 +34,31 @@ struct TrayData {
 
 impl Global for TrayData {}
 
-/// Add a capture and show the tray.
-pub fn add(path: PathBuf, cx: &mut App) {
-    cx.default_global::<TrayData>().shots.push(path);
-    show(cx);
+/// Add a capture and show the tray, by `near` (a display and a region on
+/// it, in the display's points) when the tray opens.
+/// While the editor is open, the capture goes to it instead.
+pub fn add(path: PathBuf, near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
+    cx.default_global::<TrayData>().shots.push(path.clone());
+    if !super::editor::add(path, cx) {
+        open(near, cx);
+    }
+}
+
+/// The captures back from the editor; the tray shows again if it holds
+/// anything.
+pub fn set_shots(shots: Vec<PathBuf>, cx: &mut App) {
+    let data = cx.default_global::<TrayData>();
+    data.shots = shots;
+    if !data.shots.is_empty() || !data.prompt.trim().is_empty() {
+        show(cx);
+    }
+}
+
+/// Edit the captures, starting at the one at `at`; the tray steps aside.
+pub(super) fn edit(at: usize, cx: &mut App) {
+    let shots = cx.default_global::<TrayData>().shots.clone();
+    hide(cx);
+    super::editor::open(shots, at, cx);
 }
 
 /// Whether the tray has captures waiting.
@@ -43,14 +68,26 @@ pub fn has_shots(cx: &mut App) -> bool {
 
 /// Open the tray window (bottom right of the main display), or refresh it.
 pub fn show(cx: &mut App) {
+    open(None, cx);
+}
+
+fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
+    // The editor holds the captures until it is done.
+    if super::editor::is_open(cx) {
+        return;
+    }
     if let Some(window) = cx.default_global::<TrayData>().window
         && window.update(cx, |_, w, _| w.refresh()).is_ok()
     {
         return;
     }
-    let Some(display) = cx.primary_display() else { return };
-    let size = display.bounds().size;
-    let origin = point(size.width - px(WIDTH + 24.), size.height - px(HEIGHT + 96.));
+    let display = match near {
+        Some((id, _)) => cx.displays().into_iter().find(|d| d.id() == id).or_else(|| cx.primary_display()),
+        None => cx.primary_display(),
+    };
+    let Some(display) = display else { return };
+    let region = near.filter(|(id, _)| *id == display.id()).map(|(_, r)| r);
+    let origin = super::window_origin(display.bounds()) + place(display.bounds().size, region);
     let opened = gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(px(WIDTH), px(HEIGHT))))),
@@ -76,6 +113,24 @@ pub fn show(cx: &mut App) {
         },
         Err(e) => log::error!("failed to open the screenshot tray: {e}"),
     }
+}
+
+/// Where the tray goes on a display of `size`: under `region`, its right
+/// edge on the region's (as the overlay's toolbar was); above it, or over
+/// its bottom, when there is no room. Without one, bottom right.
+fn place(size: Size<Pixels>, region: Option<Bounds<Pixels>>) -> Point<Pixels> {
+    let (w, h) = (size.width.as_f32(), size.height.as_f32());
+    let Some(r) = region else { return point(px(w - WIDTH - 24.), px(h - HEIGHT - 96.)) };
+    let x = (r.right().as_f32() - WIDTH).min(w - WIDTH - GAP).max(GAP);
+    let (top, bottom) = (r.top().as_f32(), r.bottom().as_f32());
+    let y = if bottom + GAP + PLACE_H <= h - GAP {
+        bottom + GAP
+    } else if top - GAP - PLACE_H >= GAP {
+        top - GAP - PLACE_H
+    } else {
+        (bottom - GAP - PLACE_H).max(GAP)
+    };
+    point(px(x), px(y))
 }
 
 /// The tray window while it is open.
@@ -288,6 +343,15 @@ impl Render for Tray {
             .gap_1()
             .child(div().flex_1().text_sm().font_semibold().child(format!("Screenshots ({})", shots.len())))
             .child(
+                Button::new("edit")
+                    .icon(icons::icon(icons::EDIT))
+                    .ghost()
+                    .small()
+                    .disabled(shots.is_empty())
+                    .tooltip("Edit: combine, crop, add text")
+                    .on_click(|_, _, cx| edit(0, cx)),
+            )
+            .child(
                 Button::new("more")
                     .icon(icons::icon(icons::CAMERA))
                     .ghost()
@@ -307,8 +371,11 @@ impl Render for Tray {
         for (i, path) in shots.iter().enumerate() {
             strip = strip.child(
                 div()
+                    .id(("shot", i))
                     .relative()
                     .flex_shrink_0()
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| edit(i, cx))
                     .w(px(104.))
                     .h(px(68.))
                     .rounded_md()
@@ -317,15 +384,14 @@ impl Render for Tray {
                     .border_color(theme.border)
                     .bg(theme.muted)
                     .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
-                    .child(
-                        div().absolute().top(px(2.)).right(px(2.)).child(
-                            Button::new(("remove", i))
-                                .icon(icons::icon(icons::CLOSE))
-                                .xsmall()
-                                .tooltip("Remove")
-                                .on_click(cx.listener(move |this, _, _, cx| this.remove(i, cx))),
-                        ),
-                    ),
+                    .child(div().absolute().top(px(2.)).right(px(2.)).child(
+                        Button::new(("remove", i)).icon(icons::icon(icons::CLOSE)).xsmall().tooltip("Remove").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove(i, cx);
+                            },
+                        )),
+                    )),
             );
         }
         let footer =
