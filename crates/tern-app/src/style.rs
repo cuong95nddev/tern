@@ -246,29 +246,13 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element {
-        name: "workspace_tabs",
-        about: "The bar of workspace tabs at the top",
-        groups: &[&[("background", Color, "$tab_bar_background"), ("border", Color, "$border"), ("border_bottom_width", Len, "1")]],
-    },
-    Element {
-        name: "workspace_tabs.tab",
-        about: "A workspace tab. `icon_text` and `close_text` color its folder icon and close button,                 `hover_text` its text under the pointer",
-        groups: &[BAR_TAB, TAB],
-    },
-    Element {
-        name: "workspace_tabs.tab_active",
-        about: "The active workspace tab, over `workspace_tabs.tab`",
-        groups: &[BAR_TAB_ACTIVE, TAB],
-    },
-    Element { name: "workspace_tabs.button", about: "The buttons in the workspace bar (open, agent monitor, update, close)", groups: &[] },
-    Element {
         name: "workspace",
-        about: "One workspace: panels, tabs and the status bar",
+        about: "The workspace: panels, tabs and the status bar",
         groups: &[&[("background", Color, "$background")], IMAGE],
     },
     Element {
         name: "workspace.status_bar",
-        about: "The bar at the bottom of a workspace",
+        about: "The bar at the bottom of the workspace",
         groups: &[
             &[
                 ("height", Len, "22"),
@@ -294,9 +278,10 @@ pub const ELEMENTS: &[Element] = &[
     },
     simple!("tool_strip.button", "A button in a tool strip"),
     Element { name: "explorer", about: "The file explorer panel", groups: &[PANEL, &[("start_width", Len, "250")], IMAGE] },
-    Element { name: "explorer.header", about: "The explorer's title bar (its title is the folder's name)", groups: &[HEADER] },
+    Element { name: "explorer.header", about: "The explorer's title bar", groups: &[HEADER] },
     simple!("explorer.header.button", "A button in the explorer's title bar"),
     simple!("explorer.list", "The explorer's list of rows"),
+    Element { name: "explorer.empty", about: "What the explorer shows with no folder in the workspace", groups: &[EMPTY] },
     Element { name: "explorer.row", about: "A file or folder in the explorer", groups: &[ROW, &[("focus_border", Color, "$ring")]] },
     Element { name: "changes", about: "The git changes panel", groups: &[PANEL, &[("start_width", Len, "300")], IMAGE] },
     Element { name: "changes.header", about: "The changes panel's title bar", groups: &[HEADER] },

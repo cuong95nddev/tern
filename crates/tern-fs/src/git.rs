@@ -171,14 +171,14 @@ pub fn repo_changes_with(repo: &Path, scope: &Path, defines_commands: bool) -> R
 }
 
 /// Map of absolute path → status for the explorer. Parent directories of
-/// changed files (below `root`) are marked `Modified` so collapsed folders
-/// show a dot.
-pub fn status_map<'a>(repos: impl IntoIterator<Item = &'a RepoChanges>, root: &Path) -> HashMap<PathBuf, GitStatus> {
+/// changed files (below one of `roots`) are marked `Modified` so collapsed
+/// folders show a dot.
+pub fn status_map<'a>(repos: impl IntoIterator<Item = &'a RepoChanges>, roots: &[PathBuf]) -> HashMap<PathBuf, GitStatus> {
     let mut map = HashMap::new();
     for (path, st) in repos.into_iter().flat_map(|r| &r.files) {
         let mut dir = path.parent();
         while let Some(d) = dir {
-            if !d.starts_with(root) || d == root {
+            if roots.iter().all(|r| !d.starts_with(r) || d == r) {
                 break;
             }
             map.entry(d.to_path_buf()).or_insert(GitStatus::Modified);
@@ -320,13 +320,25 @@ mod tests {
         assert_eq!(branch.as_deref(), Some("main...origin/main [ahead 1]"));
         assert_eq!(files.len(), 4);
         let rc = RepoChanges { root: root.into(), files, ..Default::default() };
-        let m = status_map([&rc], root);
+        let m = status_map([&rc], &[root.to_path_buf()]);
         assert_eq!(m[Path::new("/r/src/a.rs")], GitStatus::Modified);
         assert_eq!(m[Path::new("/r/new.txt")], GitStatus::Untracked);
         assert_eq!(m[Path::new("/r/b.rs")], GitStatus::Renamed);
         assert_eq!(m[Path::new("/r/src/x/y.rs")], GitStatus::Added);
         assert_eq!(m[Path::new("/r/src")], GitStatus::Modified);
         assert!(!m.contains_key(Path::new("/r/old.rs")));
+    }
+
+    #[test]
+    fn marks_dirs_under_any_root() {
+        let rc = RepoChanges { root: "/a".into(), files: vec![("/a/src/x.rs".into(), GitStatus::Modified)], ..Default::default() };
+        let rb = RepoChanges { root: "/b".into(), files: vec![("/b/d/e/y.rs".into(), GitStatus::Added)], ..Default::default() };
+        let m = status_map([&rc, &rb], &["/a".into(), "/b/d".into()]);
+        assert_eq!(m.get(Path::new("/a/src")), Some(&GitStatus::Modified));
+        assert_eq!(m.get(Path::new("/b/d/e")), Some(&GitStatus::Modified));
+        assert!(!m.contains_key(Path::new("/a")));
+        assert!(!m.contains_key(Path::new("/b/d")));
+        assert!(!m.contains_key(Path::new("/b")));
     }
 
     #[test]

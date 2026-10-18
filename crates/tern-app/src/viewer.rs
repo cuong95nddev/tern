@@ -56,12 +56,6 @@ fn image_format(path: &Path) -> Option<ImageFormat> {
     })
 }
 
-pub struct ViewerState {
-    path: Option<PathBuf>,
-    mode: Mode,
-    unsaved: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub enum ViewerEvent {
     /// A relative link in the Markdown preview points at this file.
@@ -409,34 +403,6 @@ impl Viewer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
-    }
-
-    /// What a rebuilt viewer needs to show the same thing.
-    pub fn state(&self, cx: &App) -> ViewerState {
-        ViewerState { path: self.path.clone(), mode: self.mode, unsaved: self.dirty.then(|| self.editor.read(cx).value().to_string()) }
-    }
-
-    /// Show `state` (from another viewer), unsaved edits included.
-    pub fn restore(&mut self, state: ViewerState, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = state.path else { return };
-        self.mode = state.mode;
-        self.path = Some(path.clone());
-        let Some(text) = state.unsaved else { return self.reload(window, cx) };
-        self.loading = true;
-        let lang = language_for(&path);
-        self.language = Some(lang.clone());
-        self.editor.update(cx, |ed, cx| {
-            ed.set_highlighter(lang, cx);
-            ed.set_value(text, window, cx);
-        });
-        self.loading = false;
-        self.dirty = true;
-        match self.mode {
-            Mode::Diff => self.show_diff(cx),
-            Mode::Preview => self.sync_preview(cx),
-            Mode::Edit => {},
-        }
-        cx.notify();
     }
 
     #[cfg(debug_assertions)]

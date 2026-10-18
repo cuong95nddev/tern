@@ -1,6 +1,6 @@
-//! Right pane: git changes of every repository under the opened folder
-//! (the enclosing repo plus nested repos), grouped per repo. Clicking a file
-//! previews its diff in a popup.
+//! Right pane: git changes of every repository under the workspace's
+//! folders (each folder's enclosing repo plus nested repos), grouped per
+//! repo, folder by folder. Clicking a file previews its diff in a popup.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -41,7 +41,8 @@ enum RowKind {
 }
 
 pub struct ChangesView {
-    root: PathBuf,
+    /// The workspace's folders.
+    roots: Vec<PathBuf>,
     repos: Vec<RepoChanges>,
     collapsed: HashSet<PathBuf>,
     rows: Vec<RowKind>,
@@ -55,7 +56,7 @@ pub struct ChangesView {
     /// Per repo, whether its config defines filter commands (status is then
     /// not run): a `git config` process saved per refresh. Forgotten when
     /// the repo's `.git` changes or on a full refresh. Not watched: files a
-    /// config includes, and the `.git` of a repo enclosing the opened folder;
+    /// config includes, and the `.git` of a repo enclosing an opened folder;
     /// the refresh button rereads those.
     defines_commands: HashMap<PathBuf, bool>,
     scroll: UniformListScrollHandle,
@@ -135,9 +136,9 @@ impl Focusable for ChangesView {
 }
 
 impl ChangesView {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(roots: Vec<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
-            root,
+            roots,
             repos: vec![],
             collapsed: HashSet::new(),
             rows: vec![],
@@ -153,6 +154,14 @@ impl ChangesView {
         };
         this.refresh(true, cx);
         this
+    }
+
+    /// The workspace's folders changed: look for their repos again.
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.roots != roots {
+            self.roots = roots;
+            self.refresh(true, cx);
+        }
     }
 
     /// Paths changed on disk (or git metadata changed): refresh the status
@@ -210,7 +219,7 @@ impl ChangesView {
         }
         self.defines_commands.retain(|r, _| !dirty.git.contains(r));
         let cached = self.defines_commands.clone();
-        let root = self.root.clone();
+        let roots = self.roots.clone();
         let known: Vec<PathBuf> = self.repos.iter().map(|r| r.root.clone()).collect();
         self._task = Some(cx.spawn(async move |this, cx| {
             let (list, fresh) = cx
@@ -221,7 +230,7 @@ impl ChangesView {
                     dirty.rediscover |= dirty.dot_git.iter().any(|d| d.join(".git").exists() != known.contains(d))
                         || known.iter().any(|r| !r.join(".git").exists());
                     dirty.git.extend(dirty.dot_git.drain());
-                    let list = (dirty.rediscover || known.is_empty()).then(|| tern_fs::git::find_repos(&root));
+                    let list = (dirty.rediscover || known.is_empty()).then(|| find_all_repos(&roots));
                     let plan = dirty.plan(list.as_ref().unwrap_or(&known));
                     // One thread per repo: a `check-ignore` when only worktree
                     // files changed, then `status` unless they're all ignored
@@ -234,7 +243,7 @@ impl ChangesView {
                                     let skip = (!paths.is_empty() && tern_fs::git::all_ignored(r, paths)) || tern_fs::git::index_locked(r);
                                     (!skip).then(|| {
                                         let defines = cached.get(r).copied().unwrap_or_else(|| tern_fs::git::repo_defines_commands(r));
-                                        (defines, tern_fs::git::repo_changes_with(r, &root, defines))
+                                        (defines, tern_fs::git::repo_changes_with(r, scope(r, &roots), defines))
                                     })
                                 })
                             })
@@ -257,7 +266,7 @@ impl ChangesView {
                 if repos != this.repos {
                     this.repos = repos;
                     this.rebuild_rows();
-                    cx.emit(ChangesEvent::Updated(tern_fs::git::status_map(&this.repos, &this.root)));
+                    cx.emit(ChangesEvent::Updated(tern_fs::git::status_map(&this.repos, &this.roots)));
                 }
                 cx.notify();
                 if this.dirty.is_some() {
@@ -281,10 +290,21 @@ impl ChangesView {
         self.repos.iter().map(|r| r.files.len()).sum()
     }
 
+    /// The repo's place under its folder; with several folders, after the
+    /// folder's name.
     fn repo_label(&self, repo: &Path) -> String {
-        match repo.strip_prefix(&self.root) {
-            Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-            _ => repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| repo.display().to_string()),
+        let name = |p: &Path| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+        // A repo enclosing a folder has no place under one.
+        let Some(root) = self.roots.iter().filter(|r| repo.starts_with(r)).max_by_key(|r| r.components().count()) else {
+            return name(repo);
+        };
+        let rel = repo.strip_prefix(root).unwrap_or(repo);
+        if rel.as_os_str().is_empty() {
+            name(repo)
+        } else if self.roots.len() > 1 {
+            Path::new(&name(root)).join(rel).display().to_string()
+        } else {
+            rel.display().to_string()
         }
     }
 
@@ -373,6 +393,26 @@ impl ChangesView {
     }
 }
 
+/// The repos of every folder of `roots`, folder by folder, each once.
+fn find_all_repos(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut all: Vec<PathBuf> = vec![];
+    for r in roots.iter().flat_map(|root| tern_fs::git::find_repos(root)) {
+        if !all.contains(&r) {
+            all.push(r);
+        }
+    }
+    all
+}
+
+/// What of `repo` to show: all of it when it is in one of `roots`, else
+/// (it encloses a folder) just that folder.
+fn scope<'a>(repo: &'a Path, roots: &'a [PathBuf]) -> &'a Path {
+    if roots.iter().any(|r| repo.starts_with(r)) {
+        return repo;
+    }
+    roots.iter().find(|r| r.starts_with(repo)).map_or(repo, PathBuf::as_path)
+}
+
 /// The repos after a refresh: `list` if repos were looked for again (else the
 /// same ones as `old`), each with its `fresh` status, else its old one.
 fn merge(old: &[RepoChanges], list: Option<Vec<PathBuf>>, mut fresh: Vec<RepoChanges>) -> Vec<RepoChanges> {
@@ -424,7 +464,15 @@ mod tests {
     use tern_fs::GitStatus;
     use tern_fs::git::RepoChanges;
 
-    use super::{Dirty, MAX_WAIT, QUIET, merge};
+    use super::{Dirty, MAX_WAIT, QUIET, merge, scope};
+
+    #[test]
+    fn a_repo_enclosing_a_folder_shows_just_the_folder() {
+        let roots = [PathBuf::from("/r/sub"), PathBuf::from("/x")];
+        assert_eq!(scope("/r".as_ref(), &roots), std::path::Path::new("/r/sub"));
+        assert_eq!(scope("/x/lib".as_ref(), &roots), std::path::Path::new("/x/lib"));
+        assert_eq!(scope("/x".as_ref(), &roots), std::path::Path::new("/x"));
+    }
 
     #[test]
     fn plans_only_the_repos_that_changed() {

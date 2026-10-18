@@ -874,8 +874,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 
 | Template | Values | Slots |
 |---|---|---|
-| `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace_tabs`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
+| `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace` |
+| `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error`, `update`, `installing`, `monitor` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
 | `status_bar` | as `workspace` | as `workspace` |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
@@ -884,9 +884,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
-| `workspace_tabs` | `monitor`, `update`, `installing`; list `items` | |
-| `workspace_tabs.tab` | `name`, `active`, `busy` | |
-| `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
+| `explorer.empty` | `add_key` | |
+| `welcome` | `recents`, `open_key`; list `recent` | |
 | `welcome.recent` | `name`, `path` | |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and

@@ -23,11 +23,11 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 
 ## Features
 
-- **Agent and shell tabs** side by side, with workspaces (one folder each) as tabs across the top of the window
+- **Agent and shell tabs** side by side, in one workspace of the folders you add: each folder with its own files, git changes and terminals
 - **File explorer** and a light editor that saves, diffs against `HEAD` and renders Markdown
 - **Changes panel** listing the git changes of every repo under the folder; click a file to preview its diff
 - **Scratch files** that save as you type
-- **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
+- **Session restore**: the workspace's folders and tabs come back on launch, on the display where you left them
 - **Screenshots for agents**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> (<kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows) anywhere freezes the screen; pick a region, mark it up (boxes, arrows, text, numbered markers, mosaic), collect a few, add a prompt and send them all to an agent tab (or a new Claude Code, Codex or OpenCode tab). On macOS it needs Screen Recording access. Not on Linux yet.
 - **Background sessions**: terminals keep running after you quit, and reattach on the next launch
 - **Themes and settings** in plain files: colors, fonts and sizes, applied as you save, easy for an agent to edit
@@ -81,8 +81,7 @@ Tooltips show each platform's keys.
 | Keys (macOS) | Action |
 |---|---|
 | <kbd>⌘</kbd><kbd>T</kbd> / <kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> | New Claude tab / shell tab |
-| <kbd>⌘</kbd><kbd>O</kbd> | Open a folder as a workspace |
-| <kbd>⌘</kbd><kbd>⇧</kbd><kbd>N</kbd> | New window |
+| <kbd>⌘</kbd><kbd>O</kbd> | Add a folder to the workspace |
 | <kbd>⌘</kbd><kbd>N</kbd> | New scratch file |
 | <kbd>⌘</kbd><kbd>B</kbd> | Toggle explorer |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd> | Toggle Changes panel |
@@ -90,13 +89,12 @@ Tooltips show each platform's keys.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>V</kbd> | Toggle Markdown preview |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd> | Open the file in VS Code or Cursor |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> | Capture a screenshot for an agent (works from any app; <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows, also **File ▸ Capture Screenshot**) |
-| <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 | <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> | Pick a theme |
 | <kbd>⌘</kbd><kbd>,</kbd> | Open `settings.json` |
 
 ## Background sessions
 
-Terminals run in a small background process (`tern --server`, started by Tern), so quitting Tern, an update or a crash doesn't stop them: at the next launch every tab comes back attached to the same program, with its screen and scrollback. While Tern is closed, a Claude turn that finishes or needs approval still posts a notification (macOS). Closing a tab, a workspace or a window ends its programs.
+Terminals run in a small background process (`tern --server`, started by Tern), so quitting Tern, an update or a crash doesn't stop them: at the next launch every tab comes back attached to the same program, with its screen and scrollback. While Tern is closed, a Claude turn that finishes or needs approval still posts a notification (macOS). Closing a tab ends its program; closing the window quits Tern, and its programs keep running.
 
 The background process quits by itself once no tab is left. Its log is `daemon.log` in `~/Library/Logs/Tern` (macOS),
 `~/.local/state/tern` (Linux) or `%LOCALAPPDATA%\Tern\logs` (Windows). To end it and everything running in it:
@@ -105,7 +103,7 @@ in `%LOCALAPPDATA%\Tern\mux`, so updates can replace `tern.exe` while it runs).
 
 On Windows it talks over an AF_UNIX socket and runs programs in ConPTY; who runs in a tab is found from the shell's pid.
 
-On macOS, a menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
+On macOS, a menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (as a tab of the workspace) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
 
 ## Themes and settings
 
@@ -128,7 +126,7 @@ Ask an agent in a Tern tab to "make the terminal background navy" and it can do 
 
 ## Updates
 
-Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the workspace bar (also under **Tern ▸ Check for Updates…** on macOS, **Help ▸ Check for Updates…** on Windows and Linux). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
+Tern checks for a new release at launch and every 6 hours. When one is available, **Update to x.y.z** appears in the status bar (also under **Tern ▸ Check for Updates…** on macOS, **Help ▸ Check for Updates…** on Windows and Linux). Set `TERN_NO_UPDATE_CHECK=1` to turn this off.
 
 ## Building from source
 
@@ -182,17 +180,14 @@ in SignPath. The project there needs the artifact configurations in `packaging/w
 
 ## Reference
 
-Tern reopens the last session: every window with its workspaces, where it was (`~/Library/Application Support/dev.tern/session`). `tern <folder>` adds the folder as a workspace in the running Tern (or launches it with the session restored); so does dropping a folder on the Dock icon. With no session, the window shows a welcome page (Open Workspace…, recent folders), as it does after its last workspace closes.
+Tern has one window and one workspace: the folders you add to it, with their tabs. It reopens the last session, where it was (`~/Library/Application Support/dev.tern/session`); a session from an older build (several windows and workspaces) becomes one workspace of all their folders and tabs. `tern <folder>` adds the folder to the workspace in the running Tern (or launches it with the session restored); so does dropping a folder on the Dock icon. With no folder and no tab, the window shows a welcome page (Add Folder…, recent folders).
 
-A window holds several workspaces (one folder each) as tabs in the top bar; the folder button at the end of the bar opens another. Drag a workspace tab out of the window to give it its own window, or onto another Tern window to join it (also in the tab's right-click menu: Move to New Window / Move to Window, Close Other Workspaces). Dragging within the bar reorders.
+Each folder is a top-level row in the explorer; the Changes panel lists the git repos of every folder, folder by folder; a terminal starts in a folder (the active tab's, or the one you pick: **New Tab in Folder** in the + menu, **New Claude/Shell Tab Here** in the explorer's right-click menu) and is reopened there. Right-click a folder's row for **Remove Folder from Workspace** (its tabs stay).
 
 | Keys | Action |
 |---|---|
-| ⌘O | Open a folder as a new workspace tab in this window (also the bar's folder button and the + menu); an already open folder is brought forward |
-| ⌘⇧W | Close workspace (or the × on its tab; closing its last tab does too) |
-| ⌘⌥← ⌘⌥→ | Previous / next workspace |
-| ⌘⇧N | New window |
-| ⌘T / ⌘⇧T | New Claude tab / shell tab (also in the tab bar's + menu) |
+| ⌘O | Add folders to the workspace (also the explorer's folder button, the + menu and File ▸ Open Recent); one already in is revealed in the explorer |
+| ⌘T / ⌘⇧T | New Claude tab / shell tab in the active tab's folder (also in the tab bar's + menu) |
 | ⌘N | New scratch file (IntelliJ-style): kept in `~/Library/Application Support/dev.tern/scratches`, saved as you type; other types and reopening old scratches are in the + menu. Closing an empty one deletes it |
 | ⌘W, ⌘1–9, ⌘⇧[ ⌘⇧] | Close / switch tabs (or the × on each tab) |
 | Right-click a tab | Close / Close Others / Close to the Right / Close File Tabs, Rename… (terminal title or scratch file name), Copy Path, Reveal in Finder |
@@ -206,7 +201,7 @@ A window holds several workspaces (one folder each) as tabs in the top bar; the 
 | ⌘-hover / ⌘-click in a terminal | Underline / open the link under the mouse: a URL (in the browser), an OSC 8 hyperlink, or a file path that exists (`src/main.rs:42:7` opens it in a tab at that line; relative paths resolve against the folder of the program running in the terminal, e.g. Claude Code's). A folder is revealed in the explorer |
 | ⌘B | Toggle explorer (or the panel buttons at the right of the tab bar) |
 | click in Changes | Preview the file's diff in a popup; **Open in Tab** moves it to a center tab |
-| ⌘⇧G | Toggle Changes panel (git changes of every repo under the folder) |
+| ⌘⇧G | Toggle Changes panel (git changes of every repo under the workspace's folders) |
 | ⌘⇧S | Toggle Scratches panel (under the explorer): every scratch file, newest first; click to open, right-click for Copy Path / Reveal in Finder / Delete… |
 | ⌘⇧D | Toggle diff vs HEAD for the open file |
 | ⌘⇧V | Toggle rendered Markdown preview (`.md` files open in preview; relative links open in the viewer) |
@@ -221,10 +216,8 @@ Debug builds can be driven without the real mouse/keyboard: run with
 send line commands to that socket — `click X Y` / `rclick X Y` (window coordinates),
 `key escape` / `key cmd-w`, `state` (tabs, active tab, dialog open, viewer mode, scratch count or -1 when hidden),
 `scratch-new EXT` / `scratch-open NAME` (what the + menu does), `scratch-text TEXT` (replace
-the active scratch tab's text; `\n` for newlines), `windows`, `ws`, `ws-open PATH`,
-`ws-close [N]`, `ws-activate N`, `ws-reorder FROM TO`, `ws-detach N`, `ws-move N WINDOW`,
-`ws-dropout N X Y` (what releasing a dragged workspace tab at window coordinates X Y does),
-`new-window`. Commands go to the active window; prefix `@N ` to target window N. Scripted runs
+the active scratch tab's text; `\n` for newlines), `ws` (the folders), `ws-open PATH` /
+`ws-remove PATH` (add a folder / take it out). Scripted runs
 neither restore nor save the session unless `TERN_SESSION=1` (pair it with a scratch `HOME`). Pair with
 `screencapture -l <window id>` to see the result.
 

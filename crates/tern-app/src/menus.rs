@@ -12,7 +12,7 @@ use gpui_kit::*;
 use crate::theme_picker::{OpenSettings, SelectTheme};
 use crate::{OpenFolder, Quit, ToggleMenuBarIcon, agent_monitor, main_window, restart, terminal_view, update, window_state, workspace};
 
-/// Open a folder from File ▸ Open Recent.
+/// Add a folder to the workspace from File ▸ Open Recent.
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = tern, no_json)]
 pub struct OpenRecent(pub PathBuf);
@@ -44,12 +44,10 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("New Shell Tab", workspace::NewShellTab),
         MenuItem::action("New Scratch File", workspace::NewScratch),
         MenuItem::separator(),
-        MenuItem::action("New Window", main_window::NewWindow),
-        MenuItem::action("Open Folder…", OpenFolder),
+        MenuItem::action("Add Folder to Workspace…", OpenFolder),
         open_recent(),
         MenuItem::separator(),
         MenuItem::action("Close Tab", workspace::CloseTab),
-        MenuItem::action("Close Workspace", main_window::CloseWorkspace),
     ];
     let edit = Menu::new("Edit").items([
         MenuItem::action("Copy", terminal_view::Copy),
@@ -72,8 +70,6 @@ fn menus() -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Next Tab", workspace::NextTab),
         MenuItem::action("Previous Tab", workspace::PrevTab),
-        MenuItem::action("Next Workspace", main_window::NextWorkspace),
-        MenuItem::action("Previous Workspace", main_window::PrevWorkspace),
     ]);
     if cfg!(target_os = "macos") {
         let shown = tern_menubar::setting::enabled(&tern_menubar::setting::file());

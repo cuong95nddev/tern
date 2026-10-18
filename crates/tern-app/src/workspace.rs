@@ -128,6 +128,8 @@ struct TermTab {
     /// Title set with Rename…, shown instead of the terminal's own.
     rename: Option<SharedString>,
     kind: TabKind,
+    /// The folder its program starts in.
+    cwd: PathBuf,
     /// Hook token for Claude tabs.
     token: Option<String>,
     /// The Claude conversation running here (from hooks), to resume it.
@@ -314,7 +316,8 @@ pub struct Services {
 }
 
 pub struct Workspace {
-    root: PathBuf,
+    /// The folders added to the workspace, in the explorer's order.
+    folders: Vec<PathBuf>,
     services: Services,
     tree: Entity<FileTreeView>,
     changes: Entity<ChangesView>,
@@ -378,14 +381,14 @@ pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
     pub agent: Option<Agent>,
+    /// The name of the folder it runs in (one of the workspace's, else its own).
+    pub folder: String,
     /// The workspace's active tab.
     pub active: bool,
     pub view: Entity<TerminalView>,
 }
 
 pub enum WorkspaceEvent {
-    /// The last tab closed: the workspace is done.
-    Close,
     /// Tabs opened, closed, switched or renamed, or a side panel shown or
     /// hidden: the session should be saved.
     TabsChanged,
@@ -430,9 +433,9 @@ impl Workspace {
     /// Open `saved.folder` with `saved`'s tabs; a Claude tab when none of
     /// them can come back.
     pub fn new(saved: SavedWorkspace, services: Services, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let root = saved.folder;
-        let tree = cx.new(|cx| FileTreeView::new(root.clone(), cx));
-        let changes = cx.new(|cx| ChangesView::new(root.clone(), cx));
+        let folders = saved.folders;
+        let tree = cx.new(|cx| FileTreeView::new(&folders, cx));
+        let changes = cx.new(|cx| ChangesView::new(folders.clone(), cx));
         let scratches = cx.new(ScratchesView::new);
 
         let tree_sub = cx.subscribe_in(&tree, window, |this, _, ev: &FileTreeEvent, window, cx| match ev {
@@ -452,6 +455,11 @@ impl Workspace {
             FileTreeEvent::Hide => {
                 this.show_explorer = false;
                 this.panels_changed(cx);
+            },
+            FileTreeEvent::RemoveFolder(root) => this.remove_folder(root, cx),
+            FileTreeEvent::NewTerminal { dir, claude } => {
+                let kind = if *claude { TabKind::Claude } else { TabKind::Shell };
+                this.add_term(kind, None, None, None, Some(dir.clone()), window, cx);
             },
         });
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
@@ -479,7 +487,7 @@ impl Workspace {
         });
 
         let mut this = Self {
-            root,
+            folders,
             services,
             tree,
             changes,
@@ -528,8 +536,8 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux } => this.add_term(TabKind::Claude, name, session, mux, window, cx),
-                SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, window, cx),
+                SavedTab::Claude { name, session, mux, cwd } => this.add_term(TabKind::Claude, name, session, mux, cwd, window, cx),
+                SavedTab::Shell { name, mux, cwd } => this.add_term(TabKind::Shell, name, None, mux, cwd, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
                 SavedTab::Scratch(p) if p.is_file() => this.open_scratch(p, window, cx),
@@ -546,12 +554,75 @@ impl Workspace {
         }
         this.regroup();
         this.restore_panes(&panes, &tab_panes, &pane_active, &made);
-        if this.tabs.is_empty() {
-            this.add_tab(TabKind::Claude, window, cx);
-        } else {
+        if !this.tabs.is_empty() {
             this.activate(saved.active.min(this.tabs.len() - 1), window, cx);
+        } else if !this.folders.is_empty() {
+            this.add_tab(TabKind::Claude, window, cx);
         }
         this
+    }
+
+    pub fn folders(&self) -> &[PathBuf] {
+        &self.folders
+    }
+
+    /// Nothing to show: no folder and no tab (the window shows its welcome).
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.tabs.is_empty()
+    }
+
+    /// Add `folder` (a Claude tab in it when there is no tab), or show it in
+    /// the explorer when it is in already.
+    pub fn add_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = dunce::canonicalize(&folder).unwrap_or(folder);
+        if !self.folders.contains(&folder) {
+            self.folders.push(folder.clone());
+            self.folders_changed(cx);
+        }
+        if !self.show_explorer {
+            self.show_explorer = true;
+            self.panels_changed(cx);
+        }
+        self.tree.update(cx, |t, cx| t.reveal(&folder, cx));
+        if self.tabs.is_empty() {
+            self.add_term(TabKind::Claude, None, None, None, Some(folder), window, cx);
+        }
+    }
+
+    /// Take `folder` out of the workspace. Its tabs stay.
+    pub fn remove_folder(&mut self, folder: &Path, cx: &mut Context<Self>) {
+        self.folders.retain(|f| f != folder);
+        self.folders_changed(cx);
+    }
+
+    fn folders_changed(&mut self, cx: &mut Context<Self>) {
+        let folders = self.folders.clone();
+        self.tree.update(cx, |t, cx| t.set_roots(&folders, cx));
+        self.changes.update(cx, |c, cx| c.set_roots(folders, cx));
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
+    /// The folder of the workspace `path` is in (the innermost).
+    fn folder_of(&self, path: &Path) -> Option<&Path> {
+        self.folders.iter().filter(|f| path.starts_with(f)).max_by_key(|f| f.components().count()).map(PathBuf::as_path)
+    }
+
+    /// Where a new terminal starts: the active tab's folder, else the first
+    /// folder, else home.
+    fn default_cwd(&self, cx: &App) -> PathBuf {
+        let active = self.tabs.get(self.active).and_then(|t| match t {
+            CenterTab::Term(t) => Some(self.folder_of(&t.cwd).unwrap_or(&t.cwd).to_owned()),
+            t => t.file_path(cx).and_then(|p| self.folder_of(&p).map(Path::to_owned)),
+        });
+        active.or_else(|| self.folders.first().cloned()).unwrap_or_else(|| crate::dirs::home().unwrap_or_default())
+    }
+
+    /// The folder relative links in a file at `path` resolve from and stay in.
+    fn link_root(&self, path: Option<&Path>) -> PathBuf {
+        path.and_then(|p| self.folder_of(p).map(Path::to_owned).or_else(|| p.parent().map(Path::to_owned)))
+            .or_else(|| self.folders.first().cloned())
+            .unwrap_or_else(|| crate::dirs::home().unwrap_or_default())
     }
 
     /// Split the center as saved: `layout` (`Layout::encode`), each saved
@@ -581,9 +652,10 @@ impl Workspace {
                 CenterTab::Term(t) => {
                     let name = t.rename.as_ref().map(|r| r.to_string());
                     let mux = t.view.read(cx).mux_id();
+                    let cwd = Some(t.cwd.clone());
                     match t.kind {
-                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux },
-                        TabKind::Shell => SavedTab::Shell { name, mux },
+                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux, cwd },
+                        TabKind::Shell => SavedTab::Shell { name, mux, cwd },
                     }
                 },
                 CenterTab::File { view, .. } => SavedTab::File(view.read(cx).path().map(Path::to_owned).unwrap_or_default()),
@@ -613,7 +685,7 @@ impl Workspace {
             .map(|(name, _)| name.to_owned())
             .collect();
         SavedWorkspace {
-            folder: self.root.clone(),
+            folders: self.folders.clone(),
             tabs,
             tab_groups,
             groups,
@@ -636,58 +708,8 @@ impl Workspace {
         ]
     }
 
-    /// The workspace moved into `window`. Views holding text inputs listen
-    /// for focus in the window they were made in, so rebuild those here,
-    /// keeping what they showed (unsaved file edits included).
-    pub fn rehost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._rename = None;
-        self.preview = None;
-        for tab in &mut self.tabs {
-            let old = tab.entity_id();
-            if let CenterTab::File { view, _subs } = tab {
-                let state = view.read(cx).state(cx);
-                let root = self.root.clone();
-                *view = cx.new(|cx| {
-                    let mut v = Viewer::new(root, window, cx);
-                    v.restore(state, window, cx);
-                    v
-                });
-                *_subs = Self::subscribe_viewer(view, window, cx);
-            }
-            if let CenterTab::Scratch { view, _sub } = tab {
-                view.update(cx, |s, cx| s.flush(cx));
-                let path = view.read(cx).path().to_owned();
-                *view = cx.new(|cx| Scratch::open(path, window, cx));
-                *_sub = cx.observe(view, |_, _, cx| cx.notify());
-            }
-            // The views above are new entities: keep their tabs' groups.
-            if let Some(g) = self.tab_group.remove(&old) {
-                self.tab_group.insert(tab.entity_id(), g);
-            }
-            if let Some(p) = self.tab_pane.remove(&old) {
-                self.tab_pane.insert(tab.entity_id(), p);
-            }
-            for shown in self.pane_active.values_mut().filter(|id| **id == old) {
-                *shown = tab.entity_id();
-            }
-            if self.preview_tab == Some(old) {
-                self.preview_tab = Some(tab.entity_id());
-            }
-        }
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    /// The workspace is being closed: save scratches (dropping empty ones).
-    /// Terminals and hook registrations go when the workspace is dropped.
-    /// End every terminal's program (the workspace or its window was
-    /// closed). Quitting Tern doesn't: they keep running in the background.
-    pub fn end_terminals(&mut self, cx: &mut Context<Self>) {
-        for t in self.tabs.iter().filter_map(CenterTab::term) {
-            t.view.update(cx, |v, _| v.close());
-        }
-    }
-
+    /// The window is closing (Tern quits): save scratches (dropping empty
+    /// ones). Terminals keep running in the background.
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             if let CenterTab::Scratch { view, .. } = tab {
@@ -696,24 +718,16 @@ impl Workspace {
         }
     }
 
-    /// The folder's name, for tab and window titles.
+    /// The folders' names, for the window title.
     pub fn name(&self) -> String {
-        self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into_owned())
-    }
-
-    /// Whether a Claude tab is mid-turn or waiting for input.
-    pub fn busy(&self, cx: &App) -> bool {
-        self.tabs
-            .iter()
-            .filter_map(CenterTab::term)
-            .any(|t| matches!(t.view.read(cx).status(), ActivityStatus::Working | ActivityStatus::Blocked))
+        self.folders.iter().map(|f| folder_name(f)).collect::<Vec<_>>().join(", ")
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_active(window, cx);
     }
 
-    fn spawn_config(&self, kind: TabKind, resume: Option<&str>) -> (SpawnConfig, &'static str) {
+    fn spawn_config(kind: TabKind, resume: Option<&str>, cwd: &Path) -> (SpawnConfig, &'static str) {
         let shell = crate::platform::shell();
         let mut env = std::collections::HashMap::new();
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
@@ -749,7 +763,7 @@ impl Workspace {
             SpawnConfig {
                 program: Some(shell),
                 args,
-                cwd: Some(self.root.clone()),
+                cwd: Some(cwd.to_owned()),
                 env,
                 size: TermSize { cols: 120, rows: 40, cell_width: 8, cell_height: 16 },
                 scrollback: 10_000,
@@ -759,23 +773,27 @@ impl Workspace {
     }
 
     fn add_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(kind, None, None, None, window, cx);
+        self.add_term(kind, None, None, None, None, window, cx);
     }
 
     /// A new terminal tab named `rename`: background session `mux` when it
-    /// still runs, else a new program (a Claude one resumes `session`).
+    /// still runs, else a new program in `cwd` (by default the active tab's
+    /// folder; a Claude one resumes `session`).
+    #[allow(clippy::too_many_arguments)]
     fn add_term(
         &mut self,
         kind: TabKind,
         rename: Option<String>,
         session: Option<String>,
         mux: Option<u64>,
+        cwd: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Known once the daemon answers (`TerminalEvent::Ready`).
         let token = None;
-        let (cfg, title) = self.spawn_config(kind, session.as_deref());
+        let cwd = cwd.unwrap_or_else(|| self.default_cwd(cx));
+        let (cfg, title) = Self::spawn_config(kind, session.as_deref(), &cwd);
         let config = self.services.terminal.clone();
         let connector = self.services.mux.clone();
         let hook = kind == TabKind::Claude;
@@ -786,7 +804,7 @@ impl Workspace {
         // not a running Claude it reattaches to, says something by exiting
         // at once.
         let resuming = session.is_some();
-        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
+        let tab = TermTab { view, rename, kind, cwd, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -794,11 +812,12 @@ impl Workspace {
     /// A tab for background session `s` that no tab shows. A Claude one
     /// resumes its conversation if it has to start again.
     pub fn adopt_session(&mut self, s: &tern_mux::proto::SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = s.cwd.clone();
         if s.claude {
             // Claude names its tab itself.
-            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), window, cx);
+            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), cwd, window, cx);
         } else {
-            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), window, cx);
+            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), cwd, window, cx);
         }
     }
 
@@ -863,10 +882,6 @@ impl Workspace {
     fn delete_scratch(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.tabs.iter().position(|t| matches!(t, CenterTab::Scratch { view, .. } if view.read(cx).path() == path));
         if let Some(ix) = open {
-            // Closing the last tab would close the workspace.
-            if self.tabs.len() == 1 {
-                self.add_tab(TabKind::Claude, window, cx);
-            }
             self.close_tab(ix, window, cx);
         }
         if let Err(e) = std::fs::remove_file(path)
@@ -926,7 +941,7 @@ impl Workspace {
             t.view.update(cx, |v, _| v.close());
         }
         if self.tabs.is_empty() {
-            cx.emit(WorkspaceEvent::Close);
+            cx.emit(WorkspaceEvent::TabsChanged);
             return;
         }
         // Its pane shows its next tab (else the one before); a pane left
@@ -1264,8 +1279,10 @@ impl Workspace {
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = self.tabs.get(self.active) {
-            window.focus(&t.focus_handle(cx), cx);
+        match self.tabs.get(self.active) {
+            Some(t) => window.focus(&t.focus_handle(cx), cx),
+            // No tab: keys still reach the workspace through the explorer.
+            None => window.focus(&self.tree.focus_handle(cx), cx),
         }
     }
 
@@ -1273,7 +1290,7 @@ impl Workspace {
     /// to move it into a center tab.
     fn preview_diff(&mut self, path: PathBuf, status: GitStatus, window: &mut Window, cx: &mut Context<Self>) {
         window.close_all_dialogs(cx);
-        let rel = path.strip_prefix(&self.root).unwrap_or(&path).display().to_string();
+        let rel = self.folder_of(&path).and_then(|f| path.strip_prefix(f).ok()).unwrap_or(&path).display().to_string();
         let title: SharedString = format!("{rel}  {}", status.letter()).into();
         let pane = cx.new(|cx| DiffPane::new(path, cx));
         self.preview = Some(pane.downgrade());
@@ -1355,10 +1372,6 @@ impl Workspace {
         if doomed.is_empty() {
             return;
         }
-        // Closing the last tab would close the workspace.
-        if doomed.len() == self.tabs.len() {
-            self.add_tab(TabKind::Claude, window, cx);
-        }
         self.close_where(|_, t| doomed.contains(&t.entity_id()), window, cx);
     }
 
@@ -1378,7 +1391,7 @@ impl Workspace {
             }
             return self.activate(ix, window, cx);
         }
-        let root = self.root.clone();
+        let root = self.link_root(Some(&path));
         let view = cx.new(|cx| {
             let mut v = Viewer::new(root, window, cx);
             v.open(path, window, cx);
@@ -1457,7 +1470,7 @@ impl Workspace {
                     t.token = None;
                     t.session = None;
                     t.resuming = false;
-                    let (cfg, _) = self.spawn_config(TabKind::Shell, None);
+                    let (cfg, _) = Self::spawn_config(TabKind::Shell, None, &t.cwd);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.set_hook(false);
@@ -1473,7 +1486,7 @@ impl Workspace {
                     Some(t) if t.resuming && *quick && code.is_some_and(|c| c != 0) => {
                         t.resuming = false;
                         t.session = None;
-                        Some(t.token.clone())
+                        Some(t.cwd.clone())
                     },
                     Some(t) => {
                         t.resuming = false;
@@ -1481,8 +1494,8 @@ impl Workspace {
                     },
                     None => None,
                 };
-                if restart.is_some() {
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, None);
+                if let Some(cwd) = restart {
+                    let (cfg, _) = Self::spawn_config(TabKind::Claude, None, &cwd);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.start(cx);
@@ -1492,8 +1505,7 @@ impl Workspace {
                     && t.kind == TabKind::Claude
                 {
                     // Enter restarts it: resume the conversation it had.
-                    let session = t.session.clone();
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref());
+                    let (cfg, _) = Self::spawn_config(TabKind::Claude, t.session.as_deref(), &t.cwd);
                     view.update(cx, |v, _| v.set_spawn_config(cfg));
                 }
                 cx.notify();
@@ -1542,7 +1554,7 @@ impl Workspace {
                 cx.notify();
             },
             TerminalEvent::OpenPath { path, line, col } => {
-                if path.is_dir() && !path.starts_with(&self.root) {
+                if path.is_dir() && self.folder_of(path).is_none() {
                     return cx.reveal_path(path);
                 }
                 if path.is_dir() {
@@ -1579,12 +1591,12 @@ impl Workspace {
             // Any later start (Enter, a daemon restart) resumes this one.
             if tab.kind == TabKind::Claude {
                 let view = tab.view.clone();
-                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref());
+                let (cfg, _) = Self::spawn_config(TabKind::Claude, ev.session_id.as_deref(), &tab.cwd);
                 view.update(cx, |v, _| v.set_spawn_config(cfg));
             }
             cx.emit(WorkspaceEvent::TabsChanged);
         }
-        let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| p.starts_with(&self.root)).collect();
+        let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| self.folder_of(p).is_some()).collect();
         if paths.is_empty() {
             return;
         }
@@ -1606,6 +1618,7 @@ impl Workspace {
                     id: t.view.entity_id(),
                     title: self.tab_info(i, cx).0,
                     agent: t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude)),
+                    folder: folder_name(self.folder_of(&t.cwd).unwrap_or(&t.cwd)),
                     active: i == self.active,
                     view: t.view.clone(),
                 })
@@ -1825,60 +1838,81 @@ impl Workspace {
     fn new_tab_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
         b.dropdown_menu(move |menu, window, cx| {
             let (ws, ws2, ws3, ws4) = (ws.clone(), ws.clone(), ws.clone(), ws.clone());
-            menu.menu("Open Workspace…", Box::new(crate::OpenFolder))
+            let folders = ws.upgrade().map(|w| w.read(cx).folders.clone()).unwrap_or_default();
+            let ws5 = ws.clone();
+            let menu = menu
+                .menu("Add Folder to Workspace…", Box::new(crate::OpenFolder))
                 .separator()
                 .menu("New Claude Tab", Box::new(NewClaudeTab))
-                .menu("New Shell Tab", Box::new(NewShellTab))
-                .submenu("Claude Options", window, cx, move |mut menu, _, _| {
-                    let args = window_state::claude_args();
-                    for (label, flag) in CLAUDE_FLAGS {
-                        menu = menu.item(
-                            PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
-                                move |_, _, _| {
-                                    window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
-                                },
-                            ),
-                        );
-                    }
-                    let ws = ws3.clone();
-                    menu.separator()
-                        .item(PopupMenuItem::new("Edit Arguments…").on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.edit_claude_args(window, cx));
-                        }))
-                        .item(PopupMenuItem::label("Applies to Claude tabs opened from now on"))
-                })
-                .separator()
-                .menu("New Scratch File", Box::new(NewScratch))
-                .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
-                    for (label, ext) in scratch::KINDS {
-                        let ws = ws.clone();
-                        menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
-                        }));
+                .menu("New Shell Tab", Box::new(NewShellTab));
+            // With several folders, a tab can start in any of them.
+            let menu = if folders.len() > 1 {
+                menu.submenu("New Tab in Folder", window, cx, move |mut menu, _, _| {
+                    for (kind, label) in [(TabKind::Claude, "Claude"), (TabKind::Shell, "Shell")] {
+                        if kind == TabKind::Shell {
+                            menu = menu.separator();
+                        }
+                        for f in &folders {
+                            let (ws, f) = (ws5.clone(), f.clone());
+                            menu =
+                                menu.item(PopupMenuItem::new(format!("{label} in {}", folder_name(&f))).on_click(move |_, window, cx| {
+                                    let _ = ws.update(cx, |this, cx| this.add_term(kind, None, None, None, Some(f.clone()), window, cx));
+                                }));
+                        }
                     }
                     menu
                 })
-                .submenu("Scratches", window, cx, move |mut menu, _, _| {
-                    let files = scratch::list(&scratch::dir());
-                    if files.is_empty() {
-                        return menu.item(PopupMenuItem::new("No scratch files").disabled(true));
-                    }
-                    for path in files.into_iter().take(30) {
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let ws = ws2.clone();
-                        menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.open_scratch(path.clone(), window, cx));
-                        }));
-                    }
-                    menu
-                })
-                .menu("Open Scratches Folder", Box::new(OpenScratchesFolder))
-                .separator()
-                .submenu("Pane Layout", window, cx, move |menu, _, cx| match ws4.upgrade() {
-                    Some(this) => Self::pane_layout_items(menu, &ws4, this.read(cx)),
-                    None => menu,
-                })
-                .submenu("Tab Layout", window, cx, |menu, _, _| tab_layout_items(menu))
+            } else {
+                menu
+            };
+            menu.submenu("Claude Options", window, cx, move |mut menu, _, _| {
+                let args = window_state::claude_args();
+                for (label, flag) in CLAUDE_FLAGS {
+                    menu = menu.item(PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
+                        move |_, _, _| {
+                            window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
+                        },
+                    ));
+                }
+                let ws = ws3.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("Edit Arguments…").on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.edit_claude_args(window, cx));
+                    }))
+                    .item(PopupMenuItem::label("Applies to Claude tabs opened from now on"))
+            })
+            .separator()
+            .menu("New Scratch File", Box::new(NewScratch))
+            .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
+                for (label, ext) in scratch::KINDS {
+                    let ws = ws.clone();
+                    menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
+                    }));
+                }
+                menu
+            })
+            .submenu("Scratches", window, cx, move |mut menu, _, _| {
+                let files = scratch::list(&scratch::dir());
+                if files.is_empty() {
+                    return menu.item(PopupMenuItem::new("No scratch files").disabled(true));
+                }
+                for path in files.into_iter().take(30) {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let ws = ws2.clone();
+                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.open_scratch(path.clone(), window, cx));
+                    }));
+                }
+                menu
+            })
+            .menu("Open Scratches Folder", Box::new(OpenScratchesFolder))
+            .separator()
+            .submenu("Pane Layout", window, cx, move |menu, _, cx| match ws4.upgrade() {
+                Some(this) => Self::pane_layout_items(menu, &ws4, this.read(cx)),
+                None => menu,
+            })
+            .submenu("Tab Layout", window, cx, |menu, _, _| tab_layout_items(menu))
         })
     }
 
@@ -3199,17 +3233,18 @@ impl Workspace {
                 "ok".into()
             },
             cmd if cmd.starts_with("file-open ") => {
-                let path = self.root.join(cmd["file-open ".len()..].trim());
+                let path = self.link_root(None).join(cmd["file-open ".len()..].trim());
                 self.open_file(path, true, window, cx);
                 "ok".into()
             },
             other => format!("error: unknown command {other:?}"),
         }
     }
+}
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
+/// A folder's name, for titles and labels.
+pub fn folder_name(f: &Path) -> String {
+    f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// Ask before closing `what` while `jobs` run in it; `then` closes it.
@@ -3291,11 +3326,16 @@ impl Render for Workspace {
             });
             scope = scope.docks(a, on_change);
         }
+        if let Some((release, installing)) = crate::update::offered(cx) {
+            let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
+            scope = scope.var("update", label).var("installing", installing);
+        }
         let scope = scope
+            .var("monitor", crate::agent_monitor::window(cx).is_some())
             .var("explorer", self.show_explorer)
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
-            .var("path", self.root.display().to_string())
+            .var("path", crate::dirs::tilde(&self.default_cwd(cx)))
             .var("background", background)
             .var("settings_error", settings_error)
             .slot("left_strip", left_strip)
@@ -3309,7 +3349,22 @@ impl Render for Workspace {
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
             cx.set_global(crate::dock::PinnedParts(pinned));
         }
-        let body = template::render("workspace", scope, &mut |_, _, d| d.into_any_element(), cx);
+        let body = template::render(
+            "workspace",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
+                ("update", Framed::Button(b)) => b
+                    .on_click(|_, _, cx| {
+                        if let Some((release, false)) = crate::update::offered(cx) {
+                            crate::update::offer(release, cx)
+                        }
+                    })
+                    .into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
 
         div()
             .key_context("Workspace")
