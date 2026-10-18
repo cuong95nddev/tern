@@ -25,10 +25,13 @@ impl<T> ScanCache<T> {
         Self(std::sync::Mutex::new(None))
     }
 
-    fn get(&self, scan: impl FnOnce() -> T) -> std::sync::Arc<T> {
+    /// A young enough scan that `has` finds what is asked about, else a
+    /// new one: a process started since the last scan isn't in it.
+    fn get(&self, has: impl Fn(&T) -> bool, scan: impl FnOnce() -> T) -> std::sync::Arc<T> {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, v)) = &*slot
             && at.elapsed() < SCAN_TTL
+            && has(v)
         {
             return v.clone();
         }
@@ -107,7 +110,8 @@ fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
 #[cfg(target_os = "linux")]
 fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
     static GROUPS: ScanCache<Vec<(u32, libc::pid_t)>> = ScanCache::new();
-    let groups = GROUPS.get(|| {
+    let has_group = |groups: &Vec<(u32, libc::pid_t)>| groups.iter().any(|&(_, g)| g == pgid);
+    let groups = GROUPS.get(has_group, || {
         let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
         dir.flatten()
             .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
@@ -230,7 +234,8 @@ mod win {
     /// `root` and every process below it with its executable name, breadth first.
     pub fn descendants(root: u32) -> Vec<(u32, String)> {
         static TREE: super::ScanCache<Tree> = super::ScanCache::new();
-        let tree = TREE.get(|| {
+        let has_root = |t: &Tree| t.exes.contains_key(&root);
+        let tree = TREE.get(has_root, || {
             let mut t = Tree::default();
             for (pid, ppid, exe) in snapshot() {
                 // The idle process is its own parent.

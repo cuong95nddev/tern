@@ -190,7 +190,7 @@ mod windows {
 
     /// GDI's 32-bit pixels are B, G, R and an unused byte.
     pub(super) fn bgrx_to_rgba(mut buf: Vec<u8>, w: u32, h: u32) -> RgbaImage {
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             px[3] = 255;
         }

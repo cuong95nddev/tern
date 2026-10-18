@@ -173,6 +173,8 @@ fn slow_client_is_dropped() {
     let d = daemon(Duration::from_secs(60));
     // A client that attaches to a flood and never reads.
     let mut raw = UnixStream::connect(paths::socket_path(&d.dir)).unwrap();
+    // Now: on macOS setting it fails (EINVAL) once the daemon has dropped it.
+    raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into(), role: proto::Role::Ui }).unwrap();
     proto::write_frame(&mut raw, &ClientMsg::Spawn { req: 1, cfg: sh("yes 0123456789012345678901234567890123456789"), hook: false })
         .unwrap();
@@ -186,7 +188,6 @@ fn slow_client_is_dropped() {
     wait_until("output", || screen(&s).contains("fine"));
     // The stalled one gets disconnected once it is 1 MiB behind: after a
     // while, reading finds what the kernel buffered, then the end.
-    raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     std::thread::sleep(Duration::from_secs(3));
     let mut buf = vec![0u8; 1 << 20];
     let mut total = 0usize;
