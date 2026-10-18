@@ -91,6 +91,16 @@ Medians:
 - Compared with Warp (an in-process `ignore` matcher, 500ms debounce + 5s throttle, `index.lock` watched) and
   T3 Code (no watcher, `check-ignore --stdin`, 250ms trailing, skip on `index.lock`).
 - Fixes the diff pane bug: it reloads when `git_repos` holds its repo.
+- Tested in the app with a logging `git.exe` wrapper first on `PATH`. The test folder was an outer repo
+  plus `ext/a`, `ext/b`, `ext/c`.
+  - 150 writes to ignored `out/` over 3s: 2 `check-ignore`, 0 `status`.
+  - 40 edits in `ext/a`: 1 `check-ignore` + 1 `status`, only for `ext/a`.
+  - A commit in `ext/b`: only `ext/b`.
+  - 5s idle: nothing.
+  - `QUIET` must exceed the explorer watcher's 400ms batch cap, or each batch starts a refresh.
+  - Windows reports a repo's `.git` dir itself when files in it change. Repos are only looked for again
+    when a `.git` really appeared or vanished, or a known repo's `.git` is gone (deleting a whole repo
+    reports just its dir).
 - The `repo_defines_commands` answer is cached per repo (`ChangesView.defines_commands`). It is dropped
   when that repo's `.git` (now including `config`) changes and on a full refresh.
 - `FsWatcher` debounce is trailing: a batch goes out once the disk is quiet for the window, at most 10×

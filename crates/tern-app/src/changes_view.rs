@@ -18,8 +18,10 @@ use crate::{file_icons, style};
 /// The element a row is drawn as ([`style`]).
 const ROW: &str = "changes.row";
 
-/// Changes are gathered until the disk is quiet this long...
-const QUIET: Duration = Duration::from_millis(250);
+/// Changes are gathered until the disk is quiet this long... Longer than
+/// the explorer watcher's batches are apart in a long burst (10 × 40ms), or
+/// each of its batches would start a refresh.
+const QUIET: Duration = Duration::from_millis(500);
 /// ...or, in a long burst, at most this long after the first one.
 const MAX_WAIT: Duration = Duration::from_secs(2);
 
@@ -64,8 +66,12 @@ pub struct ChangesView {
 
 /// Changes waiting for the next refresh.
 struct Dirty {
-    /// Look for repos again (a `.git` appeared or vanished), then refresh all.
+    /// Look for repos again, then refresh all.
     rediscover: bool,
+    /// Dirs whose `.git` entry was reported: repos are looked for again if
+    /// one appeared or vanished. Mostly it is just a repo's `.git` dir
+    /// changing (Windows reports the dir as well as the file in it).
+    dot_git: HashSet<PathBuf>,
     /// Refresh every known repo.
     all: bool,
     /// Repos whose `.git` changed: refresh them whatever the paths.
@@ -81,7 +87,16 @@ struct Dirty {
 impl Dirty {
     fn new() -> Self {
         let t = Instant::now();
-        Self { rediscover: false, all: false, git: HashSet::new(), paths: HashSet::new(), now: false, first: t, last: t }
+        Self {
+            rediscover: false,
+            dot_git: HashSet::new(),
+            all: false,
+            git: HashSet::new(),
+            paths: HashSet::new(),
+            now: false,
+            first: t,
+            last: t,
+        }
     }
 
     fn due(&self) -> Instant {
@@ -141,12 +156,14 @@ impl ChangesView {
     }
 
     /// Paths changed on disk (or git metadata changed): refresh the status
-    /// of the repos they belong to once the burst is over, and rediscover
-    /// repos if a `.git` entry appeared or vanished.
+    /// of the repos they belong to once the burst is over, and look for
+    /// repos again if a `.git` entry appeared or vanished.
     pub fn files_changed(&mut self, batch: &ChangeBatch, cx: &mut Context<Self>) {
         let d = self.dirty.get_or_insert_with(Dirty::new);
         d.last = Instant::now();
-        d.rediscover |= batch.paths.iter().any(|p| p.file_name().is_some_and(|n| n == ".git"));
+        d.dot_git.extend(
+            batch.paths.iter().filter(|p| p.file_name().is_some_and(|n| n == ".git")).filter_map(|p| p.parent()).map(Path::to_path_buf),
+        );
         d.git.extend(batch.git_repos.iter().cloned());
         d.paths.extend(batch.paths.iter().cloned());
         self.schedule(cx);
@@ -198,6 +215,12 @@ impl ChangesView {
         self._task = Some(cx.spawn(async move |this, cx| {
             let (list, fresh) = cx
                 .background_spawn(async move {
+                    let mut dirty = dirty;
+                    // Otherwise a `.git` reported is its repo's metadata changing.
+                    // A repo removed whole may be reported as its dir alone.
+                    dirty.rediscover |= dirty.dot_git.iter().any(|d| d.join(".git").exists() != known.contains(d))
+                        || known.iter().any(|r| !r.join(".git").exists());
+                    dirty.git.extend(dirty.dot_git.drain());
                     let list = (dirty.rediscover || known.is_empty()).then(|| tern_fs::git::find_repos(&root));
                     let plan = dirty.plan(list.as_ref().unwrap_or(&known));
                     // One thread per repo: a `check-ignore` when only worktree

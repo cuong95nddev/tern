@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tern_mux::client::{Connector, Open, RemoteSession};
+use tern_mux::client::{Connector, Foreground, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
@@ -268,6 +268,8 @@ pub struct TerminalView {
     resolving: Option<(String, Task<()>)>,
     /// ⌘ is held (as of the last `update_hover`).
     cmd_held: bool,
+    /// [`Ticker`] ticks since the program last wrote (after a quiet 10s).
+    idle_ticks: u32,
     /// The coding agent running in the foreground, if any.
     agent: Option<Agent>,
     /// When the program last wrote something.
@@ -283,6 +285,60 @@ impl EventEmitter<TerminalEvent> for TerminalView {}
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// One timer for every tab, rather than one each: a single wakeup per
+/// second, and the tabs' foreground programs read together, so one scan of
+/// every process serves them all. Runs while there are tabs.
+#[derive(Default)]
+struct Ticker {
+    views: Vec<WeakEntity<TerminalView>>,
+    running: bool,
+}
+
+impl Global for Ticker {}
+
+impl Ticker {
+    fn add(view: WeakEntity<TerminalView>, cx: &mut App) {
+        let t = cx.default_global::<Ticker>();
+        t.views.push(view);
+        if std::mem::replace(&mut t.running, true) {
+            return;
+        }
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let probes = cx.update(|cx| {
+                    let mut views = std::mem::take(&mut cx.global_mut::<Ticker>().views);
+                    let probes: Vec<_> =
+                        views.iter().filter_map(|v| Some((v.clone(), v.update(cx, |view, cx| view.tick(cx)).ok()??))).collect();
+                    views.retain(|v| v.upgrade().is_some());
+                    let t = cx.global_mut::<Ticker>();
+                    // Tabs added meanwhile are in `t.views`.
+                    views.append(&mut t.views);
+                    t.views = views;
+                    t.running = !t.views.is_empty();
+                    t.running.then_some(probes)
+                });
+                let Some(probes) = probes else { break };
+                if probes.is_empty() {
+                    continue;
+                }
+                let (views, fgs): (Vec<_>, Vec<_>) = probes.into_iter().unzip();
+                let programs = cx
+                    .background_spawn(
+                        async move { fgs.into_iter().map(|f| f.map(|f| f.programs()).unwrap_or_default()).collect::<Vec<_>>() },
+                    )
+                    .await;
+                cx.update(|cx| {
+                    for (v, programs) in views.into_iter().zip(programs) {
+                        let _ = v.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx));
+                    }
+                });
+            }
+        })
+        .detach();
     }
 }
 
@@ -339,6 +395,7 @@ impl TerminalView {
             unresolved: RefCell::new(None),
             resolving: None,
             cmd_held: false,
+            idle_ticks: 0,
             agent: None,
             last_output: Instant::now(),
             _pump: None,
@@ -348,38 +405,25 @@ impl TerminalView {
         this._watch = cx.spawn(async move |this, cx| {
             // A tab that isn't shown never lays out: start it anyway.
             cx.background_executor().timer(Duration::from_millis(150)).await;
-            if this.update(cx, |view, cx| view.start_once(cx)).is_err() {
-                return;
-            }
-            // Each second while the program writes (an agent starting or
-            // ending shows), else every few: a scan reads every process.
-            let mut idle_ticks = 0;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Ok(probe) = this.update(cx, |view, cx| {
-                    // Rendering clears the wakeup flag; a tab not shown never
-                    // renders, so clear it here or its output stops waking it.
-                    if let Some(s) = &view.session {
-                        s.take_wakeup();
-                    }
-                    view.read_agent_status(cx);
-                    let busy = view.last_output.elapsed() < Duration::from_secs(10);
-                    idle_ticks = if busy { 0 } else { idle_ticks + 1 };
-                    (busy || idle_ticks % 5 == 0).then(|| view.session.as_ref().map(RemoteSession::foreground))
-                }) else {
-                    break;
-                };
-                let Some(probe) = probe else { continue };
-                let programs = match probe {
-                    Some(p) => cx.background_spawn(async move { p.programs() }).await,
-                    None => Vec::new(),
-                };
-                if this.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx)).is_err() {
-                    break;
-                }
-            }
+            let _ = this.update(cx, |view, cx| view.start_once(cx));
         });
+        Ticker::add(cx.entity().downgrade(), cx);
         this
+    }
+
+    /// One tick of [`Ticker`]. `Some` when this tab's foreground programs
+    /// should be read: each tick while the program writes (an agent starting
+    /// or ending shows), else every fifth.
+    fn tick(&mut self, cx: &mut Context<Self>) -> Option<Option<Foreground>> {
+        // Rendering clears the wakeup flag; a tab not shown never renders,
+        // so clear it here or its output stops waking it.
+        if let Some(s) = &self.session {
+            s.take_wakeup();
+        }
+        self.read_agent_status(cx);
+        let busy = self.last_output.elapsed() < Duration::from_secs(10);
+        self.idle_ticks = if busy { 0 } else { self.idle_ticks + 1 };
+        (busy || self.idle_ticks.is_multiple_of(5)).then(|| self.session.as_ref().map(RemoteSession::foreground))
     }
 
     fn start_once(&mut self, cx: &mut Context<Self>) {
