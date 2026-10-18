@@ -61,6 +61,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub use tern_term::status::ActivityStatus;
 
+/// How many of an agent's bottom lines tell what it is doing.
+const AGENT_SCREEN_LINES: usize = 15;
+
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
     TitleChanged,
@@ -215,6 +218,13 @@ pub struct TerminalView {
     title: SharedString,
     default_title: SharedString,
     status: ActivityStatus,
+    /// The program has reported its status (OSC 7501): `status` is its word,
+    /// not a guess.
+    reports_status: bool,
+    /// When `status` last changed.
+    status_since: Instant,
+    /// Reads in a row that found a working agent not working.
+    quiet_reads: u8,
     exited: Option<Option<i32>>,
     /// Why the process couldn't start.
     spawn_error: Option<String>,
@@ -293,6 +303,9 @@ impl TerminalView {
             title: title.clone(),
             default_title: title,
             status: ActivityStatus::None,
+            reports_status: false,
+            status_since: Instant::now(),
+            quiet_reads: 0,
             exited: None,
             spawn_error: None,
             started: Instant::now(),
@@ -329,7 +342,8 @@ impl TerminalView {
             let mut idle_ticks = 0;
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Ok(probe) = this.update(cx, |view, _| {
+                let Ok(probe) = this.update(cx, |view, cx| {
+                    view.read_agent_status(cx);
                     let busy = view.last_output.elapsed() < Duration::from_secs(10);
                     idle_ticks = if busy { 0 } else { idle_ticks + 1 };
                     (busy || idle_ticks % 5 == 0).then(|| view.session.as_ref().map(RemoteSession::foreground))
@@ -435,6 +449,11 @@ impl TerminalView {
 
     pub fn status(&self) -> ActivityStatus {
         self.status
+    }
+
+    /// When `status` last changed: how long a turn has been working.
+    pub fn status_since(&self) -> Instant {
+        self.status_since
     }
 
     pub fn agent(&self) -> Option<Agent> {
@@ -573,6 +592,7 @@ impl TerminalView {
             TermEvent::Title(t) => {
                 self.title = t.into();
                 cx.emit(TerminalEvent::TitleChanged);
+                self.read_agent_status(cx);
             },
             TermEvent::ResetTitle => {
                 self.title = self.default_title.clone();
@@ -580,6 +600,9 @@ impl TerminalView {
             },
             TermEvent::Bell => cx.emit(TerminalEvent::Bell),
             TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            // Ended by a restart on purpose: wait for the connection to go,
+            // then start again on the new daemon (`ServerLost`).
+            TermEvent::Exit(_) if crate::restart::ended_by_restart(self.started, cx) => {},
             TermEvent::Exit(code) => {
                 self.exited = Some(code);
                 self.set_status(ActivityStatus::None, cx);
@@ -589,6 +612,7 @@ impl TerminalView {
                 cx.notify();
             },
             TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
+                self.reports_status = true;
                 if let Some(status) = next_status(self.status, &sig) {
                     self.set_status(status, cx);
                 }
@@ -600,7 +624,11 @@ impl TerminalView {
             TermEvent::Ready { token, status, .. } => {
                 // The status it had while no one watched (e.g. Done): shown,
                 // not notified again.
-                self.status = status;
+                if self.status != status {
+                    self.status = status;
+                    self.status_since = Instant::now();
+                }
+                self.reports_status |= status != ActivityStatus::None;
                 self.reattaching = false;
                 self.output_since_ready = false;
                 cx.emit(TerminalEvent::Ready { token, attached: self.attaching });
@@ -661,13 +689,67 @@ impl TerminalView {
         let status = if status == ActivityStatus::None && self.status == ActivityStatus::Working { ActivityStatus::Done } else { status };
         if self.status != status {
             self.status = status;
+            self.status_since = Instant::now();
             cx.emit(TerminalEvent::StatusChanged(status));
         }
+    }
+
+    /// For an agent that doesn't report its status, read it off its title
+    /// and screen (`Agent::read_screen`), else off its output.
+    fn read_agent_status(&mut self, cx: &mut Context<Self>) {
+        use ActivityStatus::*;
+        if self.reports_status || self.exited.is_some() {
+            return;
+        }
+        let Some(agent) = self.agent else {
+            // It ended mid-turn: done.
+            if matches!(self.status, Working | Blocked) {
+                self.set_status(None, cx);
+            }
+            return;
+        };
+        let bottom = self.bottom_text(AGENT_SCREEN_LINES);
+        let read = agent
+            .read_screen(&self.title, &bottom)
+            .unwrap_or_else(|| if self.last_output.elapsed() < Duration::from_millis(1500) { Working } else { None });
+        // A turn's spinner may pause: it ends on a second read.
+        if read == None && self.status == Working {
+            self.quiet_reads += 1;
+            if self.quiet_reads < 2 {
+                return;
+            }
+        }
+        self.quiet_reads = 0;
+        // Done stays until its tab is seen.
+        if !(read == None && self.status == Done) {
+            self.set_status(read, cx);
+        }
+    }
+
+    /// The last `n` non-blank lines of the screen, lowercased.
+    fn bottom_text(&self, n: usize) -> String {
+        let Some(s) = &self.session else { return String::new() };
+        let term = s.term().lock();
+        let grid = term.grid();
+        let mut lines: Vec<String> = (0..grid.screen_lines() as i32)
+            .rev()
+            .map(|l| grid[Line(l)].into_iter().map(|c| if c.c == ' ' { ' ' } else { c.c }).collect::<String>())
+            .filter(|l| !l.trim().is_empty())
+            .take(n)
+            .collect();
+        lines.reverse();
+        lines
+            .join(
+                "
+",
+            )
+            .to_lowercase()
     }
 
     pub fn clear_done_status(&mut self, cx: &mut Context<Self>) {
         if self.status == ActivityStatus::Done {
             self.status = ActivityStatus::None;
+            self.status_since = Instant::now();
             cx.emit(TerminalEvent::StatusChanged(ActivityStatus::None));
         }
     }
@@ -889,13 +971,7 @@ impl TerminalView {
         MouseMods { shift: m.shift, alt: m.alt, ctrl: m.control }
     }
 
-    fn report_mouse(
-        &mut self,
-        action: MouseAction,
-        button: mouse::MouseButton,
-        pos: Point<Pixels>,
-        mods: &Modifiers,
-    ) -> bool {
+    fn report_mouse(&mut self, action: MouseAction, button: mouse::MouseButton, pos: Point<Pixels>, mods: &Modifiers) -> bool {
         let mode = self.mode();
         // Shift bypasses mouse reporting so users can still select text.
         if mods.shift || !mouse::wants(mode, action, button) {
@@ -1380,7 +1456,9 @@ impl<'a> RowBuilder<'a> {
         let underline = style.underline.map(|(color, wavy)| UnderlineStyle { thickness: px(1.), color: Some(color), wavy });
         let strikethrough = style.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(style.fg) });
         match self.runs.last_mut() {
-            Some(last) if self.face == face && last.color == style.fg && last.underline == underline && last.strikethrough == strikethrough => {
+            Some(last)
+                if self.face == face && last.color == style.fg && last.underline == underline && last.strikethrough == strikethrough =>
+            {
                 last.len += s.len()
             },
             _ => {

@@ -4,6 +4,7 @@
 
 use gpui_kit::component::Theme;
 use gpui_kit::*;
+use tern_term::status::ActivityStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -79,6 +80,47 @@ impl Agent {
         }
     }
 
+    /// What the agent is doing, read off its terminal title and the bottom
+    /// lines of its screen (lowercased): for when it doesn't report it with
+    /// OSC 7501, as Claude Code doesn't on Windows (ConPTY answers its probe's
+    /// closing DA1 before the terminal can). `None` when its screen can't
+    /// tell. The cues are those herdr's detection matches.
+    pub fn read_screen(self, title: &str, bottom: &str) -> Option<ActivityStatus> {
+        let has = |s: &str| bottom.contains(s);
+        let blocked = match self {
+            // Permission prompts, questions and other forms.
+            Self::Claude => {
+                (has("esc to cancel") && (has("enter to confirm") || has("enter to select")))
+                    || has("do you want to proceed?")
+                    || has("waiting for permission")
+                    || has("do you want to allow this connection?")
+            },
+            Self::Codex => {
+                title.contains("Action Required")
+                    || has("press enter to confirm or esc to cancel")
+                    || has("allow command?")
+                    || has("enter to submit answer")
+                    || has("[y/n]")
+            },
+            _ => has("[y/n]") || has("do you want to proceed?") || has("waiting for user confirmation"),
+        };
+        if blocked {
+            return Some(ActivityStatus::Blocked);
+        }
+        let working = match self {
+            // A spinner leads the title while busy ("✳" when not), and the
+            // footer offers to interrupt.
+            Self::Claude => {
+                let mut chars = title.chars();
+                let spinner = chars.next().is_some_and(|c| matches!(c, '\u{25D0}'..='\u{25D3}' | '\u{2800}'..='\u{28FF}'));
+                (spinner && chars.next() == Some(' ')) || has("esc to interrupt")
+            },
+            Self::Codex => title.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)) || has("to interrupt)"),
+            _ => return None,
+        };
+        Some(if working { ActivityStatus::Working } else { ActivityStatus::None })
+    }
+
     /// The logo's asset path. Black-and-white logos come in a variant per
     /// theme; the others keep their brand colors in both.
     fn logo(self, dark: bool) -> &'static str {
@@ -108,4 +150,39 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
 
 pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
     LOGOS.iter().map(|(p, _)| *p).filter(move |p| p.starts_with(prefix)).map(SharedString::from)
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: gpui's `test` attribute would shadow the std one.
+    use super::Agent;
+    use tern_term::status::ActivityStatus::*;
+
+    #[test]
+    fn claude_from_title_and_screen() {
+        let c = Agent::Claude;
+        assert_eq!(c.read_screen("\u{25D0} Long poem", ""), Some(Working));
+        assert_eq!(c.read_screen("\u{2733} Long poem", ""), Some(None));
+        assert_eq!(c.read_screen("\u{2733} Long poem", "* thinking… (3s · esc to interrupt)"), Some(Working));
+        // Waiting for an answer: the spinner has stopped.
+        let prompt = "bash command\n  ls\ndo you want to proceed?\n❯ 1. yes\n  2. no\nesc to cancel";
+        assert_eq!(c.read_screen("\u{2733} Long poem", prompt), Some(Blocked));
+        let question = "which one?\n❯ 1. a\n  2. b\nenter to select · ↑/↓ to navigate · esc to cancel";
+        assert_eq!(c.read_screen("\u{2733} x", question), Some(Blocked));
+    }
+
+    #[test]
+    fn codex_from_title_and_screen() {
+        let c = Agent::Codex;
+        assert_eq!(c.read_screen("⠋ codex", ""), Some(Working));
+        assert_eq!(c.read_screen("codex", "• working (12s • esc to interrupt)"), Some(Working));
+        assert_eq!(c.read_screen("Action Required", ""), Some(Blocked));
+        assert_eq!(c.read_screen("codex", "› "), Some(None));
+    }
+
+    #[test]
+    fn others_tell_only_prompts() {
+        assert_eq!(Agent::Gemini.read_screen("gemini", "allow? [y/n]"), Some(Blocked));
+        assert_eq!(Agent::Gemini.read_screen("gemini", "> "), Option::None);
+    }
 }

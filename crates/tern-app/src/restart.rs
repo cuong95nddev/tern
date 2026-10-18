@@ -30,6 +30,17 @@ pub fn just_restarted(cx: &App) -> bool {
     cx.try_global::<Restarted>().is_some_and(|r| r.0.elapsed() < WINDOW)
 }
 
+/// Whether a program started at `started` just ended because the daemon
+/// was restarted on purpose (the old daemon reports its programs' exits as
+/// it goes): its terminal starts it again on the new daemon.
+pub fn ended_by_restart(started: Instant, cx: &App) -> bool {
+    cx.try_global::<Restarted>().is_some_and(|r| killed_by(r.0, started))
+}
+
+fn killed_by(restarted: Instant, started: Instant) -> bool {
+    started < restarted && restarted.elapsed() < WINDOW
+}
+
 /// How many terminals run in the background (in all windows).
 pub fn running(cx: &App) -> usize {
     cx.global::<AppServices>().0.mux.existing().and_then(|c| c.list().ok()).map_or(0, |l| l.len())
@@ -164,4 +175,22 @@ pub fn restart(cx: &mut App) {
             }
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, Instant, WINDOW, killed_by};
+
+    #[test]
+    fn programs_started_before_a_restart_were_killed_by_it() {
+        let restarted = Instant::now();
+        let Some(before) = restarted.checked_sub(Duration::from_secs(1)) else { return };
+        assert!(killed_by(restarted, before));
+        // Started on the new daemon: its exit is its own.
+        assert!(!killed_by(restarted, restarted + Duration::from_millis(1)));
+        // A restart long ago.
+        let Some(long_ago) = restarted.checked_sub(WINDOW * 2) else { return };
+        let Some(older) = long_ago.checked_sub(Duration::from_secs(1)) else { return };
+        assert!(!killed_by(long_ago, older));
+    }
 }

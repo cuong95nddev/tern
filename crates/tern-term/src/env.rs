@@ -3,8 +3,28 @@
 use std::path::Path;
 
 /// Variables other terminals (or a debug run of Tern) set for their own
-/// children; a shell in Tern must not see them.
-const FOREIGN: &[&str] = &["TERM_SESSION_ID", "TERN_CONTROL", "RUST_LOG", "ALACRITTY_WINDOW_ID", "WINDOWID"];
+/// children; a shell in Tern must not see them. Also those of an agent
+/// session that started Tern (e.g. running the installer): a Claude in a
+/// tab would count as its child and save no transcript (as herdr does).
+const FOREIGN: &[&str] = &[
+    "TERM_SESSION_ID",
+    "TERN_CONTROL",
+    "RUST_LOG",
+    "ALACRITTY_WINDOW_ID",
+    "WINDOWID",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CODEX_THREAD_ID",
+    "OMPCODE",
+];
 const FOREIGN_PREFIXES: &[&str] = &["ITERM_", "GHOSTTY_", "KITTY_", "VSCODE_", "WEZTERM_", "ALACRITTY_"];
 
 pub fn is_foreign(key: &str) -> bool {
@@ -86,5 +106,20 @@ mod tests {
         assert!(is_foreign("VSCODE_INJECTION"));
         assert!(!is_foreign("PATH"));
         assert!(!is_foreign("TERM_PROGRAM"));
+    }
+
+    #[test]
+    fn claude_code_session_variables_are_foreign() {
+        // Set by a Claude Code session for its own children: a Claude in a
+        // Tern started from one would count as its child and save no
+        // transcript, so `--resume` finds no conversation.
+        for k in
+            ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_THREAD_ID"]
+        {
+            assert!(is_foreign(k), "{k}");
+        }
+        // The user's own Claude Code settings stay.
+        assert!(!is_foreign("CLAUDE_CODE_USE_BEDROCK"));
+        assert!(!is_foreign("CLAUDE_CONFIG_DIR"));
     }
 }

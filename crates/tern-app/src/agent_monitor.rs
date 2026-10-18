@@ -2,7 +2,7 @@
 //! coding agents running in Tern's terminals with their status. Drag it by
 //! its header; click an agent to bring its tab forward.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -17,11 +17,13 @@ use crate::workspace::Workspace;
 
 actions!(tern, [ToggleAgentMonitor]);
 
-const WIDTH: f32 = 200.;
+const WIDTH: f32 = 220.;
 /// The starting height; the window then fits its content.
 const HEIGHT: f32 = 60.;
 /// How often the list is read again: statuses change in other windows.
 const REFRESH: Duration = Duration::from_millis(500);
+/// One cycle of a working dot's pulse.
+const PULSE: Duration = Duration::from_secs(2);
 
 /// The monitor window while it is open, and where it last was.
 #[derive(Default)]
@@ -131,6 +133,8 @@ struct Entry {
     title: String,
     agent: Agent,
     status: ActivityStatus,
+    /// When a reported turn started working, for its timer.
+    since: Option<Instant>,
 }
 
 /// Every agent, by window, workspace and tab order (so rows stay put).
@@ -140,8 +144,9 @@ fn entries(cx: &mut App) -> Vec<Entry> {
         let workspace = ws.read(cx).name();
         for t in ws.read(cx).term_tabs(cx) {
             let Some(agent) = t.agent else { continue };
-            let status = t.view.read(cx).status();
-            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status });
+            let view = t.view.read(cx);
+            let (status, since) = (view.status(), Some(view.status_since()));
+            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status, since });
         }
     }
     out
@@ -154,6 +159,10 @@ fn jump(handle: AnyWindowHandle, ws: Entity<Workspace>, tab: EntityId, cx: &mut 
 }
 
 pub struct Monitor {
+    /// Where the working dots' pulse cycles start, so they pulse together.
+    started: Instant,
+    /// Whether the last render showed a working dot.
+    pulsing: bool,
     _refresh: Task<()>,
 }
 
@@ -161,13 +170,29 @@ impl Monitor {
     fn new(cx: &mut Context<Self>) -> Self {
         let refresh = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(REFRESH).await;
+                let Ok(wait) = this.read_with(cx, |m, _| m.next_wake()) else { break };
+                cx.background_executor().timer(wait).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
             }
         });
-        Self { _refresh: refresh }
+        Self { started: Instant::now(), pulsing: false, _refresh: refresh }
+    }
+
+    /// Where the pulse is in its cycle, from 0 to 1.
+    fn phase(&self) -> f32 {
+        self.started.elapsed().as_secs_f32() % PULSE.as_secs_f32() / PULSE.as_secs_f32()
+    }
+
+    /// When to draw again: when a working dot's opacity next steps, else at
+    /// the next read of the list. Not every frame, as an animation would.
+    fn next_wake(&self) -> Duration {
+        if !self.pulsing {
+            return REFRESH;
+        }
+        let until = PULSE.mul_f32(next_pulse_step(self.phase())) + Duration::from_millis(1);
+        until.min(REFRESH)
     }
 }
 
@@ -178,29 +203,103 @@ fn display_name(title: &str, agent: Agent) -> String {
     if bare.is_empty() { agent.name().to_owned() } else { bare.to_owned() }
 }
 
-/// A status's dot color, as the tab badges show it.
+/// A status's color: blue while working, amber while waiting for you,
+/// green once done (as t3code's sidebar has them).
 fn status_color(status: ActivityStatus, cx: &App) -> Hsla {
     let theme = cx.theme();
     match status {
-        ActivityStatus::Working => theme.warning,
-        ActivityStatus::Blocked => theme.danger,
+        ActivityStatus::Working => theme.info,
+        ActivityStatus::Blocked => theme.warning,
         ActivityStatus::Done => theme.success,
         ActivityStatus::None => theme.muted_foreground,
     }
 }
 
+/// Which status a workspace shows for its agents: the one that most wants
+/// you.
+fn priority(status: ActivityStatus) -> u8 {
+    match status {
+        ActivityStatus::Blocked => 3,
+        ActivityStatus::Working => 2,
+        ActivityStatus::Done => 1,
+        ActivityStatus::None => 0,
+    }
+}
+
+/// How long a turn has been working: "42s", "3m", "1h 5m".
+fn elapsed_label(since: Instant) -> String {
+    let secs = since.elapsed().as_secs();
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, secs / 60 % 60),
+    }
+}
+
+/// The opacity of a working dot along its 2 s cycle: full, a stepped fade to
+/// half, half, a stepped return.
+fn pulse(t: f32) -> f32 {
+    let steps = |x: f32| (x * 6.).floor() / 6.;
+    match t {
+        t if t < 0.4 => 1.,
+        t if t < 0.5 => 1. - 0.5 * steps((t - 0.4) / 0.1),
+        t if t < 0.9 => 0.5,
+        t => 0.5 + 0.5 * steps((t - 0.9) / 0.1),
+    }
+}
+
+/// How far into the cycle, from `t`, the pulse next changes: the steps of
+/// its fades, and the ends of its cycle.
+fn next_pulse_step(t: f32) -> f32 {
+    let steps = (0..=6).map(|k| 0.4 + k as f32 / 60.).chain((0..=6).map(|k| 0.9 + k as f32 / 60.));
+    let next = steps.filter(|s| *s > t + 1e-4).fold(1., f32::min);
+    next - t
+}
+
+/// A status dot; it pulses while working (`phase` is the pulse's place in
+/// its cycle).
+fn status_dot(status: ActivityStatus, phase: f32, color: Hsla) -> Div {
+    let color = if status == ActivityStatus::Working { color.opacity(pulse(phase)) } else { color };
+    div().flex_shrink_0().size_1p5().rounded_full().bg(color)
+}
+
+/// A row's status: a dot and a word, with a timer while working. Nothing
+/// when idle.
+fn status_pill(e: &Entry, phase: f32, color: Hsla) -> Option<AnyElement> {
+    let label = match e.status {
+        ActivityStatus::Working => e.since.map_or("Working".to_owned(), |t| format!("Working {}", elapsed_label(t))),
+        ActivityStatus::Blocked => "Awaiting".to_owned(),
+        ActivityStatus::Done => "Completed".to_owned(),
+        ActivityStatus::None => return None,
+    };
+    Some(
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(10.))
+            .text_color(color)
+            .child(status_dot(e.status, phase, color))
+            .child(label)
+            .into_any_element(),
+    )
+}
+
 impl Render for Monitor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = entries(cx);
+        self.pulsing = entries.iter().any(|e| e.status == ActivityStatus::Working);
+        let phase = self.phase();
         let theme = cx.theme().clone();
-        let waiting = entries.iter().filter(|e| e.status == ActivityStatus::Blocked).count();
-        let working = entries.iter().filter(|e| e.status == ActivityStatus::Working).count();
-        let summary = match (working, waiting) {
-            (0, 0) => String::new(),
-            (w, 0) => format!("{w} working"),
-            (0, b) => format!("{b} waiting"),
-            (w, b) => format!("{w} working · {b} waiting"),
-        };
+        let count = |s| entries.iter().filter(|e| e.status == s).count();
+        let (working, waiting, done) = (count(ActivityStatus::Working), count(ActivityStatus::Blocked), count(ActivityStatus::Done));
+        let summary = [(waiting, "awaiting"), (working, "working"), (done, "completed")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
         // The header moves the window: the system drags it on Windows, the
         // mouse down starts the move elsewhere.
         let header = div()
@@ -222,10 +321,12 @@ impl Render for Monitor {
         // Grouped by workspace: a label (which shows it) over its agents.
         let mut rows = Vec::new();
         let mut group = None;
-        for (i, e) in entries.into_iter().enumerate() {
+        for (i, e) in entries.iter().enumerate() {
             if group != Some(e.ws.entity_id()) {
                 group = Some(e.ws.entity_id());
                 let (handle, ws) = (e.handle, e.ws.clone());
+                let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| priority(*s));
+                let top = top.filter(|s| *s != ActivityStatus::None);
                 rows.push(
                     div()
                         .id(("workspace", i))
@@ -240,13 +341,16 @@ impl Render for Monitor {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.list_hover))
                         .child(Icon::new(AssetIcon::FolderOpen).xsmall())
-                        .child(div().min_w_0().truncate().child(e.workspace.clone()))
-                        .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx)),
+                        .child(div().flex_1().min_w_0().truncate().child(e.workspace.clone()))
+                        .when_some(top, |d, s| d.child(status_dot(s, phase, status_color(s, cx))))
+                        .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx))
+                        .into_any_element(),
                 );
             }
             let color = status_color(e.status, cx);
             let name = display_name(&e.title, e.agent);
-            let Entry { handle, ws, tab, .. } = e;
+            let (handle, ws, tab) = (e.handle, e.ws.clone(), e.tab);
+            let idle = e.status == ActivityStatus::None;
             rows.push(
                 div()
                     .id(("agent", i))
@@ -261,9 +365,10 @@ impl Render for Monitor {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.list_hover))
                     .child(e.agent.icon(&theme))
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .child(div().flex_shrink_0().size_2().rounded_full().bg(color))
-                    .on_click(move |_, _, cx| jump(handle, ws.clone(), tab, cx)),
+                    .child(div().flex_1().min_w_0().truncate().when(idle, |d| d.text_color(theme.muted_foreground)).child(name))
+                    .children(status_pill(e, phase, color))
+                    .on_click(move |_, _, cx| jump(handle, ws.clone(), tab, cx))
+                    .into_any_element(),
             );
         }
         let empty = rows.is_empty();
@@ -295,5 +400,29 @@ impl Render for Monitor {
             .when(empty, |d| d.child(div().px_1().pb_1().text_xs().text_color(theme.muted_foreground).child("No agents running")))
             .children(rows)
             .child(fit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_pulse_step, pulse};
+
+    /// Waking at each step misses no change: the pulse holds until then.
+    #[test]
+    fn pulse_holds_until_its_next_step() {
+        let mut t = 0.;
+        let mut wakes = 0;
+        while t < 1. {
+            let step = next_pulse_step(t);
+            assert!(step > 0.);
+            let held = pulse(t);
+            for i in 1..20 {
+                let u = t + step * i as f32 / 20.;
+                assert!((pulse(u) - held).abs() < 1e-6, "pulse changed at {u} before the step at {}", t + step);
+            }
+            t += step + 1e-4;
+            wakes += 1;
+        }
+        assert!(wakes < 20, "{wakes} wakes a cycle");
     }
 }

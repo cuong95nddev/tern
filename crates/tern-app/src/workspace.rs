@@ -134,7 +134,8 @@ struct TermTab {
     token: Option<String>,
     /// The Claude conversation running here (from hooks), to resume it.
     session: Option<String>,
-    /// Started with `--resume`: if that fails at once, start a new one.
+    /// Its program was started with `--resume`: if that fails at once
+    /// (Claude saved no conversation), start a new one.
     resuming: bool,
     /// When the tab last showed a notification, to drop a second one for
     /// the same event (OSC 9 and the status change of one turn).
@@ -868,8 +869,9 @@ impl Workspace {
         let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
-        // Cleared when it reattaches to a running Claude (`Ready`): only a
-        // `--resume` it starts says something by exiting at once.
+        // Set again at each start (`Ready`): only a `--resume` it starts,
+        // not a running Claude it reattaches to, says something by exiting
+        // at once.
         let resuming = session.is_some();
         let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1523,9 +1525,9 @@ impl Workspace {
             TerminalEvent::Ready { token, attached } => {
                 if let Some(t) = self.term_tab_mut(view) {
                     t.token = token.clone();
-                    if *attached {
-                        t.resuming = false;
-                    }
+                    // A Claude started anew runs `--resume` of its session
+                    // (see `spawn_config`); one it reattached to doesn't.
+                    t.resuming = !*attached && t.kind == TabKind::Claude && t.session.is_some();
                 }
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
@@ -1584,6 +1586,10 @@ impl Workspace {
                 cx.notify();
             },
             TerminalEvent::StatusChanged(status) => {
+                // Finished in front of you: seen, so not left as done.
+                if *status == ActivityStatus::Done && window.is_window_active() && self.is_shown(view) {
+                    view.update(cx, |v, cx| v.clear_done_status(cx));
+                }
                 if !window.is_window_active() || !self.is_shown(view) {
                     let (title, body) = match status {
                         ActivityStatus::Blocked => ("Claude needs your input", "Waiting for permission or an answer"),
@@ -1657,6 +1663,12 @@ impl Workspace {
         };
         if ev.session_id.is_some() && tab.session != ev.session_id {
             tab.session = ev.session_id.clone();
+            // Any later start (Enter, a daemon restart) resumes this one.
+            if tab.kind == TabKind::Claude {
+                let view = tab.view.clone();
+                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref());
+                view.update(cx, |v, _| v.set_spawn_config(cfg));
+            }
             cx.emit(WorkspaceEvent::TabsChanged);
         }
         let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| p.starts_with(&self.root)).collect();
