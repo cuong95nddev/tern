@@ -1,6 +1,6 @@
 //! Recursive FSEvents watcher with debouncing. Emits batches of changed paths.
 //! `.git/` internals (of the root repo and any nested repo) are dropped except
-//! the files that change git status, and so is everything inside heavy build
+//! the files that change git status (reported per repo), and so is everything inside heavy build
 //! dirs ([`crate::git::SKIP_DIRS`]: `node_modules`, `target`, ...).
 
 use std::collections::HashSet;
@@ -15,8 +15,9 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 pub struct ChangeBatch {
     /// Changed worktree paths (absolute).
     pub paths: Vec<PathBuf>,
-    /// Something under `.git` changed (HEAD/index/refs) — git status is stale.
-    pub git_changed: bool,
+    /// Worktree roots of the repos whose `.git` changed (HEAD/index/refs):
+    /// their git status is stale.
+    pub git_repos: Vec<PathBuf>,
 }
 
 pub struct FsWatcher {
@@ -49,14 +50,16 @@ fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duratio
         let Ok(first) = rx.recv() else { return };
         let deadline = Instant::now() + window;
         let mut paths: HashSet<PathBuf> = HashSet::new();
-        let mut git_changed = false;
+        let mut git_repos: HashSet<PathBuf> = HashSet::new();
         let mut absorb = |ev: notify::Event| {
             if matches!(ev.kind, EventKind::Access(_)) {
                 return;
             }
             for p in ev.paths {
-                if let Some(rel) = git_internal(&p) {
-                    git_changed |= is_git_status_file(rel);
+                if let Some((repo, rel)) = git_internal(&p) {
+                    if is_git_status_file(rel) {
+                        git_repos.insert(repo.to_path_buf());
+                    }
                 } else if !in_skipped_dir(root, &p) {
                     paths.insert(p);
                 }
@@ -70,25 +73,24 @@ fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duratio
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if paths.is_empty() && !git_changed {
+        if paths.is_empty() && git_repos.is_empty() {
             continue;
         }
         let mut paths: Vec<_> = paths.into_iter().collect();
         paths.sort();
-        on_batch(ChangeBatch { paths, git_changed });
+        let mut git_repos: Vec<_> = git_repos.into_iter().collect();
+        git_repos.sort();
+        on_batch(ChangeBatch { paths, git_repos });
     }
 }
 
-/// For a path inside some `.git` dir, the part after `.git/`.
-fn git_internal(p: &Path) -> Option<&Path> {
-    let mut comps = p.components();
-    while let Some(c) = comps.next() {
-        if c.as_os_str() == ".git" {
-            let rest = comps.as_path();
-            return (!rest.as_os_str().is_empty()).then_some(rest);
-        }
-    }
-    None
+/// For a path inside some `.git` dir, the worktree root (the dir holding
+/// `.git`) and the part after `.git/`.
+fn git_internal(p: &Path) -> Option<(&Path, &Path)> {
+    let at = p.components().position(|c| c.as_os_str() == ".git")?;
+    let git = p.ancestors().nth(p.components().count() - at - 1)?;
+    let rest = p.strip_prefix(git).ok()?;
+    (!rest.as_os_str().is_empty()).then_some((git.parent()?, rest))
 }
 
 /// Whether `p` is inside (not just named) a skipped dir below `root`.
@@ -101,7 +103,9 @@ fn in_skipped_dir(root: &Path, p: &Path) -> bool {
 
 fn is_git_status_file(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
-    s == "HEAD" || s == "index" || s.starts_with("refs/")
+    // `index.lock` too: when git gives up a lock without writing `index`,
+    // its removal is the only sign that a skipped status can run now.
+    s == "HEAD" || s == "index" || s == "index.lock" || s.starts_with("refs/")
 }
 
 #[cfg(test)]
@@ -146,10 +150,11 @@ mod tests {
 
     #[test]
     fn classifies_nested_git_internals() {
-        assert_eq!(git_internal(Path::new("/r/sub/.git/index")), Some(Path::new("index")));
+        assert_eq!(git_internal(Path::new("/r/sub/.git/index")), Some((Path::new("/r/sub"), Path::new("index"))));
         assert_eq!(git_internal(Path::new("/r/.git")), None);
         assert_eq!(git_internal(Path::new("/r/src/a.rs")), None);
         assert!(is_git_status_file(Path::new("refs/heads/main")));
+        assert!(is_git_status_file(Path::new("index.lock")));
         assert!(!is_git_status_file(Path::new("objects/ab/cd")));
     }
 }

@@ -82,9 +82,9 @@ pub fn bind_keys(cx: &mut App) {
 pub enum FileTreeEvent {
     /// A file clicked: once to preview it, twice (`pin`) to keep its tab.
     OpenFile { path: PathBuf, pin: bool },
-    /// Batch of changed paths from disk (for the viewer to reload). Empty
-    /// when only git metadata changed.
-    Changed(Vec<PathBuf>),
+    /// Changed paths from disk (for the viewer to reload) and repos whose
+    /// git metadata changed.
+    Changed(ChangeBatch),
     /// A file or folder was renamed or moved from `from` to `to`.
     Moved { from: PathBuf, to: PathBuf },
     /// Files or folders moved to the Trash.
@@ -159,20 +159,16 @@ impl FileTreeView {
         .ok();
 
         let pump = cx.spawn(async move |this, cx| {
-            while let Ok(first) = rx.recv_async().await {
-                let mut paths = first.paths;
-                let mut git_changed = first.git_changed;
+            while let Ok(mut batch) = rx.recv_async().await {
                 for b in rx.try_iter() {
-                    paths.extend(b.paths);
-                    git_changed |= b.git_changed;
+                    batch.paths.extend(b.paths);
+                    batch.git_repos.extend(b.git_repos);
                 }
                 let ok = this.update(cx, |view, cx| {
-                    if view.tree.apply_changes(paths.iter().map(PathBuf::as_path)) {
+                    if view.tree.apply_changes(batch.paths.iter().map(PathBuf::as_path)) {
                         cx.notify();
                     }
-                    if !paths.is_empty() || git_changed {
-                        cx.emit(FileTreeEvent::Changed(paths));
-                    }
+                    cx.emit(FileTreeEvent::Changed(batch));
                 });
                 if ok.is_err() {
                     break;

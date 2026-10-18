@@ -21,7 +21,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt, h_res
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_bridge::HookEvent;
-use tern_fs::GitStatus;
+use tern_fs::{ChangeBatch, GitStatus};
 use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
@@ -532,9 +532,9 @@ impl Workspace {
             },
             FileTreeEvent::Moved { from, to } => this.file_moved(from, to, window, cx),
             FileTreeEvent::Deleted(paths) => this.files_deleted(paths, window, cx),
-            FileTreeEvent::Changed(paths) => {
-                this.changes.update(cx, |c, cx| c.files_changed(paths, cx));
-                this.files_changed(paths, window, cx);
+            FileTreeEvent::Changed(batch) => {
+                this.changes.update(cx, |c, cx| c.files_changed(batch, cx));
+                this.files_changed(batch, window, cx);
             },
             FileTreeEvent::Hide => {
                 this.show_explorer = false;
@@ -1401,19 +1401,19 @@ impl Workspace {
         }
     }
 
-    /// Reload open files and diffs (tabs and the preview popup) affected by `paths`.
-    fn files_changed(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    /// Reload open files and diffs (tabs and the preview popup) affected by `batch`.
+    fn files_changed(&mut self, batch: &ChangeBatch, window: &mut Window, cx: &mut Context<Self>) {
         let preview = self.preview.as_ref().and_then(|p| p.upgrade());
         let mut diffs = vec![];
         for t in &self.tabs {
             match t {
-                CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(paths, window, cx)),
+                CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(&batch.paths, window, cx)),
                 CenterTab::Diff(d) => diffs.push(d.clone()),
                 CenterTab::Term(_) | CenterTab::Scratch { .. } => {},
             }
         }
         for d in diffs.into_iter().chain(preview) {
-            d.update(cx, |d, cx| d.files_changed(paths, cx));
+            d.update(cx, |d, cx| d.files_changed(batch, cx));
         }
     }
 
@@ -1676,8 +1676,9 @@ impl Workspace {
             return;
         }
         self.tree.update(cx, |t, cx| t.mark_claude_edit(&paths, cx));
-        self.changes.update(cx, |c, cx| c.files_changed(&paths, cx));
-        self.files_changed(&paths, window, cx);
+        let batch = ChangeBatch { paths, git_repos: vec![] };
+        self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
+        self.files_changed(&batch, window, cx);
     }
 
     /// The terminal tabs, in tab order: where a screenshot can go, and the

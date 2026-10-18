@@ -1,8 +1,9 @@
 //! Git status via `git status --porcelain=v1 -z` (fast, no libgit2 dependency).
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
@@ -87,6 +88,56 @@ pub fn find_repos(root: &Path) -> Vec<PathBuf> {
 /// paths that no longer exist (deleted files).
 pub fn repo_for(path: &Path) -> Option<PathBuf> {
     path.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)
+}
+
+/// The repo in `repos` that owns `path`: the deepest one containing it.
+pub fn owner<'a>(repos: &'a [PathBuf], path: &Path) -> Option<&'a Path> {
+    repos.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.components().count()).map(PathBuf::as_path)
+}
+
+/// Whether git is writing `repo`'s index right now. Status then would see a
+/// half-done state (and may re-run clean filters without caching), so wait
+/// for the lock to go away: the watcher reports that.
+pub fn index_locked(repo: &Path) -> bool {
+    repo.join(".git").join("index.lock").exists()
+}
+
+/// True if git ignores every one of `paths` (all inside `repo`), as one
+/// `check-ignore` process: `.gitignore` at any depth, `info/exclude` and the
+/// user's global excludes all count, and tracked files are never ignored.
+/// On any failure, false: a needless refresh beats a missed change.
+pub fn all_ignored(repo: &Path, paths: &[PathBuf]) -> bool {
+    let mut rels = std::collections::BTreeSet::new();
+    for p in paths {
+        match p.strip_prefix(repo) {
+            // `/` separators: git takes a Windows `\` as part of the name.
+            // A leading `:` would be read as pathspec magic, which
+            // `check-ignore` refuses (and `--literal-pathspecs` with it).
+            Ok(rel) if !rel.as_os_str().is_empty() && !rel.to_string_lossy().starts_with(':') => {
+                rels.insert(rel.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/"))
+            },
+            _ => return false,
+        };
+    }
+    let child =
+        git(repo).args(["check-ignore", "-z", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = child else { return false };
+    let input: Vec<u8> = rels.iter().flat_map(|r| r.bytes().chain([0])).collect();
+    let mut stdin = child.stdin.take();
+    // Feed stdin from another thread: git answers as it reads, and a full
+    // stdout pipe would otherwise block both sides.
+    let out = std::thread::scope(|s| {
+        s.spawn(move || stdin.as_mut().map(|w| w.write_all(&input)));
+        child.wait_with_output()
+    });
+    // Exit 0: some paths are ignored; 1: none are.
+    let Ok(out) = out else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let ignored: std::collections::BTreeSet<String> =
+        out.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect();
+    ignored == rels
 }
 
 /// Status of `repo`, limited to files under `scope` when the repo encloses it.
@@ -303,6 +354,48 @@ mod tests {
         assert_eq!(find_repos(&sub), vec![top.clone()]);
         let rc = repo_changes(&top, &sub);
         assert_eq!(rc.files, vec![(sub.join("in.txt"), GitStatus::Untracked)]);
+    }
+
+    #[test]
+    fn checks_ignored_paths_in_one_go() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&root).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(
+            root.join(".gitignore"),
+            "*.log
+out/
+",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/out")).unwrap();
+        std::fs::write(
+            root.join("src/.gitignore"),
+            "gen.rs
+",
+        )
+        .unwrap();
+        let p = |s: &str| root.join(s);
+        assert!(all_ignored(&root, &[p("a.log"), p("src/out/x.js"), p("src/gen.rs")]));
+        assert!(all_ignored(&root, &[p("gone/b.log")]));
+        assert!(!all_ignored(&root, &[p("a.log"), p("src/main.rs")]));
+        // Tracked files count as changes even when a pattern matches them.
+        std::fs::write(root.join("keep.log"), "x").unwrap();
+        git(&["add", "-f", "keep.log"]);
+        assert!(!all_ignored(&root, &[p("keep.log")]));
+        // Outside the repo, or the root itself: not something to skip.
+        assert!(!all_ignored(&root, std::slice::from_ref(&root)));
+        assert!(!all_ignored(&root, &[p(":(top)x.log")]));
+        assert!(!all_ignored(&root.join("src"), &[p("a.log")]));
+    }
+
+    #[test]
+    fn owner_is_the_deepest_repo() {
+        let repos = [PathBuf::from("/r"), PathBuf::from("/r/ext/a")];
+        assert_eq!(owner(&repos, Path::new("/r/ext/a/f.rs")), Some(Path::new("/r/ext/a")));
+        assert_eq!(owner(&repos, Path::new("/r/ext/ab/f.rs")), Some(Path::new("/r")));
+        assert_eq!(owner(&repos, Path::new("/x/f.rs")), None);
     }
 
     #[test]

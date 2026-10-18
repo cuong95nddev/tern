@@ -10,15 +10,18 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::{ActiveTheme, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tern_fs::GitStatus;
 use tern_fs::git::RepoChanges;
+use tern_fs::{ChangeBatch, GitStatus};
 
 use crate::{file_icons, style};
 
 /// The element a row is drawn as ([`style`]).
 const ROW: &str = "changes.row";
 
-const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+/// Changes are gathered until the disk is quiet this long...
+const QUIET: Duration = Duration::from_millis(250);
+/// ...or, in a long burst, at most this long after the first one.
+const MAX_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub enum ChangesEvent {
@@ -41,16 +44,65 @@ pub struct ChangesView {
     collapsed: HashSet<PathBuf>,
     rows: Vec<RowKind>,
     selected: Option<PathBuf>,
-    /// A refresh is running; further requests are coalesced into `pending`.
+    /// What changed since the last refresh started.
+    dirty: Option<Dirty>,
+    /// A refresh is running; changes meanwhile wait in `dirty`.
     refreshing: bool,
-    /// `Some(rediscover)` if another refresh was requested meanwhile.
-    pending: Option<bool>,
-    /// When the last refresh started: runs are at least
-    /// [`MIN_REFRESH_INTERVAL`] apart, however busy the disk.
-    last_refresh: Option<Instant>,
+    /// The timer that starts the next refresh is running.
+    armed: bool,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
+    _timer: Option<Task<()>>,
     _task: Option<Task<()>>,
+}
+
+/// Changes waiting for the next refresh.
+struct Dirty {
+    /// Look for repos again (a `.git` appeared or vanished), then refresh all.
+    rediscover: bool,
+    /// Refresh every known repo.
+    all: bool,
+    /// Repos whose `.git` changed: refresh them whatever the paths.
+    git: HashSet<PathBuf>,
+    /// Changed worktree paths: refresh the repos owning ones git doesn't ignore.
+    paths: HashSet<PathBuf>,
+    /// Start without waiting (opening, the refresh button).
+    now: bool,
+    first: Instant,
+    last: Instant,
+}
+
+impl Dirty {
+    fn new() -> Self {
+        let t = Instant::now();
+        Self { rediscover: false, all: false, git: HashSet::new(), paths: HashSet::new(), now: false, first: t, last: t }
+    }
+
+    fn due(&self) -> Instant {
+        if self.now { self.first } else { (self.last + QUIET).min(self.first + MAX_WAIT) }
+    }
+
+    /// The repos (of `repos`) to refresh, each with the changed paths to
+    /// ask `check-ignore` about: empty means refresh regardless.
+    fn plan(&self, repos: &[PathBuf]) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        if self.all || self.rediscover {
+            return repos.iter().map(|r| (r.clone(), vec![])).collect();
+        }
+        let mut owned: HashMap<&Path, Vec<PathBuf>> = HashMap::new();
+        for p in &self.paths {
+            if let Some(r) = tern_fs::git::owner(repos, p) {
+                owned.entry(r).or_default().push(p.clone());
+            }
+        }
+        repos
+            .iter()
+            .filter_map(|r| match owned.remove(r.as_path()) {
+                _ if self.git.contains(r) => Some((r.clone(), vec![])),
+                Some(paths) => Some((r.clone(), paths)),
+                None => None,
+            })
+            .collect()
+    }
 }
 
 impl EventEmitter<ChangesEvent> for ChangesView {}
@@ -69,56 +121,102 @@ impl ChangesView {
             collapsed: HashSet::new(),
             rows: vec![],
             selected: None,
+            dirty: None,
             refreshing: false,
-            pending: None,
-            last_refresh: None,
+            armed: false,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
+            _timer: None,
             _task: None,
         };
         this.refresh(true, cx);
         this
     }
 
-    /// Paths changed on disk (or git metadata changed): refresh status, and
-    /// rediscover repos if a `.git` entry appeared or vanished.
-    pub fn files_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let rediscover = paths.iter().any(|p| p.file_name().is_some_and(|n| n == ".git"));
-        self.refresh(rediscover, cx);
+    /// Paths changed on disk (or git metadata changed): refresh the status
+    /// of the repos they belong to once the burst is over, and rediscover
+    /// repos if a `.git` entry appeared or vanished.
+    pub fn files_changed(&mut self, batch: &ChangeBatch, cx: &mut Context<Self>) {
+        let d = self.dirty.get_or_insert_with(Dirty::new);
+        d.last = Instant::now();
+        d.rediscover |= batch.paths.iter().any(|p| p.file_name().is_some_and(|n| n == ".git"));
+        d.git.extend(batch.git_repos.iter().cloned());
+        d.paths.extend(batch.paths.iter().cloned());
+        self.schedule(cx);
     }
 
+    /// Refresh every repo now (or as soon as the running refresh ends).
     pub fn refresh(&mut self, rediscover: bool, cx: &mut Context<Self>) {
-        if self.refreshing {
-            self.pending = Some(self.pending.unwrap_or(false) | rediscover);
+        let d = self.dirty.get_or_insert_with(Dirty::new);
+        d.all = true;
+        d.rediscover |= rediscover;
+        d.now = true;
+        self.schedule(cx);
+    }
+
+    /// Start the timer for the next refresh, unless it or a refresh runs.
+    fn schedule(&mut self, cx: &mut Context<Self>) {
+        if self.refreshing || self.armed {
             return;
         }
+        self.armed = true;
+        self._timer = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some(due)) = this.update(cx, |this, _| this.dirty.as_ref().map(Dirty::due)) else { return };
+                let left = due.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    let _ = this.update(cx, |this, cx| {
+                        this.armed = false;
+                        this.start(cx);
+                    });
+                    return;
+                }
+                // `due` moves while changes keep coming: look again after.
+                cx.background_executor().timer(left).await;
+            }
+        }));
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        let Some(dirty) = self.dirty.take() else { return };
         self.refreshing = true;
-        let wait = self.last_refresh.map_or(Duration::ZERO, |t| MIN_REFRESH_INTERVAL.saturating_sub(t.elapsed()));
-        self.last_refresh = Some(Instant::now() + wait);
+        cx.notify();
         let root = self.root.clone();
         let known: Vec<PathBuf> = self.repos.iter().map(|r| r.root.clone()).collect();
         self._task = Some(cx.spawn(async move |this, cx| {
-            if !wait.is_zero() {
-                cx.background_executor().timer(wait).await;
-            }
-            let repos = cx
+            let (list, fresh) = cx
                 .background_spawn(async move {
-                    let list = if rediscover || known.is_empty() { tern_fs::git::find_repos(&root) } else { known };
-                    // One git process per repo, in parallel.
-                    std::thread::scope(|s| {
-                        let handles: Vec<_> = list.iter().map(|r| s.spawn(|| tern_fs::git::repo_changes(r, &root))).collect();
-                        handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
-                    })
+                    let list = (dirty.rediscover || known.is_empty()).then(|| tern_fs::git::find_repos(&root));
+                    let plan = dirty.plan(list.as_ref().unwrap_or(&known));
+                    // One thread per repo: a `check-ignore` when only worktree
+                    // files changed, then `status` unless they're all ignored
+                    // or git holds the index lock (its release wakes us again).
+                    let fresh = std::thread::scope(|s| {
+                        let handles: Vec<_> = plan
+                            .iter()
+                            .map(|(r, paths)| {
+                                s.spawn(|| {
+                                    let skip = (!paths.is_empty() && tern_fs::git::all_ignored(r, paths)) || tern_fs::git::index_locked(r);
+                                    (!skip).then(|| tern_fs::git::repo_changes(r, &root))
+                                })
+                            })
+                            .collect();
+                        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect::<Vec<_>>()
+                    });
+                    (list, fresh)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.repos = repos;
-                this.rebuild_rows();
                 this.refreshing = false;
-                cx.emit(ChangesEvent::Updated(tern_fs::git::status_map(&this.repos, &this.root)));
+                let repos = merge(&this.repos, list, fresh);
+                if repos != this.repos {
+                    this.repos = repos;
+                    this.rebuild_rows();
+                    cx.emit(ChangesEvent::Updated(tern_fs::git::status_map(&this.repos, &this.root)));
+                }
                 cx.notify();
-                if let Some(rediscover) = this.pending.take() {
-                    this.refresh(rediscover, cx);
+                if this.dirty.is_some() {
+                    this.schedule(cx);
                 }
             });
         }));
@@ -230,6 +328,19 @@ impl ChangesView {
     }
 }
 
+/// The repos after a refresh: `list` if repos were looked for again (else the
+/// same ones as `old`), each with its `fresh` status, else its old one.
+fn merge(old: &[RepoChanges], list: Option<Vec<PathBuf>>, mut fresh: Vec<RepoChanges>) -> Vec<RepoChanges> {
+    let roots = list.unwrap_or_else(|| old.iter().map(|r| r.root.clone()).collect());
+    roots
+        .into_iter()
+        .map(|root| match fresh.iter().position(|r| r.root == root) {
+            Some(i) => fresh.swap_remove(i),
+            None => old.iter().find(|r| r.root == root).cloned().unwrap_or(RepoChanges { root, ..Default::default() }),
+        })
+        .collect()
+}
+
 impl Render for ChangesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.total();
@@ -257,5 +368,60 @@ impl Render for ChangesView {
         };
         let panel = style::el("changes", cx);
         panel.container(div().track_focus(&self.focus).size_full().flex().flex_col()).child(header).child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use tern_fs::GitStatus;
+    use tern_fs::git::RepoChanges;
+
+    use super::{Dirty, MAX_WAIT, QUIET, merge};
+
+    #[test]
+    fn plans_only_the_repos_that_changed() {
+        let repos = [PathBuf::from("/r"), PathBuf::from("/r/ext/a"), PathBuf::from("/r/ext/b")];
+        let mut d = Dirty::new();
+        d.paths.insert("/r/ext/a/src/x.rs".into());
+        d.paths.insert("/r/ext/a/out/y.js".into());
+        d.paths.insert("/elsewhere/z".into());
+        d.git.insert("/r/ext/b".into());
+        let mut plan = d.plan(&repos);
+        plan.iter_mut().for_each(|(_, p)| p.sort());
+        assert_eq!(
+            plan,
+            vec![
+                (PathBuf::from("/r/ext/a"), vec![PathBuf::from("/r/ext/a/out/y.js"), PathBuf::from("/r/ext/a/src/x.rs")]),
+                (PathBuf::from("/r/ext/b"), vec![]),
+            ]
+        );
+        d.all = true;
+        assert_eq!(d.plan(&repos).len(), 3);
+    }
+
+    #[test]
+    fn merge_keeps_status_of_repos_not_refreshed() {
+        let rc = |root: &str, n: usize| RepoChanges {
+            root: root.into(),
+            files: vec![(PathBuf::from("f"), GitStatus::Modified); n],
+            ..Default::default()
+        };
+        let old = vec![rc("/r", 1), rc("/r/a", 2)];
+        assert_eq!(merge(&old, None, vec![rc("/r/a", 0)]), vec![rc("/r", 1), rc("/r/a", 0)]);
+        let found = Some(vec!["/r".into(), "/r/b".into()]);
+        assert_eq!(merge(&old, found, vec![]), vec![rc("/r", 1), rc("/r/b", 0)]);
+    }
+
+    #[test]
+    fn waits_for_quiet_but_not_forever() {
+        let mut d = Dirty::new();
+        assert_eq!(d.due(), d.first + QUIET);
+        d.last = d.first + Duration::from_secs(5);
+        assert_eq!(d.due(), d.first + MAX_WAIT);
+        d.now = true;
+        assert_eq!(d.due(), d.first);
     }
 }

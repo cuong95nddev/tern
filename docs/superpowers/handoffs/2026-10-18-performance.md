@@ -85,11 +85,22 @@ Medians:
    Old `RenderImage`s are never `drop_image`d, `EditorData.clip` is kept after close (`editor.rs:603`), and tray
    thumbnails decode full images (`tray.rs:386`).
 7. **Smaller items:**
-   - Git status runs every 500ms during long change bursts, plus a `git config` process each time
-     (`changes_view.rs:90`, `git.rs:95`).
+   - Each git status refresh still runs a `git config` process per repo first (`repo_defines_commands`).
+     Caching it needs `.git/config` changes reported by the watcher.
    - The file-tree watcher debounce is a fixed window, not a trailing one (`file_tree_view.rs:155`).
    - The welcome screen reads the recent file twice per render (`main_window.rs:884,922`).
-   - Possible correctness bug: `diff_pane.rs:72` waits for `.git` paths that `watch.rs` drops.
+
+## Done after the handoff: git status refresh
+
+- `watch.rs`: `ChangeBatch.git_repos` names the repos whose `HEAD`/`index`/`index.lock`/`refs` changed
+  (was one `git_changed` flag).
+- `changes_view.rs`: changes wait in `Dirty` until the disk is quiet for 250ms (at most 2s), and then only the
+  repos owning a changed path run `status`. When only worktree files changed, one `git check-ignore -z --stdin`
+  per repo first; if every path is ignored, no status. A repo with `.git/index.lock` is skipped. Its release is
+  reported, which triggers the refresh again.
+- Compared with Warp (an in-process `ignore` matcher, 500ms debounce + 5s throttle, `index.lock` watched) and
+  T3 Code (no watcher, `check-ignore --stdin`, 250ms trailing, skip on `index.lock`).
+- Fixes the diff pane bug: it reloads when `git_repos` holds its repo.
 
 ## Notes
 
