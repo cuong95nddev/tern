@@ -882,6 +882,7 @@ impl MainWindow {
         let row_detail_size = row.len("detail_font_size");
         let (keys_fg, keys_muted) = (keys.color("text"), keys.color("detail_text"));
         let recent = window_state::recent_folders();
+        let has_recent = !recent.is_empty();
         let recent_list = div().flex().flex_col().gap_0p5().children(recent.into_iter().enumerate().map(|(i, path)| {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
             let shown = crate::dirs::tilde(&path);
@@ -919,7 +920,7 @@ impl MainWindow {
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
                     ),
                 )
-                .when(!window_state::recent_folders().is_empty(), |d| {
+                .when(has_recent, |d| {
                     d.child(
                         div().flex().flex_col().gap_1().child(div().text_sm().text_color(keys_muted).child("Recent")).child(recent_list),
                     )

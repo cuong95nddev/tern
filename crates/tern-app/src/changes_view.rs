@@ -50,6 +50,12 @@ pub struct ChangesView {
     refreshing: bool,
     /// The timer that starts the next refresh is running.
     armed: bool,
+    /// Per repo, whether its config defines filter commands (status is then
+    /// not run): a `git config` process saved per refresh. Forgotten when
+    /// the repo's `.git` changes or on a full refresh. Not watched: files a
+    /// config includes, and the `.git` of a repo enclosing the opened folder;
+    /// the refresh button rereads those.
+    defines_commands: HashMap<PathBuf, bool>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _timer: Option<Task<()>>,
@@ -124,6 +130,7 @@ impl ChangesView {
             dirty: None,
             refreshing: false,
             armed: false,
+            defines_commands: HashMap::new(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _timer: None,
@@ -181,6 +188,11 @@ impl ChangesView {
         let Some(dirty) = self.dirty.take() else { return };
         self.refreshing = true;
         cx.notify();
+        if dirty.all {
+            self.defines_commands.clear();
+        }
+        self.defines_commands.retain(|r, _| !dirty.git.contains(r));
+        let cached = self.defines_commands.clone();
         let root = self.root.clone();
         let known: Vec<PathBuf> = self.repos.iter().map(|r| r.root.clone()).collect();
         self._task = Some(cx.spawn(async move |this, cx| {
@@ -197,7 +209,10 @@ impl ChangesView {
                             .map(|(r, paths)| {
                                 s.spawn(|| {
                                     let skip = (!paths.is_empty() && tern_fs::git::all_ignored(r, paths)) || tern_fs::git::index_locked(r);
-                                    (!skip).then(|| tern_fs::git::repo_changes(r, &root))
+                                    (!skip).then(|| {
+                                        let defines = cached.get(r).copied().unwrap_or_else(|| tern_fs::git::repo_defines_commands(r));
+                                        (defines, tern_fs::git::repo_changes_with(r, &root, defines))
+                                    })
                                 })
                             })
                             .collect();
@@ -208,6 +223,13 @@ impl ChangesView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.refreshing = false;
+                let fresh = fresh
+                    .into_iter()
+                    .map(|(defines, rc)| {
+                        this.defines_commands.insert(rc.root.clone(), defines);
+                        rc
+                    })
+                    .collect();
                 let repos = merge(&this.repos, list, fresh);
                 if repos != this.repos {
                     this.repos = repos;

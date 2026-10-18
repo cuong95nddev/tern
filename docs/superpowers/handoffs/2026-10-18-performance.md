@@ -84,13 +84,9 @@ Medians:
 6. **Screenshot editor:** unlimited undo of full RGBA images (`shot/editor.rs:108,152`, ~33MB per step at 4K).
    Old `RenderImage`s are never `drop_image`d, `EditorData.clip` is kept after close (`editor.rs:603`), and tray
    thumbnails decode full images (`tray.rs:386`).
-7. **Smaller items:**
-   - Each git status refresh still runs a `git config` process per repo first (`repo_defines_commands`).
-     Caching it needs `.git/config` changes reported by the watcher.
-   - The file-tree watcher debounce is a fixed window, not a trailing one (`file_tree_view.rs:155`).
-   - The welcome screen reads the recent file twice per render (`main_window.rs:884,922`).
+7. **Smaller items:** all done (below).
 
-## Done after the handoff: git status refresh
+## Done after the handoff: git status refresh and small items
 
 - `watch.rs`: `ChangeBatch.git_repos` names the repos whose `HEAD`/`index`/`index.lock`/`refs` changed
   (was one `git_changed` flag).
@@ -101,6 +97,11 @@ Medians:
 - Compared with Warp (an in-process `ignore` matcher, 500ms debounce + 5s throttle, `index.lock` watched) and
   T3 Code (no watcher, `check-ignore --stdin`, 250ms trailing, skip on `index.lock`).
 - Fixes the diff pane bug: it reloads when `git_repos` holds its repo.
+- The `repo_defines_commands` answer is cached per repo (`ChangesView.defines_commands`). It is dropped
+  when that repo's `.git` (now including `config`) changes and on a full refresh.
+- `FsWatcher` debounce is trailing: a batch goes out once the disk is quiet for the window, at most 10×
+  the window after the first change. Only kept paths extend the wait.
+- The welcome screen reads the recent folders once per render.
 
 ## Notes
 

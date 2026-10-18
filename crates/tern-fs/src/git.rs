@@ -142,8 +142,14 @@ pub fn all_ignored(repo: &Path, paths: &[PathBuf]) -> bool {
 
 /// Status of `repo`, limited to files under `scope` when the repo encloses it.
 pub fn repo_changes(repo: &Path, scope: &Path) -> RepoChanges {
+    repo_changes_with(repo, scope, repo_defines_commands(repo))
+}
+
+/// [`repo_changes`] with the answer of [`repo_defines_commands`] known (and
+/// cached by the caller): when true, status is not run.
+pub fn repo_changes_with(repo: &Path, scope: &Path, defines_commands: bool) -> RepoChanges {
     let mut rc = RepoChanges { root: repo.to_path_buf(), ..Default::default() };
-    if repo_defines_commands(repo) {
+    if defines_commands {
         rc.error = Some("skipped: repo config defines filter commands".into());
         return rc;
     }
