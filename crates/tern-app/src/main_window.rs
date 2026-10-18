@@ -369,6 +369,7 @@ pub fn open_folder(root: PathBuf, cx: &mut App) {
         None => {
             let root = dunce::canonicalize(&root).unwrap_or(root);
             window_state::push_recent(&root);
+            crate::menus::install(cx);
             open_window(Content::Workspaces(vec![window_state::SavedWorkspace::fresh(root)], 0), None, cx)
         },
     }
@@ -530,6 +531,7 @@ impl MainWindow {
     pub fn open_folder(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let root = dunce::canonicalize(&root).unwrap_or(root);
         window_state::push_recent(&root);
+        crate::menus::install(cx);
         if let Some(ix) = self.slots.iter().position(|s| s.ws.read(cx).root() == root) {
             return self.activate(ix, window, cx);
         }
@@ -880,14 +882,9 @@ impl MainWindow {
         let row_detail_size = row.len("detail_font_size");
         let (keys_fg, keys_muted) = (keys.color("text"), keys.color("detail_text"));
         let recent = window_state::recent_folders();
-        let home = crate::dirs::home();
-        let pretty = move |p: &Path| match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
-            Some(rel) => format!("~/{}", rel.display()),
-            None => p.display().to_string(),
-        };
         let recent_list = div().flex().flex_col().gap_0p5().children(recent.into_iter().enumerate().map(|(i, path)| {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
-            let shown = pretty(&path);
+            let shown = crate::dirs::tilde(&path);
             row.apply(div().id(("recent", i)).flex().items_center().cursor_pointer())
                 .hover(move |s| s.bg(hover))
                 .child(Icon::new(AssetIcon::FolderOpen).small().text_color(muted))

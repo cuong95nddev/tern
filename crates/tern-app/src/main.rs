@@ -135,6 +135,7 @@ fn main() {
             .detach();
         }
         menus::install(cx);
+        menus::init(cx);
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         agent_monitor::init(cx);

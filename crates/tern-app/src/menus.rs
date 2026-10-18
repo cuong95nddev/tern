@@ -2,13 +2,33 @@
 //! Windows and Linux GPUI only keeps them, and every window draws them in
 //! its own menu bar (`AppMenuBar`, see `main_window`). Rebuilt when the
 //! menu bar icon setting may have changed (toggled here, or hidden from the
-//! menu bar agent's own menu).
+//! menu bar agent's own menu) and when the recent folders change.
+
+use std::path::PathBuf;
 
 use gpui_kit::component::GlobalState;
 use gpui_kit::*;
 
 use crate::theme_picker::{OpenSettings, SelectTheme};
-use crate::{OpenFolder, Quit, ToggleMenuBarIcon, agent_monitor, main_window, restart, terminal_view, update, workspace};
+use crate::{OpenFolder, Quit, ToggleMenuBarIcon, agent_monitor, main_window, restart, terminal_view, update, window_state, workspace};
+
+/// Open a folder from File ▸ Open Recent.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = tern, no_json)]
+pub struct OpenRecent(pub PathBuf);
+
+actions!(tern, [ClearRecent]);
+
+/// Handle the Open Recent items.
+pub fn init(cx: &mut App) {
+    cx.on_action(|a: &OpenRecent, cx| main_window::open_folder(a.0.clone(), cx));
+    cx.on_action(|_: &ClearRecent, cx| {
+        window_state::clear_recent();
+        install(cx);
+        // The welcome screen lists them too.
+        cx.refresh_windows();
+    });
+}
 
 pub fn install(cx: &mut App) {
     cx.set_menus(menus());
@@ -26,6 +46,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("New Window", main_window::NewWindow),
         MenuItem::action("Open Folder…", OpenFolder),
+        open_recent(),
         MenuItem::separator(),
         MenuItem::action("Close Tab", workspace::CloseTab),
         MenuItem::action("Close Workspace", main_window::CloseWorkspace),
@@ -91,6 +112,23 @@ fn menus() -> Vec<Menu> {
         ]);
         vec![file, edit, view, help]
     }
+}
+
+/// The recent folders, most recent first, then a way to forget them.
+fn open_recent() -> MenuItem {
+    let recent = window_state::recent_folders();
+    let mut items: Vec<MenuItem> = recent.iter().map(|p| MenuItem::action(crate::dirs::tilde(p), OpenRecent(p.clone()))).collect();
+    if !items.is_empty() {
+        items.push(MenuItem::separator());
+    }
+    items.push(MenuItem::Action {
+        name: "Clear Recent".into(),
+        action: Box::new(ClearRecent),
+        os_action: None,
+        checked: false,
+        disabled: recent.is_empty(),
+    });
+    MenuItem::submenu(Menu::new("Open Recent").items(items))
 }
 
 #[cfg(any(target_os = "macos", windows))]

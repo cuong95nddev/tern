@@ -95,6 +95,11 @@ pub fn push_recent(root: &std::path::Path) {
     write(&recent_file(), &text);
 }
 
+/// Forget every recent folder.
+pub fn clear_recent() {
+    write(&recent_file(), "");
+}
+
 /// Where `window` is: its display's uuid and its bounds.
 pub fn placement(window: &Window, cx: &App) -> Option<(String, WindowBounds)> {
     let uuid = window.display(cx).and_then(|d| d.uuid().ok())?;

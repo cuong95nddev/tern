@@ -1,12 +1,20 @@
 //! Where Tern keeps its files: macOS `~/Library/…/dev.tern`, Windows
 //! `%APPDATA%` / `%LOCALAPPDATA%\Tern`, Linux the XDG base directories.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The user's home folder (`HOME`, on Windows `USERPROFILE`).
 pub fn home() -> Option<PathBuf> {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })
+}
+
+/// `p` for display, with the home folder shortened to `~`.
+pub fn tilde(p: &Path) -> String {
+    match home().as_deref().and_then(|h| p.strip_prefix(h).ok()) {
+        Some(rel) => format!("~/{}", rel.display()),
+        None => p.display().to_string(),
+    }
 }
 
 fn home_or_tmp() -> PathBuf {
