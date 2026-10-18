@@ -215,6 +215,9 @@ pub struct TerminalView {
     output_since_ready: bool,
     config: TerminalConfig,
     focus: FocusHandle,
+    /// The title the program set, as it set it (spinner and all).
+    raw_title: SharedString,
+    /// `raw_title` without an agent's spinner: what the tab shows.
     title: SharedString,
     default_title: SharedString,
     status: ActivityStatus,
@@ -300,6 +303,7 @@ impl TerminalView {
             output_since_ready: false,
             config,
             focus: cx.focus_handle(),
+            raw_title: title.clone(),
             title: title.clone(),
             default_title: title,
             status: ActivityStatus::None,
@@ -343,6 +347,11 @@ impl TerminalView {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let Ok(probe) = this.update(cx, |view, cx| {
+                    // Rendering clears the wakeup flag; a tab not shown never
+                    // renders, so clear it here or its output stops waking it.
+                    if let Some(s) = &view.session {
+                        s.take_wakeup();
+                    }
                     view.read_agent_status(cx);
                     let busy = view.last_output.elapsed() < Duration::from_secs(10);
                     idle_ticks = if busy { 0 } else { idle_ticks + 1 };
@@ -443,8 +452,19 @@ impl TerminalView {
         }
     }
 
+    /// The title to show: an agent's spinner frames left out (its status
+    /// badge shows it working), so they don't redraw the tab bar.
     pub fn title(&self) -> &SharedString {
         &self.title
+    }
+
+    fn set_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        let label = strip_spinner(&title);
+        if *label != *self.title {
+            self.title = label.to_owned().into();
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+        self.raw_title = title;
     }
 
     pub fn status(&self) -> ActivityStatus {
@@ -590,14 +610,12 @@ impl TerminalView {
                 cx.notify()
             },
             TermEvent::Title(t) => {
-                self.title = t.into();
-                cx.emit(TerminalEvent::TitleChanged);
-                self.read_agent_status(cx);
+                if *t != *self.raw_title {
+                    self.set_title(t.into(), cx);
+                    self.read_agent_status(cx);
+                }
             },
-            TermEvent::ResetTitle => {
-                self.title = self.default_title.clone();
-                cx.emit(TerminalEvent::TitleChanged);
-            },
+            TermEvent::ResetTitle => self.set_title(self.default_title.clone(), cx),
             TermEvent::Bell => cx.emit(TerminalEvent::Bell),
             TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             // Ended by a restart on purpose: wait for the connection to go,
@@ -710,7 +728,7 @@ impl TerminalView {
         };
         let bottom = self.bottom_text(AGENT_SCREEN_LINES);
         let read = agent
-            .read_screen(&self.title, &bottom)
+            .read_screen(&self.raw_title, &bottom)
             .unwrap_or_else(|| if self.last_output.elapsed() < Duration::from_millis(1500) { Working } else { None });
         // A turn's spinner may pause: it ends on a second read.
         if read == None && self.status == Working {
@@ -1446,7 +1464,9 @@ fn face(style: &Style) -> usize {
 
 impl<'a> RowBuilder<'a> {
     fn push(&mut self, col: usize, s: &str, style: Style, out: &mut Vec<PendingText>) {
-        if !self.text.is_empty() && col != self.next_col {
+        if !self.text.is_empty() && col > self.next_col {
+            self.pad(col - self.next_col);
+        } else if !self.text.is_empty() && col != self.next_col {
             self.flush(out);
         }
         if self.text.is_empty() {
@@ -1475,6 +1495,21 @@ impl<'a> RowBuilder<'a> {
         }
         self.text.push_str(s);
         self.next_col = col + 1;
+    }
+
+    /// Fill `n` skipped blank cells with spaces, so a row is one segment
+    /// (one shaped line) rather than one per word.
+    fn pad(&mut self, n: usize) {
+        let Some(last) = self.runs.last_mut() else { return };
+        if last.underline.is_none() && last.strikethrough.is_none() {
+            last.len += n;
+        } else {
+            // The blanks carry no line.
+            let plain = TextRun { len: n, underline: None, strikethrough: None, ..last.clone() };
+            self.runs.push(plain);
+        }
+        self.text.extend(std::iter::repeat_n(' ', n));
+        self.next_col += n;
     }
 
     fn flush(&mut self, out: &mut Vec<PendingText>) {
@@ -1625,6 +1660,7 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
     let mut pending: Vec<PendingText> = Vec::new();
     // Neighboring cells mostly share a color.
     let mut last_fg: Option<(Rgb, Hsla)> = None;
+    let mut last_bg: Option<(Rgb, Hsla)> = None;
     let mut buf = String::new();
     for indexed in content.display_iter {
         let vp_line = indexed.point.line.0 + offset;
@@ -1675,7 +1711,14 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         let cell_bg = if selected {
             Some(sel_bg)
         } else if bg != default_bg {
-            Some(rgb_to_hsla(bg))
+            Some(match last_bg {
+                Some((rgb, h)) if rgb == bg => h,
+                _ => {
+                    let h = rgb_to_hsla(bg);
+                    last_bg = Some((bg, h));
+                    h
+                },
+            })
         } else {
             None
         };
@@ -1791,6 +1834,20 @@ fn sanitize_paste(text: &str) -> String {
     text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control())).collect()
 }
 
+/// `title` without the spinner an agent leads it with: Claude's half
+/// circles or braille dots while working and its asterisk when idle, or
+/// Codex's dots.
+fn strip_spinner(title: &str) -> &str {
+    let mut chars = title.chars();
+    match (chars.next(), chars.next()) {
+        (
+            Some('\u{25D0}'..='\u{25D3}' | '\u{2800}'..='\u{28FF}' | '\u{2722}' | '\u{2733}' | '\u{2736}' | '\u{273B}' | '\u{273D}'),
+            Some(' '),
+        ) => chars.as_str(),
+        _ => title,
+    }
+}
+
 /// A path as a shell word, for PowerShell (the default shell) and cmd
 /// alike: plain when it holds only safe characters, else double-quoted, as
 /// cmd reads quotes, so `& | < > ^` stay literal there. In PowerShell `$`,
@@ -1829,8 +1886,18 @@ pub(crate) fn escape_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_path, sanitize_paste};
+    use super::{escape_path, sanitize_paste, strip_spinner};
     use std::path::Path;
+
+    #[test]
+    fn strips_agent_spinners() {
+        assert_eq!(strip_spinner("\u{280b} Fix the build"), "Fix the build");
+        assert_eq!(strip_spinner("\u{2733} Fix the build"), "Fix the build");
+        assert_eq!(strip_spinner("\u{25d0} x"), "x");
+        assert_eq!(strip_spinner("\u{2733}"), "\u{2733}");
+        assert_eq!(strip_spinner("vim main.rs"), "vim main.rs");
+        assert_eq!(strip_spinner(""), "");
+    }
 
     #[test]
     #[cfg(windows)]

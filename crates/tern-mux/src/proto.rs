@@ -287,6 +287,11 @@ impl FrameReader {
             // Only the undecoded rest moves to the front, once per read.
             self.buf.drain(..self.start);
             self.start = 0;
+            // A big frame (a snapshot, a paste) is in once: don't hold its
+            // room for the life of the connection.
+            if self.buf.capacity() > 16 * READ_CHUNK && self.buf.len() < READ_CHUNK {
+                self.buf.shrink_to(2 * READ_CHUNK);
+            }
             let filled = self.buf.len();
             self.buf.resize(filled + READ_CHUNK, 0);
             let read = {
