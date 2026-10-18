@@ -38,9 +38,15 @@ while :; do
                 ;;
             MINGW* | MSYS* | CYGWIN*)
                 # From a copy: the next build relinks tern-app.exe.
-                cp target/debug/tern-app.exe target/debug/tern-dev.exe
-                target/debug/tern-dev.exe "$FOLDER" &
-                PID=$!
+                # A tern-dev.exe still running (e.g. left by an earlier
+                # dev.sh) locks the copy: say so rather than run the old one.
+                if cp target/debug/tern-app.exe target/debug/tern-dev.exe; then
+                    target/debug/tern-dev.exe "$FOLDER" &
+                    PID=$!
+                else
+                    echo "dev: can't replace tern-dev.exe: is another one running?"
+                    PID=
+                fi
                 ;;
             *)
                 # A relative path: socket paths are limited to ~100 bytes.
