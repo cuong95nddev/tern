@@ -2,20 +2,39 @@
 
 use std::collections::HashMap;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::resizable::ResizablePanel;
-use gpui_kit::component::{h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 
 use std::sync::Arc;
 
-use super::{Align, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, What};
+use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, Variant, What};
 use crate::arrange::{self, Shown, Size};
 use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange, PinnedParts};
 use crate::style::{self, Val};
 
-/// Attaches behavior to a box named by `frame`: gets the frame's name, the
-/// list entry it is in (if any) and the box; gives back what to draw.
-pub type Frames<'a> = dyn FnMut(&str, Option<usize>, Div) -> AnyElement + 'a;
+/// What a `frame` or a `button` names, for the code to attach behavior to.
+// gpui's builders are large and move by value everywhere; these do too.
+#[allow(clippy::large_enum_variant)]
+pub enum Framed {
+    Box(Div),
+    Button(Button),
+}
+
+impl Framed {
+    pub fn into_any_element(self) -> AnyElement {
+        match self {
+            Framed::Box(d) => d.into_any_element(),
+            Framed::Button(b) => b.into_any_element(),
+        }
+    }
+}
+
+/// Attaches behavior to a box named by `frame` or a `button`: gets the
+/// name, the list entry it is in (if any) and the box or button; gives back
+/// what to draw.
+pub type Frames<'a> = dyn FnMut(&str, Option<usize>, Framed) -> AnyElement + 'a;
 
 /// Draws template `name` with `scope`; `frames` attaches behavior to the
 /// boxes that name a frame.
@@ -75,7 +94,7 @@ impl Drawer<'_, '_> {
 
     /// `n`, its `when` aside (a split's panel hides rather than goes).
     fn draw(&mut self, n: &Node, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<AnyElement> {
-        let look = self.look(n, scope, outer);
+        let (look, hovers) = self.look(n, scope, outer);
         let mut kids: Vec<AnyElement> = vec![];
         match &n.what {
             What::Slot(name) | What::Part(name) => {
@@ -86,16 +105,23 @@ impl Drawer<'_, '_> {
                 kids.push(e);
             },
             What::Text(parts) => {
-                let get = lookup(scope, outer);
-                let text: String = parts
-                    .iter()
-                    .map(|p| match p {
-                        Part::Lit(t) => t.to_string(),
-                        Part::Var(v) => get(v).map(|v| v.text().to_string()).unwrap_or_default(),
-                    })
-                    .collect();
+                let text = fill(parts, &lookup(scope, outer));
                 kids.push(look.label(text).into_any_element());
             },
+            What::Icon(parts) => {
+                let name = fill(parts, &lookup(scope, outer));
+                if name.is_empty() {
+                    return None;
+                }
+                let icon = look.apply(Icon::default().path(super::icon_path(&name)));
+                if n.is_bare_icon() {
+                    return Some(icon.into_any_element());
+                }
+                kids.push(icon.into_any_element());
+                // The box takes the place; the icon keeps the look.
+                return Some(self.boxed(n, &style::el_with("", Default::default(), self.cx), hovers, kids, scope.index, None));
+            },
+            What::Button(b) => return Some(self.button(n, b, &look, scope, outer)),
             What::Each(list, item) => {
                 let items = scope.lists.remove(list.as_ref()).unwrap_or_default();
                 let mut chain = outer.to_vec();
@@ -138,7 +164,49 @@ impl Drawer<'_, '_> {
             }
         }
         let drag = if n.handle { self.dragged_part(n, scope, outer) } else { None };
-        Some(self.boxed(n, &look, kids, scope.index, drag))
+        Some(self.boxed(n, &look, hovers, kids, scope.index, drag))
+    }
+
+    /// Button `b`, drawn as node `n` says, with the code's behavior.
+    fn button(&mut self, n: &Node, b: &ButtonNode, look: &style::El, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
+        let get = lookup(scope, outer);
+        let id = ElementId::Name(format!("{}:{}:{}", scope.id, n.path, scope.index.unwrap_or(0)).into());
+        let mut button = look.apply(Button::new(id));
+        button = match b.variant {
+            Variant::Ghost => button.ghost(),
+            Variant::Primary => button.primary(),
+            // Secondary is the default.
+            Variant::Secondary => button,
+            Variant::Danger => button.danger(),
+            Variant::Outline => button.outline(),
+            Variant::Text => button.text(),
+        };
+        button = match b.size {
+            ButtonSize::XSmall => button.xsmall(),
+            ButtonSize::Small => button.small(),
+            // Medium is the default.
+            ButtonSize::Medium => button,
+            ButtonSize::Large => button.large(),
+        };
+        if let Some(icon) = &b.icon {
+            let name = fill(icon, &get);
+            if !name.is_empty() {
+                button = button.icon(Icon::default().path(super::icon_path(&name)));
+            }
+        }
+        if let Some(label) = &b.label {
+            button = button.label(look.label(fill(label, &get)));
+        }
+        if let Some(tip) = &b.tooltip {
+            button = button.tooltip(fill(tip, &get));
+        }
+        if b.selected.as_ref().is_some_and(|c| c.holds(&get)) {
+            button = button.selected(true);
+        }
+        if b.disabled.as_ref().is_some_and(|c| c.holds(&get)) {
+            button = button.disabled(true);
+        }
+        (self.frames)(&b.frame, scope.index, Framed::Button(button))
     }
 
     /// What dragging handle `n` drags: the part its scope names, when it may
@@ -378,23 +446,55 @@ impl Drawer<'_, '_> {
         group.into_any_element()
     }
 
-    /// The node's look: its element and style, with the states that hold.
-    fn look(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> style::El {
-        let on: Vec<&HashMap<&'static str, Val>> =
-            n.states.iter().filter(|(c, _)| c.holds(&lookup(scope, outer))).map(|(_, p)| p).collect();
-        let inline = if on.is_empty() {
+    /// The node's look: its element and style, with the states that hold;
+    /// and the looks it takes under the pointer, by group (`""`: its own).
+    fn look(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> (style::El, Vec<(SharedString, style::El)>) {
+        let get = lookup(scope, outer);
+        let holds = |c: &Option<Cond>| c.as_ref().is_none_or(|c| c.holds(&get));
+        let filled = |holes: &super::Holes, m: &mut HashMap<&'static str, Val>| {
+            for (prop, kind, var) in holes {
+                if let Some(v) = get(var).and_then(|v| v.val(*kind)) {
+                    m.insert(*prop, v);
+                }
+            }
+        };
+        let on: Vec<&super::State> = n.states.iter().filter(|s| s.hover.is_none() && holds(&s.when)).collect();
+        let inline = if on.is_empty() && n.holes.is_empty() {
             n.style.clone()
         } else {
             let mut m = (*n.style).clone();
-            for p in on {
-                m.extend(p.iter().map(|(k, v)| (*k, v.clone())));
+            filled(&n.holes, &mut m);
+            for s in on {
+                m.extend(s.props.iter().map(|(k, v)| (*k, v.clone())));
+                filled(&s.holes, &mut m);
             }
             Arc::new(m)
         };
-        style::el_with(n.element, inline, self.cx)
+        let hovers = n
+            .states
+            .iter()
+            .filter_map(|s| {
+                let group = s.hover.clone()?;
+                if !holds(&s.when) {
+                    return None;
+                }
+                let mut m = s.props.clone();
+                filled(&s.holes, &mut m);
+                Some((group, style::el_with("", Arc::new(m), self.cx)))
+            })
+            .collect();
+        (style::el_with(n.element, inline, self.cx), hovers)
     }
 
-    fn boxed(&mut self, n: &Node, look: &style::El, kids: Vec<AnyElement>, index: Option<usize>, drag: Option<DraggedPart>) -> AnyElement {
+    fn boxed(
+        &mut self,
+        n: &Node,
+        look: &style::El,
+        hovers: Vec<(SharedString, style::El)>,
+        kids: Vec<AnyElement>,
+        index: Option<usize>,
+        drag: Option<DraggedPart>,
+    ) -> AnyElement {
         let mut d = div().flex();
         d = match n.layout {
             Layout::Column => d.flex_col(),
@@ -455,6 +555,12 @@ impl Drawer<'_, '_> {
             d = d.min_w_0().whitespace_nowrap().text_ellipsis();
         }
         d = look.apply(d);
+        if let Some(g) = &n.group {
+            d = d.group(g.clone());
+        }
+        for (group, h) in hovers {
+            d = if group.is_empty() { d.hover(move |s| h.apply(s)) } else { d.group_hover(group, move |s| h.apply(s)) };
+        }
         let mut under = None;
         if n.border_under {
             // The box keeps its border's room; the layer under its children draws it.
@@ -486,7 +592,7 @@ impl Drawer<'_, '_> {
                     cx.new(|_| p.clone())
                 })
                 .into_any_element(),
-            (None, Some(f)) => (self.frames)(f, index, d),
+            (None, Some(f)) => (self.frames)(f, index, Framed::Box(d)),
             (None, None) => d.into_any_element(),
         };
         if n.overlay { deferred(e).with_priority(n.z.max(0) as usize).into_any_element() } else { e }
@@ -497,12 +603,38 @@ fn px_(v: f32) -> Pixels {
     px(v)
 }
 
+/// `parts` with the values `get` gives put in.
+fn fill(parts: &[Part], get: &dyn Fn(&str) -> Option<Value>) -> String {
+    parts
+        .iter()
+        .map(|p| match p {
+            Part::Lit(t) => t.to_string(),
+            Part::Var(v) => get(v).map(|v| v.text().to_string()).unwrap_or_default(),
+        })
+        .collect()
+}
+
 impl Node {
+    /// An icon with nothing a box would do: drawn as the icon alone.
+    fn is_bare_icon(&self) -> bool {
+        !self.fill
+            && self.grow.is_none()
+            && self.shrink.is_none()
+            && self.position.is_none()
+            && !self.overlay
+            && !self.clip
+            && self.frame.is_none()
+            && self.group.is_none()
+            && self.states.iter().all(|s| s.hover.is_none())
+    }
+
     /// A slot with nothing of its own: drawn as the code gives it.
     fn is_bare(&self) -> bool {
         self.element.is_empty()
             && self.style.is_empty()
             && self.states.is_empty()
+            && self.holes.is_empty()
+            && self.group.is_none()
             && !self.fill
             && self.grow.is_none()
             && self.shrink.is_none()

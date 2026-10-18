@@ -20,14 +20,6 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, ThemeColor, try_parse_colo
 use gpui_kit::*;
 use tern_fs::GitStatus;
 
-/// A horizontal tab bar's height, without its bottom border line. It's
-/// gpui-component's `Tab`, so it can't be changed; what sits in the bar
-/// matches it.
-pub const TAB_BAR_H: Pixels = px(30.);
-/// A tab in a horizontal tab bar (the bar plus its bottom border line).
-/// gpui-component's `Tab` sets it, so it can't be changed.
-pub const TAB_H: Pixels = px(32.);
-
 /// What a property holds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -197,6 +189,22 @@ const STRIP: &[Prop] = &[
 /// A tab in a horizontal bar (gpui-component's `Tab`; unset keeps its look).
 const TAB: &[Prop] = &[("text_transform", Text, "none"), ("icon_text", Color, ""), ("close_text", Color, "")];
 
+/// A tab in a pane's tab bar, drawn by the `pane_tab_bar.tab` template.
+const PANE_TAB: &[Prop] = &[
+    ("height", Len, "32"),
+    ("gap", Len, "4"),
+    ("font_size", Len, "$text_sm"),
+    ("text", Color, "$tab.foreground"),
+    ("hover_text", Color, "$tab.active.foreground"),
+    ("border", Color, "transparent"),
+    ("border_left_width", Len, "1"),
+    ("border_right_width", Len, "1"),
+];
+
+/// The shown tab of a pane, over [`PANE_TAB`].
+const PANE_TAB_ACTIVE: &[Prop] =
+    &[("background", Color, "$tab.active.background"), ("text", Color, "$tab.active.foreground"), ("border", Color, "$border")];
+
 macro_rules! simple {
     ($name:literal, $about:literal) => {
         Element { name: $name, about: $about, groups: &[] }
@@ -335,10 +343,10 @@ pub const ELEMENTS: &[Element] = &[
     Element {
         name: "pane_tab_bar.tab",
         about: "A tab in a pane's tab bar. `icon_text` colors a terminal or diff icon (file and agent icons keep theirs), \
-                `close_text` its close button",
-        groups: &[TAB],
+                `close_text` its close button, `hover_text` its text under the pointer",
+        groups: &[PANE_TAB, TAB],
     },
-    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[TAB] },
+    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[PANE_TAB_ACTIVE, TAB] },
     Element {
         name: "pane_tab_bar.group",
         about: "A tab group's chip in a tab bar (its color is the group's)",

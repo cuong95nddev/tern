@@ -17,8 +17,15 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
 - **Styling reuses elements.** A node takes an element's properties (`element`) plus its own (`style`), with the same
   value syntax (`$token`, `$element.prop`, theme colors). `states` switch properties by condition. A `$element.prop`
   with no value leaves the property unset (no error), so templates can point at optional element props.
-- **Node kinds:** box (children), `slot`, `text` (`{var}` interpolation), `each` + `item` (lists the code provides),
-  `use` (another template; the use site's placement wins).
+- **Node kinds:** box (children), `slot`, `text` (`{var}` interpolation), `each` + `item` (lists the code provides;
+  `children` come after the entries, an entry sees `index`), `use` (another template; the use site's placement
+  wins), `icon` (a bundled Lucide name, or `{var}`), `button` (named like a `frame`: the code attaches what it does;
+  takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`, `disabled`).
+- **Values in styles:** a style value `"{name}"` takes a value the code gives (a tab group's color). A state's
+  properties may name an `element` whose properties they take (`{"active": {"element": "pane_tab_bar.tab_active"}}`).
+  A state key with a `hover` term holds under the pointer; `hover:<group>` while the box named `group` is.
+- **All new UI goes through templates.** Any UI added or reworked from now on is a template (plus `frame`/`slot`
+  behavior in code), never a hand-built gpui tree (decided 2026-10-18).
 - **Layout:** `layout` (column/row/wrap), `align`, `justify`, `fill`, `grow`, `shrink`, `position` (absolute edges),
   `z` (sibling paint order), `overlay` (gpui `deferred`), `clip`, `truncate`, `border_under` (box border painted under
   the children, so a child can sit on it), `split` (resizable panels with `size`/`min`/`max`/`fixed`).
@@ -37,16 +44,22 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
 ## Phases
 
 1. **Done:** engine (`template.rs`), window, workspace (+ `workspace.left`, `status_bar`), pane, pane body + title.
-2. Pane tab bar and tabs: a `tab` item template (icon, badge, label, close) drawn in a box the code frames with the
-   tab's click/drag/drop/menu behavior; the bar's scroll/overflow stays code. Group chips, vertical tabs, empty pane,
-   new-tab and pane buttons as nodes. Needs an `icon` node (icon by name, size, color) and a `button` node that the
-   code frames.
+2. **Done (2026-10-18):** `pane_tab_bar` (+ `.item`, `.tab`, `.chip`, `.end`), `vertical_tabs` (+ `.tab`, `.group`),
+   `pane.buttons`, `pane.new_tab`, `pane.empty`. gpui-component's `TabBar`/`Tab` are gone from the pane: tabs are
+   plain boxes (the `tabs` frame scrolls them, `more` lists them), styled by `pane_tab_bar.tab` /
+   `pane_tab_bar.tab_active`, whose defaults reproduce the old look (pixel-compared on Windows, scroll, wrap and
+   vertical layouts). The tab's icon is still a code `slot` (file and agent icons carry their own colors).
+   Differences: an empty pane's tab bar keeps its 32px height (it used to shrink); the Maximize/Restore Pane icons
+   (`maximize-2`, `minimize-2`) draw nothing, as before (to look into).
 3. Workspace tab bar and welcome screen (recent list as `each`).
 4. Side panels: headers (`panel_header`, `header_button`) and rows (`list_row`) as templates; the lists stay
    `uniform_list` slots that draw each row from a row template.
 5. File header of the viewer; terminal padding box.
 6. Dialog bodies and footers; menus as data (items, separators, submenus) from templates.
 7. Screenshot tool (`shot/`): needs elements first.
+8. What the phases above don't name: the agent monitor (`agent_monitor.rs`), the diff pane header (`diff_pane.rs`),
+   the scratch view (`scratch.rs`), the drag ghosts (`DraggedTab`, `DraggedGroup`, `DraggedWorkspace`,
+   `DraggedEntries`, `DraggedPart`), the tool strips (`workspace.rs` `tool_strip`).
 
 ## User-arranged layout (parts, docks, floating)
 
@@ -149,5 +162,7 @@ D. Pop out to a separate OS window.
 
 ## Left to the builder (templates)
 
-- Node names for icons and buttons, how a `button` node maps onto gpui-component's `Button`.
-- Whether gpui-component `Tab`/`TabBar` stay (with the template drawing their insides) or are replaced by plain boxes.
+- Node names for icons and buttons, how a `button` node maps onto gpui-component's `Button`: **done** (`icon`,
+  `button`; see Decided).
+- Whether gpui-component `Tab`/`TabBar` stay or are replaced by plain boxes: **replaced** in panes (phase 2); the
+  workspace tab bar still uses them until phase 3.

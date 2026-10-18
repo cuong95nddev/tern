@@ -1,6 +1,7 @@
 //! Debug-build control socket: lets scripts drive a window (clicks, keys,
 //! state dump) by injecting events into it, without touching the real mouse
-//! or keyboard. Enabled with `TERN_CONTROL=<socket path>`.
+//! or keyboard. Enabled with `TERN_CONTROL=<socket path>` (on Windows, a
+//! loopback address: `127.0.0.1:7777`).
 //!
 //! One command per line, one reply line each:
 //!   click X Y        left click at window coordinates (logical px)
@@ -34,23 +35,59 @@
 //!   term-paste-path P1|P2   paste paths as a file drop does
 //!   @N CMD           send CMD to window N instead of the active one
 
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use gpui_kit::*;
 
 pub type Request = (String, flume::Sender<String>);
 
-/// No Unix sockets here: the control socket is a Unix-only debug aid.
+/// No Unix sockets in std here: `TERN_CONTROL` is a loopback TCP address
+/// (`127.0.0.1:7777`) instead.
 #[cfg(not(unix))]
-pub fn listen(_path: PathBuf) -> Option<flume::Receiver<Request>> {
-    log::warn!("TERN_CONTROL needs a Unix socket; ignored");
-    None
+pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    let addr: SocketAddr = path.to_str()?.parse().map_err(|_| log::warn!("TERN_CONTROL: not an address like 127.0.0.1:7777")).ok()?;
+    if !addr.ip().is_loopback() {
+        log::warn!("TERN_CONTROL {addr} is not a loopback address");
+        return None;
+    }
+    let listener = TcpListener::bind(addr).map_err(|e| log::warn!("control socket: {e}")).ok()?;
+    log::info!("control socket at {addr}");
+    let incoming = std::iter::repeat_with(move || listener.accept()).filter_map(|r| r.ok().map(|(s, _)| s));
+    Some(serve(incoming, TcpStream::try_clone))
+}
+
+/// Answers each line of each connection `incoming` gives with the reply to
+/// its request; `clone` gives a connection's writing half.
+fn serve<S: Read + Write + Send + 'static>(
+    incoming: impl Iterator<Item = S> + Send + 'static,
+    clone: fn(&S) -> std::io::Result<S>,
+) -> flume::Receiver<Request> {
+    let (tx, rx) = flume::unbounded::<Request>();
+    std::thread::spawn(move || {
+        for stream in incoming {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let Ok(mut out) = clone(&stream) else { return };
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    let (reply_tx, reply_rx) = flume::bounded(1);
+                    if tx.send((line, reply_tx)).is_err() {
+                        return;
+                    }
+                    let reply = reply_rx.recv().unwrap_or_else(|_| "error: window closed".into());
+                    if writeln!(out, "{reply}").is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    rx
 }
 
 /// Start listening on `path` (from `TERN_CONTROL`); requests arrive on the
@@ -67,27 +104,9 @@ pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
     }
     let listener = UnixListener::bind(&path).map_err(|e| log::warn!("control socket: {e}")).ok()?;
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    let (tx, rx) = flume::unbounded::<Request>();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let Ok(mut out) = stream.try_clone() else { return };
-                for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                    let (reply_tx, reply_rx) = flume::bounded(1);
-                    if tx.send((line, reply_tx)).is_err() {
-                        return;
-                    }
-                    let reply = reply_rx.recv().unwrap_or_else(|_| "error: window closed".into());
-                    if writeln!(out, "{reply}").is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
     log::info!("control socket at {}", path.display());
-    Some(rx)
+    let incoming = std::iter::repeat_with(move || listener.accept()).filter_map(|r| r.ok().map(|(s, _)| s));
+    Some(serve(incoming, UnixStream::try_clone))
 }
 
 /// Run an input command (`click`, `key`) against `window`. `None` if `line`
