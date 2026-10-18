@@ -8,8 +8,9 @@
 //! detached alone (its tab reattaches from a snapshot); a connection that
 //! falls behind as a whole is dropped (every tab reattaches).
 //!
-//! Observers (the menu bar agent) watch the session list and ask for a
-//! session to be shown; they don't keep the daemon alive.
+//! Observers (the menu bar agent, the web server) watch the session list,
+//! ask for a session to be shown and may view sessions beside their owner;
+//! they don't keep the daemon alive.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -105,6 +106,8 @@ struct Session {
     token: Option<String>,
     /// The connection attached to it.
     owner: Option<Weak<Conn>>,
+    /// Connections viewing it.
+    viewers: Vec<Weak<Conn>>,
     /// Hook requests that came while no one was attached.
     hooks: VecDeque<Vec<u8>>,
     /// `session_id` of its latest Claude hook event.
@@ -379,10 +382,15 @@ impl Server {
         } else {
             st.observers.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
         }
+        let sub: Arc<dyn Subscriber> = conn.clone();
         for s in st.sessions.values_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {
                 s.owner = None;
-                s.host.detach(&(conn.clone() as Arc<dyn Subscriber>));
+                s.host.detach(&sub);
+            }
+            if s.viewers.iter().any(|v| v.as_ptr() == Arc::as_ptr(&conn)) {
+                s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(&conn));
+                s.host.unview(&sub);
             }
         }
         Self::update_idle(&mut st);
@@ -419,6 +427,14 @@ impl Server {
             ClientMsg::Resize { id, size } => {
                 if let Some(h) = self.host(id) {
                     h.resize(size);
+                }
+            },
+            ClientMsg::View { req, id } => self.view(conn, req, id),
+            ClientMsg::Unview { id } => {
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
+                    s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(conn));
+                    s.host.unview(&(conn.clone() as Arc<dyn Subscriber>));
                 }
             },
             ClientMsg::Close { id } => self.close(id),
@@ -531,7 +547,14 @@ impl Server {
             let mut st = self.state.lock().unwrap();
             st.sessions.insert(
                 id,
-                Session { host: host.clone(), token: token.clone(), owner: None, hooks: VecDeque::new(), claude_session: None },
+                Session {
+                    host: host.clone(),
+                    token: token.clone(),
+                    owner: None,
+                    viewers: Vec::new(),
+                    hooks: VecDeque::new(),
+                    claude_session: None,
+                },
             );
             Self::update_idle(&mut st);
         }
@@ -595,6 +618,33 @@ impl Server {
             } else {
                 host.jiggle(size);
             }
+        }
+    }
+
+    /// Let `conn` watch session `id` beside its owner.
+    fn view(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, id: u64) {
+        let host = {
+            let mut st = self.state.lock().unwrap();
+            let Some(s) = st.sessions.get_mut(&id) else { return conn.send(ServerMsg::NotFound { req, id }) };
+            if !s.viewers.iter().any(|v| v.as_ptr() == Arc::as_ptr(conn)) {
+                s.viewers.push(Arc::downgrade(conn));
+            }
+            s.host.clone()
+        };
+        let pid = host.pid();
+        let mut exited = None;
+        host.view_with(conn.clone(), |snapshot| {
+            conn.caught_up(id);
+            conn.push(Out::Attached { req, id, token: None, pid, fd: None, snapshot: Box::new(snapshot) });
+            exited = host.exited();
+            if let Some(code) = exited {
+                conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
+            }
+        });
+        // The snapshot misses the scroll region and charsets: a full-screen
+        // program repaints at its own size (the owner sees the same bytes).
+        if exited.is_none() && !host.shell_in_foreground() {
+            host.jiggle(host.size());
         }
     }
 

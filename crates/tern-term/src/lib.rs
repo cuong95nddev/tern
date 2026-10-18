@@ -7,6 +7,7 @@ pub mod mouse;
 pub mod osc;
 pub mod palette;
 pub mod procs;
+pub mod replay;
 pub mod session;
 pub mod snapshot;
 pub mod status;

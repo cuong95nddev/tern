@@ -7,6 +7,7 @@
 //! gets every byte after its snapshot exactly once. Resizes, the end of a
 //! synchronized update and the exit are sent the same way, as markers.
 //! (alacritty's own event loop reads before it locks, so it can't do this.)
+//! Viewers (remote browsers) get the same stream; they never own the session.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -85,6 +86,8 @@ struct Shared {
     status: Mutex<ActivityStatus>,
     exited: Mutex<Option<Option<i32>>>,
     subscriber: Mutex<Option<Arc<dyn Subscriber>>>,
+    /// Watch alongside the subscriber, without owning the session.
+    viewers: Mutex<Vec<Arc<dyn Subscriber>>>,
 }
 
 impl Shared {
@@ -96,6 +99,21 @@ impl Shared {
     fn subscriber(&self) -> Option<Arc<dyn Subscriber>> {
         self.subscriber.lock().unwrap().clone()
     }
+
+    /// Call `f` for the subscriber and every viewer (with the terminal locked).
+    fn each(&self, mut f: impl FnMut(&dyn Subscriber)) {
+        if let Some(sub) = self.subscriber() {
+            f(&*sub);
+        }
+        let viewers = self.viewers.lock().unwrap();
+        for v in viewers.iter() {
+            f(&**v);
+        }
+    }
+}
+
+fn same(a: &Arc<dyn Subscriber>, b: &Arc<dyn Subscriber>) -> bool {
+    std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
 }
 
 #[derive(Clone)]
@@ -168,6 +186,7 @@ impl Host {
             status: Mutex::new(ActivityStatus::None),
             exited: Mutex::new(None),
             subscriber: Mutex::new(None),
+            viewers: Mutex::new(Vec::new()),
         });
         let cell = Arc::new(OnceLock::new());
         let listener = Listener { shared: shared.clone(), term: cell.clone() };
@@ -265,28 +284,48 @@ impl Host {
     /// still locked: whatever `f` queues goes before the bytes that follow.
     pub fn attach_with(&self, sub: Arc<dyn Subscriber>, f: impl FnOnce(Snapshot)) {
         let mut term = self.term.lock();
+        f(self.capture(&mut term));
+        *self.shared.subscriber.lock().unwrap() = Some(sub);
+    }
+
+    /// The snapshot an attach or a view starts from (`term` locked).
+    fn capture(&self, term: &mut HostTerm) -> Snapshot {
         // Bytes held for an open synchronized update aren't in the grid yet:
-        // end it, so the snapshot has them (the old client ends it too).
+        // end it, so the snapshot has them (those watching end it too).
         let mut parser = self.parser.lock().unwrap();
         if parser.sync_bytes_count() > 0 {
-            parser.stop_sync(&mut *term);
-            if let Some(old) = self.shared.subscriber() {
-                old.marker(self.id, &Marker::SyncFlush);
-            }
+            parser.stop_sync(term);
+            self.shared.each(|old| old.marker(self.id, &Marker::SyncFlush));
         }
         drop(parser);
         let title = self.shared.title.lock().unwrap().clone();
-        f(snapshot::capture(&mut term, self.size(), title, self.status()));
-        *self.shared.subscriber.lock().unwrap() = Some(sub);
+        snapshot::capture(term, self.size(), title, self.status())
     }
 
     /// Stop sending to `sub` (if it is still the one attached).
     pub fn detach(&self, sub: &Arc<dyn Subscriber>) {
         let _term = self.term.lock();
         let mut cur = self.shared.subscriber.lock().unwrap();
-        if cur.as_ref().is_some_and(|c| std::ptr::addr_eq(Arc::as_ptr(c), Arc::as_ptr(sub))) {
+        if cur.as_ref().is_some_and(|c| same(c, sub)) {
             *cur = None;
         }
+    }
+
+    /// Like [`Self::attach_with`], but `sub` watches beside the subscriber
+    /// instead of replacing it. Viewing again takes a new snapshot.
+    pub fn view_with(&self, sub: Arc<dyn Subscriber>, f: impl FnOnce(Snapshot)) {
+        let mut term = self.term.lock();
+        f(self.capture(&mut term));
+        let mut viewers = self.shared.viewers.lock().unwrap();
+        if !viewers.iter().any(|v| same(v, &sub)) {
+            viewers.push(sub);
+        }
+    }
+
+    /// Stop sending to viewer `sub`.
+    pub fn unview(&self, sub: &Arc<dyn Subscriber>) {
+        let _term = self.term.lock();
+        self.shared.viewers.lock().unwrap().retain(|v| !same(v, sub));
     }
 
     pub fn attached(&self) -> bool {
@@ -482,9 +521,7 @@ impl Driver {
     }
 
     fn emit_marker(&self, marker: &Marker) {
-        if let Some(sub) = self.shared.subscriber() {
-            sub.marker(self.id, marker);
-        }
+        self.shared.each(|sub| sub.marker(self.id, marker));
     }
 
     fn resize(&mut self, size: TermSize) {
@@ -509,9 +546,7 @@ impl Driver {
             {
                 let mut term = self.term.lock();
                 self.parser.lock().unwrap().advance(&mut *term, bytes);
-                if let Some(sub) = self.shared.subscriber() {
-                    sub.output(self.id, bytes);
-                }
+                self.shared.each(|sub| sub.output(self.id, bytes));
             }
             self.scan(n, buf);
             locked += n;

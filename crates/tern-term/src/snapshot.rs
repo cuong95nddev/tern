@@ -154,11 +154,17 @@ pub fn restore<L: EventListener>(snap: Snapshot, term: &mut Term<L>, parser: &mu
         None => grid.install(term.grid_mut()),
     }
     parser.advance(term, &mode_sequences(mode));
+    parser.advance(term, &style_sequences(cursor_style, &colors));
+}
+
+/// The sequences that set a fresh terminal's cursor style and palette
+/// overrides.
+pub(crate) fn style_sequences(cursor_style: Option<u8>, colors: &[(usize, [u8; 3])]) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(n) = cursor_style {
         out.extend_from_slice(format!("\x1b[{n} q").as_bytes());
     }
-    for &(i, [r, g, b]) in &colors {
+    for &(i, [r, g, b]) in colors {
         let rgb = format!("rgb:{r:02x}/{g:02x}/{b:02x}");
         let seq = match i {
             i if i < 256 => format!("\x1b]4;{i};{rgb}\x07"),
@@ -169,11 +175,11 @@ pub fn restore<L: EventListener>(snap: Snapshot, term: &mut Term<L>, parser: &mu
         };
         out.extend_from_slice(seq.as_bytes());
     }
-    parser.advance(term, &out);
+    out
 }
 
 /// The sequences that set a fresh terminal's modes to `mode`.
-fn mode_sequences(mode: TermMode) -> Vec<u8> {
+pub(crate) fn mode_sequences(mode: TermMode) -> Vec<u8> {
     let mut out = String::new();
     let fresh = TermMode::default();
     for &(flag, n) in PRIVATE_MODES {

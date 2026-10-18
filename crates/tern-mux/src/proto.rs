@@ -27,7 +27,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 1;
+pub const MINOR: u32 = 2;
 
 /// What a client is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +93,16 @@ pub enum ClientMsg {
         req: u64,
         id: u64,
     },
+    /// Watch session `id` beside whoever is attached, without taking it
+    /// (MINOR 2). Answered by `Attached` (no token, no fd); output and
+    /// markers follow as for an attach, until `Unview`.
+    View {
+        req: u64,
+        id: u64,
+    },
+    Unview {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,7 +152,8 @@ pub enum ServerMsg {
         #[serde(with = "serde_bytes")]
         body: Vec<u8>,
     },
-    /// Another connection attached to `id`.
+    /// Another connection attached to `id`, or (also to a viewer) its
+    /// output fell behind: attach or view again for a fresh snapshot.
     Detached {
         id: u64,
     },
@@ -484,11 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn minor_1_messages_round_trip() {
+    fn minor_1_and_2_messages_round_trip() {
         let msgs = vec![
             ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into(), role: Role::Observer },
             ClientMsg::Watch,
             ClientMsg::Reveal { req: 3, id: 9 },
+            ClientMsg::View { req: 4, id: 9 },
+            ClientMsg::Unview { id: 9 },
         ];
         let mut buf = vec![];
         for m in &msgs {

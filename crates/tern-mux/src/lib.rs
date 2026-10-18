@@ -10,6 +10,7 @@ pub mod observer;
 pub mod paths;
 pub mod proto;
 pub mod server;
+pub mod viewer;
 
 /// The daemon's socket: a Unix domain socket, on Windows too (AF_UNIX,
 /// Windows 10 1803 and later).

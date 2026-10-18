@@ -24,7 +24,7 @@ fn observer(dir: &Path) -> (UnixStream, proto::FrameReader) {
     proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into(), role: proto::Role::Observer })
         .unwrap();
     let mut r = proto::FrameReader::new(raw.try_clone().unwrap(), proto::MAX_SERVER_FRAME);
-    assert!(matches!(r.read::<ServerMsg>().unwrap(), Some(ServerMsg::Hello { minor: 1, .. })));
+    assert!(matches!(r.read::<ServerMsg>().unwrap(), Some(ServerMsg::Hello { minor: MINOR, .. })));
     raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     (raw, r)
 }
