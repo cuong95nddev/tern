@@ -5087,6 +5087,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6570,6 +6576,7 @@ dependencies = [
  "tern-menubar",
  "tern-mux",
  "tern-term",
+ "tern-web",
  "tiny-skia",
  "windows-sys 0.61.2",
 ]
@@ -6647,6 +6654,22 @@ dependencies = [
  "polling",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tern-web"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "log",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "sha1_smol",
+ "tern-mux",
+ "tern-term",
  "windows-sys 0.61.2",
 ]
 

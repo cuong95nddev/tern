@@ -107,6 +107,18 @@ On Windows it talks over an AF_UNIX socket and runs programs in ConPTY; who runs
 
 On macOS, a menu bar icon lists every terminal running in the background, also while Tern is closed: the count beside it, a dot when one waits for you. Pick one to open it in Tern (in the active workspace, or a new window) or end it. Hide it from its own menu or with Tern ▸ Hide Menu Bar Icon. Its log is `~/Library/Logs/Tern/menubar.log`.
 
+## Remote access (browser)
+
+`tern --web` serves Tern's terminals to a browser on another device, to watch a coding agent and answer it away from the desk. It is meant for a private network such as [Tailscale](https://tailscale.com): by default it listens on this machine's Tailscale address (else only on `127.0.0.1`), on port 7317, and prints a secret link and its QR code. Open the link once on the phone or other computer; the browser stays signed in for 30 days.
+
+The page lists the terminals (the ones that wait for you first), shows one with its scrollback and lets you type into it, with keys for Esc, Tab, arrows and Ctrl+C and a message box on phones. Tern keeps its tabs: the browser watches beside it. **Fit** makes the terminal the screen's size while you look at it, and gives it back its size when you leave.
+
+```
+tern --web [--bind <address>] [--port <port>] [--new-token]
+```
+
+`--bind 0.0.0.0` listens on every network (it is plain HTTP: only on a network you trust); `--new-token` makes a new link, and old ones stop working. On Windows, run it from `tern.exe` in a terminal. It needs the background process of the same Tern version.
+
 ## Themes and settings
 
 Settings live in `~/.config/tern` (macOS, Linux; `XDG_CONFIG_HOME` if set) or `%APPDATA%\Tern` (Windows). Saving a file
@@ -243,6 +255,7 @@ release is approved by hand before it is.
 
 Tern sends nothing about you or your files anywhere. Its only network request of its own is the update check:
 anonymous requests to github.com for this repository's latest release (`TERN_NO_UPDATE_CHECK=1` turns it off).
+`tern --web`, when you run it, serves your terminals to browsers that have its secret link; it calls nothing outside.
 Programs you run in its terminals, such as Claude Code, follow their own privacy policies.
 
 ## Feedback

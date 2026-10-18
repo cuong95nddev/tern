@@ -28,6 +28,7 @@ tern-fs = { version = "0.1.0", path = "../tern-fs" }
 tern-menubar = { version = "0.4.0", path = "../tern-menubar" }
 tern-mux = { path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
+tern-web = { path = "../tern-web" }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"

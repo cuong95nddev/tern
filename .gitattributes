@@ -3,3 +3,5 @@
 *.ico binary
 *.png binary
 *.icns binary
+# Third-party browser code, as published.
+crates/tern-web/assets/vendor/** linguist-vendored -diff

@@ -58,6 +58,11 @@ fn main() {
         unsafe { tern_term::env::prepare_process_env() };
         tern_mux::server::run();
     }
+    // Tern's terminals in a browser on another device (run by hand).
+    if std::env::args().nth(1).as_deref() == Some("--web") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        tern_web::run(&args);
+    }
     // The menu bar agent (started by the UI): lists background terminals.
     #[cfg(target_os = "macos")]
     if std::env::args().nth(1).as_deref() == Some("--menubar") {

@@ -1,0 +1,178 @@
+:root {
+  --bg: #0a0a0a;
+  --fg: #d8dade;
+  --muted: #8a8f98;
+  --line: #24262b;
+  --raised: #16181c;
+  --accent: #79c0ff;
+  --working: #79c0ff;
+  --blocked: #f2cc60;
+  --done: #a5d6a7;
+  --bad: #ff7b72;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:active { background: var(--line); }
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+#bar .icon {
+  font-size: 26px;
+  line-height: 1;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+#heading { flex: 1; min-width: 0; }
+#title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#subtitle { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.chip { padding: 5px 12px; font-size: 13px; }
+.chip.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.dot.up { background: var(--done); }
+.dot.down { background: var(--bad); }
+
+main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+section[hidden] { display: none; }
+
+#list-view { overflow-y: auto; }
+
+#sessions { list-style: none; margin: 0; padding: 8px; }
+
+#sessions li {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  cursor: pointer;
+}
+#sessions li:active { background: var(--line); }
+#sessions li.exited { opacity: 0.55; }
+
+.info { flex: 1; min-width: 0; }
+.name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  flex: none;
+}
+.badge.Working { color: var(--working); border-color: var(--working); }
+.badge.Blocked { color: var(--bg); background: var(--blocked); border-color: var(--blocked); }
+.badge.Done { color: var(--done); border-color: var(--done); }
+
+.note { color: var(--muted); text-align: center; padding: 32px 20px; margin: 0; }
+
+#term-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px;
+}
+#term { display: inline-block; }
+
+#banner {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--raised);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+#keys {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  scrollbar-width: none;
+}
+#keys button { flex: none; min-width: 44px; height: 36px; padding: 0 10px; }
+
+#compose {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
+}
+
+#text {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  max-height: 30vh;
+  font: inherit;
+  font-size: 16px;
+  color: var(--fg);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+#text:focus { outline: none; border-color: var(--accent); }
+
+#send { padding: 0 14px; }
+
+@media (hover: hover) and (pointer: fine) {
+  /* A desktop browser types into the terminal itself. */
+  #keys, #compose { display: none; }
+}
