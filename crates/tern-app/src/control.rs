@@ -157,6 +157,25 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position: to, modifiers, click_count: 1 }), cx);
             Some("ok".into())
         },
+        // Move the pointer to X Y (hover), or scroll there by DX DY pixels.
+        cmd @ ("move" | "scroll") => {
+            let n: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
+            let (position, modifiers) = match n[..] {
+                [x, y, ..] => (point(px(x), px(y)), Modifiers::default()),
+                _ => return Some(format!("error: {cmd} X Y{}", if cmd == "scroll" { " DX DY" } else { "" })),
+            };
+            window.draw(cx).clear(cx);
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers }), cx);
+            if let [_, _, dx, dy] = n[..] {
+                let delta = ScrollDelta::Pixels(point(px(dx), px(dy)));
+                window
+                    .dispatch_event(PlatformInput::ScrollWheel(ScrollWheelEvent { position, delta, modifiers, ..Default::default() }), cx);
+            } else if cmd == "scroll" {
+                return Some("error: scroll X Y DX DY".into());
+            }
+            window.draw(cx).clear(cx);
+            Some("ok".into())
+        },
         "key" => {
             let Some(k) = parts.next() else { return Some("error: key KEYSTROKE".into()) };
             match Keystroke::parse(k) {

@@ -32,7 +32,7 @@ use crate::style::{self, Props, Val};
 mod draw;
 
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use draw::{Framed, Frames, render};
+pub use draw::{Framed, Frames, on_event, render};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -59,8 +59,8 @@ pub struct Spec {
     /// or `"{name}"` for one the code gives. On a `button`: its icon.
     pub icon: Option<String>,
     /// A button; the code attaches what it does by this name, as for `frame`.
-    /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`
-    /// and `disabled`.
+    /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
+    /// `disabled` and `loading`.
     pub button: Option<String>,
     /// A button's text; `{name}` puts in a value.
     pub label: Option<String>,
@@ -75,6 +75,10 @@ pub struct Spec {
     /// A button that can't be clicked: `true`, `false` or a condition.
     #[schemars(with = "Option<serde_json::Value>")]
     pub disabled: Option<serde_json::Value>,
+    /// A button that shows a spinner for its icon: `true`, `false` or a
+    /// condition.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub loading: Option<serde_json::Value>,
     /// Names this box for `"hover:<group>"` states of the boxes in it.
     pub group: Option<String>,
     /// A name the code attaches behavior to (clicks, drags, focus).
@@ -434,6 +438,7 @@ struct ButtonNode {
     size: ButtonSize,
     selected: Option<Cond>,
     disabled: Option<Cond>,
+    loading: Option<Cond>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -852,7 +857,7 @@ impl Compiler<'_, '_> {
                 fixed.insert(name, v);
                 continue;
             };
-            match element.and_then(|e| e.prop(&name)).or_else(|| style::BOX.iter().find(|p| p.0 == name)) {
+            match element.and_then(|e| e.prop(&name)).or_else(|| style::box_prop(&name)) {
                 Some(&(prop, kind, _)) if ident(var).is_ok() => holes.push((prop, kind, var.to_owned())),
                 Some(_) => self.problems.push(format!("{at}.{name}: \"{{{var}}}\" is not a name")),
                 None => self.problems.push(format!("{at}: no property \"{name}\"")),
@@ -935,6 +940,7 @@ impl Compiler<'_, '_> {
             size,
             selected: self.flag(&s.selected, &format!("{at}.selected")),
             disabled: self.flag(&s.disabled, &format!("{at}.disabled")),
+            loading: self.flag(&s.loading, &format!("{at}.loading")),
         }
     }
 
@@ -1034,6 +1040,7 @@ impl Compiler<'_, '_> {
                 ("variant", s.variant.is_some()),
                 ("selected", s.selected.is_some()),
                 ("disabled", s.disabled.is_some()),
+                ("loading", s.loading.is_some()),
             ] {
                 if set {
                     self.problems.push(format!("{at}.{field}: only a button takes it"));
@@ -1462,7 +1469,7 @@ mod tests {
             r#"{"w": {"children": [
                 {"icon": "plus"}, {"icon": "{icon}"},
                 {"button": "go", "icon": "close", "label": "Go {n}", "tooltip": "Go", "size": "xsmall", "variant": "primary",
-                    "selected": "on", "disabled": false}]}}"#,
+                    "selected": "on", "disabled": false, "loading": "busy"}]}}"#,
         );
         assert_eq!(problems, Vec::<String>::new());
         let kids = &t.nodes["w"].children;
@@ -1470,8 +1477,18 @@ mod tests {
         let super::What::Button(b) = &kids[2].what else { panic!("not a button") };
         assert_eq!(b.frame, "go");
         assert!(matches!(b.size, super::ButtonSize::XSmall) && matches!(b.variant, super::Variant::Primary));
+        assert!(b.loading.is_some());
         // A button's size is no panel size.
         assert!(kids[2].panel.size.is_none());
+    }
+
+    #[test]
+    fn any_box_takes_a_background_image() {
+        let (_, problems) = compiled(
+            r#"{"w": {"style": {"background_image": "$welcome.background_image", "background_image_fit": "contain",
+                "background_image_opacity": 0.5}}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
     }
 
     #[test]

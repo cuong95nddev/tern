@@ -10,15 +10,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt as _};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt as _};
 use gpui_kit::*;
 
 use crate::platform::bind;
+use crate::template::{self, Framed, on_event};
 use crate::theme_picker::{self, OpenSettings, SelectTheme};
 use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
@@ -425,6 +422,9 @@ pub struct MainWindow {
     menu_ix: Option<usize>,
     /// The workspace whose tab is being dragged.
     dragging: Option<EntityId>,
+    /// The bar's tabs, and the one last scrolled into view.
+    tab_scroll: ScrollHandle,
+    revealed: Option<usize>,
     title: String,
     /// Where the window is, for the saved session.
     placement: Option<(String, WindowBounds)>,
@@ -503,6 +503,8 @@ impl MainWindow {
             active: 0,
             menu_ix: None,
             dragging: None,
+            tab_scroll: ScrollHandle::new(),
+            revealed: None,
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
@@ -715,133 +717,128 @@ impl MainWindow {
         }
     }
 
-    fn render_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let monitor_open = crate::agent_monitor::window(cx).is_some();
-        let theme = cx.theme();
-        let (warn, drop_bg) = (theme.warning, theme.list_hover);
-        let look = crate::style::el("workspace_tabs", cx);
-        let button = |b: Button| crate::style::el("workspace_tabs.button", cx).apply(b);
+    /// The bar of workspace tabs (`workspace_tabs`).
+    fn render_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let shortcut = |k| crate::platform::shortcut(k).to_string();
+        let close_key = shortcut("⌘⇧W");
+        let items = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let ws = slot.ws.read(cx);
+                template::Scope::new(format!("ws-tab-{}", slot.ws.entity_id().as_u64()))
+                    .var("name", ws.name())
+                    .var("active", i == self.active)
+                    .var("busy", i != self.active && ws.busy(cx))
+                    .var("close_key", close_key.clone())
+            })
+            .collect();
+        if self.revealed.replace(self.active) != Some(self.active) {
+            self.tab_scroll.scroll_to_item(self.active);
+        }
+        let update = crate::update::offered(cx);
+        let mut scope = template::Scope::new("workspace-tabs")
+            .var("monitor", crate::agent_monitor::window(cx).is_some())
+            .var("open_key", shortcut("⌘O"))
+            .var("close_key", close_key)
+            .list("items", items);
+        if let Some((release, installing)) = &update {
+            let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
+            scope = scope.var("update", label).var("installing", *installing);
+        }
         let me = cx.entity().downgrade();
-        let tabs = self.slots.iter().enumerate().map(|(i, slot)| {
-            let ws = slot.ws.read(cx);
-            let name: SharedString = ws.name().into();
-            let busy = i != self.active && ws.busy(cx);
-            let drag = DraggedWorkspace { ws: slot.ws.entity_id(), name: name.clone() };
-            let me = me.clone();
-            let tab_look = crate::style::el(if i == self.active { "workspace_tabs.tab_active" } else { "workspace_tabs.tab" }, cx);
-            let mut tab = crate::style::el("workspace_tabs.tab", cx).apply(Tab::new());
-            if i == self.active {
-                tab = tab_look.apply(tab);
-            }
-            let sides = (i == self.active && tab_look.is_set("border")).then(|| crate::workspace::tab_sides(tab_look.color("border")));
-            let (start, end) = sides.map_or((None, None), |(s, e)| (Some(s.into_any_element()), Some(e.into_any_element())));
-            let icon_fg = tab_look.is_set("icon_text").then(|| tab_look.color("icon_text"));
-            let close_fg = tab_look.is_set("close_text").then(|| tab_look.color("close_text"));
-            crate::workspace::tab_label(tab, &tab_look, name)
-                .prefix(
-                    div()
-                        .when_some(icon_fg, |d, c| d.text_color(c))
-                        .pl_2()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .children(start)
-                        .child(Icon::new(AssetIcon::FolderOpen).xsmall())
-                        .when(busy, |d| d.child(div().text_color(warn).child("●"))),
-                )
-                .suffix(
-                    div().pr_1().children(end).child(button(
-                        Button::new(("close-ws", i))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .when_some(close_fg, |b, c| b.text_color(c))
-                            .tooltip(format!("Close Workspace ({})", crate::platform::shortcut("⌘⇧W")))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.request_close(i, window, cx);
-                            })),
-                    )),
-                )
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(i)))
-                .on_drag(drag, move |d, _, _, cx| {
-                    let id = d.ws;
-                    let _ = me.update(cx, |m, _| m.dragging = Some(id));
-                    cx.new(|_| d.clone())
-                })
-                .drag_over::<DraggedWorkspace>(move |s, _, _, _| s.bg(drop_bg))
-                .on_drop(cx.listener(move |this, d: &DraggedWorkspace, window, cx| {
-                    this.dragging = None;
-                    this.reorder(d.ws, i, window, cx);
-                }))
-        });
-        let mut bar = look.apply(TabBar::new("workspace-tabs"));
-        bar.style().border_widths = Default::default();
-        let bar = bar
-            .selected_index(self.active)
-            .children(tabs)
-            .last_empty_space(
-                div()
-                    .id("ws-bar-end")
-                    .flex_1()
-                    .h_full()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .drag_over::<DraggedWorkspace>(move |s, _, _, _| s.bg(drop_bg))
-                    .on_drop(cx.listener(|this, d: &DraggedWorkspace, window, cx| {
-                        this.dragging = None;
-                        let last = this.slots.len().saturating_sub(1);
-                        this.reorder(d.ws, last, window, cx);
+        let drag: Vec<DraggedWorkspace> =
+            self.slots.iter().map(|s| DraggedWorkspace { ws: s.ws.entity_id(), name: s.ws.read(cx).name().into() }).collect();
+        let drop_bg = |cx: &App| cx.theme().list_hover;
+        let scroll = self.tab_scroll.clone();
+        let mut ends = 0usize;
+        template::render(
+            "workspace_tabs",
+            scope,
+            &mut |name, ix, f| match (name, f, ix) {
+                ("bar", Framed::Box(d), _) => {
+                    let menu_me = me.clone();
+                    d.id("workspace-bar")
+                        .context_menu(move |menu, _, cx| {
+                            let Some(this) = menu_me.upgrade() else { return menu };
+                            let this = this.read(cx);
+                            let Some(ix) = this.menu_ix.filter(|&ix| ix < this.slots.len()) else { return menu };
+                            let (root, single) = (this.slots[ix].ws.read(cx).root().to_owned(), this.slots.len() < 2);
+                            Self::tab_menu(menu, &menu_me, ix, root, single, cx)
+                        })
+                        .into_any_element()
+                },
+                ("tabs", Framed::Box(d), _) => {
+                    // The strip only takes sideways scrolls; let a mouse wheel move it too.
+                    let wheel = scroll.clone();
+                    d.id("workspace-tabs")
+                        .overflow_x_scroll()
+                        .track_scroll(&scroll)
+                        .on_scroll_wheel(on_event(&me, move |_, ev: &ScrollWheelEvent, window, cx| {
+                            let d = ev.delta.pixel_delta(window.line_height());
+                            if d.y.abs() > d.x.abs() {
+                                let max = wheel.max_offset().x;
+                                let mut offset = wheel.offset();
+                                offset.x = (offset.x + d.y).min(px(0.)).max(-max);
+                                wheel.set_offset(offset);
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
+                },
+                ("tab", Framed::Box(d), Some(i)) if i < drag.len() => {
+                    let start = me.clone();
+                    d.id(("workspace-tab", i))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| this.activate(i, window, cx)))
+                        .on_mouse_down(MouseButton::Right, on_event(&me, move |this, _: &MouseDownEvent, _, _| this.menu_ix = Some(i)))
+                        .on_drag(drag[i].clone(), move |d, _, _, cx| {
+                            let id = d.ws;
+                            let _ = start.update(cx, |m, _| m.dragging = Some(id));
+                            cx.new(|_| d.clone())
+                        })
+                        .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                        .on_drop(on_event(&me, move |this, d: &DraggedWorkspace, window, cx| {
+                            this.dragging = None;
+                            this.reorder(d.ws, i, window, cx);
+                        }))
+                        .into_any_element()
+                },
+                ("close", Framed::Button(b), Some(i)) => b
+                    .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| {
+                        // Don't let the tab's own click activate it.
+                        cx.stop_propagation();
+                        this.request_close(i, window, cx);
                     }))
-                    .child(button(
-                        Button::new("open-workspace")
-                            .xsmall()
-                            .ghost()
-                            .icon(Icon::new(AssetIcon::FolderPlus))
-                            .tooltip(format!("Open Workspace… ({})", crate::platform::shortcut("⌘O")))
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
-                    ))
-                    .child(div().flex_1())
-                    .child(button(
-                        Button::new("agent-monitor")
-                            .xsmall()
-                            .ghost()
-                            .icon(Icon::new(AssetIcon::Bot))
-                            .selected(monitor_open)
-                            .tooltip("Agent Monitor")
-                            .on_click(|_, _, cx| crate::agent_monitor::toggle(cx)),
-                    ))
-                    .children(crate::update::offered(cx).map(|(release, installing)| {
-                        let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
-                        button(Button::new("update"))
-                            .xsmall()
-                            .ghost()
-                            .icon(Icon::new(AssetIcon::CircleArrowDown))
-                            .label(label)
-                            .loading(installing)
-                            .tooltip("A new version of Tern is available")
-                            .on_click(move |_, _, cx| {
-                                if !installing {
-                                    crate::update::offer(release.clone(), cx)
-                                }
-                            })
-                    })),
-            )
-            // The tab bar shows `last_empty_space` only alongside a suffix.
-            .suffix(div().w_1())
-            .on_click(cx.listener(|this, ix: &usize, window, cx| this.activate(*ix, window, cx)));
-        let _ = window;
-        let outer = crate::style::el("workspace_tabs", cx);
-        let mut outer_div = outer.apply(div().id("workspace-bar"));
-        outer_div.style().background = None;
-        outer_div.child(bar).context_menu(move |menu, _, cx| {
-            let Some(this) = me.upgrade() else { return menu };
-            let this = this.read(cx);
-            let Some(ix) = this.menu_ix.filter(|&ix| ix < this.slots.len()) else { return menu };
-            let (root, single) = (this.slots[ix].ws.read(cx).root().to_owned(), this.slots.len() < 2);
-            Self::tab_menu(menu, &me, ix, root, single, cx)
-        })
+                    .into_any_element(),
+                ("end", Framed::Box(d), _) => {
+                    ends += 1;
+                    d.id(("workspace-bar-end", ends))
+                        .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                        .on_drop(on_event(&me, |this, d: &DraggedWorkspace, window, cx| {
+                            this.dragging = None;
+                            let last = this.slots.len().saturating_sub(1);
+                            this.reorder(d.ws, last, window, cx);
+                        }))
+                        .into_any_element()
+                },
+                ("open", Framed::Button(b), _) => {
+                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)).into_any_element()
+                },
+                ("agent_monitor", Framed::Button(b), _) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
+                ("update", Framed::Button(b), _) => {
+                    let update = update.clone();
+                    b.on_click(move |_, _, cx| {
+                        if let Some((release, false)) = &update {
+                            crate::update::offer(release.clone(), cx)
+                        }
+                    })
+                    .into_any_element()
+                },
+                (_, f, _) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 
     /// Right-click menu of workspace tab `ix`.
@@ -875,63 +872,43 @@ impl MainWindow {
             .item(PopupMenuItem::new(crate::platform::REVEAL).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
     }
 
-    fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let el = |name| crate::style::el(name, cx);
-        let (row, keys) = (el("welcome.recent"), el("welcome.keys"));
-        let (muted, fg, hover) = (row.color("detail_text"), row.color("text"), row.color("hover_background"));
-        let row_detail_size = row.len("detail_font_size");
-        let (keys_fg, keys_muted) = (keys.color("text"), keys.color("detail_text"));
+    /// The page of a window with no workspace (`welcome`).
+    fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shortcut = |k| crate::platform::shortcut(k).to_string();
         let recent = window_state::recent_folders();
-        let has_recent = !recent.is_empty();
-        let recent_list = div().flex().flex_col().gap_0p5().children(recent.into_iter().enumerate().map(|(i, path)| {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
-            let shown = crate::dirs::tilde(&path);
-            row.apply(div().id(("recent", i)).flex().items_center().cursor_pointer())
-                .hover(move |s| s.bg(hover))
-                .child(Icon::new(AssetIcon::FolderOpen).small().text_color(muted))
-                .child(div().text_color(fg).child(name))
-                .child(div().text_size(row_detail_size).text_color(muted).overflow_hidden().text_ellipsis().child(shown))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_folder(path.clone(), window, cx)))
-        }));
-        let key = |k: String, what: &'static str| {
-            div().flex().justify_between().gap_8().child(div().text_color(keys_muted).child(what)).child(div().text_color(keys_fg).child(k))
-        };
-        let welcome = el("welcome");
-        let mut outer = div().size_full().flex().items_center().justify_center();
-        // The image fills the screen; the box sizes go on the column.
-        outer.style().position = Some(Position::Relative);
-        outer.children(welcome.backdrop()).child(
-            welcome
-                .apply(div().flex().flex_col())
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(el("welcome.title").apply(div()).child("Tern"))
-                        .child(el("welcome.subtitle").apply(div()).child("Terminals, files and git changes of one folder per workspace.")),
-                )
-                .child(
-                    div().flex().gap_2().child(
-                        Button::new("welcome-open")
-                            .primary()
-                            .icon(Icon::new(AssetIcon::FolderPlus))
-                            .label("Open Workspace…")
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
-                    ),
-                )
-                .when(has_recent, |d| {
-                    d.child(
-                        div().flex().flex_col().gap_1().child(div().text_sm().text_color(keys_muted).child("Recent")).child(recent_list),
-                    )
-                })
-                .child(
-                    keys.apply(div().flex().flex_col())
-                        .child(key(crate::platform::shortcut("⌘O"), "Open workspace"))
-                        .child(key(crate::platform::shortcut("⌘⇧N"), "New window"))
-                        .child(key(crate::platform::shortcut("⌘⇧W"), "Close workspace"))
-                        .child(key(crate::platform::shortcut("⌘⌥← ⌘⌥→"), "Switch workspace")),
-                ),
+        let items = recent
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+                template::Scope::new(format!("recent-{i}")).var("name", name).var("path", crate::dirs::tilde(path))
+            })
+            .collect();
+        let scope = template::Scope::new("welcome")
+            .var("recents", recent.len())
+            .var("open_key", shortcut("⌘O"))
+            .var("new_window_key", shortcut("⌘⇧N"))
+            .var("close_key", shortcut("⌘⇧W"))
+            .var("switch_key", shortcut("⌘⌥← ⌘⌥→"))
+            .list("recent", items);
+        let me = cx.entity().downgrade();
+        template::render(
+            "welcome",
+            scope,
+            &mut |name, ix, f| match (name, f, ix.and_then(|i| Some((i, recent.get(i)?)))) {
+                ("open", Framed::Button(b), _) => {
+                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)).into_any_element()
+                },
+                ("recent", Framed::Box(d), Some((i, path))) => {
+                    let path = path.clone();
+                    d.id(("recent", i))
+                        .cursor_pointer()
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| this.open_folder(path.clone(), window, cx)))
+                        .into_any_element()
+                },
+                (_, f, _) => f.into_any_element(),
+            },
+            cx,
         )
     }
 
@@ -1054,14 +1031,14 @@ impl Render for MainWindow {
             self.title = title;
         }
         let ws = self.active_ws().cloned();
-        let scope = crate::template::Scope::new("window").var("workspace", ws.is_some());
+        let scope = template::Scope::new("window").var("workspace", ws.is_some());
         let scope = match ws {
-            Some(ws) => scope.slot("workspace_tabs", self.render_bar(window, cx)).slot("workspace", ws),
+            Some(ws) => scope.slot("workspace_tabs", self.render_bar(cx)).slot("workspace", ws),
             None => scope.slot("welcome", self.render_welcome(cx)),
         };
         #[cfg(not(target_os = "macos"))]
         let scope = scope.var("menu_bar", true).slot("menu_bar", self.menu_bar.clone());
-        let body = crate::template::render("window", scope, &mut |_, _, d| d.into_any_element(), cx);
+        let body = template::render("window", scope, &mut |_, _, d| d.into_any_element(), cx);
         div()
             .id("main-window")
             .key_context("MainWindow")

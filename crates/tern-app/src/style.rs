@@ -132,6 +132,12 @@ pub const BOX: &[Prop] = &[
     ("text_transform", Text, ""),
 ];
 
+/// A template box's own properties: those of [`BOX`], and of [`IMAGE`] (any
+/// box can show an image behind its children).
+pub fn box_prop(name: &str) -> Option<&'static Prop> {
+    BOX.iter().chain(IMAGE).find(|p| p.0 == name)
+}
+
 /// A container that can show an image behind its content: the file
 /// (absolute, `~/…`, or relative to the config folder), how it fits
 /// (`cover`, `contain`, `fill`, `scale_down`, `none`), and its opacity.
@@ -189,8 +195,9 @@ const STRIP: &[Prop] = &[
 /// A tab in a horizontal bar (gpui-component's `Tab`; unset keeps its look).
 const TAB: &[Prop] = &[("text_transform", Text, "none"), ("icon_text", Color, ""), ("close_text", Color, "")];
 
-/// A tab in a pane's tab bar, drawn by the `pane_tab_bar.tab` template.
-const PANE_TAB: &[Prop] = &[
+/// A tab in a horizontal tab bar drawn by a template (`pane_tab_bar.tab`,
+/// `workspace_tabs.tab`).
+const BAR_TAB: &[Prop] = &[
     ("height", Len, "32"),
     ("gap", Len, "4"),
     ("font_size", Len, "$text_sm"),
@@ -201,8 +208,8 @@ const PANE_TAB: &[Prop] = &[
     ("border_right_width", Len, "1"),
 ];
 
-/// The shown tab of a pane, over [`PANE_TAB`].
-const PANE_TAB_ACTIVE: &[Prop] =
+/// The shown tab, over [`BAR_TAB`].
+const BAR_TAB_ACTIVE: &[Prop] =
     &[("background", Color, "$tab.active.background"), ("text", Color, "$tab.active.foreground"), ("border", Color, "$border")];
 
 macro_rules! simple {
@@ -245,11 +252,15 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element {
         name: "workspace_tabs.tab",
-        about: "A workspace tab. `icon_text` and `close_text` color its folder icon and close button",
-        groups: &[TAB],
+        about: "A workspace tab. `icon_text` and `close_text` color its folder icon and close button,                 `hover_text` its text under the pointer",
+        groups: &[BAR_TAB, TAB],
     },
-    Element { name: "workspace_tabs.tab_active", about: "The active workspace tab, over `workspace_tabs.tab`", groups: &[TAB] },
-    Element { name: "workspace_tabs.button", about: "The buttons in the workspace bar (open, update, close)", groups: &[] },
+    Element {
+        name: "workspace_tabs.tab_active",
+        about: "The active workspace tab, over `workspace_tabs.tab`",
+        groups: &[BAR_TAB_ACTIVE, TAB],
+    },
+    Element { name: "workspace_tabs.button", about: "The buttons in the workspace bar (open, agent monitor, update, close)", groups: &[] },
     Element {
         name: "workspace",
         about: "One workspace: panels, tabs and the status bar",
@@ -344,9 +355,9 @@ pub const ELEMENTS: &[Element] = &[
         name: "pane_tab_bar.tab",
         about: "A tab in a pane's tab bar. `icon_text` colors a terminal or diff icon (file and agent icons keep theirs), \
                 `close_text` its close button, `hover_text` its text under the pointer",
-        groups: &[PANE_TAB, TAB],
+        groups: &[BAR_TAB, TAB],
     },
-    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[PANE_TAB_ACTIVE, TAB] },
+    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[BAR_TAB_ACTIVE, TAB] },
     Element {
         name: "pane_tab_bar.group",
         about: "A tab group's chip in a tab bar (its color is the group's)",
@@ -661,7 +672,7 @@ impl<'a> Props<'a> {
         Resolver { over: self.over, colors: &self.colors, config_dir: self.config_dir }
     }
 
-    /// `raw`'s properties: those of [`BOX`] and of `element` (when there is
+    /// `raw`'s properties: those of [`box_prop`] and of `element` (when there is
     /// one). `at` names where they are written, for `problems`.
     pub fn compile(
         &self,
@@ -673,7 +684,7 @@ impl<'a> Props<'a> {
         let r = self.resolver();
         let mut out = HashMap::new();
         for (name, v) in raw {
-            let found = element.and_then(|e| e.prop(name)).or_else(|| BOX.iter().find(|p| p.0 == name));
+            let found = element.and_then(|e| e.prop(name)).or_else(|| box_prop(name));
             let Some(&(prop, kind, _)) = found else {
                 problems.push(format!("{at}: no property \"{name}\""));
                 continue;
@@ -1067,16 +1078,27 @@ impl El {
     }
 
     /// The background image layer, to be the container's first child (the
-    /// container must be `relative`), when the element has one set.
+    /// container must be `relative`), when the element or the template box
+    /// has one set.
     pub fn backdrop(&self) -> Option<AnyElement> {
-        if element(self.name).is_none_or(|e| e.prop("background_image").is_none()) {
-            return None;
-        }
-        let path = self.text("background_image");
+        // A template box takes these without its element having them.
+        let image = |prop: &'static str| {
+            let own = element(self.name).is_some_and(|e| e.prop(prop).is_some());
+            self.inline.as_ref().and_then(|m| m.get(prop)).or_else(|| if own { self.get(prop) } else { None })
+        };
+        let text = |prop| match image(prop) {
+            Some(Val::Text(t)) => t.clone(),
+            _ => SharedString::default(),
+        };
+        let path = text("background_image");
         if path.is_empty() {
             return None;
         }
-        let fit = match self.text("background_image_fit").as_ref() {
+        let opacity = match image("background_image_opacity") {
+            Some(Val::Num(n)) => *n,
+            _ => 1.,
+        };
+        let fit = match text("background_image_fit").as_ref() {
             "contain" => ObjectFit::Contain,
             "fill" => ObjectFit::Fill,
             "scale_down" => ObjectFit::ScaleDown,
@@ -1090,7 +1112,7 @@ impl El {
                 .left_0()
                 .size_full()
                 .object_fit(fit)
-                .opacity(self.num("background_image_opacity").clamp(0., 1.))
+                .opacity(opacity.clamp(0., 1.))
                 .into_any_element(),
         )
     }

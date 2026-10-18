@@ -20,7 +20,7 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
 - **Node kinds:** box (children), `slot`, `text` (`{var}` interpolation), `each` + `item` (lists the code provides;
   `children` come after the entries, an entry sees `index`), `use` (another template; the use site's placement
   wins), `icon` (a bundled Lucide name, or `{var}`), `button` (named like a `frame`: the code attaches what it does;
-  takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`, `disabled`).
+  takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`, `disabled`, `loading`).
 - **Values in styles:** a style value `"{name}"` takes a value the code gives (a tab group's color). A state's
   properties may name an `element` whose properties they take (`{"active": {"element": "pane_tab_bar.tab_active"}}`).
   A state key with a `hover` term holds under the pointer; `hover:<group>` while the box named `group` is.
@@ -51,7 +51,13 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    vertical layouts). The tab's icon is still a code `slot` (file and agent icons carry their own colors).
    Differences: an empty pane's tab bar keeps its 32px height (it used to shrink); the Maximize/Restore Pane icons
    (`maximize-2`, `minimize-2`) draw nothing, as before (to look into).
-3. Workspace tab bar and welcome screen (recent list as `each`).
+3. **Done (2026-10-19):** `workspace_tabs` (+ `.tab`) and `welcome` (+ `.recent`). gpui-component's
+   `TabBar`/`Tab` are gone from the app except the screenshot tool's pages. Workspace tabs share the pane tabs'
+   element properties (`height`, `text`, `hover_text`, `border`, ...); the defaults reproduce the old look
+   (pixel-compared on Windows: tabs, overflow, welcome with and without a background image, hover). Any template
+   box takes `background_image*` in its `style` (the welcome screen's image fills the window while
+   `welcome.width` sizes its column). Buttons take `loading`. One difference: the bar scrolls the active
+   workspace into view, as pane tab bars do (it stayed put before).
 4. Side panels: headers (`panel_header`, `header_button`) and rows (`list_row`) as templates; the lists stay
    `uniform_list` slots that draw each row from a row template.
 5. File header of the viewer; terminal padding box.
@@ -164,5 +170,5 @@ D. Pop out to a separate OS window.
 
 - Node names for icons and buttons, how a `button` node maps onto gpui-component's `Button`: **done** (`icon`,
   `button`; see Decided).
-- Whether gpui-component `Tab`/`TabBar` stay or are replaced by plain boxes: **replaced** in panes (phase 2); the
-  workspace tab bar still uses them until phase 3.
+- Whether gpui-component `Tab`/`TabBar` stay or are replaced by plain boxes: **replaced** in panes (phase 2) and
+  the workspace tab bar (phase 3); the screenshot tool's page tabs wait for phase 7.

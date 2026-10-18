@@ -36,6 +36,18 @@ impl Framed {
 /// what to draw.
 pub type Frames<'a> = dyn FnMut(&str, Option<usize>, Framed) -> AnyElement + 'a;
 
+/// `f` on view `v` as an event handler that holds it weakly, for frames,
+/// which can't borrow a `Context` to make a listener.
+pub fn on_event<V: 'static, E: ?Sized + 'static>(
+    v: &WeakEntity<V>,
+    f: impl Fn(&mut V, &E, &mut Window, &mut Context<V>) + 'static,
+) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+    let v = v.clone();
+    move |e, window, cx| {
+        let _ = v.update(cx, |this, cx| f(this, e, window, cx));
+    }
+}
+
 /// Draws template `name` with `scope`; `frames` attaches behavior to the
 /// boxes that name a frame.
 pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyElement {
@@ -205,6 +217,9 @@ impl Drawer<'_, '_> {
         }
         if b.disabled.as_ref().is_some_and(|c| c.holds(&get)) {
             button = button.disabled(true);
+        }
+        if b.loading.as_ref().is_some_and(|c| c.holds(&get)) {
+            button = button.loading(true);
         }
         (self.frames)(&b.frame, scope.index, Framed::Button(button))
     }

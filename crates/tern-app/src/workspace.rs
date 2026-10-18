@@ -2,7 +2,7 @@
 //! files, diffs, scratches) | changes. A window shows one of its workspaces at a time (see
 //! `main_window`), and a workspace can move between windows.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,6 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::tab::Tab;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 use tern_bridge::HookEvent;
@@ -37,7 +36,7 @@ use crate::scratch::{self, Scratch};
 use crate::scratches_view::{ScratchesEvent, ScratchesView};
 use crate::settings;
 use crate::style;
-use crate::template::{self, Framed};
+use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
 use crate::theme_picker::OpenSettings;
 use crate::viewer::{self, Viewer, ViewerEvent};
@@ -272,18 +271,6 @@ struct TabEntry {
     tab: Option<EntityId>,
 }
 
-/// `f` on the workspace as an event handler that holds it weakly, for
-/// frames, which can't borrow a `Context` to make a listener.
-fn on_event<E: ?Sized + 'static>(
-    ws: &WeakEntity<Workspace>,
-    f: impl Fn(&mut Workspace, &E, &mut Window, &mut Context<Workspace>) + 'static,
-) -> impl Fn(&E, &mut Window, &mut App) + 'static {
-    let ws = ws.clone();
-    move |e, window, cx| {
-        let _ = ws.update(cx, |this, cx| f(this, e, window, cx));
-    }
-}
-
 /// A group's chip: its name on its color, a dot when it has no name, and
 /// `count` (its tabs) when collapsed.
 fn group_pill(name: SharedString, color: Hsla, count: Option<usize>, cx: &App) -> Div {
@@ -297,63 +284,6 @@ fn group_pill(name: SharedString, color: Hsla, count: Option<usize>, cx: &App) -
     }
     let look = style::el("pane_tab_bar.group", cx);
     look.apply(div().flex().items_center().bg(color).whitespace_nowrap()).child(look.label(text))
-}
-
-/// `tab` labelled `text` as element `look` writes it. gpui-component colors
-/// the label itself (the selected and hovered colors come from the theme),
-/// so an element's `text` color goes on a box of its own around it.
-pub(crate) fn tab_label(tab: Tab, look: &style::El, text: impl Into<SharedString>) -> Tab {
-    let text = look.label(text);
-    if look.is_set("text") { tab.child(div().text_color(look.color("text")).child(text)) } else { tab.label(text) }
-}
-
-/// The selected tab's 1px side borders in `color`, over gpui-component's
-/// (always the theme's `border`). Pieces as for [`over_tab`].
-pub(crate) fn tab_sides(color: Hsla) -> (impl IntoElement, impl IntoElement) {
-    over_tab(move |b, window| {
-        let side = |x: Pixels| Bounds::from_corners(point(x, b.top()), point(x + px(1.), b.bottom()));
-        window.paint_quad(fill(side(b.left()), color));
-        window.paint_quad(fill(side(b.right() - px(1.)), color));
-    })
-}
-
-/// Paints over a tab, its side borders included, after the tab itself.
-/// The tab's width isn't known when it's built, so the suffix's piece notes
-/// where the tab ends and the prefix's piece paints from there (prepaint
-/// runs for both before either paints). Each goes in the tab's prefix or
-/// suffix: (prefix piece, suffix piece).
-fn over_tab(paint: impl Fn(Bounds<Pixels>, &mut Window) + 'static) -> (impl IntoElement, impl IntoElement) {
-    let right = Rc::new(Cell::new(None::<Pixels>));
-    let r = right.clone();
-    let end = canvas(move |b, _, _| r.set(Some(b.right())), |_, _, _, _| {}).absolute().top_0().bottom_0().right_0();
-    let paint = Rc::new(paint);
-    let start = canvas(
-        move |b: Bounds<Pixels>, window, cx| {
-            // The tab clips its children inside its 1px side borders; draw
-            // later, clipped 1px wider.
-            let mask = window.content_mask().bounds;
-            let mask = ContentMask {
-                bounds: Bounds::from_corners(point(mask.left() - px(1.), mask.top()), point(mask.right() + px(1.), mask.bottom())),
-            };
-            let (right, paint) = (right.clone(), paint.clone());
-            let over = canvas(
-                |_, _, _| {},
-                move |_, _, window, _| {
-                    let Some(right) = right.get() else { return };
-                    paint(Bounds::from_corners(point(b.left() - px(1.), b.top()), point(right + px(1.), b.bottom())), window);
-                },
-            );
-            let mut over = over.into_any_element();
-            over.layout_as_root(AvailableSpace::min_size(), window, cx);
-            window.defer_draw(over, b.origin, 0, Some(mask));
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .bottom_0()
-    .left_0();
-    (start, end)
 }
 
 /// A pane's tab strip scroll state.
