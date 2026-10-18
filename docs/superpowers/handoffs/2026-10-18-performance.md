@@ -65,13 +65,7 @@ Medians:
 2. **Window layout cost (~1.5ms/frame).** Make the tab bars, side strips and other parts of `Workspace::render`
    their own cached views, so a terminal frame only rebuilds a shallow tree. Measure again with counters around
    the render, prepaint and paint parts.
-3. **Input jank.**
-   - `RemoteSession::write` (`client.rs:94`) does a blocking `write_all` on the UI thread: a big paste freezes
-     the UI. Use a writer thread with a bounded queue.
-   - `mode()` locks the term FairMutex 1–3 times per key and per mouse move (`terminal_view.rs` ~785/853/1040),
-     waiting behind up to 64KB of parsing. Keep `TermMode` in an atomic updated after each feed.
-   - Ctrl+hover link resolution (`links.rs:166-189`) reads the disk (`exists`, up to 3 levels of `read_dir`) on
-     the UI thread for every new word. Move it to the background with an LRU.
+3. **Input jank.** Done (see below).
 4. **Idle wakeups.**
    - One app-wide 1s ticker instead of one per tab (`terminal_view.rs` ~343), with one shared process scan.
    - Agent monitor: `agent_monitor.rs:24,171` notifies every 500ms while open; make it event-driven.
@@ -102,6 +96,17 @@ Medians:
 - `FsWatcher` debounce is trailing: a batch goes out once the disk is quiet for the window, at most 10×
   the window after the first change. Only kept paths extend the wait.
 - The welcome screen reads the recent folders once per render.
+
+## Done after the handoff: input jank
+
+- `client.rs`: an `Outbox` and a "mux writer" thread. The UI only queues messages, and they are written in
+  batches. A failed write ends the connection, which shows up as `ServerLost`. Queued input over 64MB makes
+  the sender wait. `Closer` waits up to 1s for queued `Close`/`Detach` before the socket shuts.
+- `mirror.rs`: mode bits are kept in an `AtomicU32` after each feed, sync flush and install.
+  `RemoteSession::mode()` and `TerminalView::mode()` read them without the term lock.
+- `terminal_view.rs`: ⌘-hover path lookup (`links::resolve` + the foreground cwd) runs in the background,
+  with a cache of 64 entries cleared when ⌘ goes down. A ⌘-click still resolves inline when the path isn't
+  cached.
 
 ## Notes
 

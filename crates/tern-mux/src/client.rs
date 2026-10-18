@@ -803,6 +803,14 @@ impl Foreground {
         #[cfg(windows)]
         return self.0.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
     }
+
+    /// See [`tern_term::procs::foreground_cwd`].
+    pub fn cwd(&self) -> Option<PathBuf> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
+        #[cfg(windows)]
+        return self.0.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
+    }
 }
 
 /// A tab's session in the daemon. Dropping it detaches (the program keeps
@@ -882,10 +890,7 @@ impl RemoteSession {
 
     /// See [`tern_term::procs::foreground_cwd`].
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
-        #[cfg(unix)]
-        return self.slot.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
-        #[cfg(windows)]
-        return self.slot.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
+        self.foreground().cwd()
     }
 
     /// End the program and forget the session.

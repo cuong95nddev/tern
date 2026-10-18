@@ -257,10 +257,17 @@ pub struct TerminalView {
     /// goes down or the text changes.
     mouse_pos: Option<Point<Pixels>>,
     hover_link: Option<HoverLink>,
-    /// The last path looked up for a link and where it resolved, so moving
-    /// over the same word doesn't search the disk again. Dropped when ⌘ goes
-    /// down.
-    resolved: RefCell<Option<(String, Option<PathBuf>)>>,
+    /// Paths looked up for links and where they resolved (newest last), so
+    /// moving over the same words doesn't search the disk again. Dropped
+    /// when ⌘ goes down: files may have come or gone since.
+    resolved: RefCell<Vec<(String, Option<PathBuf>)>>,
+    /// A path hovered but not in `resolved`: `update_hover` looks it up in
+    /// the background.
+    unresolved: RefCell<Option<String>>,
+    /// The path being looked up, and the task doing it.
+    resolving: Option<(String, Task<()>)>,
+    /// ⌘ is held (as of the last `update_hover`).
+    cmd_held: bool,
     /// The coding agent running in the foreground, if any.
     agent: Option<Agent>,
     /// When the program last wrote something.
@@ -328,7 +335,10 @@ impl TerminalView {
             mouse_button_down: None,
             mouse_pos: None,
             hover_link: None,
-            resolved: RefCell::new(None),
+            resolved: RefCell::new(Vec::new()),
+            unresolved: RefCell::new(None),
+            resolving: None,
+            cmd_held: false,
             agent: None,
             last_output: Instant::now(),
             _pump: None,
@@ -1008,7 +1018,7 @@ impl TerminalView {
         window.focus(&self.focus, cx);
         if ev.button == MouseButton::Left
             && ev.modifiers.secondary()
-            && let Some(link) = self.link_at(ev.position)
+            && let Some(link) = self.link_at(ev.position, true)
         {
             self.open_link(link.target, cx);
             return;
@@ -1095,7 +1105,7 @@ impl TerminalView {
 
     fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
         if ev.modifiers.secondary() && self.hover_link.is_none() {
-            self.resolved.take();
+            self.resolved.borrow_mut().clear();
         }
         self.update_hover(ev.modifiers.secondary(), cx);
     }
@@ -1109,17 +1119,56 @@ impl TerminalView {
 
     /// Underline the link under the mouse while `cmd` is held.
     fn update_hover(&mut self, cmd: bool, cx: &mut Context<Self>) {
-        let link = if cmd { self.mouse_pos.and_then(|p| self.link_at(p)) } else { None };
+        self.cmd_held = cmd;
+        let link = if cmd { self.mouse_pos.and_then(|p| self.link_at(p, false)) } else { None };
         if link != self.hover_link {
             self.hover_link = link;
             cx.notify();
         }
+        let Some(path) = self.unresolved.take() else { return };
+        if self.resolving.as_ref().is_some_and(|(p, _)| *p == path) {
+            return;
+        }
+        let Some(s) = &self.session else { return };
+        // The disk (`exists`, a few levels of `read_dir`) and the foreground
+        // process's cwd are read off the UI thread; the link shows when done.
+        let fg = s.foreground();
+        let cwd = self.spawn_cfg.cwd.clone();
+        let p = path.clone();
+        let key = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let bases: Vec<PathBuf> = fg.cwd().into_iter().chain(cwd).collect();
+                    links::resolve(&p, &bases)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.resolving = None;
+                this.remember(key, found);
+                if this.cmd_held {
+                    this.update_hover(true, cx);
+                }
+            });
+        });
+        self.resolving = Some((path, task));
+    }
+
+    fn remember(&self, path: String, found: Option<PathBuf>) {
+        const MAX_RESOLVED: usize = 64;
+        let mut cache = self.resolved.borrow_mut();
+        cache.retain(|(p, _)| *p != path);
+        if cache.len() >= MAX_RESOLVED {
+            cache.remove(0);
+        }
+        cache.push((path, found));
     }
 
     /// The link at `pos`: an OSC 8 hyperlink, a URL, or the path of a file
     /// or folder that exists. Text wrapped over several rows counts as one
-    /// line.
-    fn link_at(&self, pos: Point<Pixels>) -> Option<HoverLink> {
+    /// line. A path not looked up yet is looked up now if `wait`, else left
+    /// in `unresolved` (no link for now).
+    fn link_at(&self, pos: Point<Pixels>, wait: bool) -> Option<HoverLink> {
         let (col, row, _) = self.grid_point(pos)?;
         let s = self.session.as_ref()?;
         let (text, points, hyperlinks, ix) = {
@@ -1162,14 +1211,18 @@ impl TerminalView {
         let target = match link {
             Link::Url(url) => Target::Url(url),
             Link::Path { path, line, col } => {
-                let mut cache = self.resolved.borrow_mut();
-                let found = match &*cache {
-                    Some((p, found)) if *p == path => found.clone(),
-                    _ => {
+                let cached = self.resolved.borrow().iter().find(|(p, _)| *p == path).map(|(_, f)| f.clone());
+                let found = match cached {
+                    Some(found) => found,
+                    None if wait => {
                         let bases: Vec<PathBuf> = s.foreground_cwd().into_iter().chain(self.spawn_cfg.cwd.clone()).collect();
                         let found = links::resolve(&path, &bases);
-                        *cache = Some((path, found.clone()));
+                        self.remember(path, found.clone());
                         found
+                    },
+                    None => {
+                        *self.unresolved.borrow_mut() = Some(path);
+                        return None;
                     },
                 };
                 Target::Path { path: found?, line, col }
