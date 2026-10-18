@@ -801,7 +801,7 @@ impl TerminalView {
     }
 
     fn mode(&self) -> TermMode {
-        self.session.as_ref().map(|s| *s.term().lock().mode()).unwrap_or(TermMode::empty())
+        self.session.as_ref().map_or(TermMode::empty(), RemoteSession::mode)
     }
 
     // ---- keyboard -------------------------------------------------------

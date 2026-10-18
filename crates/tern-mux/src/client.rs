@@ -8,13 +8,14 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use tern_term::mirror::{Mirror, MirrorTerm};
+use tern_term::mirror::{self, Mirror, MirrorTerm};
 use tern_term::vt::sync::FairMutex;
+use tern_term::vt::term::TermMode;
 use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
@@ -60,6 +61,7 @@ struct Slot {
     mirror: Mutex<Mirror>,
     term: Arc<FairMutex<MirrorTerm>>,
     wake: Arc<AtomicBool>,
+    mode: Arc<AtomicU32>,
     sink: EventSink,
     /// Set once the daemon answered; while `None`, input waits in `early`
     /// (its lock is held to set the id).
@@ -371,6 +373,7 @@ impl MuxClient {
             close: AtomicBool::new(false),
             term: mirror.term().clone(),
             wake: mirror.wake_flag().clone(),
+            mode: mirror.mode_flag().clone(),
             mirror: Mutex::new(mirror),
             sink,
             id: Mutex::new(None),
@@ -814,6 +817,11 @@ impl RemoteSession {
     /// The mirror terminal. Lock briefly (render prep only).
     pub fn term(&self) -> &Arc<FairMutex<MirrorTerm>> {
         &self.slot.term
+    }
+
+    /// The terminal's mode, without locking it.
+    pub fn mode(&self) -> TermMode {
+        mirror::mode_of(&self.slot.mode)
     }
 
     /// Clears the pending-wakeup flag; returns whether one was pending.

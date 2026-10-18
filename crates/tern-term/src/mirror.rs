@@ -7,11 +7,11 @@
 //! come from here, as they did from an in-process session.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Osc52, Term};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,9 @@ pub struct Mirror {
     parser: Processor<StdSyncHandler>,
     scanner: OscScanner,
     listener: MirrorListener,
+    /// The term's mode bits, as of the last bytes parsed: the UI reads them
+    /// per key and mouse move without waiting for the term lock.
+    mode: Arc<AtomicU32>,
     size: TermSize,
     scrollback: usize,
 }
@@ -79,8 +82,17 @@ fn config(scrollback: usize) -> Config {
 impl Mirror {
     pub fn new(size: TermSize, scrollback: usize, sink: EventSink) -> Self {
         let listener = MirrorListener { wake: Arc::new(AtomicBool::new(false)), sink };
-        let term = Arc::new(FairMutex::new(Term::new(config(scrollback), &size, listener.clone())));
-        Self { term, parser: Processor::new(), scanner: OscScanner::new(), listener, size, scrollback }
+        let term = Term::new(config(scrollback), &size, listener.clone());
+        let mode = Arc::new(AtomicU32::new(term.mode().bits()));
+        Self {
+            term: Arc::new(FairMutex::new(term)),
+            parser: Processor::new(),
+            scanner: OscScanner::new(),
+            listener,
+            mode,
+            size,
+            scrollback,
+        }
     }
 
     pub fn term(&self) -> &Arc<FairMutex<MirrorTerm>> {
@@ -96,10 +108,20 @@ impl Mirror {
         self.size
     }
 
+    /// See the `mode` field; read it with [`mode_of`].
+    pub fn mode_flag(&self) -> &Arc<AtomicU32> {
+        &self.mode
+    }
+
+    fn sync_mode(&self, term: &MirrorTerm) {
+        self.mode.store(term.mode().bits(), Ordering::Release);
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         {
             let mut term = self.term.lock();
             self.parser.advance(&mut *term, bytes);
+            self.sync_mode(&term);
         }
         let sink = &self.listener.sink;
         self.scanner.feed(bytes, |sig| {
@@ -121,7 +143,10 @@ impl Mirror {
                 self.listener.wakeup();
             },
             Marker::SyncFlush => {
-                self.parser.stop_sync(&mut *self.term.lock());
+                let mut term = self.term.lock();
+                self.parser.stop_sync(&mut *term);
+                self.sync_mode(&term);
+                drop(term);
                 self.listener.wakeup();
             },
             Marker::Exited(code) => (self.listener.sink)(TermEvent::Exit(code)),
@@ -134,6 +159,7 @@ impl Mirror {
         let mut parser = Processor::new();
         let mut term = Term::new(config(self.scrollback), &size, self.listener.clone());
         snapshot::restore(snap, &mut term, &mut parser);
+        self.sync_mode(&term);
         *self.term.lock() = term;
         self.parser = parser;
         self.scanner = OscScanner::new();
@@ -143,6 +169,11 @@ impl Mirror {
         }
         self.listener.wakeup();
     }
+}
+
+/// The mode in a [`Mirror::mode_flag`].
+pub fn mode_of(flag: &AtomicU32) -> TermMode {
+    TermMode::from_bits_truncate(flag.load(Ordering::Acquire))
 }
 
 #[cfg(test)]
@@ -210,5 +241,16 @@ mod tests {
         m.install(snap);
         assert_eq!(text(&*m.term().lock())[0], "from the daemon");
         assert!(events.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Title(t) if t == "t")));
+    }
+
+    #[test]
+    fn mode_flag_follows_the_bytes() {
+        let (mut m, _) = mirror();
+        assert!(!mode_of(m.mode_flag()).contains(TermMode::BRACKETED_PASTE));
+        m.feed(b"[?2004h");
+        assert!(mode_of(m.mode_flag()).contains(TermMode::BRACKETED_PASTE));
+        assert_eq!(mode_of(m.mode_flag()), *m.term().lock().mode());
+        m.feed(b"[?2004l");
+        assert!(!mode_of(m.mode_flag()).contains(TermMode::BRACKETED_PASTE));
     }
 }
