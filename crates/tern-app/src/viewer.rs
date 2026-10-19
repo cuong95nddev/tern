@@ -445,13 +445,12 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let name = self.path.as_ref().map(|p| p.strip_prefix(&self.root).unwrap_or(p).display().to_string()).unwrap_or_default();
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
         let is_image = self.image.is_some();
         let me = cx.entity().downgrade();
-        let scope = crate::template::Scope::new("file_header")
+        let scope = crate::template::Scope::new("viewer")
             .var("name", name)
             .var("dirty", self.dirty)
             .var("markdown", markdown)
@@ -460,10 +459,45 @@ impl Render for Viewer {
             .var("diff", diff_mode)
             .var("preview_key", crate::platform::shortcut("⌘⇧V"))
             .var("open_external_key", crate::platform::shortcut("⌘⇧O"));
-        let header = crate::template::render(
-            "file_header",
+        // What the body shows: one slot (or the message) of the template's.
+        let scope = if diff_mode && let Some(diff) = &self.diff {
+            scope.slot("diff", diff.clone())
+        } else if let Some(msg) = &self.message {
+            scope.var("message", msg.clone())
+        } else if let Some(image) = &self.image {
+            let muted = cx.theme().muted_foreground;
+            scope.slot(
+                "image",
+                img(image.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element()),
+            )
+        } else if self.mode == Mode::Preview {
+            let viewer = me.clone();
+            scope.slot(
+                "preview",
+                TextView::new(&self.preview).scrollable(true).size_full().px_4().py_2().on_link_click(move |url, _, _, cx| {
+                    let url = url.clone();
+                    let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
+                }),
+            )
+        } else {
+            scope.slot("editor", Editor::new(&self.editor).bordered(false).h_full())
+        };
+        let focus = self.focus.clone();
+        crate::template::render(
+            "viewer",
             scope,
             &mut |name, _, f| match (name, f) {
+                ("viewer", Framed::Box(d)) => d
+                    .key_context("Viewer")
+                    .track_focus(&focus)
+                    .on_action(cx.listener(Self::save))
+                    .on_action(cx.listener(Self::toggle_diff))
+                    .on_action(cx.listener(Self::toggle_preview))
+                    .on_action(cx.listener(Self::open_external))
+                    .into_any_element(),
                 ("preview", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_preview(&TogglePreview, w, cx))).into_any_element()
                 },
@@ -476,55 +510,7 @@ impl Render for Viewer {
                 (_, f) => f.into_any_element(),
             },
             cx,
-        );
-
-        let body: AnyElement = if diff_mode && let Some(diff) = &self.diff {
-            div().flex_1().min_h_0().child(diff.clone()).into_any_element()
-        } else if let Some(msg) = &self.message {
-            div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(msg.clone()).into_any_element()
-        } else if let Some(image) = &self.image {
-            let muted = theme.muted_foreground;
-            div()
-                .flex_1()
-                .min_h_0()
-                .p_4()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    img(image.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::ScaleDown)
-                        .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element()),
-                )
-                .into_any_element()
-        } else if self.mode == Mode::Preview {
-            let viewer = cx.entity().downgrade();
-            div()
-                .flex_1()
-                .min_h_0()
-                .child(TextView::new(&self.preview).scrollable(true).size_full().px_4().py_2().on_link_click(move |url, _, _, cx| {
-                    let url = url.clone();
-                    let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
-                }))
-                .into_any_element()
-        } else {
-            div().flex_1().min_h_0().child(Editor::new(&self.editor).bordered(false).h_full()).into_any_element()
-        };
-
-        div()
-            .key_context("Viewer")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::save))
-            .on_action(cx.listener(Self::toggle_diff))
-            .on_action(cx.listener(Self::toggle_preview))
-            .on_action(cx.listener(Self::open_external))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .child(header)
-            .child(body)
+        )
     }
 }
 

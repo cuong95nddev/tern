@@ -105,9 +105,23 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
      and check, tab bar, the overflow list) and every dialog (trash, restart, delete scratch, diff preview, name,
      Claude arguments, theme); action items and button items do what they did.
 7. Screenshot tool (`shot/`): needs elements first.
-8. What the phases above don't name: the agent monitor (`agent_monitor.rs`), the diff pane header (`diff_pane.rs`),
-   the scratch view (`scratch.rs`), the drag ghosts (`DraggedTab`, `DraggedGroup`, `DraggedWorkspace`,
-   `DraggedEntries`, `DraggedPart`), the tool strips (`workspace.rs` `tool_strip`).
+8. **Done (2026-10-19):** what the phases above didn't name.
+   - `viewer` (the file header, then the body: the `diff`, `image`, `preview` or `editor` slot, or `{message}`),
+     `diff_pane` (`diff` slot or `{message}`), `scratch` (a save error over the `editor` slot).
+   - The side panels' frames: `explorer`, `changes`, `scratches` (`header` and `list` slots; the panel's
+     element, background image included, is the root's). Their empty states `changes.empty` and
+     `scratches.empty` are templates now.
+   - `tool_strip.left` / `tool_strip.right` (both `use` `tool_strip`): list `parts` with `icon`, `on`, `tooltip`;
+     the `part` button toggles its panel.
+   - `agent_monitor` (+ `.workspace`, `.agent`), with elements `agent_monitor`, `.header`, `.workspace`,
+     `.agent`, `.status`, `.empty` whose defaults are the old hard-coded look. The pulsing dot is a value the
+     code gives (`dot_color`); the agent's logo stays a slot (it carries its own colors); the canvas that fits
+     the window to the panel is the `fit` slot.
+   - Drag ghosts: `drag_chip` (`label`, `icon`) for tabs, files, panels and workspaces; `drag_group` for a tab
+     group's chip. `style::drag_chip` now renders the template; `group_pill` is gone.
+   - Pixel-identical on Windows with the previous build: layout, strips and their tooltip, viewer (code, diff,
+     Markdown, image), scratch, empty panels, agent monitor with no agents, and the file, tab and group drag
+     ghosts. Not compared: the monitor's agent rows (no agent was running) and the Markdown preview body.
 
 ## User-arranged layout (parts, docks, floating)
 

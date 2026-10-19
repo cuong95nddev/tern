@@ -9,9 +9,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt as _};
+use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
 
 use crate::platform::bind;
@@ -423,7 +422,7 @@ struct DraggedWorkspace {
 
 impl Render for DraggedWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::style::drag_chip(cx).child(Icon::new(AssetIcon::FolderOpen).xsmall()).child(self.name.clone())
+        crate::style::drag_chip(self.name.clone(), Some("folder-open"), cx)
     }
 }
 

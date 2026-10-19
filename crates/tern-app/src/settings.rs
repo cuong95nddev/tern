@@ -953,6 +953,18 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
 | `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
 | `terminal` | `background` (the palette's, with `terminal.background_opacity`) | `grid` |
+| `viewer` | as `file_header`; `message` | `diff`, `image`, `preview`, `editor` (the one it shows) |
+| `diff_pane` | `message` | `diff` |
+| `scratch` | `message` | `editor` |
+| `explorer` | | `header`, `list` |
+| `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |
+| `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
+| `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
+| `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
+| `agent_monitor.workspace` | `workspace`, `name`, `dot`, `dot_color` | |
+| `agent_monitor.agent` | `name`, `idle`, `status`, `status_color`, `dot_color` | `icon` |
+| `drag_chip` | `label`, `icon` | |
+| `drag_group` | `text`, `group_color` | |
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |

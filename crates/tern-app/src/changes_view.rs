@@ -401,18 +401,22 @@ impl Render for ChangesView {
             },
             cx,
         );
-        let body: AnyElement = if self.repos.is_empty() {
-            style::el("changes.empty", cx)
-                .apply(div().flex_1().flex().items_center().justify_center())
-                .child(if self.refreshing { "Scanning…" } else { "No git repositories" })
-                .into_any_element()
-        } else {
-            style::el("changes.list", cx)
-                .apply(uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1())
-                .into_any_element()
-        };
-        let panel = style::el("changes", cx);
-        panel.container(div().track_focus(&self.focus).size_full().flex().flex_col()).child(header).child(body)
+        let mut scope =
+            template::Scope::new("changes").var("empty", self.repos.is_empty()).var("refreshing", self.refreshing).slot("header", header);
+        if !self.repos.is_empty() {
+            let list = uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1();
+            scope = scope.slot("list", style::el("changes.list", cx).apply(list));
+        }
+        let focus = &self.focus;
+        template::render(
+            "changes",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("panel", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 }
 

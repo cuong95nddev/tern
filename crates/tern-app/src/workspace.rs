@@ -11,8 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -198,7 +197,7 @@ struct DraggedTab {
 
 impl Render for DraggedTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        style::drag_chip(cx).child(self.name.clone())
+        style::drag_chip(self.name.clone(), None, cx)
     }
 }
 
@@ -212,7 +211,8 @@ struct DraggedGroup {
 
 impl Render for DraggedGroup {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        group_pill(self.name.clone(), self.color, None, cx).shadow_md()
+        let scope = template::Scope::new("drag_group").var("text", self.name.clone()).var("group_color", self.color);
+        template::render_plain("drag_group", scope, cx)
     }
 }
 
@@ -269,21 +269,6 @@ struct TabEntry {
     color: Hsla,
     /// The tab, for a drag.
     tab: Option<EntityId>,
-}
-
-/// A group's chip: its name on its color, a dot when it has no name, and
-/// `count` (its tabs) when collapsed.
-fn group_pill(name: SharedString, color: Hsla, count: Option<usize>, cx: &App) -> Div {
-    let text = match count {
-        Some(n) if name.is_empty() => n.to_string(),
-        Some(n) => format!("{name}  {n}"),
-        None => name.to_string(),
-    };
-    if text.is_empty() {
-        return div().mx_1().size(px(10.)).rounded_full().bg(color);
-    }
-    let look = style::el("pane_tab_bar.group", cx);
-    look.apply(div().flex().items_center().bg(color).whitespace_nowrap()).child(look.label(text))
 }
 
 /// A pane's tab strip scroll state.
@@ -1737,48 +1722,23 @@ impl Workspace {
         })
     }
 
-    /// The tool window buttons of one window edge, IntelliJ style: a thin
-    /// column with `top` buttons from the top and `bottom` ones from the
-    /// bottom. Each toggles its panel, so a hidden panel is one click away.
-    fn tool_strip(name: &'static str, top: Vec<Button>, bottom: Vec<Button>, cx: &mut Context<Self>) -> Div {
-        let look = style::el(name, cx);
-        let column = |b: Vec<Button>| div().flex().flex_col().items_center().gap(look.len("gap")).children(b);
-        look.container(div().h_full().flex_none().flex().flex_col().items_center().justify_between())
-            .child(column(top))
-            .child(column(bottom))
-    }
-
-    fn strip_button(id: &'static str, icon: AssetIcon, on: bool, tooltip: impl Into<SharedString>, cx: &App) -> Button {
-        style::el("tool_strip.button", cx).apply(Button::new(id).small().ghost().icon(Icon::new(icon)).selected(on).tooltip(tooltip))
-    }
-
-    /// The tool strip button of `part`.
-    fn part_button(&self, part: &str, cx: &mut Context<Self>) -> Option<Button> {
+    /// The tool strip button of `part`: its icon, whether its panel shows,
+    /// its tooltip.
+    fn part_button(&self, part: &str) -> Option<(&'static str, bool, String)> {
         let shortcut = crate::platform::shortcut;
         Some(match part {
-            "explorer" => {
-                Self::strip_button("strip-explorer", AssetIcon::Folder, self.show_explorer, format!("Explorer ({})", shortcut("⌘B")), cx)
-                    .on_click(cx.listener(|this, _, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx)))
-            },
-            "scratches" => Self::strip_button(
-                "strip-scratches",
-                AssetIcon::StickyNote,
-                self.show_scratches,
-                format!("Scratches ({})", shortcut("⌘⇧S")),
-                cx,
-            )
-            .on_click(cx.listener(|this, _, w, cx| this.toggle_scratches(&ToggleScratches, w, cx))),
-            "changes" => {
-                Self::strip_button("strip-changes", AssetIcon::GitBranch, self.show_changes, format!("Changes ({})", shortcut("⌘⇧G")), cx)
-                    .on_click(cx.listener(|this, _, w, cx| this.toggle_changes(&ToggleChanges, w, cx)))
-            },
+            "explorer" => ("folder", self.show_explorer, format!("Explorer ({})", shortcut("⌘B"))),
+            "scratches" => ("sticky-note", self.show_scratches, format!("Scratches ({})", shortcut("⌘⇧S"))),
+            "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
             _ => return None,
         })
     }
 
-    /// The `left` or `right` tool strip: a button per part in the docks it
-    /// shows, in their order (the built-in sides without an arrangement).
-    fn strip(&self, side: &str, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) -> Div {
+    /// The `left` or `right` tool strip, IntelliJ style (template
+    /// `tool_strip.<side>`): a button per part in the docks it shows, in
+    /// their order (the built-in sides without an arrangement). Each toggles
+    /// its panel, so a hidden panel is one click away.
+    fn strip(&self, side: &str, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) -> AnyElement {
         let parts: Vec<String> = match (arrangement, cx.try_global::<template::Templates>()) {
             (Some(a), Some(t)) => t
                 .docks("workspace")
@@ -1790,8 +1750,32 @@ impl Workspace {
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
             _ => vec!["changes".into()],
         };
-        let top = parts.iter().filter_map(|p| self.part_button(p, cx)).collect();
-        Self::tool_strip(if side == "left" { "tool_strip.left" } else { "tool_strip.right" }, top, vec![], cx)
+        let parts: Vec<(String, (&'static str, bool, String))> =
+            parts.into_iter().filter_map(|p| self.part_button(&p).map(|b| (p, b))).collect();
+        let items = parts
+            .iter()
+            .map(|(p, (icon, on, tooltip))| {
+                template::Scope::new("strip").var("part", p.as_str()).var("icon", *icon).var("on", *on).var("tooltip", tooltip.as_str())
+            })
+            .collect();
+        let name = if side == "left" { "tool_strip.left" } else { "tool_strip.right" };
+        let scope = template::Scope::new(name).list("parts", items);
+        template::render(
+            name,
+            scope,
+            &mut |frame, ix, f| match (frame, ix.and_then(|i| parts.get(i)), f) {
+                ("part", Some((part, _)), Framed::Button(b)) => {
+                    let toggle: fn(&mut Self, &mut Window, &mut Context<Self>) = match part.as_str() {
+                        "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
+                        "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
+                        _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
+                    };
+                    b.on_click(cx.listener(move |this, _, w, cx| toggle(this, w, cx))).into_any_element()
+                },
+                (_, _, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 
     /// The values `pane.buttons` reads for pane `pane`, on `scope`.

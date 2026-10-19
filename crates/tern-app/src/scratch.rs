@@ -5,13 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{Editor, EditorState, InputEvent};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff_pane::language_for;
 use crate::platform::bind;
+use crate::template::{self, Framed, Scope};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(400);
 
@@ -205,16 +204,14 @@ impl Scratch {
 
 impl Render for Scratch {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .key_context("Scratch")
-            .on_action(cx.listener(Self::save))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .when_some(self.message.clone(), |d, m| d.child(div().px_2().py_1().text_sm().text_color(theme.danger).child(m)))
-            .child(div().flex_1().min_h_0().child(Editor::new(&self.editor).bordered(false).h_full()))
+        let scope = Scope::new("scratch")
+            .var("message", self.message.clone().unwrap_or_default())
+            .slot("editor", Editor::new(&self.editor).bordered(false).h_full());
+        let mut frames = |name: &str, _, f| match (name, f) {
+            ("scratch", Framed::Box(d)) => d.key_context("Scratch").on_action(cx.listener(Self::save)).into_any_element(),
+            (_, f) => f.into_any_element(),
+        };
+        template::render("scratch", scope, &mut frames, cx)
     }
 }
 

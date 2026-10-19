@@ -189,13 +189,8 @@ impl Render for ScratchesView {
             },
             cx,
         );
-        let body: AnyElement = if self.files.is_empty() {
-            style::el("scratches.empty", cx)
-                .apply(div().flex_1().flex().flex_col().items_center().justify_center())
-                .child("No scratch files")
-                .child(div().text_xs().child(format!("{} to create one", crate::platform::shortcut("⌘N"))))
-                .into_any_element()
-        } else {
+        let empty = self.files.is_empty();
+        let list = (!empty).then(|| {
             div()
                 .id("scratch-list")
                 .flex_1()
@@ -232,10 +227,22 @@ impl Render for ScratchesView {
                     let scope = template::Scope::new("scratch-menu").var("reveal", crate::platform::REVEAL);
                     template::menu("menu.scratch", scope, menu, items, window, cx)
                 })
-                .into_any_element()
-        };
-        let panel = style::el("scratches", cx);
-        panel.container(div().track_focus(&self.focus).size_full().flex().flex_col()).child(header).child(body)
+        });
+        let scope = template::Scope::new("scratches")
+            .var("empty", empty)
+            .var("new_key", crate::platform::shortcut("⌘N"))
+            .slot("header", header)
+            .slot_opt("list", list);
+        let focus = &self.focus;
+        template::render(
+            "scratches",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("panel", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 }
 

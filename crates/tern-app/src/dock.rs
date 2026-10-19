@@ -30,7 +30,7 @@ pub struct DraggedPart {
 
 impl Render for DraggedPart {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        style::drag_chip(cx).child(self.title.clone())
+        style::drag_chip(self.title.clone(), None, cx)
     }
 }
 

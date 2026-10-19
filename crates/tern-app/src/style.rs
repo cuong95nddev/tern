@@ -468,6 +468,59 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element { name: "drop_zone.hover", about: "A drop zone under the pointer", groups: &[&[("background", Color, "$primary/30")]] },
+    Element {
+        name: "agent_monitor",
+        about: "The agent monitor: the small window listing the agents running in Tern's terminals",
+        groups: &[&[
+            ("padding", Len, "0.25rem"),
+            ("radius", Len, "0.5rem"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+            ("background", Color, "$background"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "agent_monitor.header",
+        about: "The agent monitor's title bar (drag it to move the window)",
+        groups: &[&[("height", Len, "1.25rem"), ("padding_left", Len, "0.25rem"), ("gap", Len, "0.25rem"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "agent_monitor.workspace",
+        about: "A workspace's line over its agents",
+        groups: &[&[
+            ("height", Len, "1.25rem"),
+            ("padding_x", Len, "0.25rem"),
+            ("gap", Len, "0.25rem"),
+            ("radius", Len, "0.25rem"),
+            ("text", Color, "$text_muted"),
+            ("hover_background", Color, "$row_hover"),
+        ]],
+    },
+    Element {
+        name: "agent_monitor.agent",
+        about: "An agent; `idle_text` is its name's color while it does nothing",
+        groups: &[&[
+            ("height", Len, "1.5rem"),
+            ("padding_left", Len, "0.75rem"),
+            ("padding_right", Len, "0.25rem"),
+            ("gap", Len, "0.375rem"),
+            ("radius", Len, "0.25rem"),
+            ("idle_text", Color, "$text_muted"),
+            ("hover_background", Color, "$row_hover"),
+        ]],
+    },
+    Element {
+        name: "agent_monitor.status",
+        about: "An agent's status (its color is the status's) and its dot",
+        groups: &[&[("gap", Len, "0.25rem"), ("font_size", Len, "10"), ("dot_size", Len, "0.375rem")]],
+    },
+    Element {
+        name: "agent_monitor.empty",
+        about: "What the agent monitor shows with no agents running",
+        groups: &[&[("padding_x", Len, "0.25rem"), ("padding_bottom", Len, "0.25rem"), ("text", Color, "$text_muted")]],
+    },
     Element { name: "dialog", about: "Prompts and confirmations", groups: &[&[("width", Len, "420"), ("wide_width", Len, "520")]] },
     Element { name: "dialog.body", about: "A dialog's message, under its title", groups: &[&[("gap", Len, "16")]] },
     Element {
@@ -1252,12 +1305,6 @@ impl El {
                 .into_any_element(),
         )
     }
-
-    /// `apply`, with the background image first when there is one (`s`
-    /// must not have children yet).
-    pub fn container<S: Styled + ParentElement>(&self, s: S) -> S {
-        self.apply(s).relative().children(self.backdrop())
-    }
 }
 
 fn set<T>(slot: &mut Option<T>, v: Option<T>) {
@@ -1283,9 +1330,14 @@ pub fn dialog_width(wide: bool, cx: &App) -> Pixels {
     el("dialog", cx).px(if wide { "wide_width" } else { "width" })
 }
 
-/// What follows the pointer while dragging (files, tabs, workspaces).
-pub fn drag_chip(cx: &App) -> Div {
-    el("drag_chip", cx).apply(div().flex().items_center())
+/// What follows the pointer while dragging (files, tabs, workspaces): template
+/// `drag_chip` with `label`, and `icon` (a Lucide name) when given.
+pub fn drag_chip(label: SharedString, icon: Option<&'static str>, cx: &App) -> AnyElement {
+    let mut scope = crate::template::Scope::new("drag_chip").var("label", label);
+    if let Some(icon) = icon {
+        scope = scope.var("icon", icon);
+    }
+    crate::template::render_plain("drag_chip", scope, cx)
 }
 
 /// The tint of a file name with this git status, the same in every panel.

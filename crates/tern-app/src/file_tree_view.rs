@@ -121,7 +121,7 @@ struct DraggedEntries {
 
 impl Render for DraggedEntries {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        style::drag_chip(cx).child(self.label.clone())
+        style::drag_chip(self.label.clone(), None, cx)
     }
 }
 
@@ -849,91 +849,94 @@ impl FileTreeView {
 
 impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel = style::el("explorer", cx);
         let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let me = cx.entity().downgrade();
         let root = self.root().to_path_buf();
-        div()
-            .key_context(CONTEXT)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::on_new_file))
-            .on_action(cx.listener(Self::on_new_folder))
-            .on_action(cx.listener(Self::on_rename))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_copy))
-            .on_action(cx.listener(Self::on_cut))
-            .on_action(cx.listener(Self::on_paste))
-            .on_action(cx.listener(Self::on_copy_path))
-            .on_action(cx.listener(Self::on_copy_relative_path))
-            .on_action(cx.listener(Self::on_reveal))
-            .on_action(cx.listener(Self::on_collapse_all))
-            .on_action(cx.listener(Self::on_refresh))
-            .on_action(cx.listener(Self::on_select_prev))
-            .on_action(cx.listener(Self::on_select_next))
-            .on_action(cx.listener(Self::on_collapse))
-            .on_action(cx.listener(Self::on_expand))
-            .on_action(cx.listener(Self::on_open))
-            .on_action(cx.listener(Self::on_open_pinned))
-            .on_action(cx.listener(Self::on_cancel))
-            .size_full()
+        let header = crate::dock::panel_header(
+            "explorer",
+            "explorer.header",
+            root_name,
+            None,
+            template::Scope::new("explorer.header.buttons").var("hide_key", crate::platform::shortcut("⌘B")),
+            &mut |name, _, f| {
+                let Framed::Button(b) = f else { return f.into_any_element() };
+                let b = match name {
+                    "new_file" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
+                        window.focus(&this.focus, cx);
+                        this.new_entry(false, window, cx);
+                    })),
+                    "new_folder" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
+                        window.focus(&this.focus, cx);
+                        this.new_entry(true, window, cx);
+                    })),
+                    "refresh" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_refresh(&Refresh, window, cx))),
+                    "collapse_all" => {
+                        b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_collapse_all(&CollapseAll, window, cx)))
+                    },
+                    "hide" => b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(FileTreeEvent::Hide))),
+                    _ => b,
+                };
+                b.into_any_element()
+            },
+            cx,
+        );
+        let list = div()
+            .id("file-tree-body")
             .relative()
-            .flex()
-            .flex_col()
-            .map(|d| panel.container(d))
-            .child(crate::dock::panel_header(
-                "explorer",
-                "explorer.header",
-                root_name,
-                None,
-                template::Scope::new("explorer.header.buttons").var("hide_key", crate::platform::shortcut("⌘B")),
-                &mut |name, _, f| {
-                    let Framed::Button(b) = f else { return f.into_any_element() };
-                    let b = match name {
-                        "new_file" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
-                            window.focus(&this.focus, cx);
-                            this.new_entry(false, window, cx);
-                        })),
-                        "new_folder" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
-                            window.focus(&this.focus, cx);
-                            this.new_entry(true, window, cx);
-                        })),
-                        "refresh" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_refresh(&Refresh, window, cx))),
-                        "collapse_all" => {
-                            b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_collapse_all(&CollapseAll, window, cx)))
-                        },
-                        "hide" => b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(FileTreeEvent::Hide))),
-                        _ => b,
-                    };
-                    b.into_any_element()
-                },
-                cx,
-            ))
+            .flex_1()
+            .min_h_0()
+            // A right click on empty space acts on the root; a row's
+            // own handler (which runs after this one) picks the row.
+            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                if ev.button == MouseButton::Right {
+                    this.right_click(None, window, cx);
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)))
+            .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)))
             .child(
-                div()
-                    .id("file-tree-body")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    // A right click on empty space acts on the root; a row's
-                    // own handler (which runs after this one) picks the row.
-                    .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                        if ev.button == MouseButton::Right {
-                            this.right_click(None, window, cx);
-                        }
-                    }))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)))
-                    .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)))
-                    .child(
-                        uniform_list("file-tree", self.display_len(), cx.processor(Self::render_rows))
-                            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                            .with_width_from_item(Some(self.widest_row()))
-                            .track_scroll(&self.scroll)
-                            .size_full(),
-                    )
-                    // Both bars, so names wider than the panel can be scrolled to.
-                    .child(Scrollbar::new(&self.scroll).id("file-tree-scrollbar"))
-                    .map(|d| style::el("explorer.list", cx).apply(d))
-                    .context_menu(move |menu, window, cx| Self::context_menu(menu, &me, window, cx)),
+                uniform_list("file-tree", self.display_len(), cx.processor(Self::render_rows))
+                    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                    .with_width_from_item(Some(self.widest_row()))
+                    .track_scroll(&self.scroll)
+                    .size_full(),
             )
+            // Both bars, so names wider than the panel can be scrolled to.
+            .child(Scrollbar::new(&self.scroll).id("file-tree-scrollbar"))
+            .map(|d| style::el("explorer.list", cx).apply(d))
+            .context_menu(move |menu, window, cx| Self::context_menu(menu, &me, window, cx));
+        let scope = template::Scope::new("explorer").slot("header", header).slot("list", list);
+        let focus = &self.focus;
+        template::render(
+            "explorer",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("panel", Framed::Box(d)) => d
+                    .key_context(CONTEXT)
+                    .track_focus(focus)
+                    .on_action(cx.listener(Self::on_new_file))
+                    .on_action(cx.listener(Self::on_new_folder))
+                    .on_action(cx.listener(Self::on_rename))
+                    .on_action(cx.listener(Self::on_delete))
+                    .on_action(cx.listener(Self::on_copy))
+                    .on_action(cx.listener(Self::on_cut))
+                    .on_action(cx.listener(Self::on_paste))
+                    .on_action(cx.listener(Self::on_copy_path))
+                    .on_action(cx.listener(Self::on_copy_relative_path))
+                    .on_action(cx.listener(Self::on_reveal))
+                    .on_action(cx.listener(Self::on_collapse_all))
+                    .on_action(cx.listener(Self::on_refresh))
+                    .on_action(cx.listener(Self::on_select_prev))
+                    .on_action(cx.listener(Self::on_select_next))
+                    .on_action(cx.listener(Self::on_collapse))
+                    .on_action(cx.listener(Self::on_expand))
+                    .on_action(cx.listener(Self::on_open))
+                    .on_action(cx.listener(Self::on_open_pinned))
+                    .on_action(cx.listener(Self::on_cancel))
+                    .into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 }

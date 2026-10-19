@@ -4,14 +4,12 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 use crate::agents::Agent;
 use crate::main_window;
+use crate::template::{self, Framed, Scope};
 use crate::terminal_view::ActivityStatus;
 use crate::workspace::Workspace;
 
@@ -256,34 +254,26 @@ fn next_pulse_step(t: f32) -> f32 {
     next - t
 }
 
-/// A status dot; it pulses while working (`phase` is the pulse's place in
-/// its cycle).
-fn status_dot(status: ActivityStatus, phase: f32, color: Hsla) -> Div {
-    let color = if status == ActivityStatus::Working { color.opacity(pulse(phase)) } else { color };
-    div().flex_shrink_0().size_1p5().rounded_full().bg(color)
+/// A status dot's color: it pulses while working (`phase` is the pulse's
+/// place in its cycle).
+fn dot_color(status: ActivityStatus, phase: f32, color: Hsla) -> Hsla {
+    if status == ActivityStatus::Working { color.opacity(pulse(phase)) } else { color }
 }
 
-/// A row's status: a dot and a word, with a timer while working. Nothing
-/// when idle.
-fn status_pill(e: &Entry, phase: f32, color: Hsla) -> Option<AnyElement> {
-    let label = match e.status {
+/// A row's status word, with a timer while working. None when idle.
+fn status_label(e: &Entry) -> Option<String> {
+    Some(match e.status {
         ActivityStatus::Working => e.since.map_or("Working".to_owned(), |t| format!("Working {}", elapsed_label(t))),
         ActivityStatus::Blocked => "Awaiting".to_owned(),
         ActivityStatus::Done => "Completed".to_owned(),
         ActivityStatus::None => return None,
-    };
-    Some(
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_size(px(10.))
-            .text_color(color)
-            .child(status_dot(e.status, phase, color))
-            .child(label)
-            .into_any_element(),
-    )
+    })
+}
+
+/// What a row of the list does when clicked.
+enum Row {
+    Workspace(AnyWindowHandle, Entity<Workspace>),
+    Agent(AnyWindowHandle, Entity<Workspace>, EntityId),
 }
 
 impl Render for Monitor {
@@ -300,78 +290,31 @@ impl Render for Monitor {
             .map(|(n, what)| format!("{n} {what}"))
             .collect::<Vec<_>>()
             .join(" · ");
-        // The header moves the window: the system drags it on Windows, the
-        // mouse down starts the move elsewhere.
-        let header = div()
-            .id("monitor-header")
-            .flex()
-            .items_center()
-            .gap_1()
-            .pl_1()
-            .h_5()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(Icon::new(AssetIcon::Bot).xsmall())
-            .child(div().flex_1().truncate().child(if summary.is_empty() { "Agents".to_owned() } else { summary }))
-            .child(Button::new("close").icon(IconName::Close).ghost().xsmall().on_click(|_, _, cx| {
-                hide(cx);
-            }));
-        // Grouped by workspace: a label (which shows it) over its agents.
-        let mut rows = Vec::new();
+        // Grouped by workspace: a line (which shows it) over its agents.
+        let (mut rows, mut items) = (Vec::new(), Vec::new());
         let mut group = None;
-        for (i, e) in entries.iter().enumerate() {
+        for e in &entries {
             if group != Some(e.ws.entity_id()) {
                 group = Some(e.ws.entity_id());
-                let (handle, ws) = (e.handle, e.ws.clone());
                 let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| priority(*s));
-                let top = top.filter(|s| *s != ActivityStatus::None);
-                rows.push(
-                    div()
-                        .id(("workspace", i))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .h_5()
-                        .px_1()
-                        .rounded_sm()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.list_hover))
-                        .child(Icon::new(AssetIcon::FolderOpen).xsmall())
-                        .child(div().flex_1().min_w_0().truncate().child(e.workspace.clone()))
-                        .when_some(top, |d, s| d.child(status_dot(s, phase, status_color(s, cx))))
-                        .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx))
-                        .into_any_element(),
-                );
+                let mut item = Scope::new("workspace").var("workspace", true).var("name", e.workspace.as_str());
+                if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
+                    item = item.var("dot", true).var("dot_color", dot_color(s, phase, status_color(s, cx)));
+                }
+                items.push(item);
+                rows.push(Row::Workspace(e.handle, e.ws.clone()));
             }
             let color = status_color(e.status, cx);
-            let name = display_name(&e.title, e.agent);
-            let (handle, ws, tab) = (e.handle, e.ws.clone(), e.tab);
-            let idle = e.status == ActivityStatus::None;
-            rows.push(
-                div()
-                    .id(("agent", i))
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .h_6()
-                    .pl_3()
-                    .pr_1()
-                    .rounded_sm()
-                    .text_xs()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.list_hover))
-                    .child(e.agent.icon(&theme))
-                    .child(div().flex_1().min_w_0().truncate().when(idle, |d| d.text_color(theme.muted_foreground)).child(name))
-                    .children(status_pill(e, phase, color))
-                    .on_click(move |_, _, cx| jump(handle, ws.clone(), tab, cx))
-                    .into_any_element(),
-            );
+            let mut item = Scope::new("agent")
+                .var("name", display_name(&e.title, e.agent))
+                .var("idle", e.status == ActivityStatus::None)
+                .slot("icon", e.agent.icon(&theme));
+            if let Some(label) = status_label(e) {
+                item = item.var("status", label).var("status_color", color).var("dot_color", dot_color(e.status, phase, color));
+            }
+            items.push(item);
+            rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
         }
-        let empty = rows.is_empty();
         // Fit the window to the panel's height, which changes with the list.
         let fit = canvas(
             |bounds, window, cx| {
@@ -385,21 +328,44 @@ impl Render for Monitor {
         )
         .absolute()
         .inset_0();
-        div()
-            .relative()
-            .w_full()
-            .flex()
-            .flex_col()
-            .p_1()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .child(header)
-            .when(empty, |d| d.child(div().px_1().pb_1().text_xs().text_color(theme.muted_foreground).child("No agents running")))
-            .children(rows)
-            .child(fit)
+        let scope =
+            Scope::new("agent_monitor").var("summary", summary).var("agents", !entries.is_empty()).list("rows", items).slot("fit", fit);
+        let panel = template::render(
+            "agent_monitor",
+            scope,
+            &mut |name, ix, f| match (name, ix.and_then(|i| rows.get(i)), f) {
+                // The header moves the window: the system drags it on Windows,
+                // the mouse down starts the move elsewhere.
+                ("header", _, Framed::Box(d)) => d
+                    .id("monitor-header")
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+                    .into_any_element(),
+                ("close", _, Framed::Button(b)) => b
+                    .on_click(|_, _, cx| {
+                        hide(cx);
+                    })
+                    .into_any_element(),
+                ("workspace", Some(Row::Workspace(handle, ws)), Framed::Box(d)) => {
+                    let (handle, ws) = (*handle, ws.clone());
+                    d.id(("workspace", ix.unwrap_or(0)))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx))
+                        .into_any_element()
+                },
+                ("agent", Some(Row::Agent(handle, ws, tab)), Framed::Box(d)) => {
+                    let (handle, ws, tab) = (*handle, ws.clone(), *tab);
+                    d.id(("agent", ix.unwrap_or(0)))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| jump(handle, ws.clone(), tab, cx))
+                        .into_any_element()
+                },
+                (_, _, f) => f.into_any_element(),
+            },
+            cx,
+        );
+        // The window is the panel's width; its height follows the panel.
+        div().w_full().child(panel)
     }
 }
 

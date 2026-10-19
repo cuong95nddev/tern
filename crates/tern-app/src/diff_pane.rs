@@ -3,11 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_kit::component::highlighter::Language;
 use gpui_kit::*;
 use tern_fs::ChangeBatch;
+
+use crate::template::{self, Framed, Scope};
 
 pub fn language_for(path: &Path) -> SharedString {
     let ext = path.extension().and_then(|e| e.to_str()).or_else(|| path.file_name().and_then(|n| n.to_str())).unwrap_or("");
@@ -78,17 +79,20 @@ impl DiffPane {
 
 impl Render for DiffPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body: AnyElement = match (&self.message, &self.diff) {
-            (None, Some(diff)) => Diff::new(diff).line_number(true).syntax_highlight(true).into_any_element(),
-            (msg, _) => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(msg.clone().unwrap_or_default())
-                .into_any_element(),
+        let scope = Scope::new("diff_pane");
+        let scope = match (&self.message, &self.diff) {
+            (None, Some(diff)) => scope.slot("diff", Diff::new(diff).line_number(true).syntax_highlight(true)),
+            (msg, _) => scope.var("message", msg.clone().unwrap_or_default()),
         };
-        div().track_focus(&self.focus).size_full().min_h_0().bg(cx.theme().background).child(body)
+        let focus = &self.focus;
+        template::render(
+            "diff_pane",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("diff_pane", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 }

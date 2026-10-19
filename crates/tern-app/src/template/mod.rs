@@ -700,6 +700,11 @@ const SLOTS: &[&str] = &[
     "grid",
     "diff",
     "list",
+    "header",
+    "image",
+    "preview",
+    "editor",
+    "fit",
 ];
 
 /// The parts a template may name.

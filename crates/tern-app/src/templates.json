@@ -1050,6 +1050,203 @@
     "style": { "background": "{background}" },
     "children": [{ "slot": "grid" }]
   },
+  "tool_strip": {
+    "element": "$element",
+    "shrink": 0,
+    "align": "center",
+    "justify": "between",
+    "children": [
+      {
+        "align": "center",
+        "style": { "gap": "$element.gap" },
+        "each": "parts",
+        "item": {
+          "button": "part",
+          "element": "tool_strip.button",
+          "size": "small",
+          "icon": "{icon}",
+          "selected": "on",
+          "tooltip": "{tooltip}"
+        }
+      },
+      { "align": "center", "style": { "gap": "$element.gap" } }
+    ]
+  },
+  "tool_strip.left": { "use": "tool_strip", "element": "tool_strip.left" },
+  "tool_strip.right": { "use": "tool_strip", "element": "tool_strip.right" },
+  "agent_monitor": {
+    "element": "agent_monitor",
+    "children": [
+      {
+        "frame": "header",
+        "element": "agent_monitor.header",
+        "layout": "row",
+        "align": "center",
+        "children": [
+          { "icon": "bot", "style": { "width": "0.75rem", "height": "0.75rem" } },
+          { "when": "summary", "grow": 1, "truncate": true, "text": "{summary}" },
+          { "when": "!summary", "grow": 1, "truncate": true, "text": "Agents" },
+          { "button": "close", "size": "xsmall", "icon": "close" }
+        ]
+      },
+      { "when": "!agents", "element": "agent_monitor.empty", "text": "No agents running" },
+      {
+        "each": "rows",
+        "item": {
+          "children": [
+            { "when": "workspace", "use": "agent_monitor.workspace" },
+            { "when": "!workspace", "use": "agent_monitor.agent" }
+          ]
+        }
+      },
+      { "slot": "fit" }
+    ]
+  },
+  "agent_monitor.workspace": {
+    "frame": "workspace",
+    "element": "agent_monitor.workspace",
+    "layout": "row",
+    "align": "center",
+    "states": { "hover": { "background": "$agent_monitor.workspace.hover_background" } },
+    "children": [
+      { "icon": "folder-open", "style": { "width": "0.75rem", "height": "0.75rem" } },
+      { "grow": 1, "truncate": true, "text": "{name}" },
+      {
+        "when": "dot",
+        "shrink": 0,
+        "style": { "width": "$agent_monitor.status.dot_size", "height": "$agent_monitor.status.dot_size", "radius": 9999, "background": "{dot_color}" }
+      }
+    ]
+  },
+  "agent_monitor.agent": {
+    "frame": "agent",
+    "element": "agent_monitor.agent",
+    "layout": "row",
+    "align": "center",
+    "states": { "hover": { "background": "$agent_monitor.agent.hover_background" } },
+    "children": [
+      { "slot": "icon" },
+      { "grow": 1, "truncate": true, "text": "{name}", "states": { "idle": { "text": "$agent_monitor.agent.idle_text" } } },
+      {
+        "when": "status",
+        "element": "agent_monitor.status",
+        "shrink": 0,
+        "layout": "row",
+        "align": "center",
+        "style": { "text": "{status_color}" },
+        "children": [
+          {
+            "shrink": 0,
+            "style": { "width": "$agent_monitor.status.dot_size", "height": "$agent_monitor.status.dot_size", "radius": 9999, "background": "{dot_color}" }
+          },
+          { "text": "{status}" }
+        ]
+      }
+    ]
+  },
+  "viewer": {
+    "frame": "viewer",
+    "fill": true,
+    "style": { "background": "$background" },
+    "children": [
+      { "use": "file_header" },
+      { "grow": 1, "slot": "diff" },
+      {
+        "when": "message",
+        "grow": 1,
+        "layout": "row",
+        "align": "center",
+        "justify": "center",
+        "style": { "text": "$text_muted" },
+        "text": "{message}"
+      },
+      { "grow": 1, "layout": "row", "align": "center", "justify": "center", "style": { "padding": 16 }, "slot": "image" },
+      { "grow": 1, "slot": "preview" },
+      { "grow": 1, "slot": "editor" }
+    ]
+  },
+  "diff_pane": {
+    "frame": "diff_pane",
+    "fill": true,
+    "style": { "background": "$background", "min_height": 0 },
+    "children": [
+      { "slot": "diff" },
+      {
+        "when": "message",
+        "fill": true,
+        "layout": "row",
+        "align": "center",
+        "justify": "center",
+        "style": { "text": "$text_muted" },
+        "text": "{message}"
+      }
+    ]
+  },
+  "scratch": {
+    "frame": "scratch",
+    "fill": true,
+    "style": { "background": "$background" },
+    "children": [
+      { "when": "message", "style": { "padding_x": 8, "padding_y": 4, "font_size": "$text_sm", "text": "$danger" }, "text": "{message}" },
+      { "grow": 1, "slot": "editor" }
+    ]
+  },
+  "explorer": {
+    "frame": "panel",
+    "element": "explorer",
+    "fill": true,
+    "children": [{ "slot": "header" }, { "slot": "list" }]
+  },
+  "changes": {
+    "frame": "panel",
+    "element": "changes",
+    "fill": true,
+    "children": [{ "slot": "header" }, { "when": "empty", "use": "changes.empty" }, { "slot": "list" }]
+  },
+  "changes.empty": {
+    "element": "changes.empty",
+    "grow": 1,
+    "layout": "row",
+    "align": "center",
+    "justify": "center",
+    "children": [{ "when": "refreshing", "text": "Scanning…" }, { "when": "!refreshing", "text": "No git repositories" }]
+  },
+  "scratches": {
+    "frame": "panel",
+    "element": "scratches",
+    "fill": true,
+    "children": [{ "slot": "header" }, { "when": "empty", "use": "scratches.empty" }, { "slot": "list" }]
+  },
+  "scratches.empty": {
+    "element": "scratches.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "No scratch files" }, { "style": { "font_size": "$text_xs" }, "text": "{new_key} to create one" }]
+  },
+  "drag_chip": {
+    "element": "drag_chip",
+    "layout": "row",
+    "align": "center",
+    "children": [{ "when": "icon", "icon": "{icon}", "style": { "width": 12, "height": 12 } }, { "text": "{label}" }]
+  },
+  "drag_group": {
+    "children": [
+      {
+        "when": "!text",
+        "style": { "width": 10, "height": 10, "margin_x": 4, "radius": 99, "background": "{group_color}", "shadow": "md" }
+      },
+      {
+        "when": "text",
+        "element": "pane_tab_bar.group",
+        "layout": "row",
+        "align": "center",
+        "nowrap": true,
+        "text": "{text}",
+        "style": { "background": "{group_color}", "shadow": "md" }
+      }
+    ]
+  },
   "dialog.trash": {
     "element": "dialog.body",
     "children": [
