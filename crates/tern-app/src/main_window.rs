@@ -489,8 +489,7 @@ pub struct MainWindow {
     /// Where the window is, for the saved session.
     placement: Option<(String, WindowBounds)>,
     focus: FocusHandle,
-    /// The application menus, drawn by the window off macOS (see `menus`).
-    #[cfg(not(target_os = "macos"))]
+    /// Keeps the window's bounds and activation observed.
     _subs: Vec<Subscription>,
     _save_placement: Task<()>,
     /// The agents panel's next redraw for its times: in a second (while an
@@ -574,7 +573,6 @@ impl MainWindow {
             title: String::new(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
-            #[cfg(not(target_os = "macos"))]
             _subs: vec![bounds_sub, activation_sub],
             _save_placement: Task::ready(()),
             _tick: None,
