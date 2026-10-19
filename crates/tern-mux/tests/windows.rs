@@ -28,7 +28,7 @@ fn spawn_detach_reattach() {
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
     let s = c.open(
-        Open::Spawn { cfg: ps("Write-Host before; $x = Read-Host; Write-Host after:$x; Read-Host"), hook: false },
+        Open::Spawn { cfg: ps("Write-Host before; $x = Read-Host; Write-Host after:$x; Read-Host"), hook: false, seed: None },
         SIZE,
         1000,
         sink1,
@@ -58,7 +58,7 @@ fn exit_code_is_reported() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("$null = Read-Host; exit 4"), hook: false }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("$null = Read-Host; exit 4"), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     s.write(b"\r".to_vec());
     wait_until("exit", || ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(4)))));
@@ -69,7 +69,7 @@ fn hook_settings_are_substituted() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Get-Content -Raw {tern-settings}; Read-Host"), hook: true }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Get-Content -Raw {tern-settings}; Read-Host"), hook: true, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let token = ev.lock().unwrap().iter().find_map(|e| match e {
         TermEvent::Ready { token, .. } => token.clone(),
@@ -88,7 +88,7 @@ fn quiet_session_keeps_its_connection() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     std::thread::sleep(Duration::from_secs(5));
     assert!(c.alive(), "the connection dropped while the program was quiet");
@@ -106,6 +106,8 @@ fn second_daemon_refuses_the_dir() {
         hooks: false,
         max_queued: 1 << 20,
         max_queued_session: usize::MAX,
+        #[cfg(unix)]
+        successor: None,
     };
     assert_eq!(serve(&d.dir, opts).unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
     assert!(std::fs::metadata(d.dir.join(format!("server-{MAJOR}.lock"))).is_ok());
@@ -116,7 +118,7 @@ fn idle_daemon_exits() {
     let mut d = daemon(Duration::from_millis(300));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     s.close();
     drop(c);
@@ -128,7 +130,7 @@ fn ended_programs_keep_the_daemon_a_while() {
     let mut d = daemon(Duration::from_millis(200));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("exit 3"), hook: false }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("exit 3"), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     wait_until("exited", || c.list().unwrap().iter().any(|i| i.id == id && i.exited));
@@ -151,4 +153,29 @@ fn pid_file_names_the_daemon_while_it_runs() {
     assert_eq!(pid, std::process::id().to_string());
     d.thread.take().unwrap().join().unwrap().unwrap();
     assert!(!tern_mux::paths::pid_path(&d.dir).exists());
+}
+
+#[test]
+fn a_seeded_terminal_starts_below_the_old_screen() {
+    use tern_term::vt::term::{Config, Term};
+    use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
+    let mut old = Term::new(Config::default(), &SIZE, tern_term::vt::event::VoidListener);
+    Processor::<StdSyncHandler>::new().advance(&mut old, b"old line one\r\nold line two\r\nPS> ");
+    let snap = tern_term::snapshot::capture(&mut old, SIZE, None, Default::default());
+    let seed = tern_mux::proto::pack_snapshot(&snap).unwrap();
+
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: ps("Write-Host fresh; Read-Host"), hook: false, seed: Some(seed) }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("output", || screen(&s).contains("fresh"));
+    let term = s.term().lock();
+    let g = term.grid();
+    let history: Vec<String> = (1..=g.history_size() as i32)
+        .rev()
+        .map(|l| g[Line(-l)].into_iter().map(|c| c.c).collect::<String>().trim_end().to_owned())
+        .collect();
+    let at = history.iter().position(|l| l == "old line one").unwrap_or_else(|| panic!("{history:?}"));
+    assert_eq!(history[at + 1], "old line two");
 }

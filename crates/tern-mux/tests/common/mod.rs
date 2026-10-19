@@ -26,8 +26,16 @@ pub fn daemon(idle: Duration) -> Daemon {
 pub fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize) -> Daemon {
     let tmp = short_tempdir();
     let dir = tmp.path().join("m");
-    let opts =
-        ServeOpts { idle_exit: idle, notifications: false, run_root: tmp.path().join("run"), hooks: true, max_queued, max_queued_session };
+    let opts = ServeOpts {
+        idle_exit: idle,
+        notifications: false,
+        run_root: tmp.path().join("run"),
+        hooks: true,
+        max_queued,
+        max_queued_session,
+        #[cfg(unix)]
+        successor: None,
+    };
     let d = dir.clone();
     let thread = std::thread::spawn(move || serve(&d, opts));
     wait_until("socket", || paths::socket_path(&dir).exists());

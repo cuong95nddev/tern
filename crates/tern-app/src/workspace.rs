@@ -1458,6 +1458,13 @@ impl Workspace {
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
             },
+            // A Claude tab starting again resumes its conversation; if that
+            // fails at once, a new one starts (see `Exited`).
+            TerminalEvent::Restored => {
+                if let Some(t) = self.term_tab_mut(view) {
+                    t.resuming = t.kind == TabKind::Claude && t.session.is_some();
+                }
+            },
             TerminalEvent::Exited { code, quick, live } => {
                 // Claude ended on purpose (/exit): the tab goes on as a
                 // shell, as if Claude had been started from one.
@@ -1588,7 +1595,8 @@ impl Workspace {
         };
         if ev.session_id.is_some() && tab.session != ev.session_id {
             tab.session = ev.session_id.clone();
-            // Any later start (Enter, a daemon restart) resumes this one.
+            // Should Claude have to start again (Enter, its daemon
+            // restarted), it resumes this conversation.
             if tab.kind == TabKind::Claude {
                 let view = tab.view.clone();
                 let (cfg, _) = Self::spawn_config(TabKind::Claude, ev.session_id.as_deref(), &tab.cwd);

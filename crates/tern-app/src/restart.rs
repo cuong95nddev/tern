@@ -1,8 +1,10 @@
 //! Restart Background Terminals: end the daemon (and every program in it)
 //! so a new one, of this version, runs them. An update otherwise keeps the
 //! old daemon until its last terminal ends, and a daemon can also get stuck.
-//! At launch an outdated daemon that still runs programs, or one of an older
-//! protocol (whose terminals no window can show), is offered for a restart.
+//! At launch an outdated daemon that still runs programs hands them to a new
+//! one where it can (Unix); otherwise it, or one of an older protocol (whose
+//! terminals no window can show), is offered for a restart. Restarted tabs
+//! come back in their folders, below what they showed (see `TerminalView`).
 
 use std::time::{Duration, Instant};
 
@@ -81,15 +83,25 @@ pub fn confirm(window: &mut Window, cx: &mut App) {
     .detach();
 }
 
-/// At launch: offer a restart when the background runs an older Tern
-/// whose terminals would otherwise keep it for good.
+/// At launch: move the terminals of a background server that runs an older
+/// Tern to one of this build (macOS and Linux, from servers that know how);
+/// else offer a restart, as its terminals would otherwise keep it for good.
 pub fn check_at_launch(cx: &mut App) {
     let mux = cx.global::<AppServices>().0.mux.clone();
     let task = cx.background_spawn(async move {
-        let o = outlook(&mux);
+        #[allow(unused_mut)]
+        let mut o = outlook(&mux);
         // No program to lose: the next connection replaces it quietly.
         if o.outdated.is_some() && o.live == 0 {
             let _ = mux.get();
+        }
+        // Their programs keep running; the tabs reattach.
+        #[cfg(unix)]
+        if o.outdated.is_some() && o.live > 0 {
+            match mux.hand_off() {
+                Ok(()) => o.outdated = None,
+                Err(e) => log::warn!("can't move the background terminals to this build: {e}"),
+            }
         }
         o
     });
@@ -124,8 +136,8 @@ fn open(o: &Outlook, at_launch: bool, window: &mut Window, cx: &mut App) {
         ds => format!(" {} older Tern background servers also still run terminals that no window can show; they end too.", ds.len()),
     };
     let text = format!(
-        "{what}{server}{others} Restarting ends every program in them, in all windows, and starts the tabs again \
-         (a Claude Code conversation can be picked up with /resume)."
+        "{what}{server}{others} Restarting ends every program in them, in all windows. The tabs start again \
+         in the folders they were in, and Claude Code conversations resume."
     );
     let (title, later) =
         if at_launch { ("Background Terminals Run an Older Tern", "Later") } else { ("Restart Background Terminals", "Cancel") };

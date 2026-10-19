@@ -92,17 +92,25 @@ pub type HookSink = Arc<dyn Fn(HookEvent) + Send + Sync>;
 pub struct HookServer {
     port: u16,
     tokens: Arc<Mutex<HashSet<String>>>,
+    /// Kept to hand to another process (a daemon taking over).
+    listener: Arc<TcpListener>,
 }
 
 impl HookServer {
     pub fn start(sink: HookSink) -> std::io::Result<Self> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        Self::serve(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?, sink, [])
+    }
+
+    /// Serve on `listener` (another process's, handed over) with the tokens
+    /// it already gave out.
+    pub fn serve(listener: TcpListener, sink: HookSink, tokens: impl IntoIterator<Item = String>) -> std::io::Result<Self> {
         let port = listener.local_addr()?.port();
-        let tokens: Arc<Mutex<HashSet<String>>> = Default::default();
+        let tokens: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(tokens.into_iter().collect()));
         let t = tokens.clone();
         let active = Arc::new(AtomicUsize::new(0));
+        let accept = listener.try_clone()?;
         thread::Builder::new().name("hook-server".into()).spawn(move || {
-            for stream in listener.incoming().flatten() {
+            for stream in accept.incoming().flatten() {
                 // Bound concurrent connections so a local flood can't exhaust threads.
                 if active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -115,7 +123,12 @@ impl HookServer {
                 });
             }
         })?;
-        Ok(Self { port, tokens })
+        Ok(Self { port, tokens, listener: Arc::new(listener) })
+    }
+
+    /// The listening socket.
+    pub fn listener(&self) -> &TcpListener {
+        &self.listener
     }
 
     pub fn port(&self) -> u16 {
@@ -174,6 +187,16 @@ pub fn remove_claude_settings(dir: &std::path::Path, token: &str) {
     let _ = std::fs::remove_file(dir.join(format!("claude-settings-{token}.json")));
 }
 
+/// The file in a run dir that names the process using it, when that isn't
+/// the one it is named for (a daemon that took over another's sessions).
+const RUN_DIR_OWNER: &str = "owner";
+
+/// Mark run dir `dir` (created if needed) as this process's.
+pub fn claim_run_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(RUN_DIR_OWNER), std::process::id().to_string())
+}
+
 /// Drop what earlier Tern processes left in `root` (the parent of every
 /// process's own run dir, named by its pid): the dirs of processes no longer
 /// running, and 0.1.0's loose settings files once they are a day old.
@@ -183,7 +206,8 @@ pub fn sweep_run_dirs(root: &std::path::Path) {
         let name = e.file_name().to_string_lossy().into_owned();
         let Ok(ft) = e.file_type() else { continue };
         if ft.is_dir() {
-            if let Ok(pid) = name.parse::<i32>()
+            let owner = std::fs::read_to_string(e.path().join(RUN_DIR_OWNER)).ok().and_then(|s| s.trim().parse::<i32>().ok());
+            if let Some(pid) = owner.or_else(|| name.parse::<i32>().ok())
                 && !process_alive(pid)
             {
                 let _ = std::fs::remove_dir_all(e.path());
@@ -315,6 +339,23 @@ mod tests {
         assert!(me.exists());
         assert!(!dead.exists());
         assert!(root.join("claude-settings-new.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_claimed_run_dir_follows_its_owner() {
+        let root = std::env::temp_dir().join(format!("tern-claim-{}", std::process::id()));
+        // Named for a process that is gone, used by one that runs.
+        let adopted = root.join(i32::MAX.to_string());
+        super::claim_run_dir(&adopted).unwrap();
+        super::sweep_run_dirs(&root);
+        assert!(adopted.exists());
+        // Named for a process that runs, claimed by one that is gone.
+        let me = root.join(std::process::id().to_string());
+        std::fs::create_dir_all(&me).unwrap();
+        std::fs::write(me.join("owner"), i32::MAX.to_string()).unwrap();
+        super::sweep_run_dirs(&root);
+        assert!(!me.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

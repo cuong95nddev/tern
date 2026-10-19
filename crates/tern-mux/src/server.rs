@@ -11,12 +11,16 @@
 //! Observers (the menu bar agent, the web server) watch the session list,
 //! ask for a session to be shown and may view sessions beside their owner;
 //! they don't keep the daemon alive.
+//!
+//! On Unix a daemon can hand its sessions to a daemon of a newer build
+//! (`tern --server --adopt`, see [`Server::hand_off`] and [`adopt`]): the
+//! programs keep running and the UIs reattach to the new daemon.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -29,9 +33,13 @@ use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
 use tern_term::{SpawnConfig, TermSize};
 
+#[cfg(unix)]
+use crate::host::Paused;
 use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
 use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+#[cfg(unix)]
+use crate::proto::{HANDOFF_VERSION, HandedSession, HandoffMsg};
 use crate::{UnixListener, UnixStream};
 
 /// Queued output a client may fall behind by, over all its sessions, before
@@ -55,6 +63,17 @@ type PassedPty = std::convert::Infallible;
 pub const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 /// A watcher's list asks the OS about processes every this many checks.
 const WATCH_SCANS_EVERY: u32 = 8;
+/// How long either daemon waits for the other's next step in a handoff.
+#[cfg(unix)]
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
+/// The fd an adopting daemon gets its predecessor's socket on.
+#[cfg(unix)]
+const ADOPT_FD: std::os::fd::RawFd = 3;
+
+/// Starts the daemon that adopts the sessions on a handoff, from the given
+/// executable: the socket to it, and how to end it if the handoff fails.
+#[cfg(unix)]
+pub type Successor = Arc<dyn Fn(&Path) -> io::Result<(UnixStream, Box<dyn FnOnce() + Send>)> + Send + Sync>;
 
 pub struct ServeOpts {
     /// Exit after this long with no sessions and no client.
@@ -69,9 +88,28 @@ pub struct ServeOpts {
     pub max_queued: usize,
     /// Output one session may fall behind by before it is detached.
     pub max_queued_session: usize,
+    /// How a handoff starts the new daemon (`None`: `<exe> --server --adopt`).
+    #[cfg(unix)]
+    pub successor: Option<Successor>,
 }
 
-/// `tern --server`: serve until idle.
+impl ServeOpts {
+    fn daemon() -> Self {
+        Self {
+            idle_exit: Duration::from_secs(10),
+            notifications: true,
+            run_root: paths::run_root(),
+            hooks: true,
+            max_queued: MAX_QUEUED,
+            max_queued_session: MAX_QUEUED_SESSION,
+            #[cfg(unix)]
+            successor: None,
+        }
+    }
+}
+
+/// `tern --server`: serve until idle (`--adopt`: take over the sessions of
+/// the daemon that started this one first).
 pub fn run() -> ! {
     // SAFETY: plain signal dispositions, set before any thread starts.
     #[cfg(unix)]
@@ -79,15 +117,21 @@ pub fn run() -> ! {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGINT, libc::SIG_IGN);
     }
-    let opts = ServeOpts {
-        idle_exit: Duration::from_secs(10),
-        notifications: true,
-        run_root: paths::run_root(),
-        hooks: true,
-        max_queued: MAX_QUEUED,
-        max_queued_session: MAX_QUEUED_SESSION,
+    let opts = ServeOpts::daemon();
+    #[cfg(unix)]
+    let result = if std::env::args().any(|a| a == "--adopt") {
+        // SAFETY: the daemon that started us passed its end of a socketpair
+        // as this fd, and nothing else owns it.
+        let stream = unsafe { <UnixStream as std::os::fd::FromRawFd>::from_raw_fd(ADOPT_FD) };
+        // SAFETY: plain fcntl; programs we start mustn't inherit it.
+        unsafe { libc::fcntl(ADOPT_FD, libc::F_SETFD, libc::FD_CLOEXEC) };
+        adopt(&paths::mux_dir(), opts, stream)
+    } else {
+        serve(&paths::mux_dir(), opts)
     };
-    let code = match serve(&paths::mux_dir(), opts) {
+    #[cfg(windows)]
+    let result = serve(&paths::mux_dir(), opts);
+    let code = match result {
         Ok(()) => 0,
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
             log::info!("another daemon is running");
@@ -127,17 +171,46 @@ struct State {
     connecting: usize,
     /// When the daemon last had neither running programs nor clients.
     idle_since: Option<Instant>,
-    /// Decided to exit: new connections are turned away.
+    /// Decided to exit (or handing off): new connections are turned away.
     exiting: bool,
+    /// Handing the sessions to another daemon: no new ones start.
+    handing_off: bool,
+}
+
+/// Why a daemon stops serving.
+enum End {
+    Idle,
+    /// Another daemon serves its sessions now (and owns its files).
+    #[cfg(unix)]
+    HandedOff,
+}
+
+/// How the hook server starts.
+enum Hooks {
+    Off,
+    Start,
+    /// On a listener handed over, with the tokens it gave out.
+    #[cfg(unix)]
+    Adopt(std::net::TcpListener, Vec<String>),
 }
 
 pub(crate) struct Server {
     state: Mutex<State>,
     hooks: Option<HookServer>,
+    sock: PathBuf,
+    pid_file: PathBuf,
     run_dir: PathBuf,
     notifications: bool,
     max_queued: usize,
     max_queued_session: usize,
+    /// The daemon lock, handed over with the sessions.
+    #[cfg_attr(windows, allow(dead_code))]
+    lock: Mutex<Option<File>>,
+    /// The accept loops stop.
+    stopped: AtomicBool,
+    end: Mutex<Option<Sender<End>>>,
+    #[cfg(unix)]
+    successor: Option<Successor>,
 }
 
 /// Serve on `dir` until idle for `opts.idle_exit`. Fails with `AddrInUse`
@@ -146,11 +219,9 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     paths::ensure_private_dir(dir)?;
     // Before an update can replace the executable.
     paths::build_id();
-    let _lock = lock(&paths::lock_path(dir))?;
+    let lock = lock(&paths::lock_path(dir))?;
     let pid_file = paths::pid_path(dir);
-    if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
-        log::warn!("can't write {}: {e}", pid_file.display());
-    }
+    write_pid(&pid_file);
     let sock = paths::socket_path(dir);
     match UnixStream::connect(&sock) {
         Ok(_) => return Err(io::ErrorKind::AddrInUse.into()),
@@ -161,107 +232,17 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
     let listener = UnixListener::bind(&sock)?;
     tern_bridge::sweep_run_dirs(&opts.run_root);
     let run_dir = opts.run_root.join(std::process::id().to_string());
-
-    let server = Arc::new_cyclic(|weak: &Weak<Server>| {
-        let hooks = opts
-            .hooks
-            .then(|| {
-                let weak = weak.clone();
-                HookServer::start(Arc::new(move |ev: HookEvent| {
-                    if let Some(s) = weak.upgrade() {
-                        s.on_hook(ev);
-                    }
-                }))
-                .map_err(|e| log::warn!("hook server unavailable: {e}"))
-                .ok()
-            })
-            .flatten();
-        Server {
-            state: Mutex::new(State {
-                sessions: HashMap::new(),
-                clients: 0,
-                uis: Vec::new(),
-                observers: Vec::new(),
-                connecting: 0,
-                idle_since: Some(Instant::now()),
-                exiting: false,
-            }),
-            hooks,
-            run_dir,
-            notifications: opts.notifications,
-            max_queued: opts.max_queued,
-            max_queued_session: opts.max_queued_session,
-        }
-    });
+    let hooks = if opts.hooks { Hooks::Start } else { Hooks::Off };
+    let server = Server::new(&opts, dir, run_dir, lock, hooks);
+    server.claim_run_dir();
     log::info!("daemon {} listening on {}", std::process::id(), sock.display());
+    server.run(listener, opts.idle_exit)
+}
 
-    let done = Arc::new(AtomicBool::new(false));
-    {
-        let (server, done, sock) = (server.clone(), done.clone(), sock.clone());
-        std::thread::Builder::new().name("idle".into()).spawn(move || {
-            // Wakes when an idle daemon may be due to exit, and once a
-            // second otherwise to see whether it has gone idle.
-            let mut wait = Duration::from_millis(100).min(opts.idle_exit);
-            loop {
-                std::thread::sleep(wait);
-                // Decided under the lock, so a connection either counted
-                // before it or is turned away after it.
-                let (idle, after) = {
-                    let mut st = server.state.lock().unwrap();
-                    // Ended programs are kept a while for their tabs.
-                    let after = if st.sessions.is_empty() { opts.idle_exit } else { opts.idle_exit.max(ENDED_GRACE) };
-                    let idle = st.idle_since.map(|t| t.elapsed());
-                    if idle.is_some_and(|for_| for_ >= after) {
-                        st.exiting = true;
-                    }
-                    (idle, after)
-                };
-                match idle {
-                    Some(for_) if for_ >= after => {
-                        done.store(true, Ordering::Release);
-                        // Wake the accept loop.
-                        let _ = UnixStream::connect(&sock);
-                        return;
-                    },
-                    Some(for_) => wait = (after - for_).min(Duration::from_secs(1)),
-                    None => wait = Duration::from_secs(1).min(opts.idle_exit),
-                }
-            }
-        })?;
+fn write_pid(path: &Path) {
+    if let Err(e) = std::fs::write(path, std::process::id().to_string()) {
+        log::warn!("can't write {}: {e}", path.display());
     }
-
-    for stream in listener.incoming() {
-        if done.load(Ordering::Acquire) {
-            break;
-        }
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("accept: {e}");
-                continue;
-            },
-        };
-        if !paths::peer_uid_ok(&stream) {
-            log::warn!("refused a connection from another user");
-            continue;
-        }
-        let server = server.clone();
-        let _ = std::thread::Builder::new().name("client".into()).spawn(move || {
-            if let Err(e) = server.handle(stream) {
-                log::info!("client: {e}");
-            }
-        });
-    }
-    let _ = std::fs::remove_file(&sock);
-    let _ = std::fs::remove_file(&pid_file);
-    let _ = std::fs::remove_dir_all(&server.run_dir);
-    // Observers learn at once that this daemon is gone.
-    let observers = std::mem::take(&mut server.state.lock().unwrap().observers);
-    for c in observers.iter().filter_map(Weak::upgrade) {
-        c.close();
-    }
-    log::info!("daemon idle, exiting");
-    Ok(())
 }
 
 fn lock(path: &Path) -> io::Result<File> {
@@ -271,6 +252,21 @@ fn lock(path: &Path) -> io::Result<File> {
         Err(std::fs::TryLockError::WouldBlock) => Err(io::ErrorKind::AddrInUse.into()),
         Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
+}
+
+/// Bind `sock` without a moment when no socket is there: bound beside it,
+/// then renamed over it (whatever was there, a running daemon's included).
+#[cfg(unix)]
+fn bind_over(sock: &Path) -> io::Result<UnixListener> {
+    let name = sock.file_name().and_then(|n| n.to_str()).unwrap_or("mux.sock");
+    let tmp = sock.with_file_name(format!("{name}.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let listener = UnixListener::bind(&tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, sock) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(listener)
 }
 
 /// Single-quote `s` for sh.
@@ -302,8 +298,147 @@ fn random_id() -> u64 {
 }
 
 impl Server {
+    fn new(opts: &ServeOpts, dir: &Path, run_dir: PathBuf, lock: File, hooks: Hooks) -> Arc<Self> {
+        Arc::new_cyclic(|weak: &Weak<Server>| {
+            let weak = weak.clone();
+            let sink: tern_bridge::HookSink = Arc::new(move |ev: HookEvent| {
+                if let Some(s) = weak.upgrade() {
+                    s.on_hook(ev);
+                }
+            });
+            let hooks = match hooks {
+                Hooks::Off => None,
+                Hooks::Start => HookServer::start(sink).map_err(|e| log::warn!("hook server unavailable: {e}")).ok(),
+                #[cfg(unix)]
+                Hooks::Adopt(listener, tokens) => {
+                    HookServer::serve(listener, sink, tokens).map_err(|e| log::warn!("hook server unavailable: {e}")).ok()
+                },
+            };
+            Server {
+                state: Mutex::new(State {
+                    sessions: HashMap::new(),
+                    clients: 0,
+                    uis: Vec::new(),
+                    observers: Vec::new(),
+                    connecting: 0,
+                    idle_since: Some(Instant::now()),
+                    exiting: false,
+                    handing_off: false,
+                }),
+                hooks,
+                sock: paths::socket_path(dir),
+                pid_file: paths::pid_path(dir),
+                run_dir,
+                notifications: opts.notifications,
+                max_queued: opts.max_queued,
+                max_queued_session: opts.max_queued_session,
+                lock: Mutex::new(Some(lock)),
+                stopped: AtomicBool::new(false),
+                end: Mutex::new(None),
+                #[cfg(unix)]
+                successor: opts.successor.clone(),
+            }
+        })
+    }
+
+    /// Mark the run dir as this process's, so no other Tern sweeps it while
+    /// it runs (an adopted one is named for the daemon that made it).
+    fn claim_run_dir(&self) {
+        if let Err(e) = tern_bridge::claim_run_dir(&self.run_dir) {
+            log::warn!("can't claim {}: {e}", self.run_dir.display());
+        }
+    }
+
+    /// Serve on `listener` until idle for `idle_exit` or handed off.
+    fn run(self: &Arc<Self>, listener: UnixListener, idle_exit: Duration) -> io::Result<()> {
+        let (end_tx, end_rx) = mpsc::channel();
+        *self.end.lock().unwrap() = Some(end_tx.clone());
+        {
+            let server = self.clone();
+            std::thread::Builder::new().name("idle".into()).spawn(move || {
+                // Wakes when an idle daemon may be due to exit, and once a
+                // second otherwise to see whether it has gone idle.
+                let mut wait = Duration::from_millis(100).min(idle_exit);
+                loop {
+                    std::thread::sleep(wait);
+                    // Decided under the lock, so a connection either counted
+                    // before it or is turned away after it.
+                    let (idle, after) = {
+                        let mut st = server.state.lock().unwrap();
+                        // Ended programs are kept a while for their tabs.
+                        let after = if st.sessions.is_empty() { idle_exit } else { idle_exit.max(ENDED_GRACE) };
+                        let idle = st.idle_since.map(|t| t.elapsed());
+                        if idle.is_some_and(|for_| for_ >= after) {
+                            st.exiting = true;
+                        }
+                        (idle, after)
+                    };
+                    match idle {
+                        Some(for_) if for_ >= after => {
+                            server.stopped.store(true, Ordering::Release);
+                            // Wake the accept loop.
+                            let _ = UnixStream::connect(&server.sock);
+                            let _ = end_tx.send(End::Idle);
+                            return;
+                        },
+                        Some(for_) => wait = (after - for_).min(Duration::from_secs(1)),
+                        None => wait = Duration::from_secs(1).min(idle_exit),
+                    }
+                }
+            })?;
+        }
+        self.accept_on(listener)?;
+        match end_rx.recv() {
+            Ok(End::Idle) | Err(_) => {
+                let _ = std::fs::remove_file(&self.sock);
+                let _ = std::fs::remove_file(&self.pid_file);
+                let _ = std::fs::remove_dir_all(&self.run_dir);
+                // Observers learn at once that this daemon is gone.
+                let observers = std::mem::take(&mut self.state.lock().unwrap().observers);
+                for c in observers.iter().filter_map(Weak::upgrade) {
+                    c.close();
+                }
+                log::info!("daemon idle, exiting");
+            },
+            #[cfg(unix)]
+            Ok(End::HandedOff) => log::info!("daemon handed off, exiting"),
+        }
+        Ok(())
+    }
+
+    /// Accept connections on `listener` until the daemon stops.
+    fn accept_on(self: &Arc<Self>, listener: UnixListener) -> io::Result<()> {
+        let server = self.clone();
+        std::thread::Builder::new().name("accept".into()).spawn(move || {
+            for stream in listener.incoming() {
+                if server.stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let stream = match stream {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("accept: {e}");
+                        continue;
+                    },
+                };
+                if !paths::peer_uid_ok(&stream) {
+                    log::warn!("refused a connection from another user");
+                    continue;
+                }
+                let server = server.clone();
+                let _ = std::thread::Builder::new().name("client".into()).spawn(move || {
+                    if let Err(e) = server.handle(stream) {
+                        log::info!("client: {e}");
+                    }
+                });
+            }
+        })?;
+        Ok(())
+    }
+
     fn update_idle(state: &mut State) {
-        let idle = state.clients == 0 && state.connecting == 0 && state.sessions.values().all(|s| s.host.exited().is_some());
+        let idle =
+            state.clients == 0 && state.connecting == 0 && !state.handing_off && state.sessions.values().all(|s| s.host.exited().is_some());
         match (idle, state.idle_since) {
             (true, None) => state.idle_since = Some(Instant::now()),
             (false, Some(_)) => state.idle_since = None,
@@ -315,7 +450,8 @@ impl Server {
         {
             let mut st = self.state.lock().unwrap();
             if st.exiting {
-                // Closed without a Hello: the client starts a new daemon.
+                // Closed without a Hello: the client starts a new daemon (or,
+                // during a handoff, finds the new one).
                 return Err(io::Error::other("exiting"));
             }
             st.connecting += 1;
@@ -408,7 +544,7 @@ impl Server {
                 }
                 conn.send(ServerMsg::Revealed { req, delivered: ui.is_some() });
             },
-            ClientMsg::Spawn { req, cfg, hook } => self.spawn(conn, req, cfg, hook),
+            ClientMsg::Spawn { req, cfg, hook, seed } => self.spawn(conn, req, cfg, hook, seed),
             ClientMsg::Attach { req, id, size } => self.attach(conn, req, id, size),
             ClientMsg::Detach { id } => {
                 let mut st = self.state.lock().unwrap();
@@ -439,6 +575,21 @@ impl Server {
             },
             ClientMsg::Close { id } => self.close(id),
             ClientMsg::List { req } => conn.send(ServerMsg::Sessions { req, list: self.list() }),
+            #[cfg(unix)]
+            ClientMsg::HandOff { req, exe } => {
+                let (server, conn) = (self.clone(), conn.clone());
+                // Off the connection's reader: it takes a while.
+                let _ = std::thread::Builder::new().name("handoff".into()).spawn(move || {
+                    if let Err(e) = server.hand_off(&exe) {
+                        log::warn!("handoff failed: {e}");
+                        conn.send(ServerMsg::HandOffFailed { req, message: e.to_string() });
+                    }
+                });
+            },
+            #[cfg(windows)]
+            ClientMsg::HandOff { req, .. } => {
+                conn.send(ServerMsg::HandOffFailed { req, message: "handoff isn't supported on Windows".into() })
+            },
         }
     }
 
@@ -505,7 +656,19 @@ impl Server {
         self.state.lock().unwrap().sessions.get(&id).map(|s| s.host.clone())
     }
 
-    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, mut cfg: SpawnConfig, hook: bool) {
+    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, mut cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>) {
+        // A handoff exports the sessions there are: wait for it. If it
+        // succeeds this connection is closed and the UI asks the new daemon.
+        while self.state.lock().unwrap().handing_off {
+            if conn.dead.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if conn.dead.load(Ordering::Acquire) {
+            return;
+        }
+        let seed = seed.and_then(|s| proto::unpack_snapshot(&s).map_err(|e| log::warn!("bad seed: {e}")).ok());
         let id = random_id();
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
@@ -533,7 +696,7 @@ impl Server {
             }
         }
         let observer: Arc<dyn Observer> = self.clone();
-        let host = match Host::spawn(id, &cfg, observer) {
+        let host = match Host::spawn(id, &cfg, seed, observer) {
             Ok(h) => h,
             Err(e) => {
                 if let Some(t) = &token {
@@ -583,9 +746,11 @@ impl Server {
         // Closed on exec: programs spawned meanwhile mustn't inherit it.
         // SAFETY: dup of an fd the host keeps open.
         #[cfg(unix)]
-        let fd = unsafe { libc::fcntl(host.master_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        #[cfg(unix)]
-        let fd = (fd >= 0).then(|| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
+        let fd = host
+            .master_fd()
+            .map(|fd| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
+            .filter(|&fd| fd >= 0)
+            .map(|fd| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
         #[cfg(windows)]
         let fd: Option<PassedPty> = None;
         let pid = host.pid();
@@ -704,6 +869,275 @@ impl Server {
             "Claude".into()
         }
     }
+}
+
+/// A handoff under way in the old daemon: until it is committed, dropping it
+/// rolls back (ends the new daemon, drives the PTYs again, serves again).
+#[cfg(unix)]
+struct Handoff<'a> {
+    server: &'a Arc<Server>,
+    kill: Option<Box<dyn FnOnce() + Send>>,
+    paused: Vec<Box<dyn Paused>>,
+    /// The new daemon may have taken the socket path.
+    rebind: bool,
+}
+
+#[cfg(unix)]
+impl Drop for Handoff<'_> {
+    fn drop(&mut self) {
+        if let Some(kill) = self.kill.take() {
+            kill();
+        }
+        for p in self.paused.drain(..) {
+            p.resume();
+        }
+        if self.rebind {
+            match bind_over(&self.server.sock) {
+                Ok(listener) => {
+                    if let Err(e) = self.server.accept_on(listener) {
+                        log::error!("can't accept again: {e}");
+                    }
+                },
+                Err(e) => log::error!("can't listen again on {}: {e}", self.server.sock.display()),
+            }
+        }
+        let mut st = self.server.state.lock().unwrap();
+        st.exiting = false;
+        st.handing_off = false;
+        Server::update_idle(&mut st);
+    }
+}
+
+#[cfg(unix)]
+impl Server {
+    /// Hand every session to a new daemon started from `exe`. On success
+    /// the new daemon serves them, every connection here is closed, and
+    /// `serve` returns (without the files the new daemon now owns). On
+    /// failure nothing changed.
+    fn hand_off(self: &Arc<Self>, exe: &Path) -> io::Result<()> {
+        let sessions: Vec<_> = {
+            let mut st = self.state.lock().unwrap();
+            if st.exiting || st.handing_off {
+                return Err(io::Error::other("the daemon is exiting"));
+            }
+            st.exiting = true;
+            st.handing_off = true;
+            Self::update_idle(&mut st);
+            let mut v: Vec<_> = st
+                .sessions
+                .iter()
+                .map(|(&id, s)| {
+                    (id, s.host.clone(), s.token.clone(), s.claude_session.clone(), s.hooks.iter().cloned().collect::<Vec<_>>())
+                })
+                .collect();
+            v.sort_by_key(|s| s.0);
+            v
+        };
+        log::info!("handing {} sessions to a new daemon from {}", sessions.len(), exe.display());
+        let mut handoff = Handoff { server: self, kill: None, paused: Vec::new(), rebind: false };
+        let (stream, kill) = match &self.successor {
+            Some(start) => start(exe)?,
+            None => spawn_successor(exe)?,
+        };
+        handoff.kill = Some(kill);
+        stream.set_read_timeout(Some(HANDOFF_TIMEOUT))?;
+        stream.set_write_timeout(Some(HANDOFF_TIMEOUT))?;
+        let lock_fd = self.lock.lock().unwrap().as_ref().map(AsRawFd::as_raw_fd).ok_or_else(|| io::Error::other("no lock"))?;
+        let mut fds = vec![lock_fd];
+        if let Some(h) = &self.hooks {
+            fds.push(h.listener().as_raw_fd());
+        }
+        let begin = HandoffMsg::Begin {
+            version: HANDOFF_VERSION,
+            major: MAJOR,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            run_dir: self.run_dir.clone(),
+            hook_port: self.hooks.as_ref().map(HookServer::port),
+            sessions: sessions.len() as u32,
+        };
+        proto::write_frame_with_fds(&stream, &begin, &fds)?;
+        for (id, host, token, claude_session, hooks) in sessions {
+            let paused = host.pause()?;
+            let fd = paused.as_ref().and_then(|_| host.master_fd());
+            let session = HandedSession {
+                id,
+                pid: host.pid(),
+                fd: fd.is_some(),
+                exited: host.exited(),
+                size: host.size(),
+                scrollback: host.scrollback(),
+                title: host.title(),
+                status: host.status(),
+                token,
+                claude_session,
+                hooks: hooks.into_iter().map(serde_bytes::ByteBuf::from).collect(),
+                writes: paused.as_ref().map(|p| p.writes()).unwrap_or_default(),
+                scheme_reports: paused.as_ref().is_some_and(|p| p.scheme_reports()),
+                snapshot: proto::pack_snapshot(&host.capture())?,
+            };
+            handoff.paused.extend(paused);
+            let msg = HandoffMsg::Session(Box::new(session));
+            match fd {
+                Some(fd) => proto::write_frame_with_fds(&stream, &msg, &[fd])?,
+                None => proto::write_frame(&mut &stream, &msg)?,
+            }
+        }
+        let mut reader = FrameReader::new(stream.try_clone()?, proto::MAX_SERVER_FRAME);
+        expect(&mut reader, |m| matches!(m, HandoffMsg::Restored))?;
+        // From here the new daemon may take the socket path.
+        handoff.rebind = true;
+        proto::write_frame(&mut &stream, &HandoffMsg::Commit)?;
+        expect(&mut reader, |m| matches!(m, HandoffMsg::Committed))?;
+
+        // Committed: the programs are the new daemon's now.
+        handoff.kill = None;
+        handoff.rebind = false;
+        for p in handoff.paused.drain(..) {
+            p.forget();
+        }
+        std::mem::forget(handoff);
+        log::info!("handoff committed");
+        self.stopped.store(true, Ordering::Release);
+        let conns: Vec<_> = {
+            let mut st = self.state.lock().unwrap();
+            // Its hosts aren't driven here any more.
+            st.sessions.clear();
+            st.uis.iter().chain(st.observers.iter()).filter_map(Weak::upgrade).collect()
+        };
+        // The UIs reattach to the new daemon by session id.
+        for c in conns {
+            c.close();
+        }
+        // The new daemon holds the lock too (the same open file).
+        self.lock.lock().unwrap().take();
+        if let Some(end) = self.end.lock().unwrap().take() {
+            let _ = end.send(End::HandedOff);
+        }
+        Ok(())
+    }
+}
+
+/// Read the next handoff message: `Ok` when `ok` accepts it.
+#[cfg(unix)]
+fn expect(reader: &mut FrameReader, ok: impl Fn(&HandoffMsg) -> bool) -> io::Result<()> {
+    match reader.read::<HandoffMsg>()? {
+        Some(m) if ok(&m) => Ok(()),
+        Some(HandoffMsg::Failed { message }) => Err(io::Error::other(format!("the new daemon failed: {message}"))),
+        Some(m) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected {m:?}"))),
+        None => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the new daemon went away")),
+    }
+}
+
+/// Start `<exe> --server --adopt` with one end of a socketpair as fd 3.
+#[cfg(unix)]
+fn spawn_successor(exe: &Path) -> io::Result<(UnixStream, Box<dyn FnOnce() + Send>)> {
+    use std::os::unix::process::CommandExt;
+    let (ours, theirs) = UnixStream::pair()?;
+    let fd = theirs.as_raw_fd();
+    let log = crate::client::log_file().and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    let (out, err) = match log {
+        Some(f) => (std::process::Stdio::from(f.try_clone()?), std::process::Stdio::from(f)),
+        None => (std::process::Stdio::null(), std::process::Stdio::null()),
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["--server", "--adopt"]).stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    if std::env::var_os("RUST_LOG").is_none() {
+        cmd.env("RUST_LOG", "info");
+    }
+    // SAFETY: setsid, dup2 and fcntl are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setsid();
+            // dup2 leaves the copy open on exec; an fd already at 3 isn't.
+            let r = if fd == ADOPT_FD { libc::fcntl(fd, libc::F_SETFD, 0) } else { libc::dup2(fd, ADOPT_FD) };
+            if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        });
+    }
+    let mut child = cmd.spawn()?;
+    drop(theirs);
+    Ok((
+        ours,
+        Box::new(move || {
+            let _ = child.kill();
+            let _ = child.wait();
+        }),
+    ))
+}
+
+/// `tern --server --adopt`: take over the sessions of the daemon on the
+/// other end of `stream`, then serve on `dir` as [`serve`] does.
+#[cfg(unix)]
+pub fn adopt(dir: &Path, opts: ServeOpts, stream: UnixStream) -> io::Result<()> {
+    let result = adopt_sessions(dir, &opts, &stream);
+    match result {
+        Ok((server, listener)) => server.run(listener, opts.idle_exit),
+        Err(e) => {
+            let _ = proto::write_frame(&mut &stream, &HandoffMsg::Failed { message: e.to_string() });
+            Err(e)
+        },
+    }
+}
+
+#[cfg(unix)]
+fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Result<(Arc<Server>, UnixListener)> {
+    paths::ensure_private_dir(dir)?;
+    paths::build_id();
+    stream.set_read_timeout(Some(HANDOFF_TIMEOUT))?;
+    let mut reader = FrameReader::new(stream.try_clone()?, proto::MAX_SERVER_FRAME);
+    let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
+    let Some(HandoffMsg::Begin { version, major, app_version, run_dir, hook_port, sessions }) = reader.read()? else {
+        return Err(bad("expected Begin"));
+    };
+    if version > HANDOFF_VERSION || major != MAJOR {
+        return Err(io::Error::other(format!("can't adopt from Tern {app_version} (handoff {version}, protocol {major})")));
+    }
+    log::info!("adopting {sessions} sessions from Tern {app_version}");
+    let lock = File::from(reader.take_fd().ok_or_else(|| bad("no lock fd"))?);
+    let hook_listener = match hook_port {
+        Some(_) => Some(std::net::TcpListener::from(reader.take_fd().ok_or_else(|| bad("no hook listener fd"))?)),
+        None => None,
+    };
+    let mut handed = Vec::new();
+    for _ in 0..sessions {
+        let Some(HandoffMsg::Session(s)) = reader.read()? else { return Err(bad("expected Session")) };
+        let fd: Option<OwnedFd> = if s.fd { Some(reader.take_fd().ok_or_else(|| bad("no PTY fd"))?) } else { None };
+        handed.push((s, fd));
+    }
+    let tokens = handed.iter().filter_map(|(s, _)| s.token.clone()).collect();
+    let hooks = match hook_listener {
+        Some(l) if opts.hooks => Hooks::Adopt(l, tokens),
+        _ => Hooks::Off,
+    };
+    let server = Server::new(opts, dir, run_dir, lock, hooks);
+    let mut drivers = Vec::new();
+    {
+        let mut st = server.state.lock().unwrap();
+        for (s, fd) in handed {
+            let snapshot = proto::unpack_snapshot(&s.snapshot)?;
+            let observer: Arc<dyn Observer> = server.clone();
+            let (host, driver) = Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, observer)?;
+            drivers.extend(driver);
+            let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
+            st.sessions
+                .insert(s.id, Session { host, token: s.token, owner: None, viewers: Vec::new(), hooks, claude_session: s.claude_session });
+        }
+        Server::update_idle(&mut st);
+    }
+    proto::write_frame(&mut &stream.try_clone()?, &HandoffMsg::Restored)?;
+    match reader.read::<HandoffMsg>() {
+        Ok(Some(HandoffMsg::Commit)) => {},
+        // The old daemon rolled back: the parked drivers go unstarted.
+        other => return Err(io::Error::other(format!("no commit: {other:?}"))),
+    }
+    let listener = bind_over(&server.sock)?;
+    write_pid(&server.pid_file);
+    server.claim_run_dir();
+    for d in drivers {
+        d.resume();
+    }
+    proto::write_frame(&mut &stream.try_clone()?, &HandoffMsg::Committed)?;
+    log::info!("daemon {} adopted the sessions; listening on {}", std::process::id(), server.sock.display());
+    Ok((server, listener))
 }
 
 impl Observer for Server {
