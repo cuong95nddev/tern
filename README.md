@@ -74,7 +74,9 @@ On Windows and Linux, Ctrl chords stay with the terminal (Ctrl+C, Ctrl+R, …), 
 <kbd>Ctrl</kbd><kbd>Shift</kbd>, <kbd>⌘</kbd><kbd>⇧</kbd> becomes <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Shift</kbd>,
 <kbd>⌘</kbd><kbd>⌥</kbd> becomes <kbd>Ctrl</kbd><kbd>Alt</kbd> and <kbd>⌘</kbd><kbd>1</kbd>…<kbd>9</kbd> become
 <kbd>Alt</kbd><kbd>1</kbd>…<kbd>9</kbd> (copy / paste: <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>C</kbd> / <kbd>V</kbd>,
-also <kbd>Ctrl</kbd><kbd>Insert</kbd> / <kbd>Shift</kbd><kbd>Insert</kbd>; next / previous tab also
+also <kbd>Ctrl</kbd><kbd>Insert</kbd> / <kbd>Shift</kbd><kbd>Insert</kbd>; on Windows, as in Windows Terminal,
+<kbd>Ctrl</kbd><kbd>C</kbd> copies when there is a selection and <kbd>Ctrl</kbd><kbd>V</kbd> pastes, unless
+`terminal.ctrl_v_paste` is `false`; next / previous tab also
 <kbd>Ctrl</kbd><kbd>Tab</kbd> / <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Tab</kbd>). Links open with <kbd>Ctrl</kbd>-click.
 Tooltips show each platform's keys.
 
