@@ -26,6 +26,7 @@ mod settings;
 mod settings_window;
 #[cfg(any(target_os = "macos", windows))]
 mod shot;
+mod shot_icons;
 mod style;
 mod template;
 mod terminal_view;

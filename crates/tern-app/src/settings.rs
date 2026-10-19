@@ -926,13 +926,13 @@ parts as trees of boxes. `reference/templates.json` holds the built-in ones;
 copy one into `templates` under its name and change it. A box takes an element's
 properties (`\"element\"`) and its own (`\"style\"`), lines up its `children`
 (`\"layout\"`: `column`, `row`, `wrap`; `align`, `justify`, `grow`, `fill`), can
-sit over its parent (`\"position\": {{\"top\": 0, \"right\": 8}}`, `z`,
-`overlay`), show only when a condition holds (`\"when\": \"focused && tabs > 1\"`),
+sit over its parent (`\"position\": {{\"top\": 0, \"right\": 8}}`, or a
+number the code gives, `\"top\": \"{{bar_top}}\"`; `z`, `overlay`), show only when a condition holds (`\"when\": \"focused && tabs > 1\"`),
 change while one does (`\"states\": {{\"focused\": {{\"border\": \"$accent\"}}}}`),
 or split into panels you resize (`\"split\": \"row\"`, with `size`, `min`, `max`,
 `fixed` on the panels). Leaves are text (`\"text\": \"{{title}}\"`), another
 template (`\"use\"`), an icon (`\"icon\": \"folder-open\"`, a bundled Lucide
-name), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
+name, or a screenshot tool's `shot-*`), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
 `selected`, `disabled`, `loading`), or a piece Tern draws (`\"slot\"`). A list
 the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 `each` come after its entries.
@@ -994,6 +994,15 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.tab_group` | `collapsed`, `all`; list `colors` (`label`, `color`, `on`) | |
 | `menu.tab_bar` | as `menu.pane_layout` and `menu.tab_layout` | |
 | `menu.tabs` | list `tabs` (`label`, `on`) | |
+| `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |
+| `shot_overlay.toolbar` | `can_undo`, `can_redo`, `undo_key`, `redo_key`, `copy_key`, `save_key`; list `tools` (`icon`, `tooltip`, `selected`) | |
+| `shot_overlay.style_bar` | lists `sizes` (`dot`, `selected`), `colors` (`color`, `selected`) | |
+| `shot.size`, `shot.color` | an entry of `sizes`, `colors` | |
+| `shot_editor` | `pages`, `selection`, `floating`, `tool`, `text`, `text_top`, `text_left`, `can_undo`, `can_redo`, `undo_key`, `redo_key`, `copy_key`, `cut_key`, `paste_key`, `save_key`, `close_key`, `new_key`; lists `tools`, `sizes`, `colors`, `pages` | `scene`, `input` |
+| `shot_editor.toolbar`, `shot_editor.tabs` | as `shot_editor` | |
+| `shot_editor.tab` | `name`, `active` | |
+| `shot_tray` | `count`, `target`, `sending`, `error`, `capture_key`, `send_key`; list `shots` | `prompt`, `fit` |
+| `shot_tray.shot` | | `thumb` |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel

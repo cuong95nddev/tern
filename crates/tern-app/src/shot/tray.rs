@@ -5,16 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui_kit::base::StyledExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::icons;
 use super::targets::{self, Choice, Dest};
+use crate::style;
+use crate::template::{self, Framed, Scope, on_event};
 
 const WIDTH: f32 = 420.;
 /// The starting height; the window then fits its content.
@@ -23,8 +21,6 @@ const HEIGHT: f32 = 200.;
 const PLACE_H: f32 = 240.;
 /// The gap between the tray and the region or the display's edges.
 const GAP: f32 = 8.;
-/// A capture's thumbnail, in points.
-const THUMB: (f32, f32) = (104., 68.);
 
 /// What the tray holds; it outlives the tray window, which closes while a
 /// capture is on screen.
@@ -313,33 +309,6 @@ impl Tray {
         }
         cx.notify();
     }
-
-    fn target_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let label = self.chosen(cx).map_or_else(|| "No tab".to_owned(), |c| c.label);
-        let this = cx.entity().downgrade();
-        Button::new("target").small().ghost().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, cx| {
-            let Some(tray) = this.upgrade() else { return menu };
-            tray.update(cx, |t, cx| t.refresh_choices(cx));
-            let (choices, chosen) = {
-                let t = tray.read(cx);
-                (t.choices.clone(), cx.global::<TrayData>().dest.clone())
-            };
-            let mut new_section = false;
-            for c in choices {
-                if matches!(c.dest, Dest::New { .. }) && !new_section {
-                    new_section = true;
-                    menu = menu.separator();
-                }
-                let dest = c.dest.clone();
-                let tray = tray.downgrade();
-                menu = menu.item(PopupMenuItem::new(c.label).checked(chosen.as_ref() == Some(&dest)).on_click(move |_, _, cx| {
-                    cx.default_global::<TrayData>().dest = Some(dest.clone());
-                    let _ = tray.update(cx, |_, cx| cx.notify());
-                }));
-            }
-            menu
-        })
-    }
 }
 
 /// `path`'s image shrunk to fit `w` × `h` pixels.
@@ -360,7 +329,8 @@ impl Tray {
             shots.iter().filter(|p| !data.thumbs.contains_key(*p) && data.making.insert((*p).clone())).cloned().collect();
         let out = shots.iter().map(|p| data.thumbs.get(p).cloned()).collect();
         let scale = window.scale_factor();
-        let (w, h) = ((THUMB.0 * scale) as u32, (THUMB.1 * scale) as u32);
+        let thumb = style::el("shot_tray.shot", cx);
+        let (w, h) = ((thumb.px("width").as_f32() * scale) as u32, (thumb.px("height").as_f32() * scale) as u32);
         for path in todo {
             cx.spawn(async move |this, cx| {
                 let p = path.clone();
@@ -385,75 +355,13 @@ impl Render for Tray {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shots = cx.default_global::<TrayData>().shots.clone();
         let thumbs = self.thumbs(&shots, window, cx);
-        let theme = cx.theme().clone();
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(div().flex_1().text_sm().font_semibold().child(format!("Screenshots ({})", shots.len())))
-            .child(
-                Button::new("edit")
-                    .icon(icons::icon(icons::EDIT))
-                    .ghost()
-                    .small()
-                    .disabled(shots.is_empty())
-                    .tooltip("Edit: combine, crop, add text")
-                    .on_click(|_, _, cx| edit(0, cx)),
-            )
-            .child(
-                Button::new("more")
-                    .icon(icons::icon(icons::CAMERA))
-                    .ghost()
-                    .small()
-                    .tooltip(super::keys("Capture another (⌘⇧2)", "Capture another (Ctrl+Shift+2)"))
-                    .on_click(|_, _, cx| super::start(cx)),
-            )
-            .child(
-                Button::new("discard")
-                    .icon(icons::icon(icons::CLOSE))
-                    .ghost()
-                    .small()
-                    .tooltip("Discard all")
-                    .on_click(|_, _, cx| discard(cx)),
-            );
-        let mut strip = div().id("shots").flex().gap_2().overflow_x_scroll().py_1();
-        for (i, thumb) in thumbs.into_iter().enumerate() {
-            strip = strip.child(
-                div()
-                    .id(("shot", i))
-                    .relative()
-                    .flex_shrink_0()
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| edit(i, cx))
-                    .w(px(104.))
-                    .h(px(68.))
-                    .rounded_md()
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted)
-                    .when_some(thumb, |d, t| d.child(img(ImageSource::Render(t)).size_full().object_fit(ObjectFit::Contain)))
-                    .child(div().absolute().top(px(2.)).right(px(2.)).child(
-                        Button::new(("remove", i)).icon(icons::icon(icons::CLOSE)).xsmall().tooltip("Remove").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove(i, cx);
-                            },
-                        )),
-                    )),
-            );
-        }
-        let footer =
-            div().flex().items_center().gap_2().child(div().flex_1().min_w_0().overflow_hidden().child(self.target_button(cx))).child(
-                Button::new("send")
-                    .primary()
-                    .small()
-                    .icon(icons::icon(icons::SEND))
-                    .label(if self.sending { "Sending…" } else { "Send" })
-                    .disabled(self.sending)
-                    .tooltip(super::keys("Send (⌘↵)", "Send (Ctrl+Enter)"))
-                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-            );
+        let items = thumbs
+            .into_iter()
+            .map(|thumb| {
+                let shown = thumb.map(|t| img(ImageSource::Render(t)).size_full().object_fit(ObjectFit::Contain));
+                Scope::new("shot").slot_opt("thumb", shown)
+            })
+            .collect();
         // Fit the window to the panel's height, which changes with the
         // shots and the prompt's lines.
         let fit = canvas(
@@ -468,23 +376,75 @@ impl Render for Tray {
         )
         .absolute()
         .inset_0();
-        div()
-            .relative()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .child(header)
-            .when(!shots.is_empty(), |d| d.child(strip))
-            .child(Textarea::new(&self.prompt))
-            .when_some(self.error.clone(), |d, e| d.child(div().text_xs().text_color(theme.danger).child(e)))
-            .child(footer)
-            .child(fit)
+        let target = self.chosen(cx).map_or_else(|| "No tab".to_owned(), |c| c.label);
+        let mut scope = Scope::new("shot-tray")
+            .var("count", shots.len())
+            .list("shots", items)
+            .var("target", target)
+            .var("sending", self.sending)
+            .var("capture_key", super::keys("⌘⇧2", "Ctrl+Shift+2"))
+            .var("send_key", super::keys("⌘↵", "Ctrl+Enter"))
+            .slot("prompt", Textarea::new(&self.prompt))
+            .slot("fit", fit);
+        if let Some(e) = self.error.clone() {
+            scope = scope.var("error", e);
+        }
+        let me = cx.entity().downgrade();
+        let panel = template::render(
+            "shot_tray",
+            scope,
+            &mut |name, ix, f| match (name, f) {
+                ("edit", Framed::Button(b)) => b.on_click(|_, _, cx| edit(0, cx)).into_any_element(),
+                ("more", Framed::Button(b)) => b.on_click(|_, _, cx| super::start(cx)).into_any_element(),
+                ("discard", Framed::Button(b)) => b.on_click(|_, _, cx| discard(cx)).into_any_element(),
+                ("shots", Framed::Box(d)) => d.id("shots").overflow_x_scroll().into_any_element(),
+                ("shot", Framed::Box(d)) => {
+                    let i = ix.unwrap_or(0);
+                    d.id(("shot", i)).cursor_pointer().on_click(move |_, _, cx| edit(i, cx)).into_any_element()
+                },
+                ("remove", Framed::Button(b)) => {
+                    let i = ix.unwrap_or(0);
+                    b.on_click(on_event(&me, move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.remove(i, cx);
+                    }))
+                    .into_any_element()
+                },
+                ("target", Framed::Button(b)) => target_menu(b, me.clone()).into_any_element(),
+                ("send", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.send(window, cx))).into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
+        // The window is the panel's width; its height follows the panel.
+        div().w_full().child(panel)
     }
+}
+
+/// Button `b` with the tabs the captures can go to as its menu.
+fn target_menu(b: Button, tray: WeakEntity<Tray>) -> impl IntoElement {
+    b.dropdown_caret(true).dropdown_menu(move |mut menu, _, cx| {
+        let Some(tray) = tray.upgrade() else { return menu };
+        tray.update(cx, |t, cx| t.refresh_choices(cx));
+        let (choices, chosen) = {
+            let t = tray.read(cx);
+            (t.choices.clone(), cx.global::<TrayData>().dest.clone())
+        };
+        let mut new_section = false;
+        for c in choices {
+            if matches!(c.dest, Dest::New { .. }) && !new_section {
+                new_section = true;
+                menu = menu.separator();
+            }
+            let dest = c.dest.clone();
+            let tray = tray.downgrade();
+            menu = menu.item(PopupMenuItem::new(c.label).checked(chosen.as_ref() == Some(&dest)).on_click(move |_, _, cx| {
+                cx.default_global::<TrayData>().dest = Some(dest.clone());
+                let _ = tray.update(cx, |_, cx| cx.notify());
+            }));
+        }
+        menu
+    })
 }

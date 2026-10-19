@@ -3,24 +3,19 @@
 
 use std::sync::Arc;
 
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
 
-use super::icons;
 use super::model::{self, COLORS, Doc, P, Shape, Style, Tool, p};
 use super::paint::{self, View, from_point, hsla, picture, to_point};
 use super::raster::{self, Crop};
+use crate::style;
+use crate::template::{self, Framed, Scope, on_event};
 
 const HANDLE: f32 = 8.;
-/// The toolbar's size, to place it before it is laid out.
+/// The toolbar's width, to place it before it is laid out.
 const BAR_W: f32 = 600.;
-const BAR_H: f32 = 40.;
-const STYLE_H: f32 = 36.;
 
 enum Drag {
     Select {
@@ -349,138 +344,6 @@ impl Overlay {
             self.text.is_some()
         )
     }
-
-    fn tool_button(&self, tool: Tool, cx: &mut Context<Self>) -> Button {
-        let (svg, tip) = icons::tool(tool);
-        Button::new(SharedString::from(format!("tool-{tool:?}")))
-            .icon(icons::icon(svg))
-            .ghost()
-            .small()
-            .selected(self.tool == Some(tool))
-            .tooltip(tip)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.commit_text(window, cx);
-                this.tool = if this.tool == Some(tool) { None } else { Some(tool) };
-                cx.notify();
-            }))
-    }
-
-    fn action_button(id: &'static str, svg: &'static str, tip: &'static str) -> Button {
-        Button::new(id).icon(icons::icon(svg)).ghost().small().tooltip(tip)
-    }
-
-    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let border = theme.border;
-        let sep = move || div().w(px(1.)).h(px(20.)).mx_1().bg(border);
-        let mut bar = div()
-            .flex()
-            .items_center()
-            .gap_0p5()
-            .h(px(BAR_H))
-            .px_2()
-            .rounded_lg()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for tool in Tool::ALL {
-            bar = bar.child(self.tool_button(tool, cx));
-        }
-        bar.child(sep())
-            .child(
-                Self::action_button("undo", icons::UNDO, super::keys("Undo (⌘Z)", "Undo (Ctrl+Z)"))
-                    .disabled(!self.doc.can_undo())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.doc.undo();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Self::action_button("redo", icons::REDO, super::keys("Redo (⌘⇧Z)", "Redo (Ctrl+Shift+Z)"))
-                    .disabled(!self.doc.can_redo())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.doc.redo();
-                        cx.notify();
-                    })),
-            )
-            .child(sep())
-            .child(Self::action_button("cancel", icons::CLOSE, "Cancel (Esc)").on_click(|_, _, cx| super::cancel(cx)))
-            .child(
-                Self::action_button("copy", icons::COPY, super::keys("Copy (⌘C)", "Copy (Ctrl+C)"))
-                    .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
-            )
-            .child(
-                Self::action_button("save", icons::SAVE, super::keys("Save As… (⌘S)", "Save As… (Ctrl+S)"))
-                    .on_click(cx.listener(|this, _, _, cx| this.save_as(cx))),
-            )
-            .child(
-                Button::new("add")
-                    .icon(icons::icon(icons::ADD))
-                    .primary()
-                    .small()
-                    .label("Add")
-                    .tooltip("Add to the tray (↵)")
-                    .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
-            )
-    }
-
-    fn style_bar(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let mut bar = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(STYLE_H))
-            .px_2()
-            .rounded_lg()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for size in 0..3u8 {
-            let dot = 4. + 3. * f32::from(size);
-            let selected = self.style.size == size;
-            bar = bar.child(
-                div()
-                    .id(("size", usize::from(size)))
-                    .size(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .when(selected, |d| d.bg(theme.accent))
-                    .hover(|d| d.bg(theme.secondary_hover))
-                    .child(div().size(px(dot)).rounded_full().bg(theme.foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.style.size = size;
-                        cx.notify();
-                    })),
-            );
-        }
-        bar = bar.child(div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border));
-        for (i, color) in COLORS.into_iter().enumerate() {
-            let selected = self.style.color == color;
-            bar = bar.child(
-                div()
-                    .id(("color", i))
-                    .size(px(18.))
-                    .rounded_full()
-                    .bg(hsla(color))
-                    .border_2()
-                    .border_color(if selected { theme.foreground } else { theme.border })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.style.color = color;
-                        cx.notify();
-                    })),
-            );
-        }
-        bar
-    }
 }
 
 pub(super) fn png_bytes(img: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -500,83 +363,144 @@ impl Render for Overlay {
         let size = window.viewport_size();
         let (w, h) = (size.width.as_f32(), size.height.as_f32());
         let scene = self.scene();
-        let mut root = div()
-            .id("shot-overlay")
-            .track_focus(&self.focus)
-            .size_full()
-            .relative()
-            .bg(gpui_kit::black())
-            .cursor(CursorStyle::Crosshair)
-            .on_key_down(cx.listener(Self::on_key))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
-            .on_mouse_move(cx.listener(Self::on_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
-            .child(img(ImageSource::Render(self.picture.clone())).absolute().top_0().left_0().w(size.width).h(size.height))
-            .child(canvas(|_, _, _| {}, move |_, _, window, cx| scene.paint(window, cx)).absolute().top_0().left_0().size_full());
-
-        let Some((lo, hi)) = self.sel else {
-            return root.child(
-                div().absolute().top(px(h / 2. - 20.)).left_0().w(size.width).flex().justify_center().child(
-                    div()
-                        .px_3()
-                        .py_1p5()
-                        .rounded_md()
-                        .bg(hsla([0, 0, 0, 0xB0]))
-                        .text_color(gpui_kit::white())
-                        .text_sm()
-                        .child("Drag to capture a region · Esc to cancel"),
-                ),
-            );
-        };
-        // Size label above the region (inside it at the top of the screen).
-        let label_y = if lo.y >= 30. { lo.y - 28. } else { lo.y + 6. };
-        root = root.child(
-            div()
-                .absolute()
-                .left(px(lo.x))
-                .top(px(label_y))
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(hsla([0x2F, 0x6B, 0xFF, 0xFF]))
-                .text_color(gpui_kit::white())
-                .text_xs()
-                .child(format!("{} × {}", (hi.x - lo.x).round(), (hi.y - lo.y).round())),
-        );
-        if self.drag.as_ref().is_some_and(|d| matches!(d, Drag::Select { .. })) {
-            return root;
+        let shown = img(ImageSource::Render(self.picture.clone())).absolute().top_0().left_0().w(size.width).h(size.height);
+        let painted = canvas(|_, _, _| {}, move |_, _, window, cx| scene.paint(window, cx)).absolute().top_0().left_0().size_full();
+        let mut scope = Scope::new("shot-overlay").slot("picture", shown).slot("scene", painted).var("hint_top", f64::from(h / 2. - 20.));
+        if let Some((lo, hi)) = self.sel {
+            // Size label above the region (inside it at the top of the screen).
+            let label_top = if lo.y >= 30. { lo.y - 28. } else { lo.y + 6. };
+            scope = scope
+                .var("selection", true)
+                .var("label_left", f64::from(lo.x))
+                .var("label_top", f64::from(label_top))
+                .var("size", format!("{} × {}", (hi.x - lo.x).round(), (hi.y - lo.y).round()));
+            if !self.drag.as_ref().is_some_and(|d| matches!(d, Drag::Select { .. })) {
+                scope = self.bars(scope, (lo, hi), (w, h), cx);
+            }
         }
-        // The toolbar under the region; above it, or inside, when there is no room.
+        let me = cx.entity().downgrade();
+        let focus = self.focus.clone();
+        template::render(
+            "shot_overlay",
+            scope,
+            &mut |name, ix, f| match (name, f) {
+                ("overlay", Framed::Box(d)) => d
+                    .id("shot-overlay")
+                    .track_focus(&focus)
+                    .cursor(CursorStyle::Crosshair)
+                    .on_key_down(on_event(&me, Self::on_key))
+                    .on_mouse_down(MouseButton::Left, on_event(&me, Self::on_down))
+                    .on_mouse_move(on_event(&me, Self::on_move))
+                    .on_mouse_up(MouseButton::Left, on_event(&me, Self::on_up))
+                    .into_any_element(),
+                // Clicks on the bars and the text box don't reach the overlay.
+                ("bar" | "text", Framed::Box(d)) => {
+                    d.occlude().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element()
+                },
+                ("tool", Framed::Button(b)) => {
+                    let Some(tool) = ix.and_then(|i| Tool::ALL.get(i)).copied() else { return b.into_any_element() };
+                    b.on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| {
+                        this.commit_text(window, cx);
+                        this.tool = if this.tool == Some(tool) { None } else { Some(tool) };
+                        cx.notify();
+                    }))
+                    .into_any_element()
+                },
+                ("undo", Framed::Button(b)) => b
+                    .on_click(on_event(&me, |this, _: &ClickEvent, _, cx| {
+                        this.doc.undo();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                ("redo", Framed::Button(b)) => b
+                    .on_click(on_event(&me, |this, _: &ClickEvent, _, cx| {
+                        this.doc.redo();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                ("cancel", Framed::Button(b)) => b.on_click(|_, _, cx| super::cancel(cx)).into_any_element(),
+                ("copy", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.copy(cx))).into_any_element(),
+                ("save", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.save_as(cx))).into_any_element(),
+                ("add", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.add(window, cx))).into_any_element()
+                },
+                ("size", Framed::Box(d)) => {
+                    let size = ix.unwrap_or(0) as u8;
+                    d.id(("size", usize::from(size)))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, _, cx| {
+                            this.style.size = size;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                },
+                ("color", Framed::Box(d)) => {
+                    let Some(color) = ix.and_then(|i| COLORS.get(i)).copied() else { return d.into_any_element() };
+                    d.id(("color", ix.unwrap_or(0)))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, _, cx| {
+                            this.style.color = color;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
+    }
+}
+
+impl Overlay {
+    /// The toolbar under the region `(lo, hi)` (above it, or inside, when
+    /// there is no room), the style bar by it while a drawing tool is
+    /// picked, and the text box being typed in.
+    fn bars(&self, scope: Scope, (lo, hi): (P, P), (w, h): (f32, f32), cx: &App) -> Scope {
+        let bar_h = style::el("shot_overlay.toolbar", cx).px("height").as_f32();
+        let style_h = style::el("shot_overlay.style_bar", cx).px("height").as_f32();
         let styled = self.tool.is_some_and(|t| t != Tool::Mosaic);
-        let need = BAR_H + if styled { STYLE_H + 6. } else { 0. } + 10.;
+        let need = bar_h + if styled { style_h + 6. } else { 0. } + 10.;
         let below = hi.y + need <= h;
         let bar_y = if below {
             hi.y + 8.
         } else if lo.y - need >= 0. {
-            lo.y - 8. - BAR_H
+            lo.y - 8. - bar_h
         } else {
-            hi.y - 8. - BAR_H
+            hi.y - 8. - bar_h
         };
         let right = (w - hi.x).min(w - BAR_W - 8.).max(8.);
-        root = root.child(div().absolute().top(px(bar_y)).right(px(right)).child(self.toolbar(cx)));
+        let tools = Tool::ALL
+            .into_iter()
+            .map(|tool| {
+                let (icon, tip) = super::tool_icon(tool);
+                Scope::new("tool").var("icon", icon).var("tooltip", tip).var("selected", self.tool == Some(tool))
+            })
+            .collect();
+        let mut scope = scope
+            .var("toolbar", true)
+            .var("bar_top", f64::from(bar_y))
+            .var("bar_right", f64::from(right))
+            .list("tools", tools)
+            .var("can_undo", self.doc.can_undo())
+            .var("can_redo", self.doc.can_redo())
+            .var("undo_key", super::keys("⌘Z", "Ctrl+Z"))
+            .var("redo_key", super::keys("⌘⇧Z", "Ctrl+Shift+Z"))
+            .var("copy_key", super::keys("⌘C", "Ctrl+C"))
+            .var("save_key", super::keys("⌘S", "Ctrl+S"));
         if styled {
-            let style_y = if below || bar_y > lo.y { bar_y + BAR_H + 6. } else { bar_y - 6. - STYLE_H };
-            root = root.child(div().absolute().top(px(style_y)).right(px(right)).child(self.style_bar(cx)));
+            let style_y = if below || bar_y > lo.y { bar_y + bar_h + 6. } else { bar_y - 6. - style_h };
+            let (sizes, colors) = super::style_lists(&self.style);
+            scope = scope.var("style_bar", true).var("style_top", f64::from(style_y)).list("sizes", sizes).list("colors", colors);
         }
         if let Some(edit) = &self.text {
             let font = self.style.font();
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(px(edit.at.x))
-                    .top(px(edit.at.y - 4.))
-                    .w(px((hi.x - edit.at.x).max(120.)))
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(Input::new(&edit.input).appearance(false).text_color(hsla(self.style.color)).text_size(px(font))),
-            );
+            let input = Input::new(&edit.input).appearance(false).text_color(hsla(self.style.color)).text_size(px(font));
+            scope = scope
+                .var("text", true)
+                .var("text_left", f64::from(edit.at.x))
+                .var("text_top", f64::from(edit.at.y - 4.))
+                .var("text_width", f64::from((hi.x - edit.at.x).max(120.)))
+                .slot("input", input);
         }
-        root
+        scope
     }
 }
 

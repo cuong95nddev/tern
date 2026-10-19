@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::fill_parts as fill;
 use super::menu::Entry;
-use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Justify, Layout, Node, Panel, Scope, Templates, Value, Variant, What};
+use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Edge, Justify, Layout, Node, Panel, Scope, Templates, Value, Variant, What};
 use crate::arrange::{self, Shown, Size};
 use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange, PinnedParts};
 use crate::style::{self, Val};
@@ -123,7 +123,8 @@ fn content_of(n: &Node, content: &super::menu::Content, cx: &App) -> AnyElement 
     let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem() };
     let (look, hovers) = d.look(n, &scope, &[]);
     let kids: Vec<AnyElement> = n.children.iter().filter_map(|c| d.node(c, &mut scope, &[])).collect();
-    d.boxed(n, &look, hovers, kids, None, None)
+    let place = place(n, &lookup(&scope, &[]));
+    d.boxed(n, &look, hovers, kids, place, None, None)
 }
 
 trait Rem {
@@ -198,7 +199,8 @@ impl Drawer<'_, '_> {
                 }
                 kids.push(icon.into_any_element());
                 // The box takes the place; the icon keeps the look.
-                return Some(self.boxed(n, &style::el_with("", Default::default(), self.cx), hovers, kids, scope.index, None));
+                let place = place(n, &lookup(scope, outer));
+                return Some(self.boxed(n, &style::el_with("", Default::default(), self.cx), hovers, kids, place, scope.index, None));
             },
             What::Button(b) => return Some(self.button(n, b, &look, scope, outer)),
             What::Each(list, item) => {
@@ -245,7 +247,8 @@ impl Drawer<'_, '_> {
             }
         }
         let drag = if n.handle { self.dragged_part(n, scope, outer) } else { None };
-        Some(self.boxed(n, &look, hovers, kids, scope.index, drag))
+        let place = place(n, &lookup(scope, outer));
+        Some(self.boxed(n, &look, hovers, kids, place, scope.index, drag))
     }
 
     /// Button `b`, drawn as node `n` says, with the code's behavior.
@@ -573,12 +576,14 @@ impl Drawer<'_, '_> {
         (style::el_with(n.element, inline, self.cx), hovers)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn boxed(
         &mut self,
         n: &Node,
         look: &style::El,
         hovers: Vec<(SharedString, style::El)>,
         kids: Vec<AnyElement>,
+        place: Option<[Option<AbsoluteLength>; 4]>,
         index: Option<usize>,
         drag: Option<DraggedPart>,
     ) -> AnyElement {
@@ -614,7 +619,7 @@ impl Drawer<'_, '_> {
         if let Some(s) = n.shrink {
             d.style().flex_shrink = Some(s);
         }
-        d = match n.position {
+        d = match place {
             Some([t, r, b, l]) => {
                 let st = d.style();
                 st.position = Some(Position::Absolute);
@@ -692,6 +697,15 @@ impl Drawer<'_, '_> {
         };
         if n.overlay { deferred(e).with_priority(n.z.max(0) as usize).into_any_element() } else { e }
     }
+}
+
+/// Where positioned node `n` sits, its `"{name}"` edges read from `get`.
+pub(super) fn place(n: &Node, get: &dyn Fn(&str) -> Option<Value>) -> Option<[Option<AbsoluteLength>; 4]> {
+    let edges = n.position.as_ref()?;
+    Some(edges.clone().map(|e| match e? {
+        Edge::Len(l) => Some(l),
+        Edge::Var(v) => get(&v).map(|v| px(v.num() as f32).into()),
+    }))
 }
 
 fn px_(v: f32) -> Pixels {

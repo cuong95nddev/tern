@@ -104,7 +104,23 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
      (explorer, scratch row, workspace tab, new tab with its submenus, pane layout, tab, tab group with color dots
      and check, tab bar, the overflow list) and every dialog (trash, restart, delete scratch, diff preview, name,
      Claude arguments, theme); action items and button items do what they did.
-7. Screenshot tool (`shot/`): needs elements first.
+7. **Done (2026-10-19):** the screenshot tool (`shot/`).
+   - `shot_overlay` (the frozen screen and its canvas are the `picture` and `scene` slots; the hint, the region's
+     size, `shot_overlay.toolbar`, `shot_overlay.style_bar` and the text box), `shot_editor` (+ `.toolbar`,
+     `.tabs`, `.tab`; the page canvas is the `scene` slot, the text field `input`), `shot_tray` (+ `.shot`; the
+     prompt is the `prompt` slot, a thumbnail `thumb`). The stroke sizes and colors are `shot.size` and
+     `shot.color`, shared by the overlay and the editor. New elements (`shot_overlay.*`, `shot.*`,
+     `shot_editor.*`, `shot_tray.*`) whose defaults are the old hard-coded look.
+   - gpui-component's `TabBar`/`Tab` are gone from the app: the editor's tabs are boxes styled like the pane tabs.
+   - The tool's own icons are named like bundled ones (`shot-rect`, `shot-undo`, ...) and served as assets on
+     every platform (`shot_icons.rs`), so the built-in templates check on Linux too.
+   - New: a `position` edge takes a number the code gives (`"top": "{bar_top}"`): the overlay's bars and text
+     box sit where the region leaves room.
+   - Pixel-identical on Windows with the previous build (through `shot-fake`, `@shot`, `tray-add`, `editor`):
+     the overlay before and after a region is picked, with the rect, text and mosaic tools and drawn shapes; the
+     tray; the editor with one and two tabs, hovered tabs and tools. Differences: the editor's tab bar shows its
+     New Page button (gpui-component's `TabBar` never drew it, having no suffix), and keeps its height with no
+     tab open; a tray thumbnail of a tall capture is contained and centered (it filled the box, cut off).
 8. **Done (2026-10-19):** what the phases above didn't name.
    - `viewer` (the file header, then the body: the `diff`, `image`, `preview` or `editor` slot, or `{message}`),
      `diff_pane` (`diff` slot or `{message}`), `scratch` (a save error over the `editor` slot).
@@ -227,4 +243,4 @@ D. Pop out to a separate OS window.
 - Node names for icons and buttons, how a `button` node maps onto gpui-component's `Button`: **done** (`icon`,
   `button`; see Decided).
 - Whether gpui-component `Tab`/`TabBar` stay or are replaced by plain boxes: **replaced** in panes (phase 2) and
-  the workspace tab bar (phase 3); the screenshot tool's page tabs wait for phase 7.
+  the workspace tab bar (phase 3) and the screenshot editor (phase 7).

@@ -3,7 +3,6 @@
 
 mod editor;
 pub mod grab;
-mod icons;
 pub mod model;
 mod overlay;
 mod paint;
@@ -17,6 +16,8 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui_kit::*;
 
+use crate::template::Scope;
+use model::Tool;
 use overlay::Overlay;
 
 actions!(tern, [CaptureScreenshot]);
@@ -262,4 +263,29 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
         "tray-prompt" | "tray-target" | "tray-send" => tray::control(cmd, arg, cx),
         _ => return None,
     })
+}
+
+/// A tool's icon name and tooltip.
+fn tool_icon(tool: Tool) -> (&'static str, &'static str) {
+    match tool {
+        Tool::Rect => ("shot-rect", "Rectangle (R)"),
+        Tool::Ellipse => ("shot-ellipse", "Ellipse (E)"),
+        Tool::Line => ("shot-line", "Line (L)"),
+        Tool::Arrow => ("shot-arrow", "Arrow (A)"),
+        Tool::Pen => ("shot-pen", "Pen (P)"),
+        Tool::Text => ("shot-text", "Text (T)"),
+        Tool::Marker => ("shot-marker", "Numbered marker (N)"),
+        Tool::Mosaic => ("shot-mosaic", "Mosaic (M)"),
+    }
+}
+
+/// The stroke sizes and colors to pick, as the templates' `sizes` and
+/// `colors` lists.
+fn style_lists(style: &model::Style) -> (Vec<Scope>, Vec<Scope>) {
+    let sizes = (0..3u8)
+        .map(|size| Scope::new("size").var("dot", f64::from(4. + 3. * f32::from(size))).var("selected", style.size == size))
+        .collect();
+    let colors =
+        model::COLORS.into_iter().map(|c| Scope::new("color").var("color", paint::hsla(c)).var("selected", style.color == c)).collect();
+    (sizes, colors)
 }

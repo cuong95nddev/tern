@@ -1247,6 +1247,294 @@
       }
     ]
   },
+  "shot_overlay": {
+    "frame": "overlay",
+    "element": "shot_overlay",
+    "fill": true,
+    "children": [
+      { "slot": "picture" },
+      { "slot": "scene" },
+      {
+        "when": "!selection",
+        "position": { "top": "{hint_top}", "left": 0, "right": 0 },
+        "layout": "row",
+        "justify": "center",
+        "children": [{ "element": "shot_overlay.hint", "text": "Drag to capture a region · Esc to cancel" }]
+      },
+      {
+        "when": "selection",
+        "element": "shot_overlay.size_label",
+        "position": { "top": "{label_top}", "left": "{label_left}" },
+        "text": "{size}"
+      },
+      { "when": "toolbar", "position": { "top": "{bar_top}", "right": "{bar_right}" }, "use": "shot_overlay.toolbar" },
+      { "when": "style_bar", "position": { "top": "{style_top}", "right": "{bar_right}" }, "use": "shot_overlay.style_bar" },
+      {
+        "when": "text",
+        "frame": "text",
+        "position": { "top": "{text_top}", "left": "{text_left}" },
+        "style": { "width": "{text_width}" },
+        "children": [{ "slot": "input" }]
+      }
+    ]
+  },
+  "shot_overlay.toolbar": {
+    "frame": "bar",
+    "element": "shot_overlay.toolbar",
+    "layout": "row",
+    "align": "center",
+    "children": [
+      {
+        "each": "tools",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$shot_overlay.toolbar.gap" },
+        "item": { "button": "tool", "size": "small", "icon": "{icon}", "selected": "selected", "tooltip": "{tooltip}" }
+      },
+      { "element": "shot.separator" },
+      { "button": "undo", "size": "small", "icon": "shot-undo", "disabled": "!can_undo", "tooltip": "Undo ({undo_key})" },
+      { "button": "redo", "size": "small", "icon": "shot-redo", "disabled": "!can_redo", "tooltip": "Redo ({redo_key})" },
+      { "element": "shot.separator" },
+      { "button": "cancel", "size": "small", "icon": "shot-close", "tooltip": "Cancel (Esc)" },
+      { "button": "copy", "size": "small", "icon": "shot-copy", "tooltip": "Copy ({copy_key})" },
+      { "button": "save", "size": "small", "icon": "shot-save", "tooltip": "Save As… ({save_key})" },
+      { "button": "add", "variant": "primary", "size": "small", "icon": "shot-done", "label": "Add", "tooltip": "Add to the tray (↵)" }
+    ]
+  },
+  "shot_overlay.style_bar": {
+    "frame": "bar",
+    "element": "shot_overlay.style_bar",
+    "layout": "row",
+    "align": "center",
+    "children": [
+      {
+        "each": "sizes",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$shot_overlay.style_bar.gap" },
+        "item": { "use": "shot.size" }
+      },
+      { "element": "shot.separator", "style": { "height": 18 } },
+      {
+        "each": "colors",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$shot_overlay.style_bar.gap" },
+        "item": { "use": "shot.color" }
+      }
+    ]
+  },
+  "shot.size": {
+    "frame": "size",
+    "element": "shot.size",
+    "layout": "row",
+    "align": "center",
+    "justify": "center",
+    "states": {
+      "selected": { "background": "$shot.size.selected_background" },
+      "hover": { "background": "$shot.size.hover_background" }
+    },
+    "children": [{ "style": { "width": "{dot}", "height": "{dot}", "radius": 9999, "background": "$shot.size.dot" } }]
+  },
+  "shot.color": {
+    "frame": "color",
+    "element": "shot.color",
+    "style": { "background": "{color}" },
+    "states": { "selected": { "border": "$shot.color.selected_border" } }
+  },
+  "shot_editor": {
+    "frame": "editor",
+    "element": "shot_editor",
+    "fill": true,
+    "children": [
+      { "use": "shot_editor.toolbar" },
+      { "use": "shot_editor.tabs" },
+      {
+        "frame": "page",
+        "element": "shot_editor.page",
+        "grow": 1,
+        "clip": true,
+        "children": [
+          { "slot": "scene" },
+          {
+            "when": "!pages",
+            "element": "shot_editor.empty",
+            "fill": true,
+            "layout": "row",
+            "align": "center",
+            "justify": "center",
+            "text": "No screenshots. {paste_key} pastes an image, {new_key} opens a blank page."
+          }
+        ]
+      },
+      { "when": "floating", "element": "shot_editor.hint", "text": "Drag to move, corners to scale · Enter places it · Esc drops it" },
+      {
+        "when": "!floating && !tool",
+        "element": "shot_editor.hint",
+        "text": "Drag to select · {copy_key} copy · {cut_key} cut · {paste_key} paste · Del erase · Crop to the selection"
+      },
+      { "when": "!floating && tool", "element": "shot_editor.hint", "text": "Draw on the page · V to select" },
+      {
+        "when": "text",
+        "frame": "text",
+        "position": { "top": "{text_top}", "left": "{text_left}" },
+        "style": { "width": 240 },
+        "children": [{ "slot": "input" }]
+      }
+    ]
+  },
+  "shot_editor.toolbar": {
+    "element": "shot_editor.toolbar",
+    "layout": "row",
+    "align": "center",
+    "children": [
+      {
+        "each": "tools",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$shot_editor.toolbar.gap" },
+        "item": { "button": "tool", "size": "small", "icon": "{icon}", "selected": "selected", "tooltip": "{tooltip}" }
+      },
+      { "element": "shot.separator" },
+      {
+        "each": "sizes",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$shot_editor.toolbar.gap" },
+        "item": { "use": "shot.size" }
+      },
+      {
+        "each": "colors",
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "0.375rem", "padding_x": "0.125rem" },
+        "item": { "use": "shot.color" }
+      },
+      { "element": "shot.separator" },
+      { "button": "undo", "size": "small", "icon": "shot-undo", "disabled": "!can_undo", "tooltip": "Undo ({undo_key})" },
+      { "button": "redo", "size": "small", "icon": "shot-redo", "disabled": "!can_redo", "tooltip": "Redo ({redo_key})" },
+      { "element": "shot.separator" },
+      { "button": "copy", "size": "small", "icon": "shot-copy", "disabled": "!pages", "tooltip": "Copy the selection ({copy_key})" },
+      { "button": "paste", "size": "small", "icon": "shot-paste", "tooltip": "Paste ({paste_key})" },
+      { "button": "crop", "size": "small", "icon": "shot-crop", "disabled": "!selection", "tooltip": "Crop to the selection" },
+      { "button": "save", "size": "small", "icon": "shot-save", "disabled": "!pages", "tooltip": "Save As… ({save_key})" },
+      { "grow": 1 },
+      { "button": "done", "variant": "primary", "size": "small", "icon": "shot-done", "label": "Done", "tooltip": "Back to the tray" }
+    ]
+  },
+  "shot_editor.tabs": {
+    "element": "shot_editor.tabs",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "style": { "border_bottom_width": 0 },
+    "children": [
+      {
+        "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+        "style": { "border_bottom_width": "$shot_editor.tabs.border_bottom_width", "border": "$shot_editor.tabs.border" }
+      },
+      {
+        "each": "pages",
+        "frame": "pages",
+        "grow": 1,
+        "layout": "row",
+        "align": "center",
+        "item": { "use": "shot_editor.tab" },
+        "children": [
+          {
+            "layout": "row",
+            "align": "center",
+            "shrink": 0,
+            "style": { "padding_x": 4, "height": "$shot_editor.tab.height" },
+            "children": [{ "button": "new_page", "size": "xsmall", "icon": "shot-plus", "tooltip": "New page ({new_key})" }]
+          }
+        ]
+      }
+    ]
+  },
+  "shot_editor.tab": {
+    "frame": "tab",
+    "element": "shot_editor.tab",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "clip": true,
+    "states": {
+      "active": { "element": "shot_editor.tab_active" },
+      "hover && !active": { "text": "$shot_editor.tab.hover_text" }
+    },
+    "children": [
+      { "truncate": true, "text": "{name}", "style": { "padding_x": 12 } },
+      { "button": "close", "size": "xsmall", "icon": "shot-close", "tooltip": "Close: drop this screenshot ({close_key})" }
+    ]
+  },
+  "shot_tray": {
+    "element": "shot_tray",
+    "children": [
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "0.25rem" },
+        "children": [
+          { "element": "shot_tray.title", "grow": 1, "text": "Screenshots ({count})" },
+          { "button": "edit", "size": "small", "icon": "shot-edit", "disabled": "count == 0", "tooltip": "Edit: combine, crop, add text" },
+          { "button": "more", "size": "small", "icon": "shot-camera", "tooltip": "Capture another ({capture_key})" },
+          { "button": "discard", "size": "small", "icon": "shot-close", "tooltip": "Discard all" }
+        ]
+      },
+      {
+        "when": "count > 0",
+        "each": "shots",
+        "frame": "shots",
+        "layout": "row",
+        "style": { "gap": "0.5rem", "padding_y": "0.25rem" },
+        "item": { "use": "shot_tray.shot" }
+      },
+      { "slot": "prompt" },
+      { "when": "error", "element": "shot_tray.error", "text": "{error}" },
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "0.5rem" },
+        "children": [
+          { "grow": 1, "clip": true, "children": [{ "button": "target", "size": "small", "label": "{target}" }] },
+          {
+            "when": "!sending",
+            "button": "send",
+            "variant": "primary",
+            "size": "small",
+            "icon": "shot-send",
+            "label": "Send",
+            "tooltip": "Send ({send_key})"
+          },
+          {
+            "when": "sending",
+            "button": "send",
+            "variant": "primary",
+            "size": "small",
+            "icon": "shot-send",
+            "label": "Sending…",
+            "disabled": true,
+            "tooltip": "Send ({send_key})"
+          }
+        ]
+      },
+      { "slot": "fit" }
+    ]
+  },
+  "shot_tray.shot": {
+    "frame": "shot",
+    "element": "shot_tray.shot",
+    "shrink": 0,
+    "clip": true,
+    "children": [
+      { "slot": "thumb" },
+      {
+        "position": { "top": 2, "right": 2 },
+        "children": [{ "button": "remove", "variant": "secondary", "size": "xsmall", "icon": "shot-close", "tooltip": "Remove" }]
+      }
+    ]
+  },
   "dialog.trash": {
     "element": "dialog.body",
     "children": [

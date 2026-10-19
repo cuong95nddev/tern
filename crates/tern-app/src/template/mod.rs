@@ -610,6 +610,14 @@ fn ident(t: &str) -> Result<String, String> {
     }
 }
 
+/// A positioned node's distance from one edge of its parent: fixed, or a
+/// value the code gives (`"{name}"`, a number).
+#[derive(Debug, Clone)]
+enum Edge {
+    Len(AbsoluteLength),
+    Var(String),
+}
+
 /// A split's panel settings.
 #[derive(Debug, Clone, Default)]
 struct Panel {
@@ -650,7 +658,7 @@ pub struct Node {
     fill: bool,
     grow: Option<f32>,
     shrink: Option<f32>,
-    position: Option<[Option<AbsoluteLength>; 4]>,
+    position: Option<[Option<Edge>; 4]>,
     z: i32,
     overlay: bool,
     when: Option<Cond>,
@@ -705,6 +713,11 @@ const SLOTS: &[&str] = &[
     "preview",
     "editor",
     "fit",
+    "picture",
+    "scene",
+    "input",
+    "thumb",
+    "prompt",
 ];
 
 /// The parts a template may name.
@@ -1066,14 +1079,29 @@ impl Compiler<'_, '_> {
         node
     }
 
-    fn position(&mut self, s: &Spec, at: &str) -> Option<[Option<AbsoluteLength>; 4]> {
+    fn position(&mut self, s: &Spec, at: &str) -> Option<[Option<Edge>; 4]> {
         let p = s.position.as_ref()?;
         Some([
-            self.len(&p.top, &format!("{at}.position.top")),
-            self.len(&p.right, &format!("{at}.position.right")),
-            self.len(&p.bottom, &format!("{at}.position.bottom")),
-            self.len(&p.left, &format!("{at}.position.left")),
+            self.edge(&p.top, &format!("{at}.position.top")),
+            self.edge(&p.right, &format!("{at}.position.right")),
+            self.edge(&p.bottom, &format!("{at}.position.bottom")),
+            self.edge(&p.left, &format!("{at}.position.left")),
         ])
+    }
+
+    /// A length, or `"{name}"`: a number the code gives.
+    fn edge(&mut self, v: &Option<serde_json::Value>, at: &str) -> Option<Edge> {
+        let var = v.as_ref()?.as_str().and_then(|t| t.strip_prefix('{')).and_then(|t| t.strip_suffix('}')).map(str::trim);
+        match var {
+            Some(var) => match ident(var) {
+                Ok(var) => Some(Edge::Var(var)),
+                Err(e) => {
+                    self.problems.push(format!("{at}: {e}"));
+                    None
+                },
+            },
+            None => self.len(v, at).map(Edge::Len),
+        }
     }
 
     /// `true`, `false` or a condition; `false` is a condition that never holds.
@@ -1319,12 +1347,13 @@ fn icon_path(name: &str) -> SharedString {
     format!("icons/{name}.svg").into()
 }
 
-/// Whether `name` is a bundled icon.
+/// Whether `name` is a bundled icon (the screenshot tool's included).
 fn icon_exists(name: &str) -> bool {
     use gpui_kit::assets::IconName;
     static PATHS: std::sync::LazyLock<BTreeSet<SharedString>> =
         std::sync::LazyLock::new(|| IconName::ALL.iter().map(|i| i.path()).collect());
-    PATHS.contains(&icon_path(name))
+    let path = icon_path(name);
+    PATHS.contains(&path) || crate::shot_icons::asset(&path).is_some()
 }
 
 /// `parts` with the values `get` gives put in.
@@ -1736,6 +1765,21 @@ mod tests {
         assert!(n.states.iter().any(|s| s.hover.as_deref() == Some("row") && s.when.is_none()));
         assert_eq!(super::Value::Num(3.).val(style::Kind::Len), Some(style::Val::Len(gpui_kit::px(3.).into())));
         assert_eq!(super::Value::Text("x".into()).val(style::Kind::Color), None);
+    }
+
+    #[test]
+    fn position_takes_values_from_the_code() {
+        let (t, problems) = compiled(r#"{"w": {"position": {"top": "{y}", "right": 8}}, "bad": {"position": {"left": "{a b}"}}}"#);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("bad.position.left"), "{problems:?}");
+        let get = |name: &str| (name == "y").then_some(super::Value::Num(12.));
+        let placed = super::draw::place(&t.nodes["w"], &get).unwrap();
+        assert_eq!(placed[0], Some(gpui_kit::px(12.).into()));
+        assert_eq!(placed[1], Some(gpui_kit::px(8.).into()));
+        assert_eq!((placed[2], placed[3]), (None, None));
+        // A value the code doesn't give leaves that edge unset.
+        let placed = super::draw::place(&t.nodes["w"], &|_| None).unwrap();
+        assert_eq!(placed[0], None);
     }
 
     #[test]

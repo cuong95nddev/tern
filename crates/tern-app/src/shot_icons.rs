@@ -1,8 +1,8 @@
-//! Toolbar icons (24×24, Lucide style), drawn as masks in the text colour.
+//! The screenshot tool's icons (24×24, Lucide style), drawn as masks in the
+//! text colour. Templates name them like bundled icons (`shot-rect`); they
+//! are here on every platform, so the built-in templates check everywhere.
 
-use gpui_kit::component::Icon;
-
-use super::model::Tool;
+use gpui_kit::SharedString;
 
 macro_rules! svg {
     ($($body:literal)*) => {
@@ -45,19 +45,38 @@ pub const EDIT: &str = svg!(r#"<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 
 pub const PLUS: &str = svg!(r#"<path d="M12 5v14"/><path d="M5 12h14"/>"#);
 pub const SEND: &str = svg!(r#"<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>"#);
 
-pub fn icon(svg: &str) -> Icon {
-    Icon::default().data(svg.as_bytes())
+/// The icons by the names templates give them (`shot-rect`), each served
+/// as `icons/<name>.svg`.
+const NAMED: &[(&str, &str)] = &[
+    ("shot-rect", RECT),
+    ("shot-ellipse", ELLIPSE),
+    ("shot-line", LINE),
+    ("shot-arrow", ARROW),
+    ("shot-pen", PEN),
+    ("shot-text", TEXT),
+    ("shot-marker", MARKER),
+    ("shot-mosaic", MOSAIC),
+    ("shot-undo", UNDO),
+    ("shot-redo", REDO),
+    ("shot-close", CLOSE),
+    ("shot-copy", COPY),
+    ("shot-save", SAVE),
+    ("shot-done", ADD),
+    ("shot-camera", CAMERA),
+    ("shot-select", SELECT),
+    ("shot-crop", CROP),
+    ("shot-paste", PASTE),
+    ("shot-edit", EDIT),
+    ("shot-plus", PLUS),
+    ("shot-send", SEND),
+];
+
+/// The SVG at asset `path`, when it is one of these icons.
+pub fn asset(path: &str) -> Option<&'static [u8]> {
+    let name = path.strip_prefix("icons/")?.strip_suffix(".svg")?;
+    NAMED.iter().find(|(n, _)| *n == name).map(|(_, svg)| svg.as_bytes())
 }
 
-pub fn tool(tool: Tool) -> (&'static str, &'static str) {
-    match tool {
-        Tool::Rect => (RECT, "Rectangle (R)"),
-        Tool::Ellipse => (ELLIPSE, "Ellipse (E)"),
-        Tool::Line => (LINE, "Line (L)"),
-        Tool::Arrow => (ARROW, "Arrow (A)"),
-        Tool::Pen => (PEN, "Pen (P)"),
-        Tool::Text => (TEXT, "Text (T)"),
-        Tool::Marker => (MARKER, "Numbered marker (N)"),
-        Tool::Mosaic => (MOSAIC, "Mosaic (M)"),
-    }
+pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
+    NAMED.iter().map(|(n, _)| format!("icons/{n}.svg")).filter(move |p| p.starts_with(prefix)).map(SharedString::from)
 }

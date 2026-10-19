@@ -9,19 +9,15 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
 
-use super::icons;
 use super::model::{self, COLORS, Doc, P, Shape, Style, Tool, p};
 use super::paint::{self, View, from_point, hsla, picture};
 use super::raster::{self, Crop};
+use crate::template::{self, Framed, Scope, on_event};
 
 /// Grab distance of a handle, in window points.
 const HANDLE: f32 = 8.;
@@ -812,145 +808,6 @@ impl Editor {
         )
     }
 
-    fn tool_button(&self, id: &'static str, tool: Option<Tool>, cx: &mut Context<Self>) -> Button {
-        let (svg, tip) = match tool {
-            Some(tool) => icons::tool(tool),
-            None => (icons::SELECT, "Select (V)"),
-        };
-        Button::new(id).icon(icons::icon(svg)).ghost().small().selected(self.tool == tool).tooltip(tip).on_click(cx.listener(
-            move |this, _, window, cx| {
-                this.set_tool(tool, cx);
-                window.focus(&this.focus, cx);
-            },
-        ))
-    }
-
-    fn action_button(id: &'static str, svg: &'static str, tip: &'static str) -> Button {
-        Button::new(id).icon(icons::icon(svg)).ghost().small().tooltip(tip)
-    }
-
-    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let border = theme.border;
-        let sep = move || div().w(px(1.)).h(px(20.)).mx_1().bg(border);
-        let page = self.page();
-        let (can_undo, can_redo) = page.map_or((false, false), |p| (!p.undo.is_empty() || self.floating.is_some(), !p.redo.is_empty()));
-        let mut bar = div().flex().items_center().gap_0p5().px_2().py_1().border_b_1().border_color(theme.border);
-        bar = bar.child(self.tool_button("tool-select", None, cx));
-        for (i, tool) in Tool::ALL.into_iter().enumerate() {
-            const IDS: [&str; 8] = ["tool-0", "tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6", "tool-7"];
-            bar = bar.child(self.tool_button(IDS[i], Some(tool), cx));
-        }
-        bar = bar.child(sep());
-        for size in 0..3u8 {
-            let dot = 4. + 3. * f32::from(size);
-            let selected = self.style.size == size;
-            bar = bar.child(
-                div()
-                    .id(("size", usize::from(size)))
-                    .size(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .when(selected, |d| d.bg(theme.accent))
-                    .hover(|d| d.bg(theme.secondary_hover))
-                    .child(div().size(px(dot)).rounded_full().bg(theme.foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.style.size = size;
-                        cx.notify();
-                    })),
-            );
-        }
-        for (i, color) in COLORS.into_iter().enumerate() {
-            let selected = self.style.color == color;
-            bar = bar.child(
-                div()
-                    .id(("color", i))
-                    .mx_0p5()
-                    .size(px(18.))
-                    .rounded_full()
-                    .bg(hsla(color))
-                    .border_2()
-                    .border_color(if selected { theme.foreground } else { theme.border })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.style.color = color;
-                        cx.notify();
-                    })),
-            );
-        }
-        bar.child(sep())
-            .child(
-                Self::action_button("undo", icons::UNDO, super::keys("Undo (⌘Z)", "Undo (Ctrl+Z)"))
-                    .disabled(!can_undo)
-                    .on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))),
-            )
-            .child(
-                Self::action_button("redo", icons::REDO, super::keys("Redo (⌘⇧Z)", "Redo (Ctrl+Y)"))
-                    .disabled(!can_redo)
-                    .on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))),
-            )
-            .child(sep())
-            .child(
-                Self::action_button("copy", icons::COPY, super::keys("Copy the selection (⌘C)", "Copy the selection (Ctrl+C)"))
-                    .disabled(page.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.copy(cx);
-                    })),
-            )
-            .child(
-                Self::action_button("paste", icons::PASTE, super::keys("Paste (⌘V)", "Paste (Ctrl+V)"))
-                    .on_click(cx.listener(|this, _, window, cx| this.paste(window, cx))),
-            )
-            .child(
-                Self::action_button("crop", icons::CROP, "Crop to the selection")
-                    .disabled(self.sel.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.crop(cx))),
-            )
-            .child(
-                Self::action_button("save", icons::SAVE, super::keys("Save As… (⌘S)", "Save As… (Ctrl+S)"))
-                    .disabled(page.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.save_as(cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("done")
-                    .icon(icons::icon(icons::ADD))
-                    .primary()
-                    .small()
-                    .label("Done")
-                    .tooltip("Back to the tray")
-                    .on_click(cx.listener(|this, _, window, cx| this.done(window, cx))),
-            )
-    }
-
-    fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tabs = self.pages.iter().enumerate().map(|(i, page)| {
-            Tab::new().label(page.name.clone()).suffix(
-                Button::new(("close-tab", i))
-                    .icon(icons::icon(icons::CLOSE))
-                    .ghost()
-                    .xsmall()
-                    .tooltip(super::keys("Close: drop this screenshot (⌘W)", "Close: drop this screenshot (Ctrl+W)"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(i, window, cx);
-                    })),
-            )
-        });
-        TabBar::new("pages")
-            .selected_index(self.active)
-            .children(tabs)
-            .on_click(cx.listener(|this, ix: &usize, window, cx| this.switch(*ix, window, cx)))
-            .last_empty_space(
-                div().flex_1().h_full().px_1().flex().items_center().child(
-                    Self::action_button("new-page", icons::PLUS, super::keys("New page (⌘T)", "New page (Ctrl+T)"))
-                        .xsmall()
-                        .on_click(cx.listener(|this, _, window, cx| this.new_page(window, cx))),
-                ),
-            )
-    }
-
     fn scene(&self, cx: &App) -> Option<Scene> {
         let page = self.page()?;
         let mut shapes = page.doc.shapes.clone();
@@ -984,90 +841,162 @@ impl Render for Editor {
             }
         }
         self.shown = live;
-        let theme = cx.theme().clone();
-        let cursor = if self.tool.is_some() { CursorStyle::Crosshair } else { CursorStyle::Arrow };
-        let mut area = div()
-            .id("page-area")
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .bg(theme.muted)
-            .cursor(cursor)
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down));
-        match self.scene(cx) {
-            Some(scene) => {
-                let cell = self.view.clone();
-                let page = p(scene.base.width() as f32, scene.base.height() as f32);
-                let scale = self.page().map_or(self.scale, |p| p.doc.scale);
-                area = area.child(
-                    canvas(
-                        move |bounds, window, _| {
-                            let view = fit(bounds, page, scale);
-                            if cell.replace(view) != view {
-                                // The text box is placed from the view.
-                                window.refresh();
-                            }
-                            view
-                        },
-                        move |bounds, view, window, cx| scene.paint(bounds, view, window, cx),
-                    )
-                    .absolute()
-                    .inset_0(),
-                );
-            },
-            None => {
-                area = area.child(
-                    div().size_full().flex().items_center().justify_center().text_sm().text_color(theme.muted_foreground).child(
-                        super::keys(
-                            "No screenshots. ⌘V pastes an image, ⌘T opens a blank page.",
-                            "No screenshots. Ctrl+V pastes an image, Ctrl+T opens a blank page.",
-                        ),
-                    ),
-                );
-            },
+        let page = self.page();
+        let (can_undo, can_redo) = page.map_or((false, false), |p| (!p.undo.is_empty() || self.floating.is_some(), !p.redo.is_empty()));
+        // Select first, then the drawing tools.
+        let tools = std::iter::once(None)
+            .chain(Tool::ALL.into_iter().map(Some))
+            .map(|tool| {
+                let (icon, tip) = tool.map_or(("shot-select", "Select (V)"), super::tool_icon);
+                Scope::new("tool").var("icon", icon).var("tooltip", tip).var("selected", self.tool == tool)
+            })
+            .collect();
+        let (sizes, colors) = super::style_lists(&self.style);
+        let pages = self
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Scope::new("page").var("name", p.name.clone()).var("active", i == self.active))
+            .collect();
+        let mut scope = Scope::new("shot-editor")
+            .list("tools", tools)
+            .list("sizes", sizes)
+            .list("colors", colors)
+            .list("pages", pages)
+            .var("pages", page.is_some())
+            .var("selection", self.sel.is_some())
+            .var("can_undo", can_undo)
+            .var("can_redo", can_redo)
+            .var("floating", self.floating.is_some())
+            .var("tool", self.tool.is_some())
+            .var("undo_key", super::keys("⌘Z", "Ctrl+Z"))
+            .var("redo_key", super::keys("⌘⇧Z", "Ctrl+Y"))
+            .var("copy_key", super::keys("⌘C", "Ctrl+C"))
+            .var("cut_key", super::keys("⌘X", "Ctrl+X"))
+            .var("paste_key", super::keys("⌘V", "Ctrl+V"))
+            .var("save_key", super::keys("⌘S", "Ctrl+S"))
+            .var("close_key", super::keys("⌘W", "Ctrl+W"))
+            .var("new_key", super::keys("⌘T", "Ctrl+T"));
+        if let Some(scene) = self.scene(cx) {
+            let cell = self.view.clone();
+            let size = p(scene.base.width() as f32, scene.base.height() as f32);
+            let scale = page.map_or(self.scale, |p| p.doc.scale);
+            let painted = canvas(
+                move |bounds, window, _| {
+                    let view = fit(bounds, size, scale);
+                    if cell.replace(view) != view {
+                        // The text box is placed from the view.
+                        window.refresh();
+                    }
+                    view
+                },
+                move |bounds, view, window, cx| scene.paint(bounds, view, window, cx),
+            )
+            .absolute()
+            .inset_0();
+            scope = scope.slot("scene", painted);
         }
         // In window points, as the root is the window.
-        let text_box = self.text.as_ref().map(|edit| {
+        if let Some(edit) = &self.text {
             let view = self.view.get();
             let at = view.pt(edit.at);
             let font = self.style.font() * view.zoom();
-            div()
-                .absolute()
-                .left(at.x)
-                .top(at.y - px(4.))
-                .w(px(240.))
-                .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(Input::new(&edit.input).appearance(false).text_color(hsla(self.style.color)).text_size(px(font)))
-        });
-        let hint = match (&self.floating, self.tool) {
-            (Some(_), _) => "Drag to move, corners to scale · Enter places it · Esc drops it",
-            (None, None) => super::keys(
-                "Drag to select · ⌘C copy · ⌘X cut · ⌘V paste · Del erase · Crop to the selection",
-                "Drag to select · Ctrl+C copy · Ctrl+X cut · Ctrl+V paste · Del erase · Crop to the selection",
-            ),
-            (None, Some(_)) => "Draw on the page · V to select",
-        };
-        div()
-            .id("shot-editor")
-            .track_focus(&self.focus)
-            .key_context("ShotEditor")
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .on_key_down(cx.listener(Self::on_key))
-            .on_mouse_move(cx.listener(Self::on_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_up))
-            .child(self.toolbar(cx))
-            .child(self.tabs(cx))
-            .child(area)
-            .child(div().px_3().py_1().border_t_1().border_color(theme.border).text_xs().text_color(theme.muted_foreground).child(hint))
-            .children(text_box)
+            let input = Input::new(&edit.input).appearance(false).text_color(hsla(self.style.color)).text_size(px(font));
+            scope = scope
+                .var("text", true)
+                .var("text_left", f64::from(at.x.as_f32()))
+                .var("text_top", f64::from(at.y.as_f32() - 4.))
+                .slot("input", input);
+        }
+        let me = cx.entity().downgrade();
+        let focus = self.focus.clone();
+        let cursor = if self.tool.is_some() { CursorStyle::Crosshair } else { CursorStyle::Arrow };
+        template::render(
+            "shot_editor",
+            scope,
+            &mut |name, ix, f| match (name, f) {
+                ("editor", Framed::Box(d)) => d
+                    .id("shot-editor")
+                    .track_focus(&focus)
+                    .key_context("ShotEditor")
+                    .on_key_down(on_event(&me, Self::on_key))
+                    .on_mouse_move(on_event(&me, Self::on_move))
+                    .on_mouse_up(MouseButton::Left, on_event(&me, Self::on_up))
+                    .on_mouse_up_out(MouseButton::Left, on_event(&me, Self::on_up))
+                    .into_any_element(),
+                ("page", Framed::Box(d)) => {
+                    d.id("page-area").cursor(cursor).on_mouse_down(MouseButton::Left, on_event(&me, Self::on_down)).into_any_element()
+                },
+                ("text", Framed::Box(d)) => {
+                    d.occlude().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element()
+                },
+                ("tool", Framed::Button(b)) => {
+                    let tool = ix.and_then(|i| i.checked_sub(1)).and_then(|i| Tool::ALL.get(i)).copied();
+                    b.on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| {
+                        this.set_tool(tool, cx);
+                        window.focus(&this.focus, cx);
+                    }))
+                    .into_any_element()
+                },
+                ("size", Framed::Box(d)) => {
+                    let size = ix.unwrap_or(0) as u8;
+                    d.id(("size", usize::from(size)))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, _, cx| {
+                            this.style.size = size;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                },
+                ("color", Framed::Box(d)) => {
+                    let Some(color) = ix.and_then(|i| COLORS.get(i)).copied() else { return d.into_any_element() };
+                    d.id(("color", ix.unwrap_or(0)))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, _, cx| {
+                            this.style.color = color;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                },
+                ("undo", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.undo(false, cx))).into_any_element()
+                },
+                ("redo", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.undo(true, cx))).into_any_element()
+                },
+                ("copy", Framed::Button(b)) => b
+                    .on_click(on_event(&me, |this, _: &ClickEvent, _, cx| {
+                        this.copy(cx);
+                    }))
+                    .into_any_element(),
+                ("paste", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.paste(window, cx))).into_any_element()
+                },
+                ("crop", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.crop(cx))).into_any_element(),
+                ("save", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.save_as(cx))).into_any_element(),
+                ("done", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.done(window, cx))).into_any_element()
+                },
+                ("pages", Framed::Box(d)) => d.id("pages").overflow_x_scroll().into_any_element(),
+                ("tab", Framed::Box(d)) => {
+                    let i = ix.unwrap_or(0);
+                    d.id(("page-tab", i))
+                        .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| this.switch(i, window, cx)))
+                        .into_any_element()
+                },
+                ("close", Framed::Button(b)) => {
+                    let i = ix.unwrap_or(0);
+                    b.on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(i, window, cx);
+                    }))
+                    .into_any_element()
+                },
+                ("new_page", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.new_page(window, cx))).into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
     }
 }
 

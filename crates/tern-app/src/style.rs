@@ -211,6 +211,16 @@ const BAR_TAB: &[Prop] = &[
 const BAR_TAB_ACTIVE: &[Prop] =
     &[("background", Color, "$tab.active.background"), ("text", Color, "$tab.active.foreground"), ("border", Color, "$border")];
 
+/// The screenshot overlay's floating bars.
+const SHOT_BAR: &[Prop] = &[
+    ("padding_x", Len, "0.5rem"),
+    ("radius", Len, "0.5rem"),
+    ("background", Color, "$popover"),
+    ("border", Color, "$border"),
+    ("border_width", Len, "1"),
+    ("shadow", Text, "lg"),
+];
+
 macro_rules! simple {
     ($name:literal, $about:literal) => {
         Element { name: $name, about: $about, groups: &[] }
@@ -520,6 +530,150 @@ pub const ELEMENTS: &[Element] = &[
         name: "agent_monitor.empty",
         about: "What the agent monitor shows with no agents running",
         groups: &[&[("padding_x", Len, "0.25rem"), ("padding_bottom", Len, "0.25rem"), ("text", Color, "$text_muted")]],
+    },
+    Element { name: "shot_overlay", about: "The screenshot overlay over a frozen display", groups: &[&[("background", Color, "#000000")]] },
+    Element {
+        name: "shot_overlay.toolbar",
+        about: "The overlay's tools, by the captured region",
+        groups: &[&[("height", Len, "40"), ("gap", Len, "0.125rem")], SHOT_BAR],
+    },
+    Element {
+        name: "shot_overlay.style_bar",
+        about: "The overlay's stroke sizes and colors, while a drawing tool is picked",
+        groups: &[&[("height", Len, "36"), ("gap", Len, "0.25rem")], SHOT_BAR],
+    },
+    Element {
+        name: "shot_overlay.hint",
+        about: "What the overlay says before a region is dragged",
+        groups: &[&[
+            ("padding_x", Len, "0.75rem"),
+            ("padding_y", Len, "0.375rem"),
+            ("radius", Len, "0.375rem"),
+            ("font_size", Len, "$text_sm"),
+            ("text", Color, "#ffffff"),
+            ("background", Color, "#000000b0"),
+        ]],
+    },
+    Element {
+        name: "shot_overlay.size_label",
+        about: "The captured region's size, above it",
+        groups: &[&[
+            ("padding_x", Len, "0.5rem"),
+            ("padding_y", Len, "0.125rem"),
+            ("radius", Len, "0.375rem"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "#ffffff"),
+            ("background", Color, "#2f6bff"),
+        ]],
+    },
+    Element {
+        name: "shot.separator",
+        about: "The line between groups of screenshot tools",
+        groups: &[&[("width", Len, "1"), ("height", Len, "20"), ("margin_x", Len, "0.25rem"), ("background", Color, "$border")]],
+    },
+    Element {
+        name: "shot.size",
+        about: "A stroke size to pick; `dot` colors its dot",
+        groups: &[&[
+            ("width", Len, "24"),
+            ("height", Len, "24"),
+            ("radius", Len, "0.375rem"),
+            ("dot", Color, "$foreground"),
+            ("selected_background", Color, "$accent"),
+            ("hover_background", Color, "$secondary_hover"),
+        ]],
+    },
+    Element {
+        name: "shot.color",
+        about: "A color to pick (filled with it)",
+        groups: &[&[
+            ("width", Len, "18"),
+            ("height", Len, "18"),
+            ("radius", Len, "9999"),
+            ("border_width", Len, "2"),
+            ("border", Color, "$border"),
+            ("selected_border", Color, "$foreground"),
+        ]],
+    },
+    Element {
+        name: "shot_editor",
+        about: "The screenshot editor window",
+        groups: &[&[("background", Color, "$background"), ("text", Color, "$foreground")]],
+    },
+    Element {
+        name: "shot_editor.toolbar",
+        about: "The editor's tools, at the top",
+        groups: &[&[
+            ("padding_x", Len, "0.5rem"),
+            ("padding_y", Len, "0.25rem"),
+            ("gap", Len, "0.125rem"),
+            ("border", Color, "$border"),
+            ("border_bottom_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "shot_editor.tabs",
+        about: "The editor's tab per screenshot",
+        groups: &[&[("background", Color, "$tab_bar_background"), ("border", Color, "$border"), ("border_bottom_width", Len, "1")]],
+    },
+    Element {
+        name: "shot_editor.tab",
+        about: "A screenshot's tab in the editor. `hover_text` is its text under the pointer",
+        groups: &[BAR_TAB],
+    },
+    Element { name: "shot_editor.tab_active", about: "The shown screenshot's tab, over `shot_editor.tab`", groups: &[BAR_TAB_ACTIVE] },
+    Element { name: "shot_editor.page", about: "Where the editor shows the page", groups: &[&[("background", Color, "$muted")]] },
+    Element {
+        name: "shot_editor.empty",
+        about: "What the editor says with no screenshot open",
+        groups: &[&[("font_size", Len, "$text_sm"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "shot_editor.hint",
+        about: "The line of keys at the bottom of the editor",
+        groups: &[&[
+            ("padding_x", Len, "0.75rem"),
+            ("padding_y", Len, "0.25rem"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text_muted"),
+            ("border", Color, "$border"),
+            ("border_top_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "shot_tray",
+        about: "The tray of screenshots to send to an agent",
+        groups: &[&[
+            ("padding", Len, "0.75rem"),
+            ("gap", Len, "0.5rem"),
+            ("radius", Len, "0.5rem"),
+            ("text", Color, "$foreground"),
+            ("background", Color, "$background"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "shot_tray.title",
+        about: "The tray's title",
+        groups: &[&[("font_size", Len, "$text_sm"), ("font_weight", Num, "600")]],
+    },
+    Element {
+        name: "shot_tray.shot",
+        about: "A screenshot's thumbnail in the tray",
+        groups: &[&[
+            ("width", Len, "104"),
+            ("height", Len, "68"),
+            ("radius", Len, "0.375rem"),
+            ("background", Color, "$muted"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "shot_tray.error",
+        about: "Why the tray's last send failed",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$danger")]],
     },
     Element { name: "dialog", about: "Prompts and confirmations", groups: &[&[("width", Len, "420"), ("wide_width", Len, "520")]] },
     Element { name: "dialog.body", about: "A dialog's message, under its title", groups: &[&[("gap", Len, "16")]] },
