@@ -18,10 +18,89 @@ pub enum Size {
     Auto,
 }
 
-/// What a dock holds: a single part, or a split of subtrees.
+/// A side of a part or pane: where something dropped near it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    pub const ALL: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
+
+    /// The split that puts something on this side.
+    pub fn dir(self) -> Dir {
+        match self {
+            Edge::Left | Edge::Right => Dir::Row,
+            Edge::Top | Edge::Bottom => Dir::Column,
+        }
+    }
+
+    /// Whether the new one goes after (right of / below) the one split.
+    pub fn after(self) -> bool {
+        matches!(self, Edge::Right | Edge::Bottom)
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Edge::Left => "left",
+            Edge::Right => "right",
+            Edge::Top => "up",
+            Edge::Bottom => "down",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.key() == s)
+    }
+}
+
+/// Where in an area a dragged thing is dropped: onto it (joins it) or
+/// near one of its sides (splits it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    Center,
+    Edge(Edge),
+}
+
+impl Zone {
+    /// The zone at `(x, y)`, as fractions of the area's width and height:
+    /// the outer third along a side picks that side, as VS Code does.
+    pub fn at(x: f32, y: f32) -> Self {
+        let (d, edge) = nearest(x, y);
+        if d < 1. / 3. { Zone::Edge(edge) } else { Zone::Center }
+    }
+
+    /// `at`, kept to the zones an area takes: with no `center`, the nearest
+    /// side; with no `edges`, the center. None when it takes neither.
+    pub fn pick(x: f32, y: f32, edges: bool, center: bool) -> Option<Self> {
+        match (edges, center) {
+            (true, true) => Some(Self::at(x, y)),
+            (true, false) => Some(Zone::Edge(nearest(x, y).1)),
+            (false, true) => Some(Zone::Center),
+            (false, false) => None,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        if s == "center" { Some(Zone::Center) } else { Edge::parse(s).map(Zone::Edge) }
+    }
+}
+
+/// The side of the unit square closest to `(x, y)`, and how close.
+fn nearest(x: f32, y: f32) -> (f32, Edge) {
+    let near = [(x, Edge::Left), (1. - x, Edge::Right), (y, Edge::Top), (1. - y, Edge::Bottom)];
+    near.into_iter().fold((f32::MAX, Edge::Left), |best, n| if n.0 < best.0 { n } else { best })
+}
+
+/// What a dock holds: a single part, parts stacked as tabs in one area (the
+/// index of the shown one), or a split of subtrees.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tree {
     Part(String),
+    Stack(Vec<String>, usize),
     Split(Dir, Vec<(Tree, Size)>),
 }
 
@@ -37,7 +116,16 @@ impl Tree {
     pub fn has(&self, part: &str) -> bool {
         match self {
             Tree::Part(name) => name == part,
+            Tree::Stack(names, _) => names.iter().any(|n| n == part),
             Tree::Split(_, items) => items.iter().any(|(t, _)| t.has(part)),
+        }
+    }
+
+    /// True when this is the area that shows `part`: the part, or a stack holding it.
+    fn is_leaf_of(&self, part: &str) -> bool {
+        match self {
+            Tree::Part(_) | Tree::Stack(..) => self.has(part),
+            Tree::Split(..) => false,
         }
     }
 }
@@ -48,6 +136,20 @@ pub enum Drop {
     Before(String),
     After(String),
     End,
+    /// On that side of the part (of its stack, when it is in one).
+    Edge(String, Edge),
+    /// Onto the part: stacked with it, and shown.
+    Stack(String),
+}
+
+impl Drop {
+    /// The part the drop is next to or onto.
+    fn target(&self) -> Option<&str> {
+        match self {
+            Drop::Before(t) | Drop::After(t) | Drop::Edge(t, _) | Drop::Stack(t) => Some(t),
+            Drop::End => None,
+        }
+    }
 }
 
 /// A dock as the active template declares it.
@@ -95,6 +197,14 @@ pub fn prune(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Tree> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shown {
     Part(String),
+    /// A stack with more than one part shown.
+    Stack {
+        /// Child indices from the dock's root to the stack, in the stored tree.
+        path: Vec<usize>,
+        parts: Vec<String>,
+        /// The index in `parts` of the one shown.
+        active: usize,
+    },
     Split {
         dir: Dir,
         /// Child indices from the dock's root to this split, in the stored tree.
@@ -111,6 +221,14 @@ pub fn shown(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
     fn walk(tree: &Tree, path: &mut Vec<usize>, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
         match tree {
             Tree::Part(name) => shown(name).then(|| Shown::Part(name.clone())),
+            Tree::Stack(names, active) => {
+                let (mut parts, active) = kept_stack(names, *active, &mut |n| shown(n));
+                match parts.len() {
+                    0 => None,
+                    1 => parts.pop().map(Shown::Part),
+                    _ => Some(Shown::Stack { path: path.clone(), parts, active }),
+                }
+            },
             Tree::Split(dir, items) => {
                 let mut kept = Vec::new();
                 for (i, (t, _)) in items.iter().enumerate() {
@@ -147,6 +265,14 @@ pub fn merge_sizes(stored: &[Size], kept: &[usize], new: &[Size]) -> Vec<Size> {
 fn prune_mut(tree: &Tree, shown: &mut dyn FnMut(&str) -> bool) -> Option<Tree> {
     match tree {
         Tree::Part(name) => shown(name).then(|| tree.clone()),
+        Tree::Stack(names, active) => {
+            let (mut parts, active) = kept_stack(names, *active, shown);
+            match parts.len() {
+                0 => None,
+                1 => parts.pop().map(Tree::Part),
+                _ => Some(Tree::Stack(parts, active)),
+            }
+        },
         Tree::Split(dir, items) => {
             let mut kept: Vec<(Tree, Size)> = items.iter().filter_map(|(t, s)| prune_mut(t, shown).map(|t| (t, *s))).collect();
             match kept.len() {
@@ -158,9 +284,27 @@ fn prune_mut(tree: &Tree, shown: &mut dyn FnMut(&str) -> bool) -> Option<Tree> {
     }
 }
 
+/// The parts of a stack `keep` keeps, and which of them is shown: the one
+/// shown before, or the next kept after it (the last kept, past the end).
+fn kept_stack(names: &[String], active: usize, keep: &mut dyn FnMut(&str) -> bool) -> (Vec<String>, usize) {
+    let mut parts = Vec::new();
+    let mut shown = None;
+    for (i, n) in names.iter().enumerate() {
+        if keep(n) {
+            if shown.is_none() && i >= active {
+                shown = Some(parts.len());
+            }
+            parts.push(n.clone());
+        }
+    }
+    let shown = shown.unwrap_or(parts.len().saturating_sub(1));
+    (parts, shown)
+}
+
 fn collect_parts<'a>(tree: &'a Tree, out: &mut Vec<&'a str>) {
     match tree {
         Tree::Part(name) => out.push(name),
+        Tree::Stack(names, _) => out.extend(names.iter().map(String::as_str)),
         Tree::Split(_, items) => items.iter().for_each(|(t, _)| collect_parts(t, out)),
     }
 }
@@ -170,7 +314,7 @@ fn parent_of<'a>(tree: &'a Tree, part: &str) -> Option<&'a [(Tree, Size)]> {
     let Tree::Split(_, items) = tree else {
         return None;
     };
-    if items.iter().any(|(t, _)| matches!(t, Tree::Part(n) if n == part)) {
+    if items.iter().any(|(t, _)| t.is_leaf_of(part)) {
         return Some(items);
     }
     items.iter().find_map(|(t, _)| parent_of(t, part))
@@ -181,12 +325,16 @@ fn already_there(root: Option<&Tree>, part: &str, at: &Drop) -> bool {
     let Some(root) = root else {
         return false;
     };
-    let index_of = |items: &[(Tree, Size)], name: &str| items.iter().position(|(t, _)| matches!(t, Tree::Part(n) if n == name));
+    let index_of = |items: &[(Tree, Size)], name: &str| items.iter().position(|(t, _)| t.is_leaf_of(name));
     match at {
         Drop::End => match root {
             Tree::Part(n) => n == part,
+            Tree::Stack(..) => false,
             Tree::Split(_, items) => items.last().is_some_and(|(t, _)| matches!(t, Tree::Part(n) if n == part)),
         },
+        // Already in the target's stack.
+        Drop::Stack(target) => parent_stack(root, target).is_some_and(|names| names.iter().any(|n| n == part)),
+        Drop::Edge(..) => false,
         Drop::Before(target) | Drop::After(target) => {
             let Some(items) = parent_of(root, part) else {
                 return false;
@@ -199,12 +347,21 @@ fn already_there(root: Option<&Tree>, part: &str, at: &Drop) -> bool {
     }
 }
 
+/// The stack that holds `part`, when it is in one.
+fn parent_stack<'a>(tree: &'a Tree, part: &str) -> Option<&'a [String]> {
+    match tree {
+        Tree::Part(_) => None,
+        Tree::Stack(names, _) => names.iter().any(|n| n == part).then_some(names.as_slice()),
+        Tree::Split(_, items) => items.iter().find_map(|(t, _)| parent_stack(t, part)),
+    }
+}
+
 /// Inserts `part` next to `target` in the split that holds it; false when `target` isn't in `tree`.
 fn insert_next_to(tree: &mut Tree, target: &str, part: &str, after: bool) -> bool {
     let Tree::Split(_, items) = tree else {
         return false;
     };
-    if let Some(i) = items.iter().position(|(t, _)| matches!(t, Tree::Part(n) if n == target)) {
+    if let Some(i) = items.iter().position(|(t, _)| t.is_leaf_of(target)) {
         let at = if after { i + 1 } else { i };
         items.insert(at, (Tree::Part(part.to_string()), Size::Auto));
         return true;
@@ -212,10 +369,56 @@ fn insert_next_to(tree: &mut Tree, target: &str, part: &str, after: bool) -> boo
     items.iter_mut().any(|(t, _)| insert_next_to(t, target, part, after))
 }
 
+/// Puts `part` on side `edge` of the area showing `target`: a sibling when the
+/// split there runs along that side's axis, else a new split in its place.
+fn split_at(tree: &mut Tree, target: &str, part: &str, edge: Edge) -> bool {
+    let pair = |old: Tree| {
+        let new = (Tree::Part(part.to_string()), Size::Auto);
+        let old = (old, Size::Auto);
+        Tree::Split(edge.dir(), if edge.after() { vec![old, new] } else { vec![new, old] })
+    };
+    if tree.is_leaf_of(target) {
+        *tree = pair(tree.clone());
+        return true;
+    }
+    let Tree::Split(dir, items) = tree else {
+        return false;
+    };
+    if let Some(i) = items.iter().position(|(t, _)| t.is_leaf_of(target)) {
+        if *dir == edge.dir() {
+            items.insert(if edge.after() { i + 1 } else { i }, (Tree::Part(part.to_string()), Size::Auto));
+        } else {
+            items[i].0 = pair(items[i].0.clone());
+        }
+        return true;
+    }
+    items.iter_mut().any(|(t, _)| split_at(t, target, part, edge))
+}
+
+/// Stacks `part` with `target`, shown.
+fn stack_on(tree: &mut Tree, target: &str, part: &str) -> bool {
+    match tree {
+        Tree::Part(n) if n == target => {
+            *tree = Tree::Stack(vec![n.clone(), part.to_string()], 1);
+            true
+        },
+        Tree::Part(_) => false,
+        Tree::Stack(names, active) if names.iter().any(|n| n == target) => {
+            names.push(part.to_string());
+            *active = names.len() - 1;
+            true
+        },
+        Tree::Stack(..) => false,
+        Tree::Split(_, items) => items.iter_mut().any(|(t, _)| stack_on(t, target, part)),
+    }
+}
+
 /// Puts `part` into `root` at `at`; false when the drop target isn't there.
 fn place(root: &mut Option<Tree>, dir: Dir, part: &str, at: &Drop) -> bool {
     let new = Tree::Part(part.to_string());
     match at {
+        Drop::Edge(target, edge) => root.as_mut().is_some_and(|t| split_at(t, target, part, *edge)),
+        Drop::Stack(target) => root.as_mut().is_some_and(|t| stack_on(t, target, part)),
         Drop::End => {
             *root = Some(match root.take() {
                 None => new,
@@ -230,8 +433,8 @@ fn place(root: &mut Option<Tree>, dir: Dir, part: &str, at: &Drop) -> bool {
         Drop::Before(target) | Drop::After(target) => {
             let after = matches!(at, Drop::After(_));
             match root {
-                Some(Tree::Part(only)) if only == target => {
-                    let old = Tree::Part(only.clone());
+                Some(only) if only.is_leaf_of(target) => {
+                    let old = only.clone();
                     let items = if after { vec![(old, Size::Auto), (new, Size::Auto)] } else { vec![(new, Size::Auto), (old, Size::Auto)] };
                     *root = Some(Tree::Split(dir, items));
                     true
@@ -275,7 +478,7 @@ impl Arrangement {
         if !info.takes(part, kind) {
             return false;
         }
-        if matches!(&at, Drop::Before(t) | Drop::After(t) if t == part) {
+        if at.target() == Some(part) {
             return false;
         }
         if already_there(self.docks.get(dock).and_then(|t| t.as_ref()), part, &at) {
@@ -314,6 +517,32 @@ impl Arrangement {
             for ((_, size), new) in items.iter_mut().zip(sizes) {
                 *size = *new;
             }
+        }
+    }
+
+    /// Shows `part` in the stack at `path` in `dock`; false when nothing changes.
+    pub fn set_active(&mut self, dock: &str, path: &[usize], part: &str) -> bool {
+        let Some(Some(mut node)) = self.docks.get_mut(dock).map(|t| t.as_mut()) else {
+            return false;
+        };
+        for &i in path {
+            let Tree::Split(_, items) = node else {
+                return false;
+            };
+            let Some((child, _)) = items.get_mut(i) else {
+                return false;
+            };
+            node = child;
+        }
+        let Tree::Stack(names, active) = node else {
+            return false;
+        };
+        match names.iter().position(|n| n == part) {
+            Some(i) if i != *active => {
+                *active = i;
+                true
+            },
+            _ => false,
         }
     }
 
@@ -461,6 +690,14 @@ fn number(s: &str) -> Option<f32> {
 fn encode_tree(tree: &Tree, out: &mut String) {
     match tree {
         Tree::Part(name) => out.push_str(name),
+        Tree::Stack(names, active) => {
+            out.push_str("[s");
+            for (i, n) in names.iter().enumerate() {
+                out.push_str(if i == *active { " *" } else { " " });
+                out.push_str(n);
+            }
+            out.push(']');
+        },
         Tree::Split(dir, items) => {
             out.push_str(if *dir == Dir::Row { "[r" } else { "[c" });
             for (t, size) in items {
@@ -514,6 +751,10 @@ impl Parser<'_> {
         let dir = match self.peek()? {
             b'r' => Dir::Row,
             b'c' => Dir::Column,
+            b's' => {
+                self.i += 1;
+                return self.stack();
+            },
             _ => return None,
         };
         self.i += 1;
@@ -543,6 +784,29 @@ impl Parser<'_> {
             return None;
         }
         Some(Tree::Split(dir, items))
+    }
+
+    /// A stack's parts after `[s`: ` name` each, `*` before the shown one.
+    fn stack(&mut self) -> Option<Tree> {
+        let mut names = Vec::new();
+        let mut active = 0;
+        while self.peek()? != b']' {
+            if self.peek()? != b' ' {
+                return None;
+            }
+            self.i += 1;
+            if self.peek()? == b'*' {
+                self.i += 1;
+                active = names.len();
+            }
+            names.push(self.word(is_name_byte)?.to_string());
+        }
+        self.i += 1;
+        match names.len() {
+            0 => None,
+            1 => names.pop().map(Tree::Part),
+            _ => Some(Tree::Stack(names, active)),
+        }
     }
 }
 
@@ -903,6 +1167,82 @@ mod tests {
         kept.fit("a", &d, &PARTS);
         assert_eq!(kept.get("a").unwrap().encode(), moved);
         assert_eq!(kept.saved(), vec![("a".to_string(), moved)]);
+    }
+
+    #[test]
+    fn zones() {
+        assert_eq!(Zone::at(0.5, 0.5), Zone::Center);
+        assert_eq!(Zone::at(0.1, 0.5), Zone::Edge(Edge::Left));
+        assert_eq!(Zone::at(0.9, 0.4), Zone::Edge(Edge::Right));
+        assert_eq!(Zone::at(0.5, 0.05), Zone::Edge(Edge::Top));
+        assert_eq!(Zone::at(0.45, 0.8), Zone::Edge(Edge::Bottom));
+        // Kept to what the area takes.
+        assert_eq!(Zone::pick(0.5, 0.5, true, false), Some(Zone::Edge(Edge::Left)));
+        assert_eq!(Zone::pick(0.5, 0.9, true, false), Some(Zone::Edge(Edge::Bottom)));
+        assert_eq!(Zone::pick(0.1, 0.5, false, true), Some(Zone::Center));
+        assert_eq!(Zone::pick(0.1, 0.5, false, false), None);
+    }
+
+    #[test]
+    fn edges_split_across_the_dock() {
+        let d = docks();
+        let mut a = fresh();
+        // Across the column: a row in explorer's place, keeping its size.
+        assert!(a.move_part("changes", "panel", "left", Drop::Edge("scratches".into(), Edge::Right), &d));
+        assert_eq!(a.encode(), "left=[c explorer@- [r scratches@- changes@-]@0.3];right=");
+        // Along the row: a sibling, not another split.
+        assert!(a.move_part("explorer", "panel", "left", Drop::Edge("scratches".into(), Edge::Left), &d));
+        assert_eq!(a.encode(), "left=[r explorer@- scratches@- changes@-];right=");
+        // Along the column of a lone part: the root splits.
+        assert!(a.move_part("changes", "panel", "right", Drop::End, &d));
+        assert!(a.move_part("explorer", "panel", "right", Drop::Edge("changes".into(), Edge::Top), &d));
+        assert_eq!(a.encode(), "left=scratches;right=[c explorer@- changes@-]");
+        assert!(!a.move_part("changes", "panel", "right", Drop::Edge("changes".into(), Edge::Top), &d));
+    }
+
+    #[test]
+    fn stacks_hold_parts_as_tabs() {
+        let d = docks();
+        let mut a = fresh();
+        assert!(a.move_part("changes", "panel", "left", Drop::Stack("explorer".into()), &d));
+        assert_eq!(a.encode(), "left=[c [s explorer *changes]@- scratches@0.3];right=");
+        assert_eq!(Arrangement::decode(&a.key, &a.encode()), Some(a.clone()));
+        // Already there.
+        assert!(!a.move_part("changes", "panel", "left", Drop::Stack("explorer".into()), &d));
+        assert!(a.set_active("left", &[0], "explorer"));
+        assert!(!a.set_active("left", &[0], "explorer"));
+        assert!(!a.set_active("left", &[1], "explorer"));
+        assert_eq!(a.encode(), "left=[c [s *explorer changes]@- scratches@0.3];right=");
+        // A third joins and shows; on an edge of a stacked part, the whole stack splits.
+        assert!(a.move_part("scratches", "panel", "left", Drop::Stack("changes".into()), &d));
+        assert_eq!(a.encode(), "left=[s explorer changes *scratches];right=");
+        assert!(a.move_part("changes", "panel", "left", Drop::Edge("scratches".into(), Edge::Bottom), &d));
+        assert_eq!(a.encode(), "left=[c [s explorer *scratches]@- changes@-];right=");
+        // Before a stacked part: next to its stack.
+        assert!(a.move_part("changes", "panel", "left", Drop::Before("explorer".into()), &d));
+        assert_eq!(a.encode(), "left=[c changes@- [s explorer *scratches]@-];right=");
+        // Leaving a stack of two leaves the other part alone.
+        assert!(a.move_part("scratches", "panel", "right", Drop::End, &d));
+        assert_eq!(a.encode(), "left=[c changes@- explorer@-];right=scratches");
+    }
+
+    #[test]
+    fn hidden_parts_of_a_stack() {
+        let a = Arrangement::decode("k", "left=[c x@- [s a *b c]@-]").unwrap();
+        let tree = a.docks["left"].clone().unwrap();
+        let Some(Shown::Split { items, .. }) = shown(&tree, &|_| true) else { panic!() };
+        assert_eq!(items[1].1, Shown::Stack { path: vec![1], parts: vec!["a".into(), "b".into(), "c".into()], active: 1 });
+        // The shown one hidden: the next one shows; past the end, the last.
+        let Some(Shown::Split { items, .. }) = shown(&tree, &|n| n != "b") else { panic!() };
+        assert_eq!(items[1].1, Shown::Stack { path: vec![1], parts: vec!["a".into(), "c".into()], active: 1 });
+        let tree = Tree::Stack(vec!["a".into(), "b".into(), "c".into()], 2);
+        assert_eq!(shown(&tree, &|n| n != "c"), Some(Shown::Stack { path: vec![], parts: vec!["a".into(), "b".into()], active: 1 }));
+        // One left: drawn as that part.
+        assert_eq!(shown(&tree, &|n| n == "a"), Some(Shown::Part("a".into())));
+        assert_eq!(prune(&tree, &|n| n != "a"), Some(Tree::Stack(vec!["b".into(), "c".into()], 1)));
+        assert_eq!(Arrangement::decode("k", "left=[s]"), None);
+        assert_eq!(Arrangement::decode("k", "left=[s *a]"), Some(Arrangement::decode("k", "left=a").unwrap()));
+        assert_eq!(Arrangement::decode("k", "left=[s a@- b]"), None);
     }
 
     #[test]

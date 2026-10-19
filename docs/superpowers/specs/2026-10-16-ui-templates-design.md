@@ -227,7 +227,23 @@ These fit after templates phase 4 (side panels as templates), since parts need t
 
 A. **Done (2026-10-16).** `part`, `dock` (`accepts`, `before`/`after`, `empty`), `handle`, drop-zone element; side panels movable between
    left and right docks; stored per workspace; Reset Layout; `layout.locked`.
-B. Center as a dock: move the pane drop-zone code to the dock code; `edges` and `stack` for panels too.
+B. **Done (2026-10-19).** Center as a dock: move the pane drop-zone code to the dock code; `edges` and `stack` for
+   panels too. As built (plan `2026-10-19-layout-phase-b.md`):
+   - `Edge`, `Zone` and `Zone::at` live in `arrange.rs`; `Zone::pick` keeps a zone to what the area takes. The
+     overlay is `dock::zone_overlay` + `dock::on_zones` (generic over the drag payload), with the hint under the
+     pointer in one global (`dock::DropHint`). Panes and docks use the same code.
+   - `edges` splits the area showing the target part (across the dock's axis too, as a sub-split); `stack` makes a
+     `Tree::Stack` (stored `[s a *b]`, `*` the shown part). A stack draws with `dock_tabs` (+ `.tab`, frame `tab`):
+     a tab shows its part and drags it. A part dropped on a stacked part's edge splits around the whole stack;
+     `before`/`after` a stacked part goes next to its stack. With `edges` or `stack`, a dock's areas show the zone
+     under the pointer; else the `before`/`after` halves. The built-in side docks take `edges` and `stack`.
+   - The dock named `center` is the pane dock (`{ "dock": "center", "accepts": ["pane"], "zones": ["edges",
+     "stack"] }`): it draws the code's `center` slot and is left out of the arrangement (stored arrangements keep
+     their key). Its `zones` decide whether a tab may split (`edges`) or join (`stack`) a pane. With `accepts`
+     `pane`, a whole pane drags by its tab bar's empty space (a `DraggedPart` of kind `pane`): onto a pane its tabs
+     join it, on a side it moves there. `layout.locked` stops pane drags; tab drags stay unlocked.
+     Not done: mixing panels into the center or panes into side docks (the center's tree holds only panes).
+   - Control commands for checks: `part-move PART DOCK stack|left|right|up|down TARGET`, `pane-move FROM TO ZONE`.
 C. Floating parts in the window (move, resize, dock again, stored).
 D. Pop out to a separate OS window.
 

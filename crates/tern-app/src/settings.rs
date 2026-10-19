@@ -1040,20 +1040,27 @@ between them by their headers. In a template:
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or
   kinds it takes (`[\"panel\"]`; none listed: nothing can be dropped in).
-  `zones` (`before`, `after`) say where a dropped part goes, next to the parts
-  there. `empty` is `hide` (an empty dock takes no room and shows a thin drop
-  strip only while a part it takes is dragged) or `keep`. `strip` (`left` or
+  `zones` say where a dropped part goes: `before` / `after` (next to the
+  parts there, along the dock), `edges` (on a part's side: it splits, across
+  the dock too) and `stack` (onto a part: they share one area, with a
+  `dock_tabs` row of tabs to pick the one shown). With `edges` or `stack`,
+  the zone under the pointer lights up; else a part's halves do. `empty`
+  is `hide` (an empty dock takes no room and shows a thin drop strip only
+  while a part it takes is dragged) or `keep`. `strip` (`left` or
   `right`) is the tool strip whose buttons show this dock's parts; a dock
   needs one. Its children are `part`s only.
   `part_size` is the size a part gets when it arrives from another dock.
-- `\"handle\": true` on a box inside a part makes it the grip: drop the part
-  on a half of a panel in a dock to put it before or after that panel. The
-  built-in headers use `panel_header`. Dragging shows each zone as the `drop_zone`
+- `\"handle\": true` on a box inside a part makes it the grip (a stack's
+  tabs are grips too). The built-in headers use `panel_header`. Dragging shows each zone as the `drop_zone`
   element (`drop_zone.hover` under the pointer). Colors take `$name/NN`: the
   color at NN% of its opacity.
+- `\"dock\": \"center\"` is the dock of the panes (no children, `split` or
+  `strip`): `zones` `edges` lets a dragged tab split a pane, `stack` lets it
+  join one; with `\"accepts\": [\"pane\"]`, a whole pane drags by its tab
+  bar's empty space, to another pane's side or onto it (its tabs join).
 - `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
-  resizing the panels in docks. Pane splits and tab drags aren't locked yet:
-  they will be once the panes are a dock too.
+  resizing the panels in docks, and dragging whole panes. Tab drags aren't
+  locked.
 
 Where the panels are is kept per workspace and per template (the `workspace`
 template and the names of its docks), so another theme with other docks has its

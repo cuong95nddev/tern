@@ -165,10 +165,14 @@ pub struct Spec {
     pub kind: Option<String>,
     /// This box holds parts, named so a layout can refer to it; its children
     /// are its default parts, and only parts. It needs a `split` and a `strip`.
+    /// The dock named `center` holds the panes instead: it draws the code's
+    /// `center` slot and has no children, `split` or `strip`.
     pub dock: Option<String>,
     /// The part names or kinds a dock takes.
     pub accepts: Vec<String>,
-    /// Where a part may be dropped in a dock: `before` and `after`.
+    /// Where a part may be dropped in a dock: `before` and `after` (next to
+    /// a part along the dock), `edges` (on a part's side, splitting it) and
+    /// `stack` (onto a part, as tabs in one area).
     pub zones: Vec<String>,
     /// What a dock does when it has no parts: `hide` (the default) or `keep`.
     pub empty: Option<String>,
@@ -382,6 +386,14 @@ impl Templates {
     /// The node a part is drawn with.
     pub(crate) fn part(&self, name: &str) -> Option<&Node> {
         self.parts.get(name).map(|(_, n)| n)
+    }
+
+    /// What `template`'s pane dock allows.
+    pub fn pane_dock(&self, template: &str) -> PaneDock {
+        fn find(n: &Node) -> Option<PaneDock> {
+            n.pane_dock.or_else(|| n.children.iter().find_map(find))
+        }
+        self.nodes.get(template).and_then(|n| find(n)).unwrap_or_default()
     }
 
     /// The tool strip (`left`, `right`) that shows the parts of `dock` in `template`.
@@ -675,6 +687,8 @@ pub struct Node {
     /// As a part: what a dock matches it on (`panel` when unset).
     kind: Option<String>,
     dock: Option<Arc<DockNode>>,
+    /// As the pane dock: what it allows.
+    pane_dock: Option<PaneDock>,
     /// Dragging this box drags the part it is drawn for.
     handle: bool,
     /// Whether it can be dragged; None is always.
@@ -724,7 +738,28 @@ const SLOTS: &[&str] = &[
 const PARTS: &[&str] = &["explorer", "scratches", "changes"];
 
 /// The zones a dock may take a drop in.
-const ZONES: &[&str] = &["before", "after"];
+const ZONES: &[&str] = &["before", "after", "edges", "stack"];
+
+/// The dock that holds the panes.
+const PANE_DOCK: &str = "center";
+
+/// What the pane dock (`"dock": "center"`) lets the user do with tabs and panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneDock {
+    /// A whole pane may be dragged (it accepts `pane`).
+    pub panes: bool,
+    /// Dropping on a pane's side splits it.
+    pub edges: bool,
+    /// Dropping onto a pane joins it.
+    pub stack: bool,
+}
+
+impl Default for PaneDock {
+    /// Without a pane dock, tabs split and join panes, and panes stay.
+    fn default() -> Self {
+        PaneDock { panes: false, edges: true, stack: true }
+    }
+}
 
 /// Reads `specs` (the built-in templates with the theme's and the
 /// settings' over them) with `props`; what's wrong goes to `problems`.
@@ -1153,7 +1188,9 @@ impl Compiler<'_, '_> {
             Some(name) => self.element(name, at),
             None => None,
         };
-        let what = if let Some(slot) = &s.slot {
+        let what = if s.dock.as_deref() == Some(PANE_DOCK) {
+            What::Slot("center")
+        } else if let Some(slot) = &s.slot {
             match SLOTS.iter().find(|n| **n == slot) {
                 Some(n) => What::Slot(n),
                 None => {
@@ -1219,7 +1256,8 @@ impl Compiler<'_, '_> {
         let mut children: Vec<Node> = s.children.iter().enumerate().map(|(i, c)| self.node(c, &format!("{at}.children.{i}"))).collect();
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
-        let dock = self.dock(s, at, split, &children);
+        let pane_dock = self.pane_dock(s, at);
+        let dock = if pane_dock.is_some() { None } else { self.dock(s, at, split, &children) };
         let label = if submenu { s.label.as_deref().map(parts) } else { None };
         Node {
             what,
@@ -1249,11 +1287,34 @@ impl Compiler<'_, '_> {
             panel: self.panel(s, at),
             frame: s.frame.clone().map(Into::into),
             dock,
+            pane_dock,
             handle: s.handle,
             drag: self.flag(&s.drag, &format!("{at}.drag")),
             kind: s.kind.clone(),
             children,
         }
+    }
+
+    /// What the pane dock allows, when `s` is it.
+    fn pane_dock(&mut self, s: &Spec, at: &str) -> Option<PaneDock> {
+        if s.dock.as_deref() != Some(PANE_DOCK) {
+            return None;
+        }
+        if !s.children.is_empty() || s.split.is_some() || s.strip.is_some() || s.slot.is_some() {
+            self.problems.push(format!("{at}: the \"{PANE_DOCK}\" dock holds the panes: no children, split, strip or slot"));
+        }
+        let mut dock = PaneDock { panes: s.accepts.iter().any(|a| a == "pane"), edges: false, stack: false };
+        for z in &s.zones {
+            match z.as_str() {
+                "edges" => dock.edges = true,
+                "stack" => dock.stack = true,
+                _ => self.problems.push(format!("{at}.zones: \"{z}\" is not one of edges, stack")),
+            }
+        }
+        if s.accepts.iter().any(|a| a != "pane") {
+            self.problems.push(format!("{at}.accepts: the \"{PANE_DOCK}\" dock takes only \"pane\""));
+        }
+        Some(dock)
     }
 
     /// The dock `s` declares, if it does; its default parts are its children.
@@ -1504,6 +1565,26 @@ mod tests {
         let mut problems = vec![];
         let t = compile(&specs, &props, &mut problems);
         (t, problems)
+    }
+
+    #[test]
+    fn the_center_dock_holds_the_panes() {
+        let (t, problems) = compiled(
+            r#"{"w": {"split": "row", "children": [
+                {"dock": "left", "split": "column", "strip": "left", "accepts": ["panel"], "zones": ["edges", "stack"],
+                 "children": [{"part": "explorer"}]},
+                {"dock": "center", "accepts": ["pane"], "zones": ["edges"]}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(t.pane_dock("w"), super::PaneDock { panes: true, edges: true, stack: false });
+        // Not one of the arrangement's docks: stored arrangements keep their key.
+        assert_eq!(t.docks("w").iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["left"]);
+        assert!(t.nodes["w"].children[1].is_bare());
+        // Without one, tabs split and join panes as before.
+        assert_eq!(t.pane_dock("nope"), super::PaneDock::default());
+
+        let (_, problems) = compiled(r#"{"w": {"dock": "center", "accepts": ["panel"], "zones": ["before"], "split": "row"}}"#);
+        assert_eq!(problems.len(), 3, "{problems:?}");
     }
 
     #[test]

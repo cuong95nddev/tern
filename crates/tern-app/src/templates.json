@@ -34,7 +34,7 @@
                 "dock": "left",
                 "split": "column",
                 "accepts": ["panel"],
-                "zones": ["before", "after"],
+                "zones": ["edges", "stack"],
                 "strip": "left",
                 "fill": true,
                 "fixed": true,
@@ -46,12 +46,12 @@
                   { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
                 ]
               },
-              { "slot": "center" },
+              { "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] },
               {
                 "dock": "right",
                 "split": "column",
                 "accepts": ["panel"],
-                "zones": ["before", "after"],
+                "zones": ["edges", "stack"],
                 "strip": "right",
                 "fill": true,
                 "fixed": true,
@@ -1229,6 +1229,29 @@
     "layout": "row",
     "align": "center",
     "children": [{ "when": "icon", "icon": "{icon}", "style": { "width": 12, "height": 12 } }, { "text": "{label}" }]
+  },
+  "dock_tabs": {
+    "fill": true,
+    "children": [
+      {
+        "layout": "row",
+        "shrink": 0,
+        "style": { "border_bottom_width": 1, "border": "$border" },
+        "children": [{ "each": "tabs", "layout": "row", "item": { "use": "dock_tabs.tab" } }]
+      },
+      { "grow": 1, "children": [{ "slot": "content" }] }
+    ]
+  },
+  "dock_tabs.tab": {
+    "frame": "tab",
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_x": 10, "height": 26, "text": "$muted_foreground", "border_bottom_width": 2, "border": "transparent" },
+    "states": {
+      "on": { "text": "$foreground", "border": "$primary" },
+      "hover && !on": { "text": "$foreground" }
+    },
+    "children": [{ "truncate": true, "text": "{title}" }]
   },
   "drag_group": {
     "children": [

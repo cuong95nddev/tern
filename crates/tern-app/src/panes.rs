@@ -6,68 +6,13 @@ use gpui_kit::Axis;
 
 pub type PaneId = u64;
 
-/// A side of a pane: where a tab dropped near it opens a new pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edge {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
+pub use crate::arrange::{Edge, Zone};
 
-impl Edge {
-    #[cfg(debug_assertions)] // the debug control socket
-    pub const ALL: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
-
-    /// The split that puts a pane on this side.
-    pub fn axis(self) -> Axis {
-        match self {
-            Edge::Left | Edge::Right => Axis::Horizontal,
-            Edge::Top | Edge::Bottom => Axis::Vertical,
-        }
-    }
-
-    /// Whether the new pane goes after (right of / below) the one split.
-    pub fn after(self) -> bool {
-        matches!(self, Edge::Right | Edge::Bottom)
-    }
-
-    #[cfg(debug_assertions)] // the debug control socket
-    pub fn key(self) -> &'static str {
-        match self {
-            Edge::Left => "left",
-            Edge::Right => "right",
-            Edge::Top => "up",
-            Edge::Bottom => "down",
-        }
-    }
-
-    #[cfg(debug_assertions)] // the debug control socket
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|e| e.key() == s)
-    }
-}
-
-/// Where in a pane a dragged tab is dropped: onto it (joins its tabs) or
-/// near one of its sides (splits it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Zone {
-    Center,
-    Edge(Edge),
-}
-
-impl Zone {
-    /// The zone at `(x, y)`, as fractions of the pane's width and height:
-    /// the outer third along a side picks that side, as VS Code does.
-    pub fn at(x: f32, y: f32) -> Self {
-        let near = [(x, Edge::Left), (1. - x, Edge::Right), (y, Edge::Top), (1. - y, Edge::Bottom)];
-        let (d, edge) = near.into_iter().fold((f32::MAX, Edge::Left), |best, n| if n.0 < best.0 { n } else { best });
-        if d < 1. / 3. { Zone::Edge(edge) } else { Zone::Center }
-    }
-
-    #[cfg(debug_assertions)] // the debug control socket
-    pub fn parse(s: &str) -> Option<Self> {
-        if s == "center" { Some(Zone::Center) } else { Edge::parse(s).map(Zone::Edge) }
+/// The split that puts a pane on side `edge`.
+fn axis(edge: Edge) -> Axis {
+    match edge.dir() {
+        crate::arrange::Dir::Row => Axis::Horizontal,
+        crate::arrange::Dir::Column => Axis::Vertical,
     }
 }
 
@@ -116,7 +61,7 @@ impl Layout {
     pub fn split(&mut self, target: PaneId, new: PaneId, edge: Edge) {
         let pair = |old: Layout| {
             let new = Layout::Pane(new);
-            Layout::Split(edge.axis(), if edge.after() { vec![old, new] } else { vec![new, old] })
+            Layout::Split(axis(edge), if edge.after() { vec![old, new] } else { vec![new, old] })
         };
         match self {
             Layout::Pane(p) if *p == target => *self = pair(Layout::Pane(target)),
@@ -125,7 +70,7 @@ impl Layout {
                 let Some(k) = children.iter().position(|c| *c == Layout::Pane(target)) else {
                     return children.iter_mut().for_each(|c| c.split(target, new, edge));
                 };
-                if *axis == edge.axis() {
+                if *axis == self::axis(edge) {
                     // A sibling in the same row (or column), not a nested split.
                     children.insert(if edge.after() { k + 1 } else { k }, Layout::Pane(new));
                 } else {
@@ -373,15 +318,6 @@ mod tests {
         assert_eq!(l.neighbor(0, Edge::Right), Some(1));
         assert_eq!(l.neighbor(2, Edge::Left), Some(0));
         assert_eq!(l.neighbor(0, Edge::Bottom), None);
-    }
-
-    #[test]
-    fn zones() {
-        assert_eq!(Zone::at(0.5, 0.5), Zone::Center);
-        assert_eq!(Zone::at(0.1, 0.5), Zone::Edge(Edge::Left));
-        assert_eq!(Zone::at(0.9, 0.4), Zone::Edge(Edge::Right));
-        assert_eq!(Zone::at(0.5, 0.05), Zone::Edge(Edge::Top));
-        assert_eq!(Zone::at(0.45, 0.8), Zone::Edge(Edge::Bottom));
     }
 
     #[test]

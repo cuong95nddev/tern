@@ -26,7 +26,7 @@ use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::DiffPane;
-use crate::dock::{ActiveDrag, Change, OnChange};
+use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
@@ -339,8 +339,6 @@ pub struct Workspace {
     layout_epoch: usize,
     /// A tab drag started here is on: the panes show their drop zones.
     tab_drag: bool,
-    /// Where the dragged tab would land: a pane and the part of it.
-    drop_target: Option<(PaneId, Zone)>,
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
     /// Where the side panels sit, per template and docks (`arrange::key`).
     arrangements: Kept,
@@ -495,7 +493,6 @@ impl Workspace {
             zoomed: None,
             layout_epoch: 0,
             tab_drag: false,
-            drop_target: None,
             pane_ui: RefCell::new(HashMap::new()),
             docks_epoch: 0,
             arrangements: Kept::new(saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
@@ -1949,23 +1946,30 @@ impl Workspace {
         ws: &WeakEntity<Self>,
         pane: PaneId,
         entries: &[TabEntry],
+        handle: &Option<DraggedPart>,
         (name, ix, f): (&str, Option<usize>, Framed),
     ) -> Result<AnyElement, Framed> {
         let drop_bg = |cx: &App| cx.theme().list_hover;
         let entry = ix.and_then(|ix| entries.get(ix));
         Ok(match (name, f, entry) {
             ("root", Framed::Box(d), _) => Self::tab_menu_frame(d, pane, ws).into_any_element(),
-            ("end", Framed::Box(d), _) => d
-                .id(("tabs-end", pane as usize))
-                .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(drop_bg(cx)))
-                .drag_over::<DraggedGroup>(move |s, _, _, cx| s.bg(drop_bg(cx)))
-                .on_drop(on_event(ws, move |this, d: &DraggedTab, window, cx| this.move_tab_to_pane(d.tab, pane, window, cx)))
-                .on_drop(on_event(ws, move |this, d: &DraggedGroup, _, cx| {
-                    this.move_group(d.group, this.tabs.len(), cx);
-                    this.set_group_pane(d.group, pane);
-                    this.groups_changed(cx);
-                }))
-                .into_any_element(),
+            ("end", Framed::Box(d), _) => {
+                let d = d.id(("tabs-end", pane as usize));
+                // Its empty space drags the whole pane.
+                match handle.clone() {
+                    Some(p) => d.on_drag(p, crate::dock::start_drag),
+                    None => d,
+                }
+            }
+            .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+            .drag_over::<DraggedGroup>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+            .on_drop(on_event(ws, move |this, d: &DraggedTab, window, cx| this.move_tab_to_pane(d.tab, pane, window, cx)))
+            .on_drop(on_event(ws, move |this, d: &DraggedGroup, _, cx| {
+                this.move_group(d.group, this.tabs.len(), cx);
+                this.set_group_pane(d.group, pane);
+                this.groups_changed(cx);
+            }))
+            .into_any_element(),
             ("tab", Framed::Box(d), Some(&TabEntry { slot: Slot::Tab(i), ref name, tab: Some(tab), .. })) => {
                 let drag = DraggedTab { tab, name: name.clone() };
                 d.id(("tab", i))
@@ -2080,6 +2084,7 @@ impl Workspace {
             .list("items", items)
             .slot_opt("scrollbar", scrollbar);
         let ws = cx.entity().downgrade();
+        let handle = self.pane_handle(pane, cx);
         template::render(
             "pane_tab_bar",
             scope,
@@ -2130,7 +2135,7 @@ impl Workspace {
                         .anchor(Anchor::TopRight)
                         .into_any_element()
                 },
-                (name, f) => Self::tab_list_frame(&ws, pane, &entries, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
+                (name, f) => Self::tab_list_frame(&ws, pane, &entries, &handle, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
             },
             cx,
         )
@@ -2149,12 +2154,13 @@ impl Workspace {
         let (entries, items) = self.tab_entries(&slots, |_| None, cx);
         let scope = self.pane_vars(pane, template::Scope::new(format!("vertical-tabs-{pane}"))).list("items", items);
         let ws = cx.entity().downgrade();
+        let handle = self.pane_handle(pane, cx);
         template::render(
             "vertical_tabs",
             scope,
             &mut |name, ix, f| match (name, f) {
                 ("list", Framed::Box(d)) => d.id(("vtabs", pane as usize)).overflow_y_scroll().track_scroll(&scroll).into_any_element(),
-                (name, f) => Self::tab_list_frame(&ws, pane, &entries, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
+                (name, f) => Self::tab_list_frame(&ws, pane, &entries, &handle, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
             },
             cx,
         )
@@ -2495,6 +2501,11 @@ impl Workspace {
                 }
             },
             Change::Resize { dock, path, sizes } => a.set_sizes(&dock, &path, &sizes),
+            Change::Activate { dock, path, part } => {
+                if !a.set_active(&dock, &path, &part) {
+                    return;
+                }
+            },
             Change::Width { dock, width } => {
                 a.widths.insert(dock.to_string(), width);
             },
@@ -2913,7 +2924,7 @@ impl Workspace {
             .var("title", title)
             .var("tabs", self.pane_tabs(pane).len())
             .slot("content", content)
-            .slot_opt("drop_overlay", (self.tab_drag && cx.has_active_drag()).then(|| self.drop_overlay(pane, cx)));
+            .slot_opt("drop_overlay", self.drops_on_panes(cx).map(|dock| self.drop_overlay(pane, dock, cx)));
         let scope = if vertical {
             scope.slot("vertical_tabs", self.render_vertical_tabs(pane, cx))
         } else {
@@ -2948,45 +2959,88 @@ impl Workspace {
         )
     }
 
-    /// Over pane `pane`'s content while a tab is dragged: the part under
-    /// the pointer lights up where the tab would go (VS Code's drop zones).
-    fn drop_overlay(&self, pane: PaneId, cx: &mut Context<Self>) -> Div {
-        let hint = self.drop_target.filter(|t| t.0 == pane).map(|(_, zone)| {
-            let d = style::el("drop_zone", cx).apply(div().absolute());
-            match zone {
-                Zone::Center => d.inset_0(),
-                Zone::Edge(Edge::Left) => d.top_0().bottom_0().left_0().w(relative(0.5)),
-                Zone::Edge(Edge::Right) => d.top_0().bottom_0().right_0().w(relative(0.5)),
-                Zone::Edge(Edge::Top) => d.left_0().right_0().top_0().h(relative(0.5)),
-                Zone::Edge(Edge::Bottom) => d.left_0().right_0().bottom_0().h(relative(0.5)),
+    /// What the pane dock allows (`"dock": "center"`).
+    fn pane_dock(cx: &App) -> template::PaneDock {
+        cx.try_global::<template::Templates>().map(|t| t.pane_dock("workspace")).unwrap_or_default()
+    }
+
+    /// While a tab or a pane of this workspace is dragged and the pane dock
+    /// takes it somewhere: what it allows.
+    fn drops_on_panes(&self, cx: &Context<Self>) -> Option<template::PaneDock> {
+        let dock = Self::pane_dock(cx);
+        let pane = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| self.dragged_pane(p, cx.entity_id()).is_some());
+        (cx.has_active_drag() && (self.tab_drag || pane && dock.panes) && (dock.edges || dock.stack)).then_some(dock)
+    }
+
+    /// What dragging pane `pane` by its tab bar's empty space drags, when the
+    /// pane dock takes panes and there is another pane to drop it on.
+    fn pane_handle(&self, pane: PaneId, cx: &Context<Self>) -> Option<DraggedPart> {
+        let locked = cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0);
+        if locked || !Self::pane_dock(cx).panes || self.layout.panes().len() < 2 {
+            return None;
+        }
+        let title = self.pane_active_ix(pane).map(|ix| self.full_title(ix, cx)).unwrap_or_default();
+        Some(DraggedPart { part: format!("pane:{}:{pane}", cx.entity_id()).into(), kind: "pane".into(), title: title.into() })
+    }
+
+    /// The pane of this workspace that `p` drags, if it drags one.
+    fn dragged_pane(&self, p: &DraggedPart, me: EntityId) -> Option<PaneId> {
+        let (owner, pane) = p.part.strip_prefix("pane:")?.split_once(':')?;
+        (owner == me.to_string()).then(|| pane.parse().ok()).flatten()
+    }
+
+    /// Over pane `pane`'s content while a tab or a pane is dragged: the part
+    /// under the pointer lights up where it would go (VS Code's drop zones).
+    fn drop_overlay(&self, pane: PaneId, dock: template::PaneDock, cx: &mut Context<Self>) -> Div {
+        let area = format!("{}:pane:{pane}", cx.entity_id());
+        let overlay = crate::dock::zone_overlay(&area, cx);
+        let ws = cx.entity().downgrade();
+        let on_tab = {
+            let ws = ws.clone();
+            move |d: &DraggedTab, zone: Zone, window: &mut Window, cx: &mut App| {
+                let _ = ws.update(cx, |this, cx| {
+                    this.tab_drag = false;
+                    this.drop_in_pane(d.tab, pane, zone, window, cx);
+                });
             }
-        });
-        div()
-            .absolute()
-            .inset_0()
-            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedTab>, _, cx| {
-                let (b, at) = (ev.bounds, ev.event.position);
-                let next = if b.contains(&at) {
-                    let x = f32::from(at.x - b.left()) / f32::from(b.size.width).max(1.);
-                    let y = f32::from(at.y - b.top()) / f32::from(b.size.height).max(1.);
-                    Some((pane, Zone::at(x, y)))
-                } else if this.drop_target.is_some_and(|t| t.0 == pane) {
-                    None
-                } else {
-                    return;
-                };
-                if this.drop_target != next {
-                    this.drop_target = next;
-                    cx.notify();
+        };
+        let overlay = crate::dock::on_zones(overlay, area.clone().into(), dock.edges, dock.stack, on_tab);
+        crate::dock::on_zones(overlay, area.into(), dock.edges, dock.stack, move |p: &DraggedPart, zone, window, cx| {
+            let _ = ws.update(cx, |this, cx| {
+                if let Some(from) = this.dragged_pane(p, cx.entity_id()) {
+                    this.drop_pane(from, pane, zone, window, cx);
                 }
-            }))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
-                let zone = this.drop_target.filter(|t| t.0 == pane).map_or(Zone::Center, |t| t.1);
-                this.drop_target = None;
-                this.tab_drag = false;
-                this.drop_in_pane(d.tab, pane, zone, window, cx);
-            }))
-            .children(hint)
+            });
+        })
+    }
+
+    /// What dropping pane `from` (dragged by its tab bar) on part `zone` of
+    /// pane `to` does: its tabs join `to`, or it moves to that side of `to`.
+    fn drop_pane(&mut self, from: PaneId, to: PaneId, zone: Zone, window: &mut Window, cx: &mut Context<Self>) {
+        if from == to || !self.layout.contains(from) || !self.layout.contains(to) {
+            return;
+        }
+        match zone {
+            Zone::Center => {
+                for i in self.pane_tabs(from) {
+                    self.tab_pane.insert(self.tabs[i].entity_id(), to);
+                }
+                if self.focused == from {
+                    self.focus_pane_state(to);
+                }
+                self.drop_if_empty(from);
+            },
+            Zone::Edge(edge) => {
+                self.layout.remove(from);
+                self.layout.split(to, from, edge);
+                self.layout_epoch += 1;
+            },
+        }
+        self.zoomed = None;
+        self.sync_panes();
+        self.focus_active(window, cx);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
     }
 
     /// Non-input control commands (see `control`).
@@ -3192,6 +3246,15 @@ impl Workspace {
                         (Some(c), Some(r)) if (1..=4).contains(&c) && (1..=4).contains(&r) => self.apply_layout(c, r, window, cx),
                         _ => return "error: pane-layout COLS ROWS".into(),
                     },
+                    // What dropping pane FROM (dragged by its tab bar) on part ZONE of pane TO does.
+                    "pane-move" => match (
+                        num(0).and_then(|k| order.get(k)),
+                        num(1).and_then(|k| order.get(k)),
+                        args.get(2).and_then(|z| Zone::parse(z)),
+                    ) {
+                        (Some(&from), Some(&to), Some(zone)) => self.drop_pane(from, to, zone, window, cx),
+                        _ => return "error: pane-move FROM TO center|left|right|up|down".into(),
+                    },
                     "pane-tile" => self.tile_tabs(window, cx),
                     "pane-zoom" => self.toggle_zoom(cx),
                     "pane-focus" => match (num(0).and_then(|k| order.get(k)), args.first().and_then(|e| Edge::parse(e))) {
@@ -3211,14 +3274,18 @@ impl Workspace {
                 self.reset_layout(&ResetLayout, window, cx);
                 "ok".into()
             },
-            // What dropping PART in DOCK does: before or after TARGET, or at its end.
+            // What dropping PART in DOCK does: before, after, onto or on a side of TARGET, or at its end.
             cmd if cmd.starts_with("part-move ") => {
                 let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
                 let at = match (args.get(2).copied(), args.get(3)) {
                     (Some("before"), Some(t)) => arrange::Drop::Before((*t).to_owned()),
                     (Some("after"), Some(t)) => arrange::Drop::After((*t).to_owned()),
+                    (Some("stack"), Some(t)) => arrange::Drop::Stack((*t).to_owned()),
+                    (Some(e), Some(t)) if arrange::Edge::parse(e).is_some() => {
+                        arrange::Drop::Edge((*t).to_owned(), arrange::Edge::parse(e).unwrap())
+                    },
                     (Some("end"), None) => arrange::Drop::End,
-                    _ => return "error: part-move PART DOCK before|after|end [TARGET]".into(),
+                    _ => return "error: part-move PART DOCK before|after|stack|left|right|up|down|end [TARGET]".into(),
                 };
                 let (part, dock) = (args[0], args[1]);
                 let kind =
@@ -3281,7 +3348,9 @@ impl Render for Workspace {
         // A drag that ended outside every drop target leaves these behind.
         if !cx.has_active_drag() {
             self.tab_drag = false;
-            self.drop_target = None;
+            if cx.try_global::<DropHint>().is_some_and(|h| h.0.is_some()) {
+                cx.set_global(DropHint(None));
+            }
             if cx.try_global::<ActiveDrag>().is_some_and(|d| d.0.is_some()) {
                 cx.set_global(ActiveDrag(None));
                 // Other windows drew zones for the drag too.

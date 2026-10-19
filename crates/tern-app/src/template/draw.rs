@@ -346,15 +346,96 @@ impl Drawer<'_, '_> {
         Some(self.zone(d, arrange::Drop::End, on_change))
     }
 
-    /// Part `name`'s body in dock `d`, with its `before`/`after` halves over
-    /// it while a part the dock takes is dragged.
-    fn leaf(&self, d: &DockNode, name: &str, body: AnyElement, scope: &Scope) -> AnyElement {
-        let Some((_, on_change)) = self.drop_for(d, scope) else { return body };
+    /// What dragging part `part` by a stack's tab drags, when it may be dragged.
+    fn part_drag(&self, part: &str) -> Option<DraggedPart> {
+        if self.locked() || self.cx.try_global::<PinnedParts>().is_some_and(|p| p.0.contains(part)) {
+            return None;
+        }
+        let (kind, _) = self.cx.try_global::<Templates>()?.parts.get(part)?;
+        Some(DraggedPart { part: part.to_owned().into(), kind: kind.clone().into(), title: crate::dock::part_title(part) })
+    }
+
+    /// Part `name` as its node draws it.
+    fn part_body(&mut self, name: &str, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
+        let cx = self.cx;
+        let body = cx.try_global::<Templates>().and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
+        body.unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// The stack at `path` in dock `d`: a row of tabs (`dock_tabs`) over the
+    /// part it shows. A tab shows its part, and drags it.
+    #[allow(clippy::too_many_arguments)]
+    fn stack(
+        &mut self,
+        d: &DockNode,
+        path: &[usize],
+        parts: &[String],
+        active: usize,
+        scope: &mut Scope,
+        outer: &[&HashMap<&'static str, Value>],
+    ) -> AnyElement {
+        let active = active.min(parts.len().saturating_sub(1));
+        let body = self.part_body(&parts[active], scope, outer);
+        let tabs = parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Scope::default().var("title", crate::dock::part_title(p)).var("part", p.clone()).var("on", i == active))
+            .collect();
+        let drags: Vec<Option<DraggedPart>> = parts.iter().map(|p| self.part_drag(p)).collect();
+        let (id, on_change, dock, at) = (scope.id.clone(), scope.on_change.clone(), d.name.clone(), path.to_vec());
+        let names = parts.to_vec();
+        let mut frames = |name: &str, ix: Option<usize>, f: Framed| match (name, f, ix.filter(|i| *i < names.len())) {
+            ("tab", Framed::Box(b), Some(i)) => {
+                let mut b = b.id(ElementId::Name(format!("{id}:dock_tab:{}", names[i]).into()));
+                if let Some(on_change) = on_change.clone() {
+                    let (dock, path, part) = (dock.clone(), at.clone(), SharedString::from(names[i].clone()));
+                    b = b.on_click(move |_, window, cx| {
+                        on_change(Change::Activate { dock: dock.clone(), path: path.clone(), part: part.clone() }, window, cx);
+                    });
+                }
+                if let Some(p) = drags[i].clone() {
+                    b = b.on_drag(p, crate::dock::start_drag);
+                }
+                b.into_any_element()
+            },
+            (_, f, _) => f.into_any_element(),
+        };
+        let at: Vec<String> = path.iter().map(usize::to_string).collect();
+        let tabs = Scope::new(format!("{}:stack:{}:{}", scope.id, d.name, at.join("."))).list("tabs", tabs).slot("content", body);
+        let e = render("dock_tabs", tabs, &mut frames, self.cx);
+        self.leaf(d, parts, active, e, scope)
+    }
+
+    /// The area showing `parts[active]` (one part, or a stack) in dock `d`,
+    /// with its drop zones over it while a part the dock takes is dragged:
+    /// with `edges` or `stack`, the zone under the pointer; else the
+    /// `before`/`after` halves.
+    fn leaf(&self, d: &DockNode, parts: &[String], active: usize, body: AnyElement, scope: &Scope) -> AnyElement {
+        let Some((p, on_change)) = self.drop_for(d, scope) else { return body };
+        // Next to or onto the part shown, or another of its stack when that one is dragged.
+        let shown = parts.get(active).or(parts.first());
+        let Some(name) = shown.filter(|n| **n != *p.part).or_else(|| parts.iter().find(|n| **n != *p.part)).cloned() else {
+            return body;
+        };
+        let (edges, stack) = (d.zones.contains(&"edges"), d.zones.contains(&"stack"));
+        if edges || stack {
+            let area = format!("{}:{}:{name}", scope.id, d.name);
+            let dock = d.name.clone();
+            let overlay = crate::dock::zone_overlay(&area, self.cx);
+            let overlay = crate::dock::on_zones(overlay, area.into(), edges, stack, move |p: &DraggedPart, zone, window, cx| {
+                let at = match zone {
+                    arrange::Zone::Center => arrange::Drop::Stack(name.clone()),
+                    arrange::Zone::Edge(e) => arrange::Drop::Edge(name.clone(), e),
+                };
+                on_change(Change::Move { part: p.part.clone(), kind: p.kind.clone(), dock: dock.clone(), at }, window, cx);
+            });
+            return div().relative().size_full().flex().flex_col().child(body).child(overlay).into_any_element();
+        }
         let mut zones = vec![];
         for zone in &d.zones {
             let (at, start) = match *zone {
-                "before" => (arrange::Drop::Before(name.to_owned()), true),
-                _ => (arrange::Drop::After(name.to_owned()), false),
+                "before" => (arrange::Drop::Before(name.clone()), true),
+                _ => (arrange::Drop::After(name.clone()), false),
             };
             let z = self.zone(d, at, on_change.clone()).absolute();
             zones.push(match (d.dir, start) {
@@ -453,17 +534,21 @@ impl Drawer<'_, '_> {
         let templates = cx.try_global::<Templates>();
         let (dir, path, sizes, items) = match t {
             Shown::Part(name) => {
-                let body = templates.and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
-                return self.leaf(d, name, body.unwrap_or_else(|| div().into_any_element()), scope);
+                let body = self.part_body(name, scope, outer);
+                return self.leaf(d, std::slice::from_ref(name), 0, body, scope);
             },
+            Shown::Stack { path, parts, active } => return self.stack(d, path, parts, *active, scope, outer),
             Shown::Split { dir, path, sizes, items } => (dir, path, sizes, items),
         };
         let mut cells = vec![];
         for (ix, child) in items {
+            // A stack sizes as the part it shows.
             let part = match child {
-                Shown::Part(name) => templates.and_then(|ts| ts.part(name)).map(|p| (name, p)),
+                Shown::Part(name) => Some(name),
+                Shown::Stack { parts, active, .. } => parts.get(*active),
                 Shown::Split { .. } => None,
             };
+            let part = part.and_then(|name| templates.and_then(|ts| ts.part(name)).map(|p| (name, p)));
             let own = part.map(|(_, p)| p.panel.clone()).unwrap_or_default();
             let (fixed, size) = match sizes.get(*ix).copied().unwrap_or(Size::Auto) {
                 Size::Px(v) => (true, Some(px(v))),
@@ -684,14 +769,9 @@ impl Drawer<'_, '_> {
         let d = d.children(look.backdrop()).children(under).children(kids);
         let e = match (drag, &n.frame) {
             // gpui doesn't say what is dragged: the drag's start keeps it for the docks.
-            (Some(p), _) => d
-                .id(ElementId::Name(format!("handle:{}", p.part).into()))
-                .on_drag(p, |p, _, _, cx| {
-                    cx.set_global(ActiveDrag(Some(p.clone())));
-                    cx.refresh_windows();
-                    cx.new(|_| p.clone())
-                })
-                .into_any_element(),
+            (Some(p), _) => {
+                d.id(ElementId::Name(format!("handle:{}", p.part).into())).on_drag(p, crate::dock::start_drag).into_any_element()
+            },
             (None, Some(f)) => (self.frames)(f, index, Framed::Box(d)),
             (None, None) => d.into_any_element(),
         };

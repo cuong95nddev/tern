@@ -134,10 +134,13 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             Some("ok".into())
         },
         // Press at X1 Y1, move there to X2 Y2 in steps (redrawing, so drop
-        // targets that appear mid-drag are hit), release.
+        // targets that appear mid-drag are hit), release; with `hold`, stay
+        // pressed until `release`.
         "drag" => {
-            let n: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
-            let [x1, y1, x2, y2] = n[..] else { return Some("error: drag X1 Y1 X2 Y2".into()) };
+            let words: Vec<&str> = parts.collect();
+            let hold = words.last() == Some(&"hold");
+            let n: Vec<f32> = words.iter().filter_map(|s| s.parse().ok()).collect();
+            let [x1, y1, x2, y2] = n[..] else { return Some("error: drag X1 Y1 X2 Y2 [hold]".into()) };
             window.draw(cx).clear(cx);
             let (button, modifiers) = (MouseButton::Left, Modifiers::default());
             let from = point(px(x1), px(y1));
@@ -156,7 +159,22 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             let to = point(px(x2), px(y2));
             window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: to, pressed_button: Some(button), modifiers }), cx);
             window.draw(cx).clear(cx);
-            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position: to, modifiers, click_count: 1 }), cx);
+            if !hold {
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position: to, modifiers, click_count: 1 }), cx);
+            }
+            Some("ok".into())
+        },
+        // Release a `drag … hold` at X Y.
+        "release" => {
+            let n: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
+            let [x, y] = n[..] else { return Some("error: release X Y".into()) };
+            let position = point(px(x), px(y));
+            window.draw(cx).clear(cx);
+            let modifiers = Modifiers::default();
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, modifiers, click_count: 1 }),
+                cx,
+            );
             Some("ok".into())
         },
         // Move the pointer to X Y (hover), or scroll there by DX DY pixels.
