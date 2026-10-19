@@ -110,6 +110,9 @@ pub struct TerminalSettings {
     pub font_size: Option<f32>,
     /// Line height as a multiple of the font size (default 1.25).
     pub line_height: Option<f32>,
+    /// Windows: Ctrl+V pastes (default true). False sends ^V to the
+    /// program instead (Vim's block selection); Ctrl+Shift+V still pastes.
+    pub ctrl_v_paste: Option<bool>,
     /// Terminal colors over the theme's.
     pub colors: TerminalColors,
 }
@@ -374,6 +377,7 @@ fn load(cx: &mut App) {
         font_size: px(t.font_size.filter(|v| *v > 0.).unwrap_or(13.)),
         line_height: t.line_height.filter(|v| *v > 0.).unwrap_or(1.25),
         palette: Arc::new(palette),
+        ctrl_v_paste: t.ctrl_v_paste.unwrap_or(true),
     });
 
     set_error((!problems.is_empty()).then(|| problems.join("; ")), cx);

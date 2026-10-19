@@ -38,7 +38,7 @@ use crate::agents::Agent;
 use crate::links::{self, Link};
 use crate::platform::bind;
 
-actions!(terminal, [Copy, Paste, Clear, ScrollPageUp, ScrollPageDown, SelectAll]);
+actions!(terminal, [Copy, Paste, Clear, ScrollPageUp, ScrollPageDown, SelectAll, CopyOrInterrupt, PasteOrQuote]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -56,6 +56,11 @@ pub fn bind_keys(cx: &mut App) {
     ]);
     if !cfg!(target_os = "macos") {
         cx.bind_keys([bind("ctrl-insert", Copy, Some("Terminal")), bind("shift-insert", Paste, Some("Terminal"))]);
+    }
+    // As in Windows Terminal: Ctrl+C copies a selection (else it is ^C) and
+    // Ctrl+V pastes (else, with `terminal.ctrl_v_paste` off, it is ^V).
+    if cfg!(target_os = "windows") {
+        cx.bind_keys([bind("ctrl-c", CopyOrInterrupt, Some("Terminal")), bind("ctrl-v", PasteOrQuote, Some("Terminal"))]);
     }
 }
 
@@ -153,6 +158,8 @@ pub struct TerminalLook {
     pub font_size: Pixels,
     pub line_height: f32,
     pub palette: Arc<Palette>,
+    /// Ctrl+V pastes (Windows); off, the terminal gets ^V.
+    pub ctrl_v_paste: bool,
 }
 
 impl Global for TerminalLook {}
@@ -941,6 +948,37 @@ impl TerminalView {
         }
     }
 
+    /// Ctrl+C on Windows: copy the selection and drop it, or with none let
+    /// the key reach the terminal as ^C.
+    fn copy_or_interrupt(&mut self, _: &CopyOrInterrupt, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = &self.session else { return cx.propagate() };
+        let text = {
+            let mut term = s.term().lock();
+            let text = term.selection_to_string().filter(|t| !t.is_empty());
+            if text.is_some() {
+                term.selection = None;
+            }
+            text
+        };
+        match text {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.notify();
+            },
+            None => cx.propagate(),
+        }
+    }
+
+    /// Ctrl+V on Windows: paste, or let the key reach the terminal as ^V
+    /// when the settings say so (Vim's block selection).
+    fn paste_or_quote(&mut self, _: &PasteOrQuote, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.try_global::<TerminalLook>().is_none_or(|l| l.ctrl_v_paste) {
+            self.paste(&Paste, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
         // Files copied in Finder: their paths, not the name Finder also
@@ -1398,6 +1436,8 @@ impl Render for TerminalView {
             .on_key_up(cx.listener(Self::key_up))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::copy_or_interrupt))
+            .on_action(cx.listener(Self::paste_or_quote))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(|v, _: &ScrollPageUp, _, cx| v.scroll_page(true, cx)))
