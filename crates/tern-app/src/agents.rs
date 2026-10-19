@@ -6,6 +6,68 @@ use gpui_kit::component::Theme;
 use gpui_kit::*;
 use tern_term::status::ActivityStatus;
 
+/// What an agent's row says of its state, as T3 Code's sidebar does: its
+/// label, icon (empty for none) and color. `since` is how long it has been
+/// in `status`; `rang` is a bell rung while not shown.
+pub fn status_look(status: ActivityStatus, rang: bool, since: std::time::Duration, theme: &Theme) -> (String, &'static str, Hsla) {
+    match (status, rang) {
+        (ActivityStatus::Working, _) => (format!("Working {}", working_label(since)), "circle-dashed", theme.info),
+        (ActivityStatus::Blocked, _) => ("Needs input".to_owned(), "message-circle-question-mark", theme.warning),
+        (ActivityStatus::Done, _) => ("Done".to_owned(), "circle-check", theme.success),
+        (ActivityStatus::None, true) => ("Bell".to_owned(), "bell", theme.warning),
+        (ActivityStatus::None, false) => (ago_label(since), "", theme.muted_foreground),
+    }
+}
+
+/// A state's color: blue while working, amber while waiting for you,
+/// green once done (as t3code's sidebar has them).
+pub fn status_color(status: ActivityStatus, theme: &Theme) -> Hsla {
+    match status {
+        ActivityStatus::Working => theme.info,
+        ActivityStatus::Blocked => theme.warning,
+        ActivityStatus::Done => theme.success,
+        ActivityStatus::None => theme.muted_foreground,
+    }
+}
+
+/// Which state a workspace shows for its agents: the one that most wants you.
+pub fn priority(status: ActivityStatus) -> u8 {
+    match status {
+        ActivityStatus::Blocked => 3,
+        ActivityStatus::Working => 2,
+        ActivityStatus::Done => 1,
+        ActivityStatus::None => 0,
+    }
+}
+
+/// What a row calls an agent: its tab's title without the status glyph
+/// some agents put first (Claude Code's "✳"), else the agent's name.
+pub fn display_name(title: &str, agent: Agent) -> String {
+    let bare = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    if bare.is_empty() { agent.name().to_owned() } else { bare.to_owned() }
+}
+
+/// How long a turn has run, as T3 Code's sidebar says it: `12s`, `3m`, `1h 5m`.
+pub fn working_label(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    match s / 60 {
+        0 => format!("{s}s"),
+        m if m < 60 => format!("{m}m"),
+        m => format!("{}h {}m", m / 60, m % 60),
+    }
+}
+
+/// How long ago something happened, compact: `now`, `5m`, `3h`, `2d`.
+pub fn ago_label(d: std::time::Duration) -> String {
+    let m = d.as_secs() / 60;
+    match m {
+        0 => "now".to_owned(),
+        m if m < 60 => format!("{m}m"),
+        m if m < 24 * 60 => format!("{}h", m / 60),
+        m => format!("{}d", m / (24 * 60)),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Claude,

@@ -82,6 +82,7 @@ function onText(m) {
       break;
     case "sessions":
       sessions = m.list;
+      noteStatuses();
       renderList();
       renderHeading();
       break;
@@ -142,50 +143,148 @@ function onBytes(data) {
 }
 
 // ---- The list -------------------------------------------------------------
+// Laid out as Tern's agents panel and agent monitor (templates `agents.folder`
+// and `agents.tab`): each folder, the state of its terminals that most wants
+// you, and its terminals under it with their state.
 
 function label(s) {
-  if (s.title) return s.title;
+  // Without the status glyph some agents put first (Claude Code's "✳").
+  const title = (s.title || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+  if (title) return title;
   if (s.program) return s.program;
-  return s.cwd ? s.cwd.split(/[\\/]/).filter(Boolean).pop() || s.cwd : `Terminal ${s.id}`;
+  return s.cwd ? baseName(s.cwd) : `Terminal ${s.id}`;
+}
+
+function baseName(path) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
 const STATUS = { Working: "Working", Blocked: "Needs input", Done: "Done" };
-const ORDER = { Blocked: 0, Done: 1, Working: 2 };
+const PRIORITY = { Blocked: 3, Working: 2, Done: 1 };
+// Lucide icons, as the app draws them.
+const ICON = {
+  Working: '<circle cx="12" cy="12" r="10" stroke-dasharray="3.5 2.8"/>',
+  Blocked: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+  Done: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  folder: '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
+  open: '<path d="m6 9 6 6 6-6"/>',
+  closed: '<path d="m9 18 6-6-6-6"/>',
+  terminal: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/>',
+  claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/>',
+};
+
+function icon(name, cls) {
+  const span = document.createElement("span");
+  span.className = `ic ${cls || ""}`;
+  span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
+  return span;
+}
+
+// When each session's state was last seen to change: its working time, or
+// how long ago its turn ended (from the page's first look at it).
+const since = new Map();
+// The folders whose terminals are hidden.
+const collapsed = new Set();
+
+function workingLabel(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function agoLabel(ms) {
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "now";
+  if (m < 60) return `${m}m`;
+  if (m < 1440) return `${Math.floor(m / 60)}h`;
+  return `${Math.floor(m / 1440)}d`;
+}
+
+function noteStatuses() {
+  const now = Date.now();
+  const seen = new Set();
+  for (const s of sessions) {
+    seen.add(s.id);
+    const key = s.exited ? "exited" : s.status;
+    const was = since.get(s.id);
+    if (!was || was.status !== key) since.set(s.id, { status: key, at: now });
+  }
+  for (const id of since.keys()) if (!seen.has(id)) since.delete(id);
+}
+
+// A row's state: label, icon and class (the color), as `agents::status_look`.
+function statusLook(s) {
+  const at = since.get(s.id)?.at ?? Date.now();
+  if (s.exited) return { text: "Ended", cls: "" };
+  if (s.status === "Working") return { text: `Working ${workingLabel(Date.now() - at)}`, icon: "Working", cls: "Working" };
+  if (STATUS[s.status]) return { text: STATUS[s.status], icon: s.status, cls: s.status };
+  return { text: agoLabel(Date.now() - at), cls: "" };
+}
 
 function renderList() {
   const ul = $("sessions");
   ul.replaceChildren();
-  const list = [...sessions].sort(
-    (a, b) => (a.exited - b.exited) || ((ORDER[a.status] ?? 3) - (ORDER[b.status] ?? 3)) || label(a).localeCompare(label(b)),
-  );
-  for (const s of list) {
-    const li = document.createElement("li");
-    li.className = s.exited ? "exited" : "";
-    const info = document.createElement("div");
-    info.className = "info";
-    const name = document.createElement("div");
+  // By folder, in the order they come; the agents first in each.
+  const groups = new Map();
+  for (const s of sessions) {
+    const key = s.cwd || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  for (const [cwd, list] of groups) {
+    list.sort((a, b) => (a.exited - b.exited) || (b.claude - a.claude) || label(a).localeCompare(label(b)));
+    const open = !collapsed.has(cwd);
+    const folder = document.createElement("li");
+    folder.className = "folder";
+    folder.append(icon("folder", "muted"));
+    const name = document.createElement("span");
     name.className = "name";
-    name.textContent = label(s);
-    const where = document.createElement("div");
-    where.className = "where";
-    // Shown right to left so the end of a long path stays visible.
-    where.textContent = "‎" + [s.cwd, s.program].filter(Boolean).join(" · ");
-    info.append(name, where);
-    li.append(info);
-    const status = s.exited ? "Ended" : STATUS[s.status];
-    if (status) {
-      const badge = document.createElement("span");
-      badge.className = `badge ${s.exited ? "" : s.status}`;
-      badge.textContent = status;
-      li.append(badge);
+    name.textContent = cwd ? baseName(cwd) : "Other";
+    name.title = cwd;
+    // As the app: the chevron after the name, shown on hover.
+    const fill = document.createElement("span");
+    fill.className = "fill";
+    folder.append(name, icon(open ? "open" : "closed", "chevron"), fill);
+    const top = list.filter((s) => !s.exited).map((s) => s.status).sort((a, b) => (PRIORITY[b] ?? 0) - (PRIORITY[a] ?? 0))[0];
+    if (PRIORITY[top]) {
+      const dot = document.createElement("span");
+      dot.className = `dot ${top}`;
+      folder.append(dot);
     }
-    li.onclick = () => openSession(s.id);
-    ul.append(li);
+    folder.onclick = () => {
+      if (!collapsed.delete(cwd)) collapsed.add(cwd);
+      renderList();
+    };
+    ul.append(folder);
+    if (!open) continue;
+    for (const s of list) {
+      const li = document.createElement("li");
+      li.className = `tab ${s.exited ? "exited" : ""} ${s.status === "Working" ? "working" : ""}`;
+      li.append(icon(s.claude ? "claude" : "terminal", s.claude ? "agent" : "muted"));
+      const title = document.createElement("span");
+      title.className = "name";
+      title.textContent = label(s);
+      li.append(title);
+      const look = statusLook(s);
+      const status = document.createElement("span");
+      status.className = `status ${look.cls}`;
+      if (look.icon) status.append(icon(look.icon));
+      status.append(look.text);
+      li.append(status);
+      li.onclick = () => openSession(s.id);
+      ul.append(li);
+    }
   }
   $("empty").hidden = sessions.length > 0;
   const waiting = sessions.filter((s) => s.status === "Blocked" && !s.exited).length;
   document.title = waiting ? `(${waiting}) Tern` : "Tern";
 }
+
+// Working times count seconds.
+setInterval(() => {
+  if (!$("list-view").hidden && sessions.some((s) => s.status === "Working" && !s.exited)) renderList();
+}, 1000);
 
 function renderHeading() {
   const s = sessions.find((x) => x.id === (pending ?? current));

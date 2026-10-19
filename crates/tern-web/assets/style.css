@@ -85,37 +85,47 @@ section[hidden] { display: none; }
 
 #list-view { overflow-y: auto; }
 
-#sessions { list-style: none; margin: 0; padding: 8px; }
+#sessions { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 1px; }
 
+/* As the app's agents panel: a folder row, its terminals under it, not indented. */
 #sessions li {
   display: flex;
-  gap: 12px;
+  gap: 6px;
   align-items: center;
-  padding: 12px;
-  margin-bottom: 6px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--raised);
+  min-height: 40px;
+  padding: 0 10px 0 6px;
+  border-radius: 6px;
   cursor: pointer;
 }
-#sessions li:active { background: var(--line); }
-#sessions li.exited { opacity: 0.55; }
-
-.info { flex: 1; min-width: 0; }
-.name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.where { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-
-.badge {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  flex: none;
+#sessions li:active { background: var(--raised); }
+@media (hover: hover) { #sessions li:hover { background: var(--raised); } }
+#sessions li.folder { font-weight: 600; }
+#sessions li.folder .name { flex: 0 1 auto; }
+#sessions li.folder .fill { flex: 1; }
+@media (hover: hover) {
+  #sessions li.folder .chevron { opacity: 0; }
+  #sessions li.folder:hover .chevron { opacity: 1; }
 }
-.badge.Working { color: var(--working); border-color: var(--working); }
-.badge.Blocked { color: var(--bg); background: var(--blocked); border-color: var(--blocked); }
-.badge.Done { color: var(--done); border-color: var(--done); }
+#sessions li.working { opacity: 0.7; }
+#sessions li.exited { opacity: 0.5; }
+
+.name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ic { display: inline-flex; flex: none; width: 15px; height: 15px; }
+.ic svg { width: 100%; height: 100%; }
+.ic.muted, .ic.chevron { color: var(--muted); }
+.ic.agent { color: #d97757; }
+
+.status { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; color: var(--muted); }
+.status .ic { width: 13px; height: 13px; }
+.status.Working { color: var(--working); }
+.status.Blocked { color: var(--blocked); }
+.status.Done { color: var(--done); }
+
+.dot.Working { background: var(--working); }
+.dot.Blocked { background: var(--blocked); }
+.dot.Done { background: var(--done); }
+#sessions .dot { width: 6px; height: 6px; }
 
 .note { color: var(--muted); text-align: center; padding: 32px 20px; margin: 0; }
 

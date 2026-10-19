@@ -1,12 +1,11 @@
 //! The application menus. macOS shows them in the system menu bar; on
-//! Windows and Linux GPUI only keeps them, and every window draws them in
-//! its own menu bar (`AppMenuBar`, see `main_window`). Rebuilt when the
+//! Windows and Linux GPUI only keeps them, and windows draw no menu bar (as
+//! in T3 Code: Settings sits under the agents panel). Rebuilt when the
 //! menu bar icon setting may have changed (toggled here, or hidden from the
 //! menu bar agent's own menu) and when the recent folders change.
 
 use std::path::PathBuf;
 
-use gpui_kit::component::GlobalState;
 use gpui_kit::*;
 
 use crate::theme_picker::{OpenSettings, SelectTheme};
@@ -32,10 +31,6 @@ pub fn init(cx: &mut App) {
 
 pub fn install(cx: &mut App) {
     cx.set_menus(menus());
-    if !cfg!(target_os = "macos") {
-        let menus = cx.get_menus().unwrap_or_default();
-        GlobalState::global_mut(cx).set_app_menus(menus);
-    }
 }
 
 fn menus() -> Vec<Menu> {

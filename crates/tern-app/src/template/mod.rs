@@ -723,12 +723,11 @@ pub struct Node {
 /// The slots every template may name. The code fills those it has; a slot
 /// it leaves empty draws nothing.
 const SLOTS: &[&str] = &[
-    "menu_bar",
     "welcome",
-    "workspace_tabs",
     "workspace",
     "left_strip",
-    "right_strip",
+    "title_bar",
+    "agents",
     "explorer",
     "scratches",
     "center",
@@ -760,7 +759,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["explorer", "scratches", "changes"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1505,6 +1504,15 @@ mod tests {
     }
 
     #[test]
+    fn agent_times() {
+        use std::time::Duration;
+        let (w, a) = (crate::agents::working_label, crate::agents::ago_label);
+        assert_eq!([w(Duration::from_secs(12)), w(Duration::from_secs(185)), w(Duration::from_secs(3900))], ["12s", "3m", "1h 5m"]);
+        assert_eq!([a(Duration::from_secs(30)), a(Duration::from_secs(300)), a(Duration::from_secs(3 * 3600))], ["now", "5m", "3h"]);
+        assert_eq!(a(Duration::from_secs(2 * 86400 + 5)), "2d");
+    }
+
+    #[test]
     fn text_parts() {
         let p = parts("Settings: {error}!");
         assert!(matches!(&p[..], [Part::Lit(a), Part::Var(v), Part::Lit(b)] if a == "Settings: " && v == "error" && b == "!"));
@@ -1527,9 +1535,10 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         let docks = t.docks("workspace");
         let names: Vec<&str> = docks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["left", "right"]);
-        let a = crate::arrange::Arrangement::defaults("workspace/left+right", &docks);
-        assert_eq!(a.encode(), "left=[c explorer@- scratches@220px];right=changes");
+        // The agents panel on the left, as T3 Code's sidebar; every other panel on the right.
+        assert_eq!(names, ["start", "right"]);
+        let a = crate::arrange::Arrangement::defaults("workspace/right+start", &docks);
+        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px];start=agents");
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }

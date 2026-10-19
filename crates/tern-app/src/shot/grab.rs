@@ -87,6 +87,28 @@ mod macos {
         grab(r.x, r.y, r.w, r.h)
     }
 
+    /// Windows are picked by `pick_window` here, not over the overlay.
+    pub fn windows_on(_id: u64) -> Vec<[i32; 4]> {
+        Vec::new()
+    }
+
+    /// A window the user clicks, by `screencapture`'s own picker; `None`
+    /// when they cancel (Esc). Blocks until then.
+    pub fn pick_window() -> Result<Option<RgbaImage>, String> {
+        let dir = super::dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let file = dir.join(super::unique_name("grab"));
+        // Interactive, window mode, no shadow, no sound.
+        let status =
+            Command::new("/usr/sbin/screencapture").args(["-i", "-W", "-o", "-x"]).arg(&file).status().map_err(|e| e.to_string())?;
+        if !file.exists() {
+            return if status.success() { Ok(None) } else { Err(format!("screencapture failed ({status})")) };
+        }
+        let img = image::open(&file).map(|i| Some(i.to_rgba8())).map_err(|e| format!("can't read the capture: {e}"));
+        let _ = std::fs::remove_file(&file);
+        img
+    }
+
     /// The screen inside `(x, y, w, h)` (global points, top left origin).
     fn grab(x: f64, y: f64, w: f64, h: f64) -> Result<RgbaImage, String> {
         let dir = super::dir();
@@ -108,11 +130,16 @@ mod macos {
 #[cfg(windows)]
 mod windows {
     use image::RgbaImage;
-    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
         DeleteObject, GetDC, GetDIBits, GetMonitorInfoW, HMONITOR, MONITORINFO, ReleaseDC, SRCCOPY, SelectObject,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GWL_EXSTYLE, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, IsIconic, IsWindowVisible, WS_EX_TRANSPARENT,
+    };
+    use windows_sys::core::BOOL;
 
     /// Windows needs no permission to read the screen.
     pub fn has_permission() -> bool {
@@ -123,16 +150,71 @@ mod windows {
 
     pub fn open_permission_settings() {}
 
-    /// Display `id` (GPUI's id is the `HMONITOR`) at its pixel resolution.
-    pub fn grab_display(id: u64) -> Result<RgbaImage, String> {
-        let empty = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, rcMonitor: empty, rcWork: empty, dwFlags: 0 };
+    const EMPTY: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+
+    /// Monitor `id`'s rectangle in virtual screen pixels.
+    fn monitor_rect(id: u64) -> Result<RECT, String> {
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, rcMonitor: EMPTY, rcWork: EMPTY, dwFlags: 0 };
         // SAFETY: `info.cbSize` is set; a stale handle only makes the call fail.
         if unsafe { GetMonitorInfoW(id as HMONITOR, &mut info) } == 0 {
             return Err(format!("no monitor {id:#x}: {}", std::io::Error::last_os_error()));
         }
-        let r = info.rcMonitor;
+        Ok(info.rcMonitor)
+    }
+
+    /// Display `id` (GPUI's id is the `HMONITOR`) at its pixel resolution.
+    pub fn grab_display(id: u64) -> Result<RgbaImage, String> {
+        let r = monitor_rect(id)?;
         grab(r.left, r.top, r.right - r.left, r.bottom - r.top)
+    }
+
+    /// The windows showing on display `id`, topmost first, as `[x, y, w, h]`
+    /// in the display's pixels, cut to it.
+    pub fn windows_on(id: u64) -> Vec<[i32; 4]> {
+        let Ok(m) = monitor_rect(id) else { return Vec::new() };
+        let mut found: Vec<RECT> = Vec::new();
+        unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
+            // SAFETY: `data` is the `found` below, alive for the whole enumeration.
+            let found = unsafe { &mut *(data as *mut Vec<RECT>) };
+            if let Some(r) = unsafe { window_rect(hwnd) } {
+                found.push(r);
+            }
+            1
+        }
+        // SAFETY: `each` only touches `found`, which outlives the call.
+        unsafe { EnumWindows(Some(each), &raw mut found as LPARAM) };
+        found
+            .into_iter()
+            .filter_map(|r| {
+                let (l, t) = (r.left.max(m.left), r.top.max(m.top));
+                let (rt, b) = (r.right.min(m.right), r.bottom.min(m.bottom));
+                (rt > l && b > t).then(|| [l - m.left, t - m.top, rt - l, b - t])
+            })
+            .collect()
+    }
+
+    /// The visible frame of top-level window `hwnd`, if it is one a user
+    /// sees: shown, not minimised, titled, not cloaked (another virtual
+    /// desktop, a suspended app) and not click-through.
+    unsafe fn window_rect(hwnd: HWND) -> Option<RECT> {
+        unsafe {
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowTextLengthW(hwnd) == 0 {
+                return None;
+            }
+            if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT != 0 {
+                return None;
+            }
+            let mut cloaked = 0u32;
+            if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, (&raw mut cloaked).cast(), size_of::<u32>() as u32) == 0 && cloaked != 0 {
+                return None;
+            }
+            // Without the invisible resize borders `GetWindowRect` counts.
+            let mut r = EMPTY;
+            if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, (&raw mut r).cast(), size_of::<RECT>() as u32) != 0 {
+                GetWindowRect(hwnd, &mut r);
+            }
+            (r.right > r.left && r.bottom > r.top).then_some(r)
+        }
     }
 
     /// The screen inside `(x, y, w, h)`, in virtual screen pixels (Tern is

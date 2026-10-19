@@ -1,8 +1,11 @@
-//! A window: a bar of workspace tabs over the active workspace, or a welcome
-//! page when it has none (like VS Code with no folder open). Workspaces move
-//! between windows: drag a tab out of the bar onto another Tern window to
-//! join it, or anywhere else to give it a window of its own; the tab's menu
-//! does the same.
+//! A window: its active workspace, whose agents panel lists the window's
+//! workspaces (one per folder) with the terminals running an agent, like T3
+//! Code's projects and threads; or a welcome page when it has none (like VS
+//! Code with no folder open). Workspaces move between windows: drag a folder
+//! out of the agents panel onto another Tern window to join it, or anywhere
+//! else to give it a window of its own; the folder's menu does the same.
+
+use std::collections::HashSet;
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -15,9 +18,10 @@ use gpui_kit::*;
 
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
-use crate::theme_picker::{self, OpenSettingsFile, SelectTheme};
+use crate::theme_picker::{self, OpenSettings, OpenSettingsFile, SelectTheme};
 use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
+use tern_term::status::ActivityStatus;
 
 actions!(window, [CloseWorkspace, NextWorkspace, PrevWorkspace, NewWindow]);
 
@@ -319,7 +323,9 @@ pub fn open_window(content: Content, at: Option<(DisplayId, WindowBounds)>, cx: 
         WindowOptions {
             window_bounds: Some(window_bounds),
             display_id,
-            titlebar: Some(TitlebarOptions { title: Some("Tern".into()), ..Default::default() }),
+            // The window draws its own title bar (`render_title_bar`).
+            titlebar: Some(TitlebarOptions { title: Some("Tern".into()), ..gpui_kit::component::TitleBar::title_bar_options() }),
+            app_owns_titlebar_drag: true,
             // Matches the Linux desktop entry (packaging/linux), for its icon.
             app_id: Some("dev.tern.Tern".into()),
             ..Default::default()
@@ -408,9 +414,47 @@ pub fn dispatch_hook(ev: tern_bridge::HookEvent, cx: &mut App) {
     }
 }
 
+/// What a box of the agents panel does, on its window even when the panel
+/// is in a window of its own (which then gives way to it).
+fn on_main<E: ?Sized + 'static>(
+    me: &WeakEntity<MainWindow>,
+    f: impl Fn(&mut MainWindow, &E, &mut Window, &mut Context<MainWindow>) + 'static,
+) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+    let me = me.clone();
+    move |e, window, cx| {
+        let Some(main) = me.upgrade() else { return };
+        let handle = main.read(cx).handle;
+        if window.window_handle() == handle {
+            main.update(cx, |this, cx| f(this, e, window, cx));
+        } else {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                main.update(cx, |this, cx| f(this, e, window, cx));
+            });
+        }
+    }
+}
+
+/// The agents panel of a window, drawn by its `MainWindow` wherever a
+/// workspace docks it.
+pub struct AgentsView {
+    main: WeakEntity<MainWindow>,
+    /// Drawn again with its window, also when in a window of its own.
+    _sub: Option<Subscription>,
+}
+
+impl Render for AgentsView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.main.upgrade() {
+            Some(main) => main.update(cx, |m, cx| m.render_agents(cx)),
+            None => div().into_any_element(),
+        }
+    }
+}
+
 struct Slot {
     ws: Entity<Workspace>,
-    _sub: Subscription,
+    _subs: [Subscription; 2],
 }
 
 /// The payload of a workspace tab drag.
@@ -429,13 +473,16 @@ impl Render for DraggedWorkspace {
 pub struct MainWindow {
     /// Closed by the user (not by quitting): its terminals end with it.
     ends_terminals: bool,
+    handle: AnyWindowHandle,
+    /// The agents panel its workspaces draw.
+    agents: Entity<AgentsView>,
     slots: Vec<Slot>,
     active: usize,
-    /// The workspace tab last right-clicked, for its menu.
-    menu_ix: Option<usize>,
+    /// The workspaces whose agents the agents panel hides.
+    collapsed: HashSet<EntityId>,
     /// The workspace whose tab is being dragged.
     dragging: Option<EntityId>,
-    /// The bar's tabs, and the one last scrolled into view.
+    /// The agents panel's list, and the workspace last scrolled into view.
     tab_scroll: ScrollHandle,
     revealed: Option<usize>,
     title: String,
@@ -444,9 +491,11 @@ pub struct MainWindow {
     focus: FocusHandle,
     /// The application menus, drawn by the window off macOS (see `menus`).
     #[cfg(not(target_os = "macos"))]
-    menu_bar: Entity<gpui_kit::component::menu::AppMenuBar>,
     _subs: Vec<Subscription>,
     _save_placement: Task<()>,
+    /// The agents panel's next redraw for its times: in a second (while an
+    /// agent works) or in half a minute.
+    _tick: Option<(bool, Task<()>)>,
 }
 
 impl MainWindow {
@@ -510,11 +559,15 @@ impl MainWindow {
             }
         })
         .detach();
+        let main = cx.entity();
+        let agents = cx.new(|cx| AgentsView { main: main.downgrade(), _sub: Some(cx.observe(&main, |_, _, cx| cx.notify())) });
         Self {
             ends_terminals: false,
+            handle: window.window_handle(),
+            agents,
             slots: vec![],
             active: 0,
-            menu_ix: None,
+            collapsed: HashSet::new(),
             dragging: None,
             tab_scroll: ScrollHandle::new(),
             revealed: None,
@@ -522,9 +575,9 @@ impl MainWindow {
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
             #[cfg(not(target_os = "macos"))]
-            menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             _subs: vec![bounds_sub, activation_sub],
             _save_placement: Task::ready(()),
+            _tick: None,
         }
     }
 
@@ -572,8 +625,12 @@ impl MainWindow {
         let sub = cx.subscribe_in(&ws, window, |this, _, ev: &WorkspaceEvent, _, cx| match ev {
             WorkspaceEvent::TabsChanged => this.changed(cx),
         });
+        // The agents panel shows its tabs' titles and activity.
+        let agents = self.agents.clone();
+        let observe = cx.observe(&ws, move |_, _, cx| agents.update(cx, |_, cx| cx.notify()));
+        ws.update(cx, |w, _| w.set_agents(self.agents.clone().into()));
         let ix = at.unwrap_or(self.slots.len()).min(self.slots.len());
-        self.slots.insert(ix, Slot { ws, _sub: sub });
+        self.slots.insert(ix, Slot { ws, _subs: [sub, observe] });
         self.activate(ix, window, cx);
     }
 
@@ -725,116 +782,93 @@ impl MainWindow {
         }
     }
 
-    /// The bar of workspace tabs (`workspace_tabs`).
-    fn render_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The agents panel (`agents`), a part every workspace of the window
+    /// draws: each workspace's folder with its agents' terminals under it,
+    /// unless collapsed. Picking one shows its tab and gives it focus.
+    fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        #[derive(Clone, Copy)]
+        enum Entry {
+            Folder(usize),
+            Tab(usize, EntityId),
+        }
         let shortcut = |k| crate::platform::shortcut(k).to_string();
         let close_key = shortcut("⌘⇧W");
-        let items = self
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let ws = slot.ws.read(cx);
-                template::Scope::new(format!("ws-tab-{}", slot.ws.entity_id().as_u64()))
-                    .var("name", ws.name())
-                    .var("active", i == self.active)
-                    .var("busy", i != self.active && ws.busy(cx))
-                    .var("close_key", close_key.clone())
-            })
-            .collect();
+        let mut entries = vec![];
+        let mut items = vec![];
+        let mut active_row = 0;
+        let mut working = false;
+        for (i, slot) in self.slots.iter().enumerate() {
+            let ws = slot.ws.read(cx);
+            let open = !self.collapsed.contains(&slot.ws.entity_id());
+            if i == self.active {
+                active_row = entries.len();
+            }
+            let tabs = ws.sidebar_tabs(i == self.active, cx);
+            let top = tabs.iter().map(|(_, _, s)| *s).max_by_key(|s| crate::agents::priority(*s));
+            working |= tabs.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
+            entries.push(Entry::Folder(i));
+            let mut folder = template::Scope::new(format!("side-ws-{}", slot.ws.entity_id().as_u64()))
+                .var("folder", true)
+                .var("name", ws.name())
+                .var("active", i == self.active)
+                .var("open", open)
+                .var("buttons", true)
+                .var("close_key", close_key.clone());
+            if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
+                folder = folder.var("dot", true).var("dot_color", crate::agents::status_color(s, cx.theme()));
+            }
+            items.push(folder);
+            if open {
+                for (id, scope, _) in tabs {
+                    entries.push(Entry::Tab(i, id));
+                    items.push(scope);
+                }
+            }
+        }
         if self.revealed.replace(self.active) != Some(self.active) {
-            self.tab_scroll.scroll_to_item(self.active);
+            self.tab_scroll.scroll_to_item(active_row);
+        }
+        // Working times count seconds; ended turns' ages, minutes.
+        if self._tick.as_ref().is_none_or(|(fast, _)| working && !fast) {
+            let wait = Duration::from_secs(if working { 1 } else { 30 });
+            self._tick = Some((
+                working,
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this._tick = None;
+                        cx.notify();
+                    });
+                }),
+            ));
         }
         let update = crate::update::offered(cx);
-        let mut scope = template::Scope::new("workspace-tabs")
-            .var("monitor", crate::agent_monitor::window(cx).is_some())
+        let mut buttons = template::Scope::new("agents.header.buttons")
             .var("open_key", shortcut("⌘O"))
-            .var("close_key", close_key)
-            .list("items", items);
+            .var("monitor", crate::agent_monitor::window(cx).is_some());
+        // Screenshots are on macOS and Windows.
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
+        }
         if let Some((release, installing)) = &update {
             let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
-            scope = scope.var("update", label).var("installing", *installing);
+            buttons = buttons.var("update", label).var("installing", *installing);
         }
-        let me = cx.entity().downgrade();
-        let drag: Vec<DraggedWorkspace> =
-            self.slots.iter().map(|s| DraggedWorkspace { ws: s.ws.entity_id(), name: s.ws.read(cx).name().into() }).collect();
-        let drop_bg = |cx: &App| cx.theme().list_hover;
-        let scroll = self.tab_scroll.clone();
-        let mut ends = 0usize;
-        template::render(
-            "workspace_tabs",
-            scope,
-            &mut |name, ix, f| match (name, f, ix) {
-                ("bar", Framed::Box(d), _) => {
-                    let menu_me = me.clone();
-                    d.id("workspace-bar")
-                        .context_menu(move |menu, window, cx| {
-                            let Some(this) = menu_me.upgrade() else { return menu };
-                            let this = this.read(cx);
-                            let Some(ix) = this.menu_ix.filter(|&ix| ix < this.slots.len()) else { return menu };
-                            let (root, single) = (this.slots[ix].ws.read(cx).root().to_owned(), this.slots.len() < 2);
-                            Self::tab_menu(menu, &menu_me, ix, root, single, window, cx)
-                        })
-                        .into_any_element()
-                },
-                ("tabs", Framed::Box(d), _) => {
-                    // The strip only takes sideways scrolls; let a mouse wheel move it too.
-                    let wheel = scroll.clone();
-                    d.id("workspace-tabs")
-                        .overflow_x_scroll()
-                        .track_scroll(&scroll)
-                        .on_scroll_wheel(on_event(&me, move |_, ev: &ScrollWheelEvent, window, cx| {
-                            let d = ev.delta.pixel_delta(window.line_height());
-                            if d.y.abs() > d.x.abs() {
-                                let max = wheel.max_offset().x;
-                                let mut offset = wheel.offset();
-                                offset.x = (offset.x + d.y).min(px(0.)).max(-max);
-                                wheel.set_offset(offset);
-                                cx.notify();
-                            }
-                        }))
-                        .into_any_element()
-                },
-                ("tab", Framed::Box(d), Some(i)) if i < drag.len() => {
-                    let start = me.clone();
-                    d.id(("workspace-tab", i))
-                        .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| this.activate(i, window, cx)))
-                        .on_mouse_down(MouseButton::Right, on_event(&me, move |this, _: &MouseDownEvent, _, _| this.menu_ix = Some(i)))
-                        .on_drag(drag[i].clone(), move |d, _, _, cx| {
-                            let id = d.ws;
-                            let _ = start.update(cx, |m, _| m.dragging = Some(id));
-                            cx.new(|_| d.clone())
-                        })
-                        .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
-                        .on_drop(on_event(&me, move |this, d: &DraggedWorkspace, window, cx| {
-                            this.dragging = None;
-                            this.reorder(d.ws, i, window, cx);
-                        }))
-                        .into_any_element()
-                },
-                ("close", Framed::Button(b), Some(i)) => b
-                    .on_click(on_event(&me, move |this, _: &ClickEvent, window, cx| {
-                        // Don't let the tab's own click activate it.
-                        cx.stop_propagation();
-                        this.request_close(i, window, cx);
-                    }))
-                    .into_any_element(),
-                ("end", Framed::Box(d), _) => {
-                    ends += 1;
-                    d.id(("workspace-bar-end", ends))
-                        .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
-                        .on_drop(on_event(&me, |this, d: &DraggedWorkspace, window, cx| {
-                            this.dragging = None;
-                            let last = this.slots.len().saturating_sub(1);
-                            this.reorder(d.ws, last, window, cx);
-                        }))
-                        .into_any_element()
-                },
-                ("open", Framed::Button(b), _) => {
+        let header = crate::dock::panel_header(
+            "agents",
+            "agents.header",
+            "Agents",
+            None,
+            buttons,
+            &mut |name, _, f| match (name, f) {
+                ("open", Framed::Button(b)) => {
                     b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)).into_any_element()
                 },
-                ("agent_monitor", Framed::Button(b), _) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
-                ("update", Framed::Button(b), _) => {
+                ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
+                #[cfg(any(target_os = "macos", windows))]
+                ("screenshots", Framed::Button(b)) => b.on_click(|_, _, cx| crate::shot::toggle_panel(cx)).into_any_element(),
+                ("update", Framed::Button(b)) => {
                     let update = update.clone();
                     b.on_click(move |_, _, cx| {
                         if let Some((release, false)) = &update {
@@ -843,13 +877,116 @@ impl MainWindow {
                     })
                     .into_any_element()
                 },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
+        let scope = template::Scope::new("agents").var("settings_key", shortcut("⌘,")).slot("header", header).list("items", items);
+        let me = cx.entity().downgrade();
+        let workspaces: Vec<Entity<Workspace>> = self.slots.iter().map(|s| s.ws.clone()).collect();
+        let drag: Vec<DraggedWorkspace> =
+            self.slots.iter().map(|s| DraggedWorkspace { ws: s.ws.entity_id(), name: s.ws.read(cx).name().into() }).collect();
+        let drop_bg = |cx: &App| cx.theme().list_hover;
+        let scroll = self.tab_scroll.clone();
+        template::render(
+            "agents",
+            scope,
+            &mut |name, ix, f| match (name, f, ix.and_then(|i| entries.get(i).copied())) {
+                ("list", Framed::Box(d), _) => d.id("agents-list").overflow_y_scroll().track_scroll(&scroll).into_any_element(),
+                ("folder", Framed::Box(d), Some(Entry::Folder(i))) if i < drag.len() => {
+                    let start = me.clone();
+                    let menu_me = me.clone();
+                    d.id(("agents-folder", i))
+                        .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                            if let Some(s) = this.slots.get(i) {
+                                this.collapsed.remove(&s.ws.entity_id());
+                            }
+                            this.activate(i, window, cx);
+                        }))
+                        .on_drag(drag[i].clone(), move |d, _, _, cx| {
+                            let id = d.ws;
+                            let _ = start.update(cx, |m, _| m.dragging = Some(id));
+                            cx.new(|_| d.clone())
+                        })
+                        .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                        .on_drop(on_main(&me, move |this, d: &DraggedWorkspace, window, cx| {
+                            this.dragging = None;
+                            this.reorder(d.ws, i, window, cx);
+                        }))
+                        .context_menu(move |menu, window, cx| {
+                            let Some(this) = menu_me.upgrade() else { return menu };
+                            let this = this.read(cx);
+                            let Some(slot) = this.slots.get(i) else { return menu };
+                            let (root, single) = (slot.ws.read(cx).root().to_owned(), this.slots.len() < 2);
+                            Self::tab_menu(menu, &menu_me, i, root, single, window, cx)
+                        })
+                        .into_any_element()
+                },
+                ("toggle", Framed::Box(d), Some(Entry::Folder(i))) => d
+                    .id(("agents-toggle", i))
+                    .on_click(on_main(&me, move |this, _: &ClickEvent, _, cx| {
+                        // Don't let the folder's own click activate it.
+                        cx.stop_propagation();
+                        if let Some(id) = this.slots.get(i).map(|s| s.ws.entity_id())
+                            && !this.collapsed.remove(&id)
+                        {
+                            this.collapsed.insert(id);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                ("new_tab", Framed::Button(b), Some(Entry::Folder(i))) => match workspaces.get(i) {
+                    Some(ws) => Workspace::new_tab_button(b, ws.downgrade()),
+                    None => b.into_any_element(),
+                },
+                ("close", Framed::Button(b), Some(Entry::Folder(i))) => b
+                    .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                        // Don't let the folder's own click activate it.
+                        cx.stop_propagation();
+                        this.request_close(i, window, cx);
+                    }))
+                    .into_any_element(),
+                ("tab", Framed::Box(d), Some(Entry::Tab(i, id))) => {
+                    let d = d.id(("agents-tab", id.as_u64() as usize)).on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                        let Some(ws) = this.slots.get(i).map(|s| s.ws.clone()) else { return };
+                        if i != this.active {
+                            this.activate(i, window, cx);
+                        }
+                        ws.update(cx, |w, cx| w.show_tab(id, window, cx));
+                    }));
+                    match workspaces.get(i) {
+                        Some(ws) => Workspace::sidebar_tab_row(&ws.downgrade(), id, d, cx),
+                        None => d.into_any_element(),
+                    }
+                },
+                ("close", Framed::Button(b), Some(Entry::Tab(i, id))) => b
+                    .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                        // Don't let the row's own click show it.
+                        cx.stop_propagation();
+                        if let Some(ws) = this.slots.get(i).map(|s| s.ws.clone()) {
+                            ws.update(cx, |w, cx| w.request_close_id(id, window, cx));
+                        }
+                    }))
+                    .into_any_element(),
+                ("settings", Framed::Button(b), _) => {
+                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
+                },
+                ("end", Framed::Box(d), _) => d
+                    .id("agents-end")
+                    .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                    .on_drop(on_main(&me, |this, d: &DraggedWorkspace, window, cx| {
+                        this.dragging = None;
+                        let last = this.slots.len().saturating_sub(1);
+                        this.reorder(d.ws, last, window, cx);
+                    }))
+                    .into_any_element(),
                 (_, f, _) => f.into_any_element(),
             },
             cx,
         )
     }
 
-    /// Right-click menu of workspace tab `ix`.
+    /// Right-click menu of workspace `ix`'s folder in the agents panel.
     fn tab_menu(
         menu: PopupMenu,
         me: &WeakEntity<Self>,
@@ -1043,6 +1180,10 @@ pub fn control(line: &str, cx: &mut App) -> String {
     if let Some(section) = line.trim().strip_prefix("settings ") {
         return crate::settings_window::show(section.trim(), cx);
     }
+    if line.trim() == "agent-monitor" {
+        crate::agent_monitor::toggle(cx);
+        return "ok".into();
+    }
     if line.trim() == "restart-background" {
         crate::restart::restart(cx);
         return "ok".into();
@@ -1056,6 +1197,36 @@ pub fn control(line: &str, cx: &mut App) -> String {
         .unwrap_or_else(|_| "error: window closed".into())
 }
 
+impl MainWindow {
+    /// The title bar, drawn by the window itself (as in T3 Code): the title,
+    /// what is wrong with the background terminals or the settings, then the buttons of the workspace's panels docked on the right, then
+    /// the window controls. `TitleBar` moves the window and draws those.
+    fn render_title_bar(&self, ws: Option<&Entity<Workspace>>, cx: &mut Context<Self>) -> AnyElement {
+        let (parts, clicks) = ws.map(|ws| ws.update(cx, |w, cx| w.title_parts(cx))).unwrap_or_default();
+        let (background, settings_error) = ws.map(|ws| ws.read(cx).title_status(cx)).unwrap_or_default();
+        let scope = template::Scope::new("title_bar")
+            .var("title", self.title.clone())
+            .var("background", background)
+            .var("settings_error", settings_error)
+            .list("parts", parts);
+        let bar = template::render(
+            "title_bar",
+            scope,
+            &mut |name, ix, f| match (name, f, ix.and_then(|i| clicks.get(i))) {
+                ("part", Framed::Button(b), Some(click)) => {
+                    let click = click.clone();
+                    b.on_click(move |_, w, cx| click(w, cx)).into_any_element()
+                },
+                // Over the bar's drag area: without this, Windows takes a click on a button for the caption's.
+                ("buttons", Framed::Box(d), _) => d.occlude().into_any_element(),
+                (_, f, _) => f.into_any_element(),
+            },
+            cx,
+        );
+        crate::style::el("title_bar", cx).apply(gpui_kit::component::TitleBar::new()).child(bar).into_any_element()
+    }
+}
+
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.active_ws().map_or_else(|| "Tern".to_owned(), |ws| ws.read(cx).name());
@@ -1064,13 +1235,12 @@ impl Render for MainWindow {
             self.title = title;
         }
         let ws = self.active_ws().cloned();
-        let scope = template::Scope::new("window").var("workspace", ws.is_some());
+        let title_bar = self.render_title_bar(ws.as_ref(), cx);
+        let scope = template::Scope::new("window").var("workspace", ws.is_some()).slot("title_bar", title_bar);
         let scope = match ws {
-            Some(ws) => scope.slot("workspace_tabs", self.render_bar(cx)).slot("workspace", ws),
+            Some(ws) => scope.slot("workspace", ws),
             None => scope.slot("welcome", self.render_welcome(cx)),
         };
-        #[cfg(not(target_os = "macos"))]
-        let scope = scope.var("menu_bar", true).slot("menu_bar", self.menu_bar.clone());
         let body = template::render("window", scope, &mut |_, _, d| d.into_any_element(), cx);
         div()
             .id("main-window")

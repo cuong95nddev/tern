@@ -3,16 +3,8 @@
     "element": "window",
     "fill": true,
     "children": [
-      {
-        "when": "menu_bar",
-        "element": "menu_bar",
-        "layout": "row",
-        "align": "center",
-        "shrink": 0,
-        "children": [{ "slot": "menu_bar" }]
-      },
+      { "slot": "title_bar" },
       { "when": "!workspace", "grow": 1, "children": [{ "slot": "welcome" }] },
-      { "when": "workspace", "slot": "workspace_tabs" },
       { "when": "workspace", "grow": 1, "children": [{ "slot": "workspace" }] }
     ]
   },
@@ -24,27 +16,23 @@
         "grow": 1,
         "layout": "row",
         "children": [
-          { "slot": "left_strip" },
           {
             "grow": 1,
             "style": { "border_bottom_width": 1, "border": "$border" },
             "split": "row",
             "children": [
               {
-                "dock": "left",
+                "dock": "start",
                 "split": "column",
                 "accepts": ["panel"],
                 "zones": ["edges", "stack"],
-                "strip": "left",
+                "strip": "right",
                 "fill": true,
                 "fixed": true,
-                "size": "$explorer.start_width",
-                "min": 140,
-                "max": 600,
-                "children": [
-                  { "part": "explorer", "when": "explorer" },
-                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
-                ]
+                "size": "$agents.start_width",
+                "min": 160,
+                "max": 480,
+                "children": [{ "part": "agents" }]
               },
               { "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] },
               {
@@ -58,14 +46,16 @@
                 "size": "$changes.start_width",
                 "min": 180,
                 "max": 700,
-                "children": [{ "part": "changes", "when": "changes" }]
+                "children": [
+                  { "part": "explorer", "when": "explorer" },
+                  { "part": "changes", "when": "changes", "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
+                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
+                ]
               }
             ]
-          },
-          { "slot": "right_strip" }
+          }
         ]
-      },
-      { "use": "status_bar" }
+      }
     ]
   },
   "panel_header": {
@@ -265,23 +255,6 @@
       { "slot": "icon" },
       { "grow": 1, "truncate": true, "text": "{name}" },
       { "when": "age", "shrink": 0, "text": "{age}", "style": { "font_size": "$scratches.row.detail_font_size", "text": "$scratches.row.detail_text" } }
-    ]
-  },
-  "status_bar": {
-    "element": "workspace.status_bar",
-    "layout": "row",
-    "align": "center",
-    "children": [
-      { "text": "{path}" },
-      { "text": "{background}" },
-      {
-        "when": "settings_error",
-        "grow": 1,
-        "layout": "row",
-        "justify": "end",
-        "style": { "text": "$workspace.status_bar.error_text" },
-        "children": [{ "truncate": true, "text": "Settings: {settings_error}" }]
-      }
     ]
   },
   "pane": {
@@ -685,115 +658,168 @@
       }
     ]
   },
-  "workspace_tabs": {
-    "frame": "bar",
-    "element": "workspace_tabs",
+  "agents.header": { "use": "panel_header", "element": "agents.header" },
+  "agents.header.buttons": {
     "layout": "row",
     "align": "center",
-    "shrink": 0,
+    "style": { "gap": "$agents.header.gap" },
     "children": [
       {
-        "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
-        "style": { "border_bottom_width": 1, "border": "$border" }
+        "when": "update",
+        "button": "update",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "circle-arrow-down",
+        "label": "{update}",
+        "loading": "installing",
+        "tooltip": "A new version of Tern is available"
       },
       {
-        "each": "items",
-        "frame": "tabs",
-        "grow": 1,
-        "layout": "row",
-        "align": "center",
-        "item": { "use": "workspace_tabs.tab" },
-        "children": [
-          {
-            "frame": "end",
-            "layout": "row",
-            "align": "center",
-            "shrink": 0,
-            "style": { "padding_left": 4, "height": "$workspace_tabs.tab.height" },
-            "children": [
-              {
-                "button": "open",
-                "element": "workspace_tabs.button",
-                "size": "xsmall",
-                "icon": "folder-plus",
-                "tooltip": "Open Workspace… ({open_key})"
-              }
-            ]
-          },
-          { "frame": "end", "grow": 1, "style": { "height": "$workspace_tabs.tab.height" } },
-          {
-            "frame": "end",
-            "layout": "row",
-            "align": "center",
-            "shrink": 0,
-            "style": { "padding_right": 4, "height": "$workspace_tabs.tab.height" },
-            "children": [
-              {
-                "button": "agent_monitor",
-                "element": "workspace_tabs.button",
-                "size": "xsmall",
-                "icon": "bot",
-                "selected": "monitor",
-                "tooltip": "Agent Monitor"
-              },
-              {
-                "when": "update",
-                "button": "update",
-                "element": "workspace_tabs.button",
-                "size": "xsmall",
-                "icon": "circle-arrow-down",
-                "label": "{update}",
-                "loading": "installing",
-                "tooltip": "A new version of Tern is available"
-              }
-            ]
-          }
-        ]
+        "button": "agent_monitor",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "bot",
+        "selected": "monitor",
+        "tooltip": "Agent Monitor"
       },
-      { "shrink": 0, "style": { "width": 4 } }
+      {
+        "when": "can_shot",
+        "button": "screenshots",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "shot-camera",
+        "selected": "shots",
+        "tooltip": "Screenshots"
+      },
+      {
+        "button": "open",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "folder-plus",
+        "tooltip": "Open Workspace… ({open_key})"
+      }
     ]
   },
-  "workspace_tabs.tab": {
-    "frame": "tab",
-    "element": "workspace_tabs.tab",
+  "agents": {
+    "frame": "panel",
+    "element": "agents",
+    "fill": true,
+    "children": [
+      { "slot": "header" },
+      {
+        "frame": "list",
+        "element": "agents.list",
+        "grow": 1,
+        "each": "items",
+        "item": {
+          "shrink": 0,
+          "children": [
+            { "when": "folder", "use": "agents.folder" },
+            { "when": "!folder", "use": "agents.tab" }
+          ]
+        },
+        "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
+      },
+      {
+        "layout": "row",
+        "shrink": 0,
+        "style": { "padding": 4 },
+        "children": [
+          { "button": "settings", "element": "agents.settings", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
+        ]
+      }
+    ]
+  },
+  "agents.folder": {
+    "frame": "folder",
+    "group": "sfolder",
+    "element": "agents.folder",
     "layout": "row",
     "align": "center",
     "shrink": 0,
-    "clip": true,
     "states": {
-      "active": { "element": "workspace_tabs.tab_active" },
-      "hover && !active": { "text": "$workspace_tabs.tab.hover_text" }
+      "active": { "background": "$agents.folder.active_background", "text": "$agents.folder.active_text" },
+      "hover && !active": { "background": "$agents.folder.hover_background" }
     },
     "children": [
+      { "icon": "folder-open", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
+      { "truncate": true, "text": "{name}" },
       {
+        "frame": "toggle",
+        "shrink": 0,
+        "style": { "opacity": 0 },
+        "states": { "hover:sfolder": { "opacity": 1 } },
+        "children": [
+          { "when": "open", "icon": "chevron-down", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
+          { "when": "!open", "icon": "chevron-right", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } }
+        ]
+      },
+      { "grow": 1 },
+      {
+        "when": "dot",
+        "shrink": 0,
+        "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+      },
+      {
+        "when": "buttons",
         "layout": "row",
         "align": "center",
-        "style": { "padding_left": 8, "gap": 4, "text": "$workspace_tabs.tab.icon_text" },
-        "states": { "active": { "text": "$workspace_tabs.tab_active.icon_text" } },
+        "shrink": 0,
+        "style": { "opacity": 0 },
+        "states": { "hover:sfolder": { "opacity": 1 } },
         "children": [
-          { "icon": "folder-open", "style": { "width": 12, "height": 12 } },
-          { "when": "busy", "text": "●", "style": { "text": "$warning" } }
+          { "button": "new_tab", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Tab" },
+          {
+            "button": "close",
+            "element": "agents.button",
+            "size": "xsmall",
+            "icon": "close",
+            "tooltip": "Close Workspace ({close_key})"
+          }
+        ]
+      }
+    ]
+  },
+  "agents.tab": {
+    "frame": "tab",
+    "group": "stab",
+    "element": "agents.tab",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "states": {
+      "active": { "background": "$agents.tab.selected_background", "text": "$agents.tab.selected_text" },
+      "hover && !active": { "background": "$agents.tab.hover_background" },
+      "!shown && !active": { "text": "$agents.tab.hidden_text" },
+      "working && !active": { "opacity": "$agents.tab.working_opacity" }
+    },
+    "children": [
+      { "slot": "icon" },
+      { "grow": 1, "truncate": true, "text": "{label}" },
+      {
+        "when": "status",
+        "element": "agents.status",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "style": { "text": "{status_color}" },
+        "children": [
+          { "when": "status_icon", "icon": "{status_icon}", "style": { "width": 12, "height": 12 } },
+          { "text": "{status}" }
         ]
       },
       {
-        "truncate": true,
-        "text": "{name}",
-        "style": { "padding_x": 12, "text_transform": "$workspace_tabs.tab.text_transform" },
-        "states": { "active": { "text_transform": "$workspace_tabs.tab_active.text_transform" } }
-      },
-      {
-        "layout": "row",
-        "align": "center",
-        "style": { "padding_right": 4 },
+        "when": "buttons",
+        "shrink": 0,
+        "style": { "opacity": 0 },
+        "states": { "hover:stab": { "opacity": 1 } },
         "children": [
           {
             "button": "close",
-            "element": "workspace_tabs.button",
+            "element": "agents.button",
             "size": "xsmall",
             "icon": "close",
-            "tooltip": "Close Workspace ({close_key})",
-            "style": { "text": "$workspace_tabs.tab.close_text" },
-            "states": { "active": { "text": "$workspace_tabs.tab_active.close_text" } }
+            "tooltip": "Close ({close_key})"
           }
         ]
       }
@@ -1072,6 +1098,34 @@
       { "align": "center", "style": { "gap": "$element.gap" } }
     ]
   },
+  "title_bar": {
+    "layout": "row",
+    "align": "center",
+    "grow": 1,
+    "style": { "gap": "$title_bar.status_gap", "padding_right": "$title_bar.buttons_padding" },
+    "children": [
+      { "shrink": 0, "text": "{title}" },
+      { "when": "background", "shrink": 0, "text": "{background}" },
+      { "grow": 1, "truncate": true, "when": "settings_error", "style": { "text": "$title_bar.error_text" }, "text": "Settings: {settings_error}" },
+      { "grow": 1, "when": "!settings_error" },
+      {
+        "layout": "row",
+        "align": "center",
+        "frame": "buttons",
+        "shrink": 0,
+        "style": { "gap": "$title_bar.buttons_gap" },
+        "each": "parts",
+        "item": {
+          "button": "part",
+          "element": "title_bar.button",
+          "size": "small",
+          "icon": "{icon}",
+          "selected": "on",
+          "tooltip": "{tooltip}"
+        }
+      }
+    ]
+  },
   "tool_strip.left": { "use": "tool_strip", "element": "tool_strip.left" },
   "tool_strip.right": { "use": "tool_strip", "element": "tool_strip.right" },
   "agent_monitor": {
@@ -1091,57 +1145,17 @@
       },
       { "when": "!agents", "element": "agent_monitor.empty", "text": "No agents running" },
       {
+        "element": "agents.list",
         "each": "rows",
         "item": {
+          "shrink": 0,
           "children": [
-            { "when": "workspace", "use": "agent_monitor.workspace" },
-            { "when": "!workspace", "use": "agent_monitor.agent" }
+            { "when": "folder", "use": "agents.folder" },
+            { "when": "!folder", "use": "agents.tab" }
           ]
         }
       },
       { "slot": "fit" }
-    ]
-  },
-  "agent_monitor.workspace": {
-    "frame": "workspace",
-    "element": "agent_monitor.workspace",
-    "layout": "row",
-    "align": "center",
-    "states": { "hover": { "background": "$agent_monitor.workspace.hover_background" } },
-    "children": [
-      { "icon": "folder-open", "style": { "width": "0.75rem", "height": "0.75rem" } },
-      { "grow": 1, "truncate": true, "text": "{name}" },
-      {
-        "when": "dot",
-        "shrink": 0,
-        "style": { "width": "$agent_monitor.status.dot_size", "height": "$agent_monitor.status.dot_size", "radius": 9999, "background": "{dot_color}" }
-      }
-    ]
-  },
-  "agent_monitor.agent": {
-    "frame": "agent",
-    "element": "agent_monitor.agent",
-    "layout": "row",
-    "align": "center",
-    "states": { "hover": { "background": "$agent_monitor.agent.hover_background" } },
-    "children": [
-      { "slot": "icon" },
-      { "grow": 1, "truncate": true, "text": "{name}", "states": { "idle": { "text": "$agent_monitor.agent.idle_text" } } },
-      {
-        "when": "status",
-        "element": "agent_monitor.status",
-        "shrink": 0,
-        "layout": "row",
-        "align": "center",
-        "style": { "text": "{status_color}" },
-        "children": [
-          {
-            "shrink": 0,
-            "style": { "width": "$agent_monitor.status.dot_size", "height": "$agent_monitor.status.dot_size", "radius": 9999, "background": "{dot_color}" }
-          },
-          { "text": "{status}" }
-        ]
-      }
     ]
   },
   "viewer": {
@@ -1282,7 +1296,7 @@
         "position": { "top": "{hint_top}", "left": 0, "right": 0 },
         "layout": "row",
         "justify": "center",
-        "children": [{ "element": "shot_overlay.hint", "text": "Drag to capture a region · Esc to cancel" }]
+        "children": [{ "element": "shot_overlay.hint", "text": "{hint}" }]
       },
       {
         "when": "selection",
@@ -1497,12 +1511,26 @@
       {
         "layout": "row",
         "align": "center",
-        "style": { "gap": "0.25rem" },
+        "style": { "gap": "0.125rem" },
         "children": [
-          { "element": "shot_tray.title", "grow": 1, "text": "Screenshots ({count})" },
-          { "button": "edit", "size": "small", "icon": "shot-edit", "disabled": "count == 0", "tooltip": "Edit: combine, crop, add text" },
-          { "button": "more", "size": "small", "icon": "shot-camera", "tooltip": "Capture another ({capture_key})" },
-          { "button": "discard", "size": "small", "icon": "shot-close", "tooltip": "Discard all" }
+          {
+            "frame": "drag",
+            "grow": 1,
+            "align": "center",
+            "style": { "height": 22 },
+            "layout": "row",
+            "children": [
+              { "when": "count == 0", "element": "shot_tray.title", "truncate": true, "text": "Screenshots" },
+              { "when": "count > 0", "element": "shot_tray.title", "truncate": true, "text": "Screenshots ({count})" }
+            ]
+          },
+          { "button": "region", "size": "xsmall", "icon": "shot-region", "tooltip": "Capture a region ({capture_key})" },
+          { "button": "window", "size": "xsmall", "icon": "shot-window", "tooltip": "Capture a window" },
+          { "button": "screen", "size": "xsmall", "icon": "shot-screen", "tooltip": "Capture the full screen" },
+          { "element": "shot.separator", "style": { "height": 14 } },
+          { "button": "edit", "size": "xsmall", "icon": "shot-edit", "disabled": "count == 0", "tooltip": "Edit: combine, crop, add text" },
+          { "button": "clear", "size": "xsmall", "icon": "shot-trash", "disabled": "count == 0", "tooltip": "Discard all" },
+          { "button": "close", "size": "xsmall", "icon": "shot-close", "tooltip": "Close" }
         ]
       },
       {
@@ -1510,17 +1538,16 @@
         "each": "shots",
         "frame": "shots",
         "layout": "row",
-        "style": { "gap": "0.5rem", "padding_y": "0.25rem" },
+        "style": { "gap": "0.25rem" },
         "item": { "use": "shot_tray.shot" }
       },
-      { "slot": "prompt" },
-      { "when": "error", "element": "shot_tray.error", "text": "{error}" },
       {
+        "when": "count > 0",
         "layout": "row",
-        "align": "center",
-        "style": { "gap": "0.5rem" },
+        "align": "end",
+        "style": { "gap": "0.375rem" },
         "children": [
-          { "grow": 1, "clip": true, "children": [{ "button": "target", "size": "small", "label": "{target}" }] },
+          { "grow": 1, "slot": "prompt" },
           {
             "when": "!sending",
             "button": "send",
@@ -1528,7 +1555,7 @@
             "size": "small",
             "icon": "shot-send",
             "label": "Send",
-            "tooltip": "Send ({send_key})"
+            "tooltip": "Send to… ({send_key}: {target})"
           },
           {
             "when": "sending",
@@ -1537,12 +1564,46 @@
             "size": "small",
             "icon": "shot-send",
             "label": "Sending…",
-            "disabled": true,
-            "tooltip": "Send ({send_key})"
+            "disabled": true
           }
         ]
       },
+      { "when": "error", "element": "shot_tray.error", "text": "{error}" },
       { "slot": "fit" }
+    ]
+  },
+  "shot_send_menu": {
+    "frame": "menu",
+    "element": "shot_send_menu",
+    "fill": true,
+    "layout": "row",
+    "children": [
+      { "each": "folders", "element": "shot_send_menu.folders", "item": { "use": "shot_send_menu.folder" } },
+      { "each": "items", "grow": 1, "element": "shot_send_menu.items", "item": { "use": "shot_send_menu.item" } }
+    ]
+  },
+  "shot_send_menu.folder": {
+    "frame": "folder",
+    "element": "shot_send_menu.row",
+    "layout": "row",
+    "align": "center",
+    "states": { "active": { "background": "$shot_send_menu.row.active_background" } },
+    "children": [
+      { "grow": 1, "truncate": true, "text": "{name}" },
+      { "icon": "chevron-right", "style": { "width": 12, "height": 12, "text": "$shot_send_menu.row.icon_text" } }
+    ]
+  },
+  "shot_send_menu.item": {
+    "frame": "item",
+    "element": "shot_send_menu.row",
+    "layout": "row",
+    "align": "center",
+    "states": { "hover": { "background": "$shot_send_menu.row.active_background" } },
+    "children": [
+      { "when": "checked", "icon": "check", "style": { "width": 12, "height": 12 } },
+      { "when": "!checked && new", "icon": "plus", "style": { "width": 12, "height": 12, "text": "$shot_send_menu.row.icon_text" } },
+      { "when": "!checked && !new", "shrink": 0, "style": { "width": 12 } },
+      { "grow": 1, "truncate": true, "text": "{name}" }
     ]
   },
   "shot_tray.shot": {
@@ -1553,7 +1614,7 @@
     "children": [
       { "slot": "thumb" },
       {
-        "position": { "top": 2, "right": 2 },
+        "position": { "top": 1, "right": 1 },
         "children": [{ "button": "remove", "variant": "secondary", "size": "xsmall", "icon": "shot-close", "tooltip": "Remove" }]
       }
     ]

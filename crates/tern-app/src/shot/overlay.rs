@@ -54,11 +54,25 @@ pub struct Overlay {
     style: Style,
     doc: Doc,
     text: Option<TextEdit>,
+    /// In window mode, the windows to pick from (in points, topmost
+    /// first): a click takes the one under it as the region.
+    windows: Option<Vec<(P, P)>>,
+    /// The window under the pointer, before one is picked.
+    hover: Option<(P, P)>,
 }
 
 impl Overlay {
-    pub fn new(base: RgbaImage, width_pt: f32, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `windows`, in `base`'s pixels, puts the overlay in window mode.
+    pub fn new(base: RgbaImage, width_pt: f32, windows: Option<Vec<[i32; 4]>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scale = if width_pt > 0. { base.width() as f32 / width_pt } else { 1. };
+        let windows = windows.map(|ws| {
+            ws.into_iter()
+                .map(|[x, y, w, h]| {
+                    let lo = p(x as f32, y as f32).scale(1. / scale);
+                    (lo, lo + p(w as f32, h as f32).scale(1. / scale))
+                })
+                .collect()
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
@@ -72,7 +86,14 @@ impl Overlay {
             style: Style::default(),
             doc: Doc::new(scale),
             text: None,
+            windows,
+            hover: None,
         }
+    }
+
+    /// The topmost window under `q`, in window mode.
+    fn window_at(&self, q: P) -> Option<(P, P)> {
+        self.windows.as_ref()?.iter().find(|(lo, hi)| q.x >= lo.x && q.x < hi.x && q.y >= lo.y && q.y < hi.y).copied()
     }
 
     fn to_px(&self, q: P) -> P {
@@ -102,6 +123,14 @@ impl Overlay {
         }
         if ev.click_count == 2 && self.inside(q) && self.tool.is_none() {
             return self.add(window, cx);
+        }
+        // Window mode: a click picks a window, or another one while nothing
+        // is drawn.
+        let repick = self.sel.is_none() || (!self.inside(q) && self.handle_at(q).is_none() && self.doc.shapes.is_empty());
+        if repick && let Some(picked) = self.window_at(q) {
+            self.sel = Some(picked);
+            self.hover = None;
+            return cx.notify();
         }
         self.drag = match (self.sel, self.handle_at(q), self.tool) {
             (None, _, _) => Some(Drag::Select { start: q }),
@@ -139,6 +168,13 @@ impl Overlay {
     fn on_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let q = from_point(ev.position);
         let at = self.to_px(q);
+        if self.sel.is_none() && self.drag.is_none() {
+            let hover = self.window_at(q);
+            if hover != self.hover {
+                self.hover = hover;
+                cx.notify();
+            }
+        }
         let Some(drag) = &mut self.drag else { return };
         match drag {
             Drag::Select { start } => self.sel = Some(model::norm(*start, q)),
@@ -330,7 +366,8 @@ impl Overlay {
         if let Some(Drag::Draw(s)) = &self.drag {
             shapes.push(s.clone());
         }
-        Scene { shapes, sel: self.sel, scale: self.scale, base: self.base.clone(), accent: hsla(COLORS[1]) }
+        let hover = if self.sel.is_none() { self.hover } else { None };
+        Scene { shapes, sel: self.sel, hover, scale: self.scale, base: self.base.clone(), accent: hsla(COLORS[1]) }
     }
 
     #[cfg(debug_assertions)]
@@ -366,6 +403,12 @@ impl Render for Overlay {
         let shown = img(ImageSource::Render(self.picture.clone())).absolute().top_0().left_0().w(size.width).h(size.height);
         let painted = canvas(|_, _, _| {}, move |_, _, window, cx| scene.paint(window, cx)).absolute().top_0().left_0().size_full();
         let mut scope = Scope::new("shot-overlay").slot("picture", shown).slot("scene", painted).var("hint_top", f64::from(h / 2. - 20.));
+        let hint = if self.windows.is_some() {
+            "Click a window to capture it · Esc to cancel"
+        } else {
+            "Drag to capture a region · Esc to cancel"
+        };
+        scope = scope.var("hint", hint);
         if let Some((lo, hi)) = self.sel {
             // Size label above the region (inside it at the top of the screen).
             let label_top = if lo.y >= 30. { lo.y - 28. } else { lo.y + 6. };
@@ -509,6 +552,8 @@ impl Overlay {
 struct Scene {
     shapes: Vec<Shape>,
     sel: Option<(P, P)>,
+    /// The window to pick, framed without handles.
+    hover: Option<(P, P)>,
     scale: f32,
     base: Arc<RgbaImage>,
     accent: Hsla,
@@ -518,7 +563,7 @@ impl Scene {
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let size = window.viewport_size();
         let dim = hsla([0, 0, 0, 0x73]);
-        let Some((lo, hi)) = self.sel else {
+        let Some((lo, hi)) = self.sel.or(self.hover) else {
             window.paint_quad(fill(Bounds::new(point(px(0.), px(0.)), size), dim));
             return;
         };
@@ -537,6 +582,9 @@ impl Scene {
             }
         });
         window.paint_quad(outline(region, self.accent, BorderStyle::Solid));
+        if self.sel.is_none() {
+            return;
+        }
         for c in Overlay::handles((lo, hi)) {
             let b = Bounds::new(point(px(c.x - 4.), px(c.y - 4.)), gpui_kit::size(px(8.), px(8.)));
             window.paint_quad(fill(b, gpui_kit::white()));

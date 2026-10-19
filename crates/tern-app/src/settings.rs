@@ -439,27 +439,33 @@ fn set_error(error: Option<String>, cx: &mut App) {
 }
 
 /// "Tern Dark" and "Tern Light": the component's default themes with
-/// Tern's terminal palettes.
+/// Tern's terminal palettes, and a gray selected row where theirs is blue.
 fn builtin_themes(cx: &App) -> Vec<(SharedString, TernTheme)> {
     let registry = ThemeRegistry::global(cx);
-    let named = |config: &Rc<ThemeConfig>, name: &str| {
+    let named = |config: &Rc<ThemeConfig>, name: &str, selected: (&str, &str)| {
         let mut c = (**config).clone();
         c.name = name.into();
         c.is_default = false;
+        c.colors.list_active = Some(selected.0.into());
+        c.colors.list_active_border = Some(selected.1.into());
         c
     };
     vec![
         (
             DEFAULT_THEME.into(),
             TernTheme {
-                ui: named(registry.default_dark_theme(), DEFAULT_THEME),
+                ui: named(registry.default_dark_theme(), DEFAULT_THEME, ("#ffffff1a", "#404040")),
                 terminal: colors_of(&Palette::default()),
                 ..Default::default()
             },
         ),
         (
             LIGHT_THEME.into(),
-            TernTheme { ui: named(registry.default_light_theme(), LIGHT_THEME), terminal: light_terminal(), ..Default::default() },
+            TernTheme {
+                ui: named(registry.default_light_theme(), LIGHT_THEME, ("#0000000f", "#d4d4d4")),
+                terminal: light_terminal(),
+                ..Default::default()
+            },
         ),
     ]
 }
@@ -857,7 +863,7 @@ Every key is optional. `{SCHEMA}` lists them all with their meaning.
 - `colors`: UI colors over the theme's, by theme key. The keys are the
   properties of `colors` in `{SCHEMA}`; the common ones: `background` (panels,
   editor, terminal area), `foreground`, `muted.foreground` (secondary text),
-  `border`, `title_bar.background` (window chrome, tool strips, status bar),
+  `border`, `title_bar.background` (window chrome, title bar, tool strips),
   `tab_bar.background`, `tab.active.background`, `sidebar.background`,
   `list.hover.background`, `list.active.background`, `primary.background`,
   `success.background` / `warning.background` / `danger.background` (git
@@ -871,7 +877,7 @@ Every key is optional. `{SCHEMA}` lists them all with their meaning.
 
 Every part of the window Tern draws is an element with its own properties:
 `explorer.row` has `height`, `padding_left`, `font_size`, `text`,
-`hover_background`, …; `workspace.status_bar` has `height`, `padding_x`, `background`,
+`hover_background`, …; `title_bar` has `height`, `background`, `error_text`,
 …. `reference/{ELEMENTS_DOC}` lists them all with their defaults.
 
 Out of the box most properties point at a shared token, so the window stays
@@ -939,9 +945,9 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 
 | Template | Values | Slots |
 |---|---|---|
-| `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace_tabs`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
-| `status_bar` | as `workspace` | as `workspace` |
+| `window` | `workspace` | `welcome`, `workspace` |
+| `workspace` | `explorer`, `scratches`, `changes`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes` |
+| `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
@@ -961,15 +967,15 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
 | `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
-| `agent_monitor.workspace` | `workspace`, `name`, `dot`, `dot_color` | |
-| `agent_monitor.agent` | `name`, `idle`, `status`, `status_color`, `dot_color` | `icon` |
 | `drag_chip` | `label`, `icon` | |
 | `drag_group` | `text`, `group_color` | |
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
-| `workspace_tabs` | `monitor`, `update`, `installing`; list `items` | |
-| `workspace_tabs.tab` | `name`, `active`, `busy` | |
+| `agents` | `settings_key`; list `items` | `header` |
+| `agents.header.buttons` | `open_key`, `monitor`, `update`, `installing` | |
+| `agents.folder` (also in `agent_monitor`) | `folder`, `name`, `active`, `open`, `dot`, `dot_color`, `buttons`, `close_key` | |
+| `agents.tab` (also in `agent_monitor`) | `label`, `active`, `shown`, `working`, `status`, `status_icon`, `status_color`, `buttons`, `close_key` | `icon` |
 | `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
 | `welcome.recent` | `name`, `path` | |
 | `settings` | `title`, `subtitle`; lists `sections`, `rows` | `extra` |
@@ -1101,7 +1107,7 @@ it. Copy the new `workspace` from `reference/templates.json`.
 
 ### Background images
 
-`window`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs`,
+`window`, `agents`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs`,
 `welcome` and `terminal` can show an image behind their content (so can any
 box of a template, through its `style`): `background_image` (a path:
 absolute, `~/…`, or relative to this folder), `background_image_fit` (`cover`,

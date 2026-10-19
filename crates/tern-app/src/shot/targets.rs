@@ -23,12 +23,16 @@ pub enum Dest {
 #[derive(Clone)]
 pub struct Choice {
     pub label: String,
+    /// The workspace's folder, the send menu's first level.
+    pub folder: String,
+    /// The label under the folder.
+    pub item: String,
     pub agent: Option<Agent>,
     pub dest: Dest,
 }
 
-/// Every terminal tab (frontmost window and workspace first), then a new
-/// tab of each agent in the frontmost workspace.
+/// For each workspace (frontmost window and workspace first), its terminal
+/// tabs, then a new tab of each agent.
 pub fn choices(cx: &mut App) -> Vec<Choice> {
     let all = main_window::workspaces(cx);
     let mut out = Vec::new();
@@ -38,16 +42,17 @@ pub fn choices(cx: &mut App) -> Vec<Choice> {
         for t in w.term_tabs(cx) {
             out.push(Choice {
                 label: format!("{name} › {}", t.title),
+                folder: name.to_string(),
+                item: t.title.to_string(),
                 agent: t.agent,
                 dest: Dest::Tab { window: *window, ws: ws.entity_id(), tab: t.id },
             });
         }
-    }
-    if let Some((window, ws)) = all.first() {
-        let name = ws.read(cx).name();
         for agent in NEW_AGENTS {
             out.push(Choice {
                 label: format!("New {} tab in {name}", agent.name()),
+                folder: name.to_string(),
+                item: format!("New {} tab", agent.name()),
                 agent: Some(agent),
                 dest: Dest::New { window: *window, ws: ws.entity_id(), agent },
             });

@@ -7,6 +7,7 @@ pub mod model;
 mod overlay;
 mod paint;
 pub mod raster;
+mod send_menu;
 pub mod targets;
 mod tray;
 
@@ -72,8 +73,35 @@ pub fn init(cx: &mut App) {
     cx.default_global::<Capture>()._hotkey = Some(manager);
 }
 
-/// Freeze every display and put the capture overlay on it.
+/// What a capture takes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// A region dragged over the frozen screen.
+    Region,
+    /// A window clicked on the frozen screen.
+    Window,
+    /// Every display, whole, straight to the tray.
+    Screen,
+}
+
+/// Capture a region (the shortcut and the menu's).
 pub fn start(cx: &mut App) {
+    capture(Mode::Region, cx);
+}
+
+/// Open or close the screenshot panel.
+pub fn toggle_panel(cx: &mut App) {
+    tray::toggle(cx);
+}
+
+/// Whether the screenshot panel is showing.
+pub fn panel_open(cx: &mut App) -> bool {
+    tray::is_open(cx)
+}
+
+/// Freeze every display and put the capture overlay on it; for
+/// [`Mode::Screen`], add the displays to the tray instead.
+pub fn capture(mode: Mode, cx: &mut App) {
     if cx.default_global::<Capture>().on {
         return;
     }
@@ -90,6 +118,10 @@ pub fn start(cx: &mut App) {
     cx.default_global::<Capture>().on = true;
     // The tray's window fades out before the screen is grabbed.
     let wait = if tray::hide(cx) { 400 } else { 0 };
+    #[cfg(target_os = "macos")]
+    if mode == Mode::Window {
+        return pick_window(wait, cx);
+    }
     let displays: Vec<_> = cx.displays().iter().map(|d| (d.id(), d.bounds())).collect();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(Duration::from_millis(wait)).await;
@@ -97,20 +129,87 @@ pub fn start(cx: &mut App) {
             .background_executor()
             .spawn(async move {
                 std::thread::scope(|s| {
-                    let jobs: Vec<_> =
-                        displays.into_iter().map(|(id, bounds)| s.spawn(move || (id, bounds, grab::grab_display(u64::from(id))))).collect();
+                    let jobs: Vec<_> = displays
+                        .into_iter()
+                        .map(|(id, bounds)| {
+                            s.spawn(move || {
+                                let windows = (mode == Mode::Window).then(|| grab::windows_on(u64::from(id)));
+                                Grab { id, bounds, image: grab::grab_display(u64::from(id)), windows }
+                            })
+                        })
+                        .collect();
                     jobs.into_iter().filter_map(|j| j.join().ok()).collect::<Vec<_>>()
                 })
             })
             .await;
-        cx.update(|cx| open_overlays(grabs, cx));
+        if mode == Mode::Screen {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { grabs.into_iter().map(|g| g.image.and_then(|img| grab::save(&img, &grab::dir()))).collect::<Vec<_>>() })
+                .await;
+            cx.update(|cx| add_screens(saved, cx));
+        } else {
+            cx.update(|cx| open_overlays(grabs, cx));
+        }
     })
     .detach();
 }
 
-fn open_overlays(grabs: Vec<(DisplayId, Bounds<Pixels>, Result<image::RgbaImage, String>)>, cx: &mut App) {
+/// One display's capture.
+struct Grab {
+    id: DisplayId,
+    bounds: Bounds<Pixels>,
+    image: Result<image::RgbaImage, String>,
+    /// The windows to pick from (in the image's pixels), in window mode.
+    windows: Option<Vec<[i32; 4]>>,
+}
+
+/// The whole displays, saved, into the tray.
+fn add_screens(saved: Vec<Result<std::path::PathBuf, String>>, cx: &mut App) {
+    cx.default_global::<Capture>().on = false;
+    let mut added = false;
+    for s in saved {
+        match s {
+            Ok(path) => {
+                tray::add(path, None, cx);
+                added = true;
+            },
+            Err(e) => log::error!("screen capture failed: {e}"),
+        }
+    }
+    if !added {
+        notify("Couldn't capture the screen", "See the log for why.", cx);
+        tray::restore(cx);
+    }
+}
+
+/// macOS picks the window itself (`screencapture -W`).
+#[cfg(target_os = "macos")]
+fn pick_window(wait: u64, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_millis(wait)).await;
+        let picked = cx
+            .background_executor()
+            .spawn(async move { grab::pick_window().and_then(|img| img.map(|img| grab::save(&img, &grab::dir())).transpose()) })
+            .await;
+        cx.update(|cx| {
+            cx.default_global::<Capture>().on = false;
+            match picked {
+                Ok(Some(path)) => tray::add(path, None, cx),
+                Ok(None) => tray::restore(cx),
+                Err(e) => {
+                    notify("Couldn't capture the window", &e, cx);
+                    tray::restore(cx);
+                },
+            }
+        });
+    })
+    .detach();
+}
+
+fn open_overlays(grabs: Vec<Grab>, cx: &mut App) {
     let mut overlays = Vec::new();
-    for (id, bounds, grabbed) in grabs {
+    for Grab { id, bounds, image: grabbed, windows } in grabs {
         let size = bounds.size;
         let img = match grabbed {
             Ok(img) => img,
@@ -133,7 +232,7 @@ fn open_overlays(grabs: Vec<(DisplayId, Bounds<Pixels>, Result<image::RgbaImage,
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Overlay::new(img, size.width.as_f32(), window, cx)),
+            |window, cx| cx.new(|cx| Overlay::new(img, size.width.as_f32(), windows, window, cx)),
         );
         match opened {
             Ok((handle, _)) => overlays.push(handle),
@@ -143,9 +242,7 @@ fn open_overlays(grabs: Vec<(DisplayId, Bounds<Pixels>, Result<image::RgbaImage,
     if overlays.is_empty() {
         cx.default_global::<Capture>().on = false;
         notify("Couldn't capture the screen", "See the log for why.", cx);
-        if tray::has_shots(cx) {
-            tray::show(cx);
-        }
+        tray::restore(cx);
         return;
     }
     if let Some(first) = overlays.first() {
@@ -161,7 +258,7 @@ fn window_origin(display: Bounds<Pixels>) -> Point<Pixels> {
 }
 
 /// Close the overlays (after the current update, which may be one of
-/// theirs); the tray comes back if it holds captures.
+/// theirs); the tray comes back if it was open or holds captures.
 pub fn cancel(cx: &mut App) {
     cx.defer(|cx| {
         let capture = cx.default_global::<Capture>();
@@ -169,9 +266,7 @@ pub fn cancel(cx: &mut App) {
         for w in std::mem::take(&mut capture.overlays) {
             let _ = w.update(cx, |_, w, _| w.remove_window());
         }
-        if tray::has_shots(cx) {
-            tray::show(cx);
-        }
+        tray::restore(cx);
     });
 }
 
@@ -191,6 +286,9 @@ fn notify(title: &str, body: &str, cx: &mut App) {
 
 /// Control socket commands (debug builds):
 ///   shot             start a capture
+///   shot-window      start a window capture
+///   shot-screen      capture the whole displays
+///   tray             open or close the tray
 ///   @shot CMD        input CMD (click, drag, key) to the first overlay
 ///   @tray CMD        input CMD to the tray
 ///   @editor CMD      input CMD to the editor
@@ -253,7 +351,19 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             let img = image::open(arg).map(|i| i.to_rgba8()).map_err(|e| e.to_string());
             cx.default_global::<Capture>().on = true;
             let _ = tray::hide(cx);
-            open_overlays(vec![(display.id(), display.bounds(), img)], cx);
+            open_overlays(vec![Grab { id: display.id(), bounds: display.bounds(), image: img, windows: None }], cx);
+            "ok".into()
+        },
+        "shot-window" => {
+            capture(Mode::Window, cx);
+            "ok".into()
+        },
+        "shot-screen" => {
+            capture(Mode::Screen, cx);
+            "ok".into()
+        },
+        "tray" => {
+            toggle_panel(cx);
             "ok".into()
         },
         "tray-add" => {

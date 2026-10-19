@@ -44,6 +44,16 @@ pub const PASTE: &str = svg!(
 pub const EDIT: &str = svg!(r#"<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>"#);
 pub const PLUS: &str = svg!(r#"<path d="M12 5v14"/><path d="M5 12h14"/>"#);
 pub const SEND: &str = svg!(r#"<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>"#);
+pub const REGION: &str = svg!(
+    r#"<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/>"#
+    r#"<path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>"#
+);
+pub const WINDOW: &str = svg!(r#"<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20"/><path d="M6 6.5h.01M9 6.5h.01"/>"#);
+pub const SCREEN: &str = svg!(r#"<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>"#);
+pub const TRASH: &str = svg!(
+    r#"<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>"#
+    r#"<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>"#
+);
 
 /// The icons by the names templates give them (`shot-rect`), each served
 /// as `icons/<name>.svg`.
@@ -69,6 +79,10 @@ const NAMED: &[(&str, &str)] = &[
     ("shot-edit", EDIT),
     ("shot-plus", PLUS),
     ("shot-send", SEND),
+    ("shot-region", REGION),
+    ("shot-window", WINDOW),
+    ("shot-screen", SCREEN),
+    ("shot-trash", TRASH),
 ];
 
 /// The SVG at asset `path`, when it is one of these icons.

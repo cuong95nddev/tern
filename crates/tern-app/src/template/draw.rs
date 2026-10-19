@@ -708,19 +708,23 @@ impl Drawer<'_, '_> {
             }
             Arc::new(m)
         };
-        let hovers = n
-            .states
-            .iter()
-            .filter_map(|s| {
-                let group = s.hover.clone()?;
-                if !holds(&s.when) {
-                    return None;
-                }
-                let mut m = s.props.clone();
-                filled(&s.holes, &mut m);
-                Some((group, style::el_with("", Arc::new(m), self.cx)))
-            })
-            .collect();
+        // One look per hover group (gpui takes one): states that hold for
+        // the same group merge, the later ones over the earlier.
+        let mut merged: Vec<(SharedString, HashMap<&'static str, Val>)> = vec![];
+        for st in n.states.iter().filter(|s| s.hover.is_some() && holds(&s.when)) {
+            let group = st.hover.clone().unwrap_or_default();
+            let at = match merged.iter().position(|(g, _)| *g == group) {
+                Some(i) => i,
+                None => {
+                    merged.push((group, HashMap::new()));
+                    merged.len() - 1
+                },
+            };
+            let m = &mut merged[at].1;
+            m.extend(st.props.iter().map(|(k, v)| (*k, v.clone())));
+            filled(&st.holes, m);
+        }
+        let hovers = merged.into_iter().map(|(group, m)| (group, style::el_with("", Arc::new(m), self.cx))).collect();
         (style::el_with(n.element, inline, self.cx), hovers)
     }
 

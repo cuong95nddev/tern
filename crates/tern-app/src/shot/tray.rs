@@ -1,24 +1,25 @@
-//! The tray: a small floating panel collecting captures, with the prompt
-//! and the tab they go to, until they are sent.
+//! The tray: a small floating panel to capture a region, a window or the
+//! screen, collecting the captures with the prompt and the tab they go to.
+//! It stays until it is closed, stepping aside while a capture is on screen.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::*;
 
+use super::Mode;
 use super::targets::{self, Choice, Dest};
 use crate::style;
 use crate::template::{self, Framed, Scope, on_event};
 
-const WIDTH: f32 = 420.;
+const WIDTH: f32 = 340.;
 /// The starting height; the window then fits its content.
-const HEIGHT: f32 = 200.;
+const HEIGHT: f32 = 160.;
 /// About the height with one capture, to place the tray by a region.
-const PLACE_H: f32 = 240.;
+const PLACE_H: f32 = 180.;
 /// The gap between the tray and the region or the display's edges.
 const GAP: f32 = 8.;
 
@@ -35,6 +36,10 @@ struct TrayData {
     prompt: String,
     dest: Option<Dest>,
     window: Option<AnyWindowHandle>,
+    /// Shown until closed: it comes back after a capture even when empty.
+    open: bool,
+    /// Where the tray was last, to come back there.
+    origin: Option<Point<Pixels>>,
 }
 
 impl Global for TrayData {}
@@ -52,11 +57,8 @@ pub fn add(path: PathBuf, near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut Ap
 /// The captures back from the editor; the tray shows again if it holds
 /// anything.
 pub fn set_shots(shots: Vec<PathBuf>, cx: &mut App) {
-    let data = cx.default_global::<TrayData>();
-    data.shots = shots;
-    if !data.shots.is_empty() || !data.prompt.trim().is_empty() {
-        show(cx);
-    }
+    cx.default_global::<TrayData>().shots = shots;
+    restore(cx);
 }
 
 /// Edit the captures, starting at the one at `at`; the tray steps aside.
@@ -66,14 +68,35 @@ pub(super) fn edit(at: usize, cx: &mut App) {
     super::editor::open(shots, at, cx);
 }
 
-/// Whether the tray has captures waiting.
-pub fn has_shots(cx: &mut App) -> bool {
-    !cx.default_global::<TrayData>().shots.is_empty()
-}
-
-/// Open the tray window (bottom right of the main display), or refresh it.
+/// Open the tray window (bottom right of the main display, or where it
+/// was last), or refresh it.
 pub fn show(cx: &mut App) {
     open(None, cx);
+}
+
+/// Show the tray again after a capture if it was open or holds anything.
+pub fn restore(cx: &mut App) {
+    let data = cx.default_global::<TrayData>();
+    if data.open || !data.shots.is_empty() || !data.prompt.trim().is_empty() {
+        show(cx);
+    }
+}
+
+/// Whether the tray is showing.
+pub fn is_open(cx: &mut App) -> bool {
+    cx.default_global::<TrayData>().window.is_some()
+}
+
+/// Open the tray, or close it.
+pub fn toggle(cx: &mut App) {
+    if is_open(cx) { close(cx) } else { show(cx) }
+}
+
+/// Close the tray for good (until it is opened again), keeping what it
+/// holds.
+fn close(cx: &mut App) {
+    cx.default_global::<TrayData>().open = false;
+    hide(cx);
 }
 
 fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
@@ -86,13 +109,14 @@ fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
     {
         return;
     }
+    let last = cx.default_global::<TrayData>().origin;
     let display = match near {
-        Some((id, _)) => cx.displays().into_iter().find(|d| d.id() == id).or_else(|| cx.primary_display()),
-        None => cx.primary_display(),
+        Some((id, _)) if last.is_none() => cx.displays().into_iter().find(|d| d.id() == id).or_else(|| cx.primary_display()),
+        _ => cx.primary_display(),
     };
     let Some(display) = display else { return };
     let region = near.filter(|(id, _)| *id == display.id()).map(|(_, r)| r);
-    let origin = super::window_origin(display.bounds()) + place(display.bounds().size, region);
+    let origin = last.unwrap_or_else(|| super::window_origin(display.bounds()) + place(display.bounds().size, region));
     let opened = gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(px(WIDTH), px(HEIGHT))))),
@@ -113,8 +137,12 @@ fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
     );
     match opened {
         Ok((handle, _)) => {
-            cx.default_global::<TrayData>().window = Some(handle);
+            let data = cx.default_global::<TrayData>();
+            data.window = Some(handle);
+            data.open = true;
             let _ = handle.update(cx, |_, w, _| w.activate_window());
+            // The agents panel's button shows it open.
+            cx.refresh_windows();
         },
         Err(e) => log::error!("failed to open the screenshot tray: {e}"),
     }
@@ -139,15 +167,25 @@ fn place(size: Size<Pixels>, region: Option<Bounds<Pixels>>) -> Point<Pixels> {
 }
 
 /// The tray window while it is open.
-#[cfg(debug_assertions)]
 pub fn window(cx: &mut App) -> Option<AnyWindowHandle> {
     cx.default_global::<TrayData>().window
 }
 
-#[cfg(debug_assertions)]
 fn tray_view(cx: &mut App) -> Option<Entity<Tray>> {
     let handle = window(cx)?.downcast::<gpui_kit::base::Root>()?;
     handle.update(cx, |root, _, _| root.view().clone().downcast::<Tray>().ok()).ok().flatten()
+}
+
+/// The tab the captures go to by the send shortcut.
+pub(super) fn chosen_dest(cx: &mut App) -> Option<Dest> {
+    cx.default_global::<TrayData>().dest.clone()
+}
+
+/// Send what the tray holds to `dest`, which the send shortcut then uses.
+pub(super) fn send_to(dest: Dest, cx: &mut App) {
+    cx.default_global::<TrayData>().dest = Some(dest);
+    let (Some(tray), Some(handle)) = (tray_view(cx), window(cx)) else { return };
+    let _ = handle.update(cx, |_, window, cx| tray.update(cx, |t, cx| t.send(window, cx)));
 }
 
 #[cfg(debug_assertions)]
@@ -205,19 +243,16 @@ pub fn control(cmd: &str, arg: &str, cx: &mut App) -> String {
 /// Returns whether it was open. It closes once the current update ends:
 /// this may run in one of the tray's own handlers (its camera button).
 pub fn hide(cx: &mut App) -> bool {
+    super::send_menu::close(cx);
     let Some(window) = cx.default_global::<TrayData>().window.take() else { return false };
+    if let Ok(origin) = window.update(cx, |_, w, _| w.bounds().origin) {
+        cx.default_global::<TrayData>().origin = Some(origin);
+    }
     cx.defer(move |cx| {
         let _ = window.update(cx, |_, w, _| w.remove_window());
+        cx.refresh_windows();
     });
     true
-}
-
-/// Drop everything and close.
-fn discard(cx: &mut App) {
-    let data = cx.default_global::<TrayData>();
-    data.shots.clear();
-    data.prompt.clear();
-    hide(cx);
 }
 
 pub struct Tray {
@@ -233,8 +268,8 @@ impl Tray {
         let text = cx.default_global::<TrayData>().prompt.clone();
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(2, 5)
-                .placeholder(super::keys("What should the agent do? (⌘↵ sends)", "What should the agent do? (Ctrl+Enter sends)"))
+                .auto_grow(1, 4)
+                .placeholder(super::keys("Prompt (⌘↵ sends)", "Prompt (Ctrl+Enter sends)"))
                 .default_value(text)
         });
         let sub = cx.subscribe_in(&prompt, window, |this, input, ev: &InputEvent, window, cx| match ev {
@@ -283,10 +318,10 @@ impl Tray {
         let task = targets::deliver(choice.dest, shots, prompt, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.sending = false;
                 match result {
-                    Ok(()) => cx.defer(discard),
+                    Ok(()) => this.clear(window, cx),
                     Err(e) => {
                         this.error = Some(e);
                         cx.notify();
@@ -302,11 +337,16 @@ impl Tray {
         if ix < data.shots.len() {
             data.shots.remove(ix);
         }
-        if data.shots.is_empty() && data.prompt.trim().is_empty() {
-            cx.defer(|cx| {
-                hide(cx);
-            });
-        }
+        cx.notify();
+    }
+
+    /// Drop the captures and the prompt; the tray stays.
+    fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let data = cx.default_global::<TrayData>();
+        data.shots.clear();
+        data.prompt.clear();
+        self.prompt.update(cx, |p, cx| p.set_value(String::new(), window, cx));
+        self.error = None;
         cx.notify();
     }
 }
@@ -384,7 +424,7 @@ impl Render for Tray {
             .var("sending", self.sending)
             .var("capture_key", super::keys("⌘⇧2", "Ctrl+Shift+2"))
             .var("send_key", super::keys("⌘↵", "Ctrl+Enter"))
-            .slot("prompt", Textarea::new(&self.prompt))
+            .slot("prompt", Textarea::new(&self.prompt).small())
             .slot("fit", fit);
         if let Some(e) = self.error.clone() {
             scope = scope.var("error", e);
@@ -395,9 +435,24 @@ impl Render for Tray {
             scope,
             &mut |name, ix, f| match (name, f) {
                 ("edit", Framed::Button(b)) => b.on_click(|_, _, cx| edit(0, cx)).into_any_element(),
-                ("more", Framed::Button(b)) => b.on_click(|_, _, cx| super::start(cx)).into_any_element(),
-                ("discard", Framed::Button(b)) => b.on_click(|_, _, cx| discard(cx)).into_any_element(),
-                ("shots", Framed::Box(d)) => d.id("shots").overflow_x_scroll().into_any_element(),
+                ("region", Framed::Button(b)) => b.on_click(|_, _, cx| super::capture(Mode::Region, cx)).into_any_element(),
+                ("window", Framed::Button(b)) => b.on_click(|_, _, cx| super::capture(Mode::Window, cx)).into_any_element(),
+                ("screen", Framed::Button(b)) => b.on_click(|_, _, cx| super::capture(Mode::Screen, cx)).into_any_element(),
+                ("clear", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.clear(window, cx))).into_any_element()
+                },
+                ("close", Framed::Button(b)) => b.on_click(|_, _, cx| close(cx)).into_any_element(),
+                // The title moves the window: the system drags it on Windows,
+                // the mouse down starts the move elsewhere.
+                ("drag", Framed::Box(d)) => d
+                    .id("tray-drag")
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        super::send_menu::close(cx);
+                        window.start_window_move()
+                    })
+                    .into_any_element(),
+                ("shots", Framed::Box(d)) => d.id("shots").min_w_0().overflow_x_scroll().into_any_element(),
                 ("shot", Framed::Box(d)) => {
                     let i = ix.unwrap_or(0);
                     d.id(("shot", i)).cursor_pointer().on_click(move |_, _, cx| edit(i, cx)).into_any_element()
@@ -410,10 +465,7 @@ impl Render for Tray {
                     }))
                     .into_any_element()
                 },
-                ("target", Framed::Button(b)) => target_menu(b, me.clone()).into_any_element(),
-                ("send", Framed::Button(b)) => {
-                    b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.send(window, cx))).into_any_element()
-                },
+                ("send", Framed::Button(b)) => b.on_click(|_, window, cx| super::send_menu::toggle(window.bounds(), cx)).into_any_element(),
                 (_, f) => f.into_any_element(),
             },
             cx,
@@ -421,30 +473,4 @@ impl Render for Tray {
         // The window is the panel's width; its height follows the panel.
         div().w_full().child(panel)
     }
-}
-
-/// Button `b` with the tabs the captures can go to as its menu.
-fn target_menu(b: Button, tray: WeakEntity<Tray>) -> impl IntoElement {
-    b.dropdown_caret(true).dropdown_menu(move |mut menu, _, cx| {
-        let Some(tray) = tray.upgrade() else { return menu };
-        tray.update(cx, |t, cx| t.refresh_choices(cx));
-        let (choices, chosen) = {
-            let t = tray.read(cx);
-            (t.choices.clone(), cx.global::<TrayData>().dest.clone())
-        };
-        let mut new_section = false;
-        for c in choices {
-            if matches!(c.dest, Dest::New { .. }) && !new_section {
-                new_section = true;
-                menu = menu.separator();
-            }
-            let dest = c.dest.clone();
-            let tray = tray.downgrade();
-            menu = menu.item(PopupMenuItem::new(c.label).checked(chosen.as_ref() == Some(&dest)).on_click(move |_, _, cx| {
-                cx.default_global::<TrayData>().dest = Some(dest.clone());
-                let _ = tray.update(cx, |_, cx| cx.notify());
-            }));
-        }
-        menu
-    })
 }

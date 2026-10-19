@@ -221,6 +221,9 @@ pub struct Host {
     /// for a program that had ended when it was adopted).
     #[cfg(unix)]
     master: Option<File>,
+    /// Where it started: Windows can't tell where its shell is now.
+    #[cfg(windows)]
+    start_cwd: Option<PathBuf>,
     scrollback: usize,
     shared: Arc<Shared>,
     term: Arc<FairMutex<HostTerm>>,
@@ -271,6 +274,8 @@ impl Host {
             pid,
             #[cfg(unix)]
             master,
+            #[cfg(windows)]
+            start_cwd: cfg.cwd.clone(),
             scrollback: cfg.scrollback,
             shared: shared.clone(),
             term: term.clone(),
@@ -470,7 +475,7 @@ impl Host {
         #[cfg(unix)]
         return self.master.as_ref().and_then(tern_term::procs::foreground_cwd);
         #[cfg(windows)]
-        return tern_term::procs::foreground_cwd(self.pid);
+        return tern_term::procs::foreground_cwd(self.pid).or_else(|| self.start_cwd.clone());
     }
 
     pub fn foreground_programs(&self) -> Vec<String> {

@@ -194,46 +194,6 @@ impl Monitor {
     }
 }
 
-/// What a row calls the agent: its tab's title without the status glyph
-/// some agents put first (Claude Code's "✳"), else the agent's name.
-fn display_name(title: &str, agent: Agent) -> String {
-    let bare = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
-    if bare.is_empty() { agent.name().to_owned() } else { bare.to_owned() }
-}
-
-/// A status's color: blue while working, amber while waiting for you,
-/// green once done (as t3code's sidebar has them).
-fn status_color(status: ActivityStatus, cx: &App) -> Hsla {
-    let theme = cx.theme();
-    match status {
-        ActivityStatus::Working => theme.info,
-        ActivityStatus::Blocked => theme.warning,
-        ActivityStatus::Done => theme.success,
-        ActivityStatus::None => theme.muted_foreground,
-    }
-}
-
-/// Which status a workspace shows for its agents: the one that most wants
-/// you.
-fn priority(status: ActivityStatus) -> u8 {
-    match status {
-        ActivityStatus::Blocked => 3,
-        ActivityStatus::Working => 2,
-        ActivityStatus::Done => 1,
-        ActivityStatus::None => 0,
-    }
-}
-
-/// How long a turn has been working: "42s", "3m", "1h 5m".
-fn elapsed_label(since: Instant) -> String {
-    let secs = since.elapsed().as_secs();
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3600 => format!("{}m", secs / 60),
-        _ => format!("{}h {}m", secs / 3600, secs / 60 % 60),
-    }
-}
-
 /// The opacity of a working dot along its 2 s cycle: full, a stepped fade to
 /// half, half, a stepped return.
 fn pulse(t: f32) -> f32 {
@@ -260,16 +220,6 @@ fn dot_color(status: ActivityStatus, phase: f32, color: Hsla) -> Hsla {
     if status == ActivityStatus::Working { color.opacity(pulse(phase)) } else { color }
 }
 
-/// A row's status word, with a timer while working. None when idle.
-fn status_label(e: &Entry) -> Option<String> {
-    Some(match e.status {
-        ActivityStatus::Working => e.since.map_or("Working".to_owned(), |t| format!("Working {}", elapsed_label(t))),
-        ActivityStatus::Blocked => "Awaiting".to_owned(),
-        ActivityStatus::Done => "Completed".to_owned(),
-        ActivityStatus::None => return None,
-    })
-}
-
 /// What a row of the list does when clicked.
 enum Row {
     Workspace(AnyWindowHandle, Entity<Workspace>),
@@ -284,7 +234,7 @@ impl Render for Monitor {
         let theme = cx.theme().clone();
         let count = |s| entries.iter().filter(|e| e.status == s).count();
         let (working, waiting, done) = (count(ActivityStatus::Working), count(ActivityStatus::Blocked), count(ActivityStatus::Done));
-        let summary = [(waiting, "awaiting"), (working, "working"), (done, "completed")]
+        let summary = [(waiting, "need input"), (working, "working"), (done, "done")]
             .into_iter()
             .filter(|(n, _)| *n > 0)
             .map(|(n, what)| format!("{n} {what}"))
@@ -296,21 +246,27 @@ impl Render for Monitor {
         for e in &entries {
             if group != Some(e.ws.entity_id()) {
                 group = Some(e.ws.entity_id());
-                let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| priority(*s));
-                let mut item = Scope::new("workspace").var("workspace", true).var("name", e.workspace.as_str());
+                // As in the agents panel (`agents.folder`), without its buttons.
+                let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| crate::agents::priority(*s));
+                let mut item = Scope::new("workspace").var("folder", true).var("name", e.workspace.as_str()).var("open", true);
                 if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
-                    item = item.var("dot", true).var("dot_color", dot_color(s, phase, status_color(s, cx)));
+                    item = item.var("dot", true).var("dot_color", dot_color(s, phase, crate::agents::status_color(s, &theme)));
                 }
                 items.push(item);
                 rows.push(Row::Workspace(e.handle, e.ws.clone()));
             }
-            let color = status_color(e.status, cx);
+            // As in the agents panel (`agents.tab`).
+            let since = e.since.map(|t| t.elapsed()).unwrap_or_default();
+            let (label, icon, color) = crate::agents::status_look(e.status, false, since, &theme);
             let mut item = Scope::new("agent")
-                .var("name", display_name(&e.title, e.agent))
-                .var("idle", e.status == ActivityStatus::None)
+                .var("label", crate::agents::display_name(&e.title, e.agent))
+                .var("shown", true)
+                .var("working", e.status == ActivityStatus::Working)
+                .var("status", label)
+                .var("status_color", color)
                 .slot("icon", e.agent.icon(&theme));
-            if let Some(label) = status_label(e) {
-                item = item.var("status", label).var("status_color", color).var("dot_color", dot_color(e.status, phase, color));
+            if !icon.is_empty() {
+                item = item.var("status_icon", icon);
             }
             items.push(item);
             rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
@@ -346,14 +302,14 @@ impl Render for Monitor {
                         hide(cx);
                     })
                     .into_any_element(),
-                ("workspace", Some(Row::Workspace(handle, ws)), Framed::Box(d)) => {
+                ("folder", Some(Row::Workspace(handle, ws)), Framed::Box(d)) => {
                     let (handle, ws) = (*handle, ws.clone());
                     d.id(("workspace", ix.unwrap_or(0)))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx))
                         .into_any_element()
                 },
-                ("agent", Some(Row::Agent(handle, ws, tab)), Framed::Box(d)) => {
+                ("tab", Some(Row::Agent(handle, ws, tab)), Framed::Box(d)) => {
                     let (handle, ws, tab) = (*handle, ws.clone(), *tab);
                     d.id(("agent", ix.unwrap_or(0)))
                         .cursor_pointer()

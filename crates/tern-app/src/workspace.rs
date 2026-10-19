@@ -354,6 +354,8 @@ pub struct Workspace {
     arrange_problems: Vec<String>,
     /// Where the floating parts sit, as last drawn.
     float_area: Option<Bounds<Pixels>>,
+    /// The agents panel of the window showing this workspace (see `main_window`).
+    agents: Option<AnyView>,
     /// The windows of the parts in windows of their own, by part (None
     /// while one opens).
     part_windows: HashMap<String, Option<AnyWindowHandle>>,
@@ -505,6 +507,7 @@ impl Workspace {
             arranged: None,
             arrange_problems: vec![],
             float_area: None,
+            agents: None,
             part_windows: HashMap::new(),
             _subs: vec![tree_sub, changes_sub, scratches_sub],
         };
@@ -691,14 +694,6 @@ impl Workspace {
     /// The folder's name, for tab and window titles.
     pub fn name(&self) -> String {
         self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into_owned())
-    }
-
-    /// Whether a Claude tab is mid-turn or waiting for input.
-    pub fn busy(&self, cx: &App) -> bool {
-        self.tabs
-            .iter()
-            .filter_map(CenterTab::term)
-            .any(|t| matches!(t.view.read(cx).status(), ActivityStatus::Working | ActivityStatus::Blocked))
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1629,9 +1624,80 @@ impl Workspace {
             .collect()
     }
 
-    /// Show the tab with entity `id`.
+    /// The terminal tabs running an agent, as the window's agents panel lists
+    /// them under this workspace's folder, in tab order: each one's entity
+    /// and its `sidebar.tab` values. `here` is whether this workspace is the
+    /// shown one.
+    pub fn sidebar_tabs(&self, here: bool, cx: &App) -> Vec<(EntityId, template::Scope, ActivityStatus)> {
+        let close_key = crate::platform::shortcut("⌘W").to_string();
+        (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].term().is_some_and(|t| t.kind == TabKind::Claude || t.view.read(cx).agent().is_some()))
+            .map(|i| {
+                let (label, _, _) = self.tab_info(i, cx);
+                let id = self.tabs[i].entity_id();
+                let Some(t) = self.tabs[i].term() else { unreachable!("filtered to terminals") };
+                let v = t.view.read(cx);
+                let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
+                let (status, icon, color) = crate::agents::status_look(now, t.rang, v.status_since().elapsed(), cx.theme());
+                let label = crate::agents::display_name(&label, agent);
+                let mut scope = template::Scope::new(format!("side-tab-{}", id.as_u64()))
+                    .var("label", label)
+                    .var("active", here && i == self.active)
+                    .var("shown", self.pane_active.get(&self.pane_of(i)) == Some(&id))
+                    .var("close_key", close_key.clone())
+                    .var("buttons", true)
+                    .slot_opt("icon", self.tab_icon(i, None, cx));
+                scope = scope.var("status", status).var("status_color", color).var("working", now == ActivityStatus::Working);
+                if !icon.is_empty() {
+                    scope = scope.var("status_icon", icon);
+                }
+                (id, scope, now)
+            })
+            .collect()
+    }
+
+    /// `d`, the agents panel row of tab `id`: dragged into a pane, the tab moves
+    /// there; a right click opens the tab's menu.
+    pub fn sidebar_tab_row(ws: &WeakEntity<Self>, id: EntityId, d: Stateful<Div>, cx: &App) -> AnyElement {
+        let name = ws
+            .upgrade()
+            .and_then(|w| {
+                let w = w.read(cx);
+                let ix = w.tabs.iter().position(|t| t.entity_id() == id)?;
+                Some(w.tab_info(ix, cx).1)
+            })
+            .unwrap_or_default();
+        let menu_ws = ws.clone();
+        d.on_drag(DraggedTab { tab: id, name }, Self::drag_start(ws.clone()))
+            .context_menu(move |menu, window, cx| {
+                let Some(this) = menu_ws.upgrade() else { return menu };
+                let this = this.read(cx);
+                let Some(ix) = this.tabs.iter().position(|t| t.entity_id() == id) else { return menu };
+                let (name, scope, items) = Self::tab_menu(&menu_ws, ix, this, cx);
+                template::menu(name, scope, menu, items, window, cx)
+            })
+            .into_any_element()
+    }
+
+    /// Close the tab with entity `id`, asking first when that ends a running program.
+    pub fn request_close_id(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == id) {
+            self.request_close_tab(ix, window, cx);
+        }
+    }
+
+    /// `b` with the new-tab menu (Claude, shell, agents, scratch).
+    pub fn new_tab_button(b: Button, ws: WeakEntity<Self>) -> AnyElement {
+        Self::new_tab_menu(b, ws).into_any_element()
+    }
+
+    /// Show the tab with entity `id` and give it focus.
     pub fn show_tab(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|t| t.entity_id() == id) {
+            // Another pane filling the center would hide it.
+            if self.zoomed.is_some_and(|z| z != self.pane_of(ix)) {
+                self.zoomed = None;
+            }
             self.activate(ix, window, cx);
         }
     }
@@ -1738,11 +1804,58 @@ impl Workspace {
         })
     }
 
-    /// The `left` or `right` tool strip, IntelliJ style (template
-    /// `tool_strip.<side>`): a button per part in the docks it shows, in
-    /// their order (the built-in sides without an arrangement). Each toggles
-    /// its panel, so a hidden panel is one click away.
-    fn strip(&self, side: &str, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) -> AnyElement {
+    /// The buttons of the panels docked on the right, for the main window's
+    /// title bar (template `title_bar`, list `parts`), with what each does.
+    pub fn title_parts(&mut self, cx: &mut Context<Self>) -> (Vec<template::Scope>, Vec<TitleClick>) {
+        let arrangement = self.arrangement(cx);
+        let parts = self.strip_parts("right", arrangement.as_deref(), cx);
+        let me = cx.entity().downgrade();
+        parts
+            .into_iter()
+            .map(|(p, (icon, on, tooltip))| {
+                let toggle = Self::strip_toggle(&p);
+                let me = me.clone();
+                let click: TitleClick = Rc::new(move |w, cx| {
+                    let _ = me.update(cx, |this, cx| toggle(this, w, cx));
+                });
+                (template::Scope::new(format!("part-{p}")).var("icon", icon).var("on", on).var("tooltip", tooltip), click)
+            })
+            .unzip()
+    }
+
+    /// What the title bar says is wrong: with the background terminals
+    /// (empty while they run in this build's daemon), with the settings
+    /// (empty without a problem).
+    pub fn title_status(&self, cx: &App) -> (String, String) {
+        let background = match self.services.mux.server_version() {
+            // An update's new UI keeps talking to the old daemon until
+            // its terminals end.
+            Some(v) if v != env!("CARGO_PKG_VERSION") => format!("Background: Tern {v} (updates once its terminals end)"),
+            Some(_) if self.services.mux.server_same_build() == Some(false) => {
+                "Background: an older build (updates once its terminals end)".to_owned()
+            },
+            Some(_) => String::new(),
+            None => "Background: unavailable".to_owned(),
+        };
+        let mut settings_error: Vec<String> =
+            cx.try_global::<crate::settings::SettingsStatus>().and_then(|s| s.error.as_ref().map(|e| e.to_string())).into_iter().collect();
+        settings_error.extend(self.arrange_problems.iter().cloned());
+        (background, settings_error.join("; "))
+    }
+
+    /// What the strip button of `part` does: toggle its panel.
+    fn strip_toggle(part: &str) -> fn(&mut Self, &mut Window, &mut Context<Self>) {
+        match part {
+            "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
+            "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
+            _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
+        }
+    }
+
+    /// The parts with a button on the `left` or `right` strip: those in the
+    /// docks it shows, in their order (the built-in sides without an
+    /// arrangement), with their buttons.
+    fn strip_parts(&self, side: &str, arrangement: Option<&Arrangement>, cx: &App) -> Vec<(String, (&'static str, bool, String))> {
         let parts: Vec<String> = match (arrangement, cx.try_global::<template::Templates>()) {
             (Some(a), Some(t)) => t
                 .docks("workspace")
@@ -1760,8 +1873,15 @@ impl Workspace {
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
             _ => vec!["changes".into()],
         };
-        let parts: Vec<(String, (&'static str, bool, String))> =
-            parts.into_iter().filter_map(|p| self.part_button(&p).map(|b| (p, b))).collect();
+        parts.into_iter().filter_map(|p| self.part_button(&p).map(|b| (p, b))).collect()
+    }
+
+    /// The `left` tool strip, IntelliJ style (template `tool_strip.left`):
+    /// a button per part in the docks it shows. Each toggles its panel, so a
+    /// hidden panel is one click away. The right one's buttons sit in the
+    /// main window's title bar (see `title_parts`).
+    fn strip(&self, side: &str, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) -> AnyElement {
+        let parts = self.strip_parts(side, arrangement, cx);
         let items = parts
             .iter()
             .map(|(p, (icon, on, tooltip))| {
@@ -1775,11 +1895,7 @@ impl Workspace {
             scope,
             &mut |frame, ix, f| match (frame, ix.and_then(|i| parts.get(i)), f) {
                 ("part", Some((part, _)), Framed::Button(b)) => {
-                    let toggle: fn(&mut Self, &mut Window, &mut Context<Self>) = match part.as_str() {
-                        "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
-                        "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
-                        _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
-                    };
+                    let toggle = Self::strip_toggle(part);
                     b.on_click(cx.listener(move |this, _, w, cx| toggle(this, w, cx))).into_any_element()
                 },
                 (_, _, f) => f.into_any_element(),
@@ -2736,6 +2852,12 @@ impl Workspace {
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
+            .slot_opt("agents", self.agents.clone())
+    }
+
+    /// The agents panel to draw: its window's.
+    pub fn set_agents(&mut self, agents: AnyView) {
+        self.agents = Some(agents);
     }
 
     /// Puts the side panels back where the templates place them.
@@ -3705,6 +3827,9 @@ fn notify_system(title: &str, body: &str, cx: &mut App) {
     });
 }
 
+/// What a title bar button of a panel does.
+pub type TitleClick = Rc<dyn Fn(&mut Window, &mut App)>;
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
@@ -3738,21 +3863,7 @@ impl Render for Workspace {
             },
         };
 
-        let background = match self.services.mux.server_version() {
-            // An update's new UI keeps talking to the old daemon until
-            // its terminals end.
-            Some(v) if v != env!("CARGO_PKG_VERSION") => format!("background: Tern {v} (updates once its terminals end)"),
-            Some(_) if self.services.mux.server_same_build() == Some(false) => {
-                "background: an older build (updates once its terminals end)".to_owned()
-            },
-            Some(_) => "background: ✓".to_owned(),
-            None => "background: unavailable".to_owned(),
-        };
-        let mut settings_error: Vec<String> =
-            cx.try_global::<crate::settings::SettingsStatus>().and_then(|s| s.error.as_ref().map(|e| e.to_string())).into_iter().collect();
-        settings_error.extend(self.arrange_problems.iter().cloned());
-        let settings_error = settings_error.join("; ");
-        let (left_strip, right_strip) = (self.strip("left", arrangement.as_deref(), cx), self.strip("right", arrangement.as_deref(), cx));
+        let left_strip = self.strip("left", arrangement.as_deref(), cx);
         let mut scope = self.part_scope();
         let ws = cx.entity().downgrade();
         let on_change: OnChange = Rc::new(move |change, _, cx| {
@@ -3773,12 +3884,7 @@ impl Render for Workspace {
         if let Some(a) = arrangement.clone() {
             scope = scope.docks(a, on_change.clone());
         }
-        let scope = scope
-            .var("background", background)
-            .var("settings_error", settings_error)
-            .slot("left_strip", left_strip)
-            .slot("right_strip", right_strip)
-            .slot("center", center);
+        let scope = scope.slot("left_strip", left_strip).slot("center", center);
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {

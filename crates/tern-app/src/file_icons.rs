@@ -11,9 +11,12 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        Bell,
         Bot,
         ChevronsDownUp,
         CircleArrowDown,
+        CircleCheck,
+        CircleDashed,
         Columns2,
         Database,
         FileArchive,
@@ -37,6 +40,7 @@ gpui_kit::assets::icon_assets!(
         FolderPlus,
         GitBranch,
         LayoutGrid,
+        MessageCircleQuestionMark,
         Maximize2,
         Minimize2,
         StickyNote,
