@@ -9,7 +9,9 @@ use gpui_kit::*;
 use crate::platform::bind;
 use crate::settings;
 
-actions!(tern, [SelectTheme, OpenSettings]);
+// `OpenSettings` opens the Settings window, `OpenSettingsFile` the file it
+// writes in a tab.
+actions!(tern, [SelectTheme, OpenSettings, OpenSettingsFile]);
 
 pub fn bind_keys(cx: &mut App) {
     // After the terminal's ⌘K (Clear), which then waits for a second key

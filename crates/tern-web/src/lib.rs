@@ -10,7 +10,10 @@
 mod auth;
 mod bridge;
 mod http;
+mod service;
 mod ws;
+
+pub use service::{Serving, last_log_line, log_file, qr, renew_token, serving, start, stop, wanted};
 
 use std::io::{self, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -90,7 +93,17 @@ fn attach_console() {
 fn serve(opts: Opts) -> io::Result<()> {
     let mux_dir = tern_mux::paths::mux_dir();
     tern_mux::paths::ensure_private_dir(&mux_dir)?;
-    let token = auth::load_token(&mux_dir.join("web-token"), opts.new_token)?;
+    // Held while serving. An app looking at it holds it for a moment.
+    let mut lock = service::lock(&mux_dir);
+    for _ in 0..20 {
+        if lock.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        lock = service::lock(&mux_dir);
+    }
+    let _lock = lock?;
+    let token = auth::load_token(&mux_dir.join(service::TOKEN), opts.new_token)?;
     let tailnet = tailscale_self();
     let ip = opts.bind.or(tailnet.as_ref().map(|t| t.ip)).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let listener = TcpListener::bind(SocketAddr::new(ip, opts.port))?;
@@ -100,7 +113,7 @@ fn serve(opts: Opts) -> io::Result<()> {
     let on_tailnet = tailnet.as_ref().filter(|t| t.ip == ip || ip.is_unspecified());
     let addr = match ip {
         IpAddr::V6(v6) => format!("[{v6}]"),
-        ip if ip.is_unspecified() => on_tailnet.map_or_else(|| "127.0.0.1".into(), |t| t.ip.to_string()),
+        ip if ip.is_unspecified() => on_tailnet.map(|t| t.ip).or_else(lan_ip).map_or_else(|| "127.0.0.1".into(), |ip| ip.to_string()),
         ip => ip.to_string(),
     };
     println!("Tern is serving its terminals on http://{}", SocketAddr::new(ip, port));
@@ -117,6 +130,10 @@ fn serve(opts: Opts) -> io::Result<()> {
     }
     println!("Press Ctrl+C to stop.");
     let _ = io::stdout().flush();
+    let mut links = vec![link(&addr)];
+    links.extend(on_tailnet.and_then(|t| t.name.as_deref()).map(link));
+    let status = service::Serving { pid: std::process::id(), links, all_networks: ip.is_unspecified(), local_only: ip.is_loopback() };
+    service::write_status(&mux_dir, &status)?;
 
     let state = Arc::new(Shared { token, mux_dir, cookie: format!("tern_web_{port}") });
     for stream in listener.incoming() {
@@ -212,6 +229,14 @@ fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
         },
         _ => http::respond(&mut w, "405 Method Not Allowed", &[], b""),
     }
+}
+
+/// This machine's address on its local network: the one it would reach
+/// the internet from (a UDP socket only picks a route; nothing is sent).
+fn lan_ip() -> Option<IpAddr> {
+    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 /// This machine on the tailnet.

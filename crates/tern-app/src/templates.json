@@ -706,5 +706,128 @@
         "style": { "font_size": "$welcome.recent.detail_font_size", "text": "$welcome.recent.detail_text" }
       }
     ]
+  },
+  "settings": {
+    "element": "settings",
+    "fill": true,
+    "layout": "row",
+    "children": [
+      { "element": "settings.nav", "children": [{ "each": "sections", "item": { "use": "settings.nav_item" } }] },
+      {
+        "frame": "page",
+        "grow": 1,
+        "children": [
+          {
+            "element": "settings.page",
+            "children": [
+              {
+                "style": { "gap": 4 },
+                "children": [
+                  { "element": "settings.title", "text": "{title}" },
+                  { "element": "settings.subtitle", "text": "{subtitle}" }
+                ]
+              },
+              { "element": "settings.group", "children": [{ "each": "rows", "item": { "use": "settings.row" } }] },
+              { "slot": "extra" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings.nav_item": {
+    "frame": "section",
+    "element": "settings.nav_item",
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "hover && !active": { "background": "$settings.nav_item.hover_background" },
+      "active": { "element": "settings.nav_item_active" }
+    },
+    "children": [{ "icon": "{icon}", "style": { "width": 14, "height": 14 } }, { "text": "{label}" }]
+  },
+  "settings.row": {
+    "element": "settings.row",
+    "layout": "row",
+    "align": "center",
+    "states": { "index > 0": { "border_top_width": "$settings.row.divider_width" } },
+    "children": [
+      {
+        "grow": 1,
+        "shrink": 1,
+        "style": { "gap": 2 },
+        "children": [
+          { "element": "settings.row.title", "text": "{title}" },
+          { "when": "description", "element": "settings.row.description", "text": "{description}" },
+          { "when": "problem", "element": "settings.row.problem", "text": "{problem}" }
+        ]
+      },
+      {
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "style": { "gap": 6 },
+        "children": [
+          { "when": "stepper && changed", "button": "reset", "size": "xsmall", "icon": "undo-2", "tooltip": "Back to the default ({default})" },
+          { "when": "stepper", "button": "dec", "variant": "outline", "size": "xsmall", "icon": "minus", "disabled": "at_min" },
+          { "when": "value", "element": "settings.row.value", "text": "{value}" },
+          { "when": "stepper", "button": "inc", "variant": "outline", "size": "xsmall", "icon": "plus", "disabled": "at_max" },
+          { "when": "action", "button": "action", "variant": "outline", "size": "small", "label": "{action}", "loading": "busy", "disabled": "busy" },
+          {
+            "when": "switch",
+            "frame": "switch",
+            "element": "settings.switch",
+            "layout": "row",
+            "align": "center",
+            "states": { "on": { "element": "settings.switch_on" }, "busy": { "opacity": 0.5 } },
+            "children": [{ "element": "settings.switch.knob" }]
+          }
+        ]
+      }
+    ]
+  },
+  "settings.remote": {
+    "element": "settings.group",
+    "children": [
+      {
+        "element": "settings.row",
+        "layout": "row",
+        "align": "start",
+        "children": [
+          { "slot": "qr" },
+          {
+            "grow": 1,
+            "shrink": 1,
+            "style": { "gap": 8 },
+            "children": [
+              { "element": "settings.row.title", "text": "Pairing link" },
+              {
+                "element": "settings.row.description",
+                "text": "Scan the code with your phone's camera, or open the link on another computer. Anyone with the link can use your terminals: keep it secret."
+              },
+              { "element": "settings.link", "truncate": true, "text": "{link}" },
+              { "when": "dns_link", "element": "settings.row.description", "truncate": true, "text": "With MagicDNS: {dns_link}" },
+              {
+                "layout": "row",
+                "style": { "gap": 8 },
+                "children": [
+                  { "button": "copy", "variant": "outline", "size": "small", "icon": "{copy_icon}", "label": "{copy_label}" },
+                  {
+                    "button": "new_link",
+                    "variant": "outline",
+                    "size": "small",
+                    "icon": "refresh-cw",
+                    "label": "New Link",
+                    "tooltip": "Make a new link; the old one stops working",
+                    "loading": "busy",
+                    "disabled": "busy"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

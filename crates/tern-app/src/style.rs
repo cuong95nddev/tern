@@ -504,6 +504,136 @@ pub const ELEMENTS: &[Element] = &[
             ("border_top_width", Len, "1"),
         ]],
     },
+    Element {
+        name: "settings",
+        about: "The Settings window",
+        groups: &[&[("background", Color, "$background"), ("text", Color, "$text")]],
+    },
+    Element {
+        name: "settings.nav",
+        about: "The list of sections down the Settings window's side",
+        groups: &[&[
+            ("width", Len, "200"),
+            ("padding", Len, "8"),
+            ("gap", Len, "2"),
+            ("background", Color, "$panel_background"),
+            ("border", Color, "$border"),
+            ("border_right_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "settings.nav_item",
+        about: "A section in the Settings window's list",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("padding_y", Len, "6"),
+            ("gap", Len, "8"),
+            ("radius", Len, "$radius"),
+            ("font_size", Len, "$text_sm"),
+            ("text", Color, "$text_muted"),
+            ("hover_background", Color, "$row_hover"),
+        ]],
+    },
+    Element {
+        name: "settings.nav_item_active",
+        about: "The section shown",
+        groups: &[&[("background", Color, "$row_selected"), ("text", Color, "$text")]],
+    },
+    Element {
+        name: "settings.page",
+        about: "A section's page",
+        groups: &[&[("max_width", Len, "760"), ("padding_x", Len, "32"), ("padding_y", Len, "28"), ("gap", Len, "20")]],
+    },
+    Element {
+        name: "settings.title",
+        about: "A page's title",
+        groups: &[&[("font_size", Len, "1.25rem"), ("font_weight", Num, "600"), ("text", Color, "$text")]],
+    },
+    Element {
+        name: "settings.subtitle",
+        about: "The line under a page's title",
+        groups: &[&[("font_size", Len, "$text_sm"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "settings.group",
+        about: "A card of settings rows",
+        groups: &[&[("border", Color, "$border"), ("border_width", Len, "1"), ("radius", Len, "10"), ("background", Color, "$muted/30")]],
+    },
+    Element {
+        name: "settings.row",
+        about: "A setting: its name and description, its control on the right; `divider_width` is the line above all but the first",
+        groups: &[&[
+            ("padding_x", Len, "16"),
+            ("padding_y", Len, "12"),
+            ("gap", Len, "16"),
+            ("border", Color, "$border"),
+            ("divider_width", Len, "1"),
+        ]],
+    },
+    Element {
+        name: "settings.row.title",
+        about: "A setting's name",
+        groups: &[&[("font_size", Len, "$text_sm"), ("font_weight", Num, "500"), ("text", Color, "$text")]],
+    },
+    Element {
+        name: "settings.row.description",
+        about: "What a setting does",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "settings.row.problem",
+        about: "Why a setting couldn't be applied",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$danger.background")]],
+    },
+    Element {
+        name: "settings.row.value",
+        about: "A setting's current value",
+        groups: &[&[("font_size", Len, "$text_sm"), ("text", Color, "$text")]],
+    },
+    Element {
+        name: "settings.switch",
+        about: "An on/off switch, off",
+        groups: &[&[
+            ("width", Len, "34"),
+            ("height", Len, "20"),
+            ("padding", Len, "2"),
+            ("radius", Len, "10"),
+            ("background", Color, "$muted.foreground/40"),
+        ]],
+    },
+    Element {
+        name: "settings.switch_on",
+        about: "An on/off switch, on",
+        groups: &[&[("padding_left", Len, "16"), ("background", Color, "$primary")]],
+    },
+    Element {
+        name: "settings.switch.knob",
+        about: "The knob of a switch",
+        groups: &[&[("width", Len, "16"), ("height", Len, "16"), ("radius", Len, "8"), ("background", Color, "$background")]],
+    },
+    Element {
+        name: "settings.link",
+        about: "The secret link to open Tern from another device",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("padding_y", Len, "6"),
+            ("radius", Len, "$radius"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+            ("background", Color, "$muted/60"),
+        ]],
+    },
+    Element {
+        name: "settings.qr",
+        about: "The link as a QR code: `size` is the code's, `color` its dark squares",
+        groups: &[&[
+            ("size", Len, "132"),
+            ("padding", Len, "8"),
+            ("radius", Len, "8"),
+            ("background", Color, "#ffffff"),
+            ("color", Color, "#000000"),
+        ]],
+    },
 ];
 
 pub fn element(name: &str) -> Option<&'static Element> {

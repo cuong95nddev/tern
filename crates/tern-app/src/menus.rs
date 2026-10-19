@@ -100,7 +100,7 @@ fn menus() -> Vec<Menu> {
         file.extend([MenuItem::separator(), MenuItem::action(capture_label(), crate::shot::CaptureScreenshot)]);
         file.extend([
             MenuItem::separator(),
-            MenuItem::action("Settings", OpenSettings),
+            MenuItem::action("Settings…", OpenSettings),
             MenuItem::action("Theme…", SelectTheme),
             MenuItem::separator(),
             MenuItem::action("Quit", Quit),

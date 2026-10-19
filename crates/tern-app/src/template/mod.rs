@@ -637,6 +637,8 @@ const SLOTS: &[&str] = &[
     "buttons",
     "icon",
     "scrollbar",
+    "extra",
+    "qr",
 ];
 
 /// The parts a template may name.

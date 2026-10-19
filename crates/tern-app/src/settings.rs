@@ -257,19 +257,32 @@ pub fn preview_theme(name: Option<SharedString>, cx: &mut App) {
 /// Saves theme `name` in `settings.json`, keeping the rest of the file.
 pub fn choose_theme(name: &str, cx: &mut App) {
     cx.global_mut::<Loader>().preview = None;
-    let path = settings_path(cx);
-    let old = match std::fs::read_to_string(&path) {
+    set_value(&["theme"], Some(name.into()), cx);
+}
+
+/// Sets the key at `path` (`["terminal", "font_size"]`) in `settings.json`,
+/// or with `None` removes it (back to the default), keeping the rest of the
+/// file, and applies it.
+pub fn set_value(path: &[&str], value: Option<serde_json::Value>, cx: &mut App) {
+    let file = settings_path(cx);
+    let old = match std::fs::read_to_string(&file) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return set_error(Some(format!("{SETTINGS}: {e}")), cx),
     };
-    match with_theme(old.as_deref(), name).and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string())) {
+    match with_value(old.as_deref(), path, value).and_then(|text| std::fs::write(&file, text).map_err(|e| e.to_string())) {
         Ok(()) => load(cx),
         Err(e) => {
             load(cx);
-            set_error(Some(format!("can't save the theme in {SETTINGS}: {e}")), cx);
+            set_error(Some(format!("can't save {} in {SETTINGS}: {e}", path.join("."))), cx);
         },
     }
+}
+
+/// `settings.json` as written (an empty object when there is none or it
+/// can't be read), for showing what it sets.
+pub fn file_value(cx: &App) -> serde_json::Value {
+    std::fs::read_to_string(settings_path(cx)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}))
 }
 
 /// `settings.json`, the file to edit.
@@ -277,16 +290,48 @@ pub fn settings_path(cx: &App) -> PathBuf {
     cx.global::<Loader>().dir.join(SETTINGS)
 }
 
-/// `text` (a settings file, `None` when there is none) with `theme` set.
+/// `text` (a settings file, `None` when there is none) with the key at
+/// `path` set to `value`, or removed (with the objects that leaves empty).
 /// Keys keep their order; the file's own spacing doesn't survive.
-fn with_theme(text: Option<&str>, theme: &str) -> Result<String, String> {
-    let mut value: serde_json::Value = match text {
+fn with_value(text: Option<&str>, path: &[&str], value: Option<serde_json::Value>) -> Result<String, String> {
+    let mut root: serde_json::Value = match text {
         Some(t) if !t.trim().is_empty() => serde_json::from_str(t).map_err(|e| e.to_string())?,
         _ => serde_json::json!({ "$schema": format!("./{SCHEMA}") }),
     };
-    let obj = value.as_object_mut().ok_or("the file isn't a JSON object")?;
-    obj.insert("theme".into(), theme.into());
-    Ok(serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n")
+    let (last, parents) = path.split_last().ok_or("no key")?;
+    let obj = root.as_object_mut().ok_or("the file isn't a JSON object")?;
+    match value {
+        Some(v) => {
+            let mut obj = obj;
+            for key in parents {
+                let entry = obj.entry(key.to_string()).or_insert_with(|| serde_json::json!({}));
+                obj = entry.as_object_mut().ok_or_else(|| format!("\"{key}\" isn't a JSON object"))?;
+            }
+            obj.insert(last.to_string(), v);
+        },
+        None => remove_at(obj, path),
+    }
+    Ok(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?
+        + "
+")
+}
+
+/// Removes the key at `path`, and the objects on the way that it leaves empty.
+fn remove_at(obj: &mut serde_json::Map<String, serde_json::Value>, path: &[&str]) {
+    match path {
+        [] => {},
+        [key] => {
+            obj.shift_remove(*key);
+        },
+        [key, rest @ ..] => {
+            if let Some(child) = obj.get_mut(*key).and_then(|c| c.as_object_mut()) {
+                remove_at(child, rest);
+                if child.is_empty() {
+                    obj.shift_remove(*key);
+                }
+            }
+        },
+    }
 }
 
 /// Reads the settings and themes and applies them. On an error the
@@ -892,6 +937,10 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `workspace_tabs.tab` | `name`, `active`, `busy` | |
 | `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
 | `welcome.recent` | `name`, `path` | |
+| `settings` | `title`, `subtitle`; lists `sections`, `rows` | `extra` |
+| `settings.nav_item` | `label`, `icon`, `active` | |
+| `settings.row` | `title`, `description`, `problem`, `value`, `default`, `switch`, `on`, `stepper`, `changed`, `at_min`, `at_max`, `action`, `busy` | |
+| `settings.remote` | `link`, `dns_link`, `copy_label`, `copy_icon`, `busy` | `qr` |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
@@ -992,7 +1041,7 @@ mod tests {
     use tern_term::vt::vte::ansi::Rgb;
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, read_theme_set, terminal_palette, with_theme};
+    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, read_theme_set, terminal_palette, with_value};
 
     /// The session and window places live next to the settings on Windows:
     /// saving them (every few seconds while a tab's status changes) must not
@@ -1021,17 +1070,38 @@ mod tests {
     #[test]
     fn choosing_a_theme_keeps_the_rest_of_the_file() {
         let old = r#"{"$schema": "./settings.schema.json", "theme": "Tern Dark", "ui": {"font_size": 15}, "colors": {}}"#;
-        let new = with_theme(Some(old), "Tern Light").unwrap();
+        let new = with_value(Some(old), &["theme"], Some("Tern Light".into())).unwrap();
         let v: serde_json::Value = serde_json::from_str(&new).unwrap();
         assert_eq!(v["theme"], "Tern Light");
         assert_eq!(v["ui"]["font_size"], 15);
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["$schema", "theme", "ui", "colors"]);
 
-        let fresh: serde_json::Value = serde_json::from_str(&with_theme(None, "X").unwrap()).unwrap();
+        let fresh: serde_json::Value = serde_json::from_str(&with_value(None, &["theme"], Some("X".into())).unwrap()).unwrap();
         assert_eq!(fresh["theme"], "X");
-        assert!(with_theme(Some("[1]"), "X").is_err());
-        assert!(with_theme(Some("{oops"), "X").is_err());
+        assert!(with_value(Some("[1]"), &["theme"], Some("X".into())).is_err());
+        assert!(with_value(Some("{oops"), &["theme"], Some("X".into())).is_err());
+    }
+
+    #[test]
+    fn setting_a_nested_value_makes_and_keeps_its_objects() {
+        let old = r#"{"theme": "Tern Dark", "terminal": {"font_family": "Menlo"}}"#;
+        let new = with_value(Some(old), &["terminal", "font_size"], Some(14.into())).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&new).unwrap();
+        assert_eq!(v["terminal"]["font_size"], 14);
+        assert_eq!(v["terminal"]["font_family"], "Menlo");
+        let new = with_value(Some(&new), &["ui", "font_size"], Some(15.into())).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&new).unwrap();
+        assert_eq!(v["ui"]["font_size"], 15);
+        let new = with_value(Some(&new), &["terminal", "font_family"], None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&new).unwrap();
+        assert!(v["terminal"].get("font_family").is_none());
+        // Back to the default leaves no empty object behind.
+        let new = with_value(Some(&new), &["ui", "font_size"], None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&new).unwrap();
+        assert!(v.get("ui").is_none());
+        assert!(with_value(Some(&new), &["editor", "font_size"], None).is_ok());
+        assert!(with_value(Some(r#"{"ui": 3}"#), &["ui", "font_size"], Some(1.into())).is_err());
     }
 
     #[test]

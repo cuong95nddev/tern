@@ -607,7 +607,7 @@ impl Connector {
 
 /// End process `pid`: asked first, then forced.
 #[cfg(unix)]
-fn kill_process(pid: u32) -> io::Result<()> {
+pub fn kill_process(pid: u32) -> io::Result<()> {
     let pid = pid as libc::pid_t;
     // SAFETY: plain signals to a pid the daemon gave us.
     let alive = || unsafe { libc::kill(pid, 0) } == 0;
@@ -626,21 +626,27 @@ fn kill_process(pid: u32) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn kill_process(pid: u32) -> io::Result<()> {
+pub fn kill_process(pid: u32) -> io::Result<()> {
     let status = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status()?;
     if status.success() { Ok(()) } else { Err(io::Error::other(format!("taskkill exited with {status}"))) }
 }
 
-/// Start the daemon from this executable, detached from us.
-#[cfg(unix)]
+/// Start the daemon, detached from us.
 fn spawn() -> io::Result<()> {
-    spawn_detached(&["--server"], log_file().as_deref())
+    spawn_background(&["--server"], log_file().as_deref())
 }
 
-/// Start the daemon from a copy of this executable, detached from us: a
-/// running `tern.exe` can't be replaced, and the daemon outlives updates.
+/// Run this executable with `args`, detached from us, for a process that
+/// outlives the app (the daemon, `--web`).
+#[cfg(unix)]
+pub fn spawn_background(args: &[&str], log: Option<&Path>) -> io::Result<()> {
+    spawn_detached(args, log)
+}
+
+/// Run a copy of this executable with `args`, detached from us: a running
+/// `tern.exe` can't be replaced, and these processes outlive updates.
 #[cfg(windows)]
-fn spawn() -> io::Result<()> {
+pub fn spawn_background(args: &[&str], log: Option<&Path>) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let dir = paths::mux_dir();
     paths::ensure_private_dir(&dir)?;
@@ -665,7 +671,7 @@ fn spawn() -> io::Result<()> {
         }
     }
     sweep_old_copies(&dir, &copy);
-    spawn_detached_exe(&copy, &["--server"], log_file().as_deref())
+    spawn_detached_exe(&copy, args, log)
 }
 
 /// Delete the daemon copies of other builds (those still running stay), and

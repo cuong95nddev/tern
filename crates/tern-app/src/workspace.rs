@@ -38,7 +38,7 @@ use crate::settings;
 use crate::style;
 use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
-use crate::theme_picker::OpenSettings;
+use crate::theme_picker::OpenSettingsFile;
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedTab, SavedWorkspace, TabLayout};
 
@@ -3339,7 +3339,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.step_tab(true, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.step_tab(false, w, cx)))
             .on_action(cx.listener(Self::toggle_explorer))
-            .on_action(cx.listener(|this, _: &OpenSettings, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettingsFile, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
             .on_action(cx.listener(Self::toggle_changes))
             .on_action(cx.listener(Self::toggle_scratches))
             .on_action(cx.listener(Self::reset_layout))

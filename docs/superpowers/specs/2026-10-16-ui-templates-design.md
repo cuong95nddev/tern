@@ -58,6 +58,9 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    box takes `background_image*` in its `style` (the welcome screen's image fills the window while
    `welcome.width` sizes its column). Buttons take `loading`. One difference: the bar scrolls the active
    workspace into view, as pane tab bars do (it stayed put before).
+   The Settings window (2026-10-19, `settings_window.rs`) was built on templates from the start: `settings`
+   (side list + page), `settings.nav_item`, `settings.row` (a setting with a switch, a stepper, a button or a
+   value, picked by values the code gives) and `settings.remote` (Connections' link and QR code, a `qr` slot).
 4. Side panels: headers (`panel_header`, `header_button`) and rows (`list_row`) as templates; the lists stay
    `uniform_list` slots that draw each row from a row template.
 5. File header of the viewer; terminal padding box.

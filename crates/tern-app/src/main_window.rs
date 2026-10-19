@@ -16,7 +16,7 @@ use gpui_kit::*;
 
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
-use crate::theme_picker::{self, OpenSettings, SelectTheme};
+use crate::theme_picker::{self, OpenSettingsFile, SelectTheme};
 use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 
@@ -353,6 +353,20 @@ pub fn open_window(content: Content, at: Option<(DisplayId, WindowBounds)>, cx: 
         },
         Err(e) => log::error!("failed to open window: {e}"),
     }
+}
+
+/// `settings.json` in a tab of the active Tern window (else the first).
+pub fn open_settings_file(cx: &mut App) {
+    let active = cx.active_window();
+    let all = windows(cx);
+    let Some((handle, _)) = all.iter().find(|(h, _)| Some(*h) == active).or(all.first()) else {
+        cx.open_with_system(&crate::settings::settings_path(cx));
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        window.dispatch_action(Box::new(OpenSettingsFile), cx);
+    });
 }
 
 /// Open `root` in the active window as a new workspace tab (or focus it
@@ -1005,6 +1019,12 @@ pub fn control(line: &str, cx: &mut App) -> String {
         open_window(Content::Welcome, None, cx);
         return "ok".into();
     }
+    if let Some(cmd) = line.trim().strip_prefix("settings-input ") {
+        return crate::settings_window::input(cmd, cx);
+    }
+    if let Some(section) = line.trim().strip_prefix("settings ") {
+        return crate::settings_window::show(section.trim(), cx);
+    }
     if line.trim() == "restart-background" {
         crate::restart::restart(cx);
         return "ok".into();
@@ -1043,7 +1063,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|_, _: &SelectTheme, window, cx| theme_picker::open(window, cx)))
             .on_action(cx.listener(|_, _: &crate::restart::RestartBackground, window, cx| crate::restart::confirm(window, cx)))
             // A workspace opens it in a tab; without one, the system does.
-            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| cx.open_with_system(&crate::settings::settings_path(cx))))
+            .on_action(cx.listener(|_, _: &OpenSettingsFile, _, cx| cx.open_with_system(&crate::settings::settings_path(cx))))
             .on_action(cx.listener(|_, _: &NewWindow, _, cx| open_window(Content::Welcome, None, cx)))
             .on_action(cx.listener(|this, _: &CloseWorkspace, window, cx| {
                 if !this.slots.is_empty() {

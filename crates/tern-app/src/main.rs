@@ -23,6 +23,7 @@ mod restart;
 mod scratch;
 mod scratches_view;
 mod settings;
+mod settings_window;
 #[cfg(any(target_os = "macos", windows))]
 mod shot;
 mod style;
@@ -144,6 +145,7 @@ fn main() {
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         agent_monitor::init(cx);
+        settings_window::init(cx);
         #[cfg(any(target_os = "macos", windows))]
         shot::init(cx);
         // Reached only when no window has focus.
@@ -210,6 +212,7 @@ fn main() {
         }
         if !scripted {
             restart::check_at_launch(cx);
+            settings_window::start_remote_at_launch(cx);
         }
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv_async().await {
