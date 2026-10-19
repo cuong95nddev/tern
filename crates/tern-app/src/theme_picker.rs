@@ -28,7 +28,7 @@ pub fn open(window: &mut Window, cx: &mut App) {
         move |dialog, _, cx| {
             let (state, themes, current) = (state.clone(), themes.clone(), current.clone());
             dialog.w(crate::style::dialog_width(false, cx)).title("Theme").on_close(|_, _, cx| settings::preview_theme(None, cx)).content(
-                move |c, _, _| {
+                move |c, _, cx| {
                     let items = themes.iter().map(|t| {
                         CommandItem::new()
                             .label(t.name.clone())
@@ -36,23 +36,23 @@ pub fn open(window: &mut Window, cx: &mut App) {
                             .checked(t.name == current)
                     });
                     let (on_select, on_confirm) = (themes.clone(), themes.clone());
-                    c.child(
-                        Command::new(&state)
-                            .bordered(false)
-                            .placeholder("Search themes")
-                            .items(items)
-                            .on_select(move |ix, _, cx| {
-                                if let Some(t) = on_select.get(ix.row) {
-                                    settings::preview_theme(Some(t.name.clone()), cx);
-                                }
-                            })
-                            .on_confirm(move |ix, window, cx| {
-                                if let Some(t) = on_confirm.get(ix.row) {
-                                    settings::choose_theme(&t.name, cx);
-                                }
-                                window.close_dialog(cx);
-                            }),
-                    )
+                    let list = Command::new(&state)
+                        .bordered(false)
+                        .placeholder("Search themes")
+                        .items(items)
+                        .on_select(move |ix, _, cx| {
+                            if let Some(t) = on_select.get(ix.row) {
+                                settings::preview_theme(Some(t.name.clone()), cx);
+                            }
+                        })
+                        .on_confirm(move |ix, window, cx| {
+                            if let Some(t) = on_confirm.get(ix.row) {
+                                settings::choose_theme(&t.name, cx);
+                            }
+                            window.close_dialog(cx);
+                        });
+                    let scope = crate::template::Scope::new("theme").slot("list", list);
+                    c.child(crate::template::render_plain("dialog.theme", scope, cx))
                 },
             )
         }

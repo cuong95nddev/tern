@@ -3,10 +3,11 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_fs::{ChangeBatch, FsWatcher};
@@ -164,14 +165,17 @@ impl Render for ScratchesView {
             &mut |name, _, f| match (name, f) {
                 ("new", Framed::Button(b)) => {
                     let me = me.clone();
-                    b.dropdown_menu(move |mut menu, _, _| {
-                        for (label, ext) in scratch::KINDS {
+                    b.dropdown_menu(move |menu, window, cx| {
+                        let me = me.clone();
+                        let items: template::MenuItems = Rc::new(move |name, ix| {
+                            let (_, ext) = *scratch::KINDS.get(ix?).filter(|_| name == "new")?;
                             let me = me.clone();
-                            menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, _, cx| {
+                            Some(Rc::new(move |_, _, cx| {
                                 let _ = me.update(cx, |_, cx| cx.emit(ScratchesEvent::New(ext)));
-                            }));
-                        }
-                        menu
+                            }))
+                        });
+                        let scope = template::Scope::new("new-scratch").list("kinds", scratch::kind_entries());
+                        template::menu("menu.new_scratch", scope, menu, items, window, cx)
                     })
                     .into_any_element()
                 },
@@ -198,31 +202,35 @@ impl Render for ScratchesView {
                 .min_h_0()
                 .child(uniform_list("scratches", self.files.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).size_full())
                 .map(|d| style::el("scratches.list", cx).apply(d))
-                .context_menu(move |menu, _, cx| {
+                .context_menu(move |menu, window, cx| {
                     let Some(this) = me.upgrade() else { return menu };
                     let Some(path) = this.read(cx).menu_ix.and_then(|ix| this.read(cx).files.get(ix)).map(|f| f.0.clone()) else {
                         return menu;
                     };
-                    let item = |label: &'static str, f: fn(&Path, &mut App) -> Option<ScratchesEvent>| {
+                    let me = me.clone();
+                    let items: template::MenuItems = Rc::new(move |name, _| {
+                        let f: fn(&Path, &mut App) -> Option<ScratchesEvent> = match name {
+                            "open" => |p, _| Some(ScratchesEvent::Open(p.to_owned())),
+                            "copy_path" => |p, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
+                                None
+                            },
+                            "reveal" => |p, cx| {
+                                cx.reveal_path(p);
+                                None
+                            },
+                            "delete" => |p, _| Some(ScratchesEvent::Delete(p.to_owned())),
+                            _ => return None,
+                        };
                         let (me, path) = (me.clone(), path.clone());
-                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        Some(Rc::new(move |_, _, cx| {
                             if let Some(ev) = f(&path, cx) {
                                 let _ = me.update(cx, |_, cx| cx.emit(ev));
                             }
-                        })
-                    };
-                    menu.item(item("Open", |p, _| Some(ScratchesEvent::Open(p.to_owned()))))
-                        .separator()
-                        .item(item("Copy Path", |p, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
-                            None
                         }))
-                        .item(item(crate::platform::REVEAL, |p, cx| {
-                            cx.reveal_path(p);
-                            None
-                        }))
-                        .separator()
-                        .item(item("Delete…", |p, _| Some(ScratchesEvent::Delete(p.to_owned()))))
+                    });
+                    let scope = template::Scope::new("scratch-menu").var("reveal", crate::platform::REVEAL);
+                    template::menu("menu.scratch", scope, menu, items, window, cx)
                 })
                 .into_any_element()
         };

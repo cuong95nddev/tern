@@ -469,6 +469,13 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element { name: "drop_zone.hover", about: "A drop zone under the pointer", groups: &[&[("background", Color, "$primary/30")]] },
     Element { name: "dialog", about: "Prompts and confirmations", groups: &[&[("width", Len, "420"), ("wide_width", Len, "520")]] },
+    Element { name: "dialog.body", about: "A dialog's message, under its title", groups: &[&[("gap", Len, "16")]] },
+    Element {
+        name: "dialog.note",
+        about: "The small line under a dialog's message",
+        groups: &[&[("padding_top", Len, "0.5rem"), ("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element { name: "dialog.footer", about: "A dialog's buttons", groups: &[&[("gap", Len, "0.5rem")]] },
     Element { name: "welcome", about: "The window with no workspace open", groups: &[&[("width", Len, "520"), ("gap", Len, "24")], IMAGE] },
     Element {
         name: "welcome.title",

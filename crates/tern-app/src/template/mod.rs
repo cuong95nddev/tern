@@ -30,9 +30,10 @@ use crate::dock::OnChange;
 use crate::style::{self, Props, Val};
 
 mod draw;
+mod menu;
 
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use draw::{Framed, Frames, on_event, render};
+pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, on_event, render, render_plain};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -62,8 +63,15 @@ pub struct Spec {
     /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
     /// `disabled` and `loading`.
     pub button: Option<String>,
-    /// A button's text; `{name}` puts in a value.
+    /// A button's text; `{name}` puts in a value. In a menu, on a box with
+    /// `children`: the submenu's name.
     pub label: Option<String>,
+    /// An action by name (`"file_tree::NewFile"`, see `reference/actions.md`):
+    /// a menu item that dispatches it and shows its key, or on a `button`
+    /// what clicking it does.
+    pub action: Option<String>,
+    /// In a menu: a line between entries.
+    pub separator: bool,
     /// What a button says under the pointer; `{name}` puts in a value.
     pub tooltip: Option<String>,
     /// A button's look: `ghost` (the default), `primary`, `secondary`,
@@ -126,6 +134,9 @@ pub struct Spec {
     /// One line that is never cut: its text spills over (or widens a list
     /// that scrolls sideways) rather than wraps.
     pub nowrap: bool,
+    /// Text wraps at the box's width, even where a box around it keeps
+    /// it on one line (a dialog's message).
+    pub wrap: bool,
     /// Hides what spills out of it.
     pub clip: bool,
     /// Paints its border under its children, so a child can sit on it (a
@@ -390,6 +401,35 @@ impl Templates {
         self.parts.iter().filter(|(_, (_, n))| n.drag.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
     }
 
+    /// Says which actions the templates name that `known` doesn't have.
+    pub fn check_actions(&self, known: &[&str], problems: &mut Vec<String>) {
+        fn walk(n: &Node, known: &[&str], problems: &mut Vec<String>) {
+            if let What::Button(b) = &n.what
+                && let Some(a) = &b.action
+                && !known.contains(&a.as_ref())
+            {
+                problems.push(format!("{}.action: no action \"{a}\"", n.path));
+            }
+            if let What::Each(_, item) = &n.what {
+                walk(item, known, problems);
+            }
+            n.children.iter().for_each(|c| walk(c, known, problems));
+        }
+        let start = problems.len();
+        let mut names: Vec<&String> = self.nodes.keys().collect();
+        names.sort();
+        for name in names {
+            walk(&self.nodes[name], known, problems);
+        }
+        // A template another uses names its actions there too.
+        let mut said = BTreeSet::new();
+        let mut ix = 0;
+        problems.retain(|p| {
+            ix += 1;
+            ix <= start || said.insert(p.clone())
+        });
+    }
+
     /// Whether `template`'s root is a drag handle.
     #[cfg(test)]
     pub fn is_handle(&self, template: &str) -> bool {
@@ -434,12 +474,16 @@ enum What {
     /// An icon's name.
     Icon(Vec<Part>),
     Button(Arc<ButtonNode>),
+    /// In a menu: a line between entries.
+    Separator,
 }
 
 /// A button: the code attaches what it does by `frame`.
 #[derive(Debug, Clone)]
 struct ButtonNode {
     frame: SharedString,
+    /// The action it dispatches, by name.
+    action: Option<SharedString>,
     icon: Option<Vec<Part>>,
     label: Option<Vec<Part>>,
     tooltip: Option<Vec<Part>>,
@@ -612,9 +656,12 @@ pub struct Node {
     when: Option<Cond>,
     truncate: bool,
     nowrap: bool,
+    wrap: bool,
     clip: bool,
     border_under: bool,
     split: Option<Axis>,
+    /// In a menu: a box with children is a submenu of this name.
+    label: Option<Vec<Part>>,
     panel: Panel,
     frame: Option<SharedString>,
     /// As a part: what a dock matches it on (`panel` when unset).
@@ -651,6 +698,8 @@ const SLOTS: &[&str] = &[
     "qr",
     "field",
     "grid",
+    "diff",
+    "list",
 ];
 
 /// The parts a template may name.
@@ -947,6 +996,7 @@ impl Compiler<'_, '_> {
         };
         ButtonNode {
             frame: frame.to_owned().into(),
+            action: s.action.clone().map(Into::into),
             icon: s.icon.as_deref().map(|i| self.icon(i, &format!("{at}.icon"))),
             label: s.label.as_deref().map(parts),
             tooltip: s.tooltip.as_deref().map(parts),
@@ -1037,19 +1087,24 @@ impl Compiler<'_, '_> {
     fn panel(&mut self, s: &Spec, at: &str) -> Panel {
         let fixed = self.flag(&s.fixed, &format!("{at}.fixed")).filter(|c| !c.0.is_empty());
         // A button's `size` is its own.
-        let size = if s.button.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
+        let size = if s.button.is_some() || s.action.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
         Panel { size, min: self.len(&s.min, &format!("{at}.min")), max: self.len(&s.max, &format!("{at}.max")), fixed }
     }
 
     fn own(&mut self, s: &Spec, at: &str) -> Node {
-        let icon = s.icon.is_some() && s.button.is_none();
-        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some(), icon, s.button.is_some()];
+        let button = s.button.is_some() || s.action.is_some();
+        let icon = s.icon.is_some() && !button;
+        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some(), icon, button, s.separator];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon and button"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, button and separator"));
         }
-        if s.button.is_none() {
+        // A box with children takes a label: a submenu's name.
+        let submenu = !button && kinds.iter().all(|k| !k) && !s.children.is_empty();
+        if s.label.is_some() && !button && !submenu {
+            self.problems.push(format!("{at}.label: only a button or a submenu takes it"));
+        }
+        if !button {
             for (field, set) in [
-                ("label", s.label.is_some()),
                 ("tooltip", s.tooltip.is_some()),
                 ("variant", s.variant.is_some()),
                 ("selected", s.selected.is_some()),
@@ -1083,8 +1138,12 @@ impl Compiler<'_, '_> {
             }
         } else if let Some(text) = &s.text {
             What::Text(parts(text))
-        } else if let Some(frame) = &s.button {
-            What::Button(Arc::new(self.button(frame, s, at)))
+        } else if button {
+            // An action alone is named by its action.
+            let frame = s.button.as_ref().or(s.action.as_ref()).cloned().unwrap_or_default();
+            What::Button(Arc::new(self.button(&frame, s, at)))
+        } else if s.separator {
+            What::Separator
         } else if let Some(name) = &s.icon {
             What::Icon(self.icon(name, &format!("{at}.icon")))
         } else if let Some(list) = &s.each {
@@ -1128,6 +1187,7 @@ impl Compiler<'_, '_> {
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
         let dock = self.dock(s, at, split, &children);
+        let label = if submenu { s.label.as_deref().map(parts) } else { None };
         Node {
             what,
             path: at.into(),
@@ -1148,9 +1208,11 @@ impl Compiler<'_, '_> {
             when,
             truncate: s.truncate,
             nowrap: s.nowrap,
+            wrap: s.wrap,
             clip: s.clip,
             border_under: s.border_under,
             split,
+            label,
             panel: self.panel(s, at),
             frame: s.frame.clone().map(Into::into),
             dock,
@@ -1258,6 +1320,17 @@ fn icon_exists(name: &str) -> bool {
     static PATHS: std::sync::LazyLock<BTreeSet<SharedString>> =
         std::sync::LazyLock::new(|| IconName::ALL.iter().map(|i| i.path()).collect());
     PATHS.contains(&icon_path(name))
+}
+
+/// `parts` with the values `get` gives put in.
+fn fill_parts(parts: &[Part], get: &dyn Fn(&str) -> Option<Value>) -> String {
+    parts
+        .iter()
+        .map(|p| match p {
+            Part::Lit(t) => t.to_string(),
+            Part::Var(v) => get(v).map(|v| v.text().to_string()).unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn parts(text: &str) -> Vec<Part> {
@@ -1514,6 +1587,81 @@ mod tests {
         assert!(t.nodes["explorer.row"].children.iter().any(|c| c.nowrap && c.grow.is_some()));
     }
 
+    /// A menu's entries, written short: `-` a separator, `"x"` a label,
+    /// `name:label` an item (`[x]` checked, `(off)` disabled), `label>[...]` a submenu.
+    fn shown(entries: &[super::menu::Entry]) -> Vec<String> {
+        use super::menu::Entry;
+        entries
+            .iter()
+            .map(|e| match e {
+                Entry::Separator => "-".to_owned(),
+                Entry::Label(t) => format!("\"{t}\""),
+                Entry::Item(i) => format!(
+                    "{}:{}{}{}{}",
+                    i.frame,
+                    i.label,
+                    if i.checked { " [x]" } else { "" },
+                    if i.disabled { " (off)" } else { "" },
+                    i.index.map(|n| format!(" #{n}")).unwrap_or_default()
+                ),
+                Entry::Submenu { label, entries } => format!("{label}>{:?}", shown(entries)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn menus_are_entries() {
+        let (t, problems) = compiled(
+            r#"{
+                "menu.m": { "children": [
+                    { "separator": true },
+                    { "action": "a::Open", "label": "Open" },
+                    { "separator": true, "when": "many" },
+                    { "separator": true },
+                    { "button": "cut", "label": "Cut", "when": "many" },
+                    { "button": "paste", "label": "Paste", "disabled": "!clip", "selected": true },
+                    { "text": "Pick" },
+                    { "each": "kinds", "item": { "button": "new", "label": "{label} .{ext}" } },
+                    { "label": "More", "children": [{ "separator": true }, { "use": "menu.sub" }] },
+                    { "separator": true }
+                ]},
+                "menu.sub": { "children": [{ "button": "x", "label": "X {n}" }] }
+            }"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let kinds = vec![
+            super::Scope::default().var("label", "Text").var("ext", "txt"),
+            super::Scope::default().var("label", "Rust").var("ext", "rs"),
+        ];
+        let scope = super::Scope::new("m").var("many", false).var("clip", false).var("n", 2usize).list("kinds", kinds);
+        assert_eq!(
+            shown(&t.menu("menu.m", scope)),
+            ["a::Open:Open", "-", "paste:Paste [x] (off)", "\"Pick\"", "new:Text .txt #0", "new:Rust .rs #1", "More>[\"x:X 2\"]",]
+        );
+    }
+
+    #[test]
+    fn menu_problems() {
+        let (t, problems) = compiled(
+            r#"{"menu.m": { "children": [
+                { "label": "Lost" },
+                { "separator": true, "text": "x" },
+                { "action": "a::Gone", "label": "Gone" },
+                { "action": "a::Open", "label": "Open" }
+            ]}}"#,
+        );
+        assert_eq!(
+            problems,
+            [
+                "templates.menu.m.children.0.label: only a button or a submenu takes it",
+                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, button and separator",
+            ]
+        );
+        let mut problems = vec![];
+        t.check_actions(&["a::Open"], &mut problems);
+        assert_eq!(problems, ["templates.menu.m.children.2.action: no action \"a::Gone\""]);
+    }
+
     #[test]
     fn file_header_and_terminal_compile() {
         let (t, problems) = compiled(super::BUILTIN);
@@ -1561,7 +1709,7 @@ mod tests {
         );
         assert_eq!(problems.len(), 5, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("no icon \"no-such-icon\"")), "{problems:?}");
-        assert!(problems.iter().any(|p| p.contains("only a button takes it")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("only a button or a submenu takes it")), "{problems:?}");
     }
 
     #[test]

@@ -413,6 +413,7 @@ fn load(cx: &mut App) {
     specs.extend(theme.templates.clone());
     specs.extend(settings.templates.clone());
     let templates = crate::template::compile(&specs, &style::Props::new(&over, &colors, dir), &mut problems);
+    templates.check_actions(cx.all_action_names(), &mut problems);
     cx.set_global(templates);
     cx.set_global(crate::dock::LayoutLock(settings.layout.locked));
 
@@ -693,6 +694,7 @@ fn write_reference_files(dir: &Path, cx: &App) -> std::io::Result<()> {
     write_if_changed(&dir.join(SCHEMA), &serde_json::to_string_pretty(&schema).unwrap_or_default())?;
     write_if_changed(&dir.join(REFERENCE).join(ELEMENTS_DOC), &elements_doc())?;
     write_if_changed(&dir.join(REFERENCE).join("templates.json"), crate::template::builtin_text())?;
+    write_if_changed(&dir.join(REFERENCE).join("actions.md"), &actions_doc(cx))?;
     write_if_changed(&dir.join(README), &readme(dir))?;
     let settings = dir.join(SETTINGS);
     if !settings.exists() {
@@ -709,6 +711,20 @@ fn write_reference_files(dir: &Path, cx: &App) -> std::io::Result<()> {
         write_if_changed(&dir.join(REFERENCE).join(file), &serde_json::to_string_pretty(&set).unwrap_or_default())?;
     }
     Ok(())
+}
+
+/// Every action a template's `action` may name.
+fn actions_doc(cx: &App) -> String {
+    let mut names: Vec<&str> = cx.all_action_names().to_vec();
+    names.sort_unstable();
+    let mut out = String::from(
+        "# Actions\n\nWhat a menu entry's or a button's `\"action\"` may name in `templates` (see `README.md`). \
+         Actions that take values (Open Recent) can't be named.\n\n",
+    );
+    for n in names {
+        out.push_str(&format!("- `{n}`\n"));
+    }
+    out
 }
 
 /// The schema of `tokens` and `elements`: every built-in token, element
@@ -948,6 +964,24 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `settings.nav_item` | `label`, `icon`, `active` | |
 | `settings.row` | `title`, `description`, `problem`, `value`, `default`, `switch`, `on`, `stepper`, `changed`, `at_min`, `at_max`, `action`, `busy` | |
 | `settings.remote` | `link`, `dns_link`, `copy_label`, `copy_icon`, `busy` | `qr` |
+| `dialog.trash` | `question` | |
+| `dialog.restart` | `message` | |
+| `dialog.restart.footer` | `at_launch` | |
+| `dialog.delete_scratch` | `name` | |
+| `dialog.diff_preview` | `height` | `diff` |
+| `dialog.name`, `dialog.claude_args` | | `field` |
+| `dialog.theme` | | `list` |
+| `menu.explorer` | `on_entry`, `can_paste`, `reveal` | |
+| `menu.scratch` | `reveal` | |
+| `menu.new_scratch` | list `kinds` (`label`, `ext`) | |
+| `menu.workspace_tab` | `single`, `reveal`; list `windows` (`label`) | |
+| `menu.pane_layout` | `panes`; list `presets` (`label`, `on`) | |
+| `menu.tab_layout` | list `layouts` (`label`, `on`) | |
+| `menu.new_tab` | as `menu.pane_layout`, `menu.tab_layout`, `menu.new_scratch`; `scratch_count`; lists `flags` (`label`, `flag`, `on`), `scratch_files` (`name`) | |
+| `menu.tab` | `others`, `right`, `file_tabs`, `grouped`, `renamable`, `diff_file`, `has_path`, `reveal`; lists `groups` (`title`, `color`), `layouts` | |
+| `menu.tab_group` | `collapsed`, `all`; list `colors` (`label`, `color`, `on`) | |
+| `menu.tab_bar` | as `menu.pane_layout` and `menu.tab_layout` | |
+| `menu.tabs` | list `tabs` (`label`, `on`) | |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
@@ -959,6 +993,18 @@ element's `padding_left` plus its `indent` for each level it is nested; its
 `name_color` is the git status color (unset in the explorer for a file git
 doesn't report, so the row's text color shows). A header's buttons are the
 `<header>.buttons` template, put in the header's `buttons` slot.
+
+A dialog's message is template `dialog.<name>` and its buttons
+`dialog.<name>.footer` (its title and frame are Tern's). A `\"wrap\": true` box
+wraps its text at its width. A menu is template `menu.<name>`; its root's
+children are the entries: `{{\"separator\": true}}`, `{{\"action\":
+\"file_tree::NewFile\", \"label\": \"New File…\"}}` (runs that action and shows
+its key), `{{\"button\": \"close\", \"label\": \"Close\"}}` (Tern attaches what it
+does by name), both with `icon`, `selected` (a check) and `disabled`; `\"text\"`
+(a line that can't be clicked), a box with a `label` and `children` (a
+submenu), `each` and `use` (another menu's entries). A `button` with
+`children` draws them as its item. A `button` with an `action` runs it when
+clicked, in any template.
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 

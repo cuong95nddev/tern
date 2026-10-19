@@ -76,7 +76,34 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    gives, the palette's with `background_opacity`; the grid is the `grid` slot). The VS Code button now takes
    `file_header.button` too. Pixel-identical on Windows with the old build (code, diff, Markdown, preview,
    image, unsaved, terminal).
-6. Dialog bodies and footers; menus as data (items, separators, submenus) from templates.
+6. **Done (2026-10-19):** dialog bodies and footers; menus as data (items, separators, submenus) from templates.
+   Calls made:
+   - **Dialogs.** gpui-component's `Dialog` stays the frame (overlay, title, close button, Escape, focus): that
+     is behavior. Its body is template `dialog.<name>` and its footer `dialog.<name>.footer`; the title stays a
+     string in code. Built-in: `dialog.trash`, `dialog.restart`, `dialog.delete_scratch`, `dialog.diff_preview`,
+     `dialog.name`, `dialog.claude_args`, `dialog.theme`. Elements `dialog.note` (the small muted line) and
+     `dialog.footer` (the buttons' row). New node property `wrap`: text wraps at the box's width even where a box
+     around it keeps it on one line (a dialog's message).
+   - **Menus.** A menu is a template `menu.<name>` whose root's children are its entries; the code passes the
+     popup in (where it is anchored, whether it scrolls, the focus its actions go to stay code) and gets it back
+     filled. Entries: `{"separator": true}`; `{"action": "file_tree::NewFile", "label": ...}` dispatches that
+     action and shows its key (an unknown action is a problem); `{"button": "name", "label": ...}` is an item the
+     code attaches what it does to by name; both take `icon`, `selected` (checked) and `disabled`; a button with
+     `children` draws them as the item (a color dot before the label); `{"text": ...}` is a label that can't be
+     clicked; a box with a `label` and `children` is a submenu; `each` + `item` gives an entry per list entry;
+     `use` puts another menu's entries in place (`menu.tab_layout` in several menus). `when` hides an entry; the
+     menu drops separators left at the ends or doubled. The entries are worked out apart from drawing (a plain
+     list a TUI could draw too). A `button` with `action` anywhere else dispatches the action when clicked.
+   - Built-in: `menu.explorer`, `menu.scratch`, `menu.new_scratch`, `menu.workspace_tab`, `menu.new_tab`,
+     `menu.pane_layout`, `menu.tab_layout`, `menu.tab`, `menu.tab_group`, `menu.tab_bar`, `menu.tabs`. The
+     application menu bar (`menus.rs`, native on macOS) stays code for now: its items must all be actions, some
+     carry data (Open Recent), and macOS adds its own (Services).
+   - Dialog bodies take element `dialog.body` (`gap` 16, as gpui-component's dialog content puts between its
+     children). Action names are checked after compiling (`Templates::check_actions`, against the registered
+     actions); `reference/actions.md` lists them. Pixel-identical on Windows with the old build: every menu
+     (explorer, scratch row, workspace tab, new tab with its submenus, pane layout, tab, tab group with color dots
+     and check, tab bar, the overflow list) and every dialog (trash, restart, delete scratch, diff preview, name,
+     Claude arguments, theme); action items and button items do what they did.
 7. Screenshot tool (`shot/`): needs elements first.
 8. What the phases above don't name: the agent monitor (`agent_monitor.rs`), the diff pane header (`diff_pane.rs`),
    the scratch view (`scratch.rs`), the drag ghosts (`DraggedTab`, `DraggedGroup`, `DraggedWorkspace`,

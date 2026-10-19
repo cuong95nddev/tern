@@ -3,13 +3,17 @@
 use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizablePanel;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
-use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Justify, Layout, Node, Panel, Part, Scope, Templates, Value, Variant, What};
+use super::fill_parts as fill;
+use super::menu::Entry;
+use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Justify, Layout, Node, Panel, Scope, Templates, Value, Variant, What};
 use crate::arrange::{self, Shown, Size};
 use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange, PinnedParts};
 use crate::style::{self, Val};
@@ -57,6 +61,69 @@ pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyEle
     let mut scope = scope;
     let mut d = Drawer { frames, cx, rem: cx.theme_rem() };
     d.node(&node, &mut scope, &[]).unwrap_or_else(|| div().into_any_element())
+}
+
+/// Draws template `name` with `scope`, with no behavior attached.
+pub fn render_plain(name: &str, scope: Scope, cx: &App) -> AnyElement {
+    render(name, scope, &mut |_, _, f| f.into_any_element(), cx)
+}
+
+/// What clicking a menu item does.
+pub type MenuHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// Gives what a menu's `button` item does: by its name and the list entry
+/// it is in (if any). None leaves it doing nothing.
+pub type MenuItems = Rc<dyn Fn(&str, Option<usize>) -> Option<MenuHandler>>;
+
+/// Fills `menu` with menu template `name`'s entries for `scope`; `items`
+/// attaches what its buttons do.
+pub fn menu(name: &str, scope: Scope, menu: PopupMenu, items: MenuItems, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let entries = cx.try_global::<Templates>().map(|t| t.menu(name, scope)).unwrap_or_default();
+    fill_menu(&entries, menu, &items, window, cx)
+}
+
+fn fill_menu(entries: &[Entry], mut menu: PopupMenu, items: &MenuItems, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    for e in entries {
+        menu = match e {
+            Entry::Separator => menu.separator(),
+            Entry::Label(text) => menu.item(PopupMenuItem::label(text.clone())),
+            Entry::Item(it) => {
+                let mut item = match &it.content {
+                    Some((node, content)) => {
+                        let (node, content) = (node.clone(), content.clone());
+                        PopupMenuItem::element(move |_, cx| content_of(&node, &content, cx))
+                    },
+                    None => PopupMenuItem::new(it.label.clone()),
+                };
+                item = item.checked(it.checked).disabled(it.disabled);
+                if let Some(icon) = &it.icon {
+                    item = item.icon(Icon::default().path(super::icon_path(icon)));
+                }
+                if let Some(action) = it.action.as_ref().and_then(|a| cx.build_action(a, None).ok()) {
+                    item = item.action(action);
+                }
+                if let Some(h) = items(&it.frame, it.index) {
+                    item = item.on_click(move |e, window, cx| h(e, window, cx));
+                }
+                menu.item(item)
+            },
+            Entry::Submenu { label, entries } => {
+                let (entries, items) = (entries.clone(), items.clone());
+                menu.submenu(label.clone(), window, cx, move |m, window, cx| fill_menu(&entries, m, &items, window, cx))
+            },
+        };
+    }
+    menu
+}
+
+/// A menu item's own content: its node's children, in a row by default.
+fn content_of(n: &Node, content: &super::menu::Content, cx: &App) -> AnyElement {
+    let mut scope = Scope { vars: content.vars.clone(), index: content.index, ..Default::default() };
+    let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
+    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem() };
+    let (look, hovers) = d.look(n, &scope, &[]);
+    let kids: Vec<AnyElement> = n.children.iter().filter_map(|c| d.node(c, &mut scope, &[])).collect();
+    d.boxed(n, &look, hovers, kids, None, None)
 }
 
 trait Rem {
@@ -143,6 +210,8 @@ impl Drawer<'_, '_> {
                 }
             },
             What::Box => {},
+            // Only a menu draws it.
+            What::Separator => return None,
         }
         if let Some(d) = &n.dock {
             match self.dock_tree(d, scope, outer) {
@@ -220,6 +289,9 @@ impl Drawer<'_, '_> {
         }
         if b.loading.as_ref().is_some_and(|c| c.holds(&get)) {
             button = button.loading(true);
+        }
+        if let Some(action) = b.action.as_ref().and_then(|a| self.cx.build_action(a, None).ok()) {
+            button = button.on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
         }
         (self.frames)(&b.frame, scope.index, Framed::Button(button))
     }
@@ -569,6 +641,9 @@ impl Drawer<'_, '_> {
         if n.truncate {
             d = d.min_w_0().whitespace_nowrap().text_ellipsis();
         }
+        if n.wrap {
+            d = d.whitespace_normal();
+        }
         if n.nowrap {
             // At least as wide as its text, even when it grows from nothing.
             d = d.whitespace_nowrap();
@@ -623,17 +698,6 @@ fn px_(v: f32) -> Pixels {
     px(v)
 }
 
-/// `parts` with the values `get` gives put in.
-fn fill(parts: &[Part], get: &dyn Fn(&str) -> Option<Value>) -> String {
-    parts
-        .iter()
-        .map(|p| match p {
-            Part::Lit(t) => t.to_string(),
-            Part::Var(v) => get(v).map(|v| v.text().to_string()).unwrap_or_default(),
-        })
-        .collect()
-}
-
 impl Node {
     /// An icon with nothing a box would do: drawn as the icon alone.
     fn is_bare_icon(&self) -> bool {
@@ -662,6 +726,7 @@ impl Node {
             && !self.overlay
             && !self.truncate
             && !self.nowrap
+            && !self.wrap
             && !self.clip
             && self.frame.is_none()
             && self.align.is_none()

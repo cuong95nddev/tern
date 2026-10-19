@@ -1049,5 +1049,232 @@
     "fill": true,
     "style": { "background": "{background}" },
     "children": [{ "slot": "grid" }]
-  }
+  },
+  "dialog.trash": {
+    "element": "dialog.body",
+    "children": [
+      { "wrap": true, "text": "{question}" },
+      { "element": "dialog.note", "text": "You can restore it from the Trash." }
+    ]
+  },
+  "dialog.trash.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "danger", "label": "Move to Trash" }
+    ]
+  },
+  "dialog.restart": {
+    "element": "dialog.body",
+    "children": [
+      { "wrap": true, "text": "{message}" },
+      { "element": "dialog.note", "text": "Unsaved work in terminal programs is lost." }
+    ]
+  },
+  "dialog.restart.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "when": "at_launch", "button": "cancel", "variant": "secondary", "label": "Later" },
+      { "when": "!at_launch", "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "danger", "label": "Restart" }
+    ]
+  },
+  "dialog.delete_scratch": { "element": "dialog.body", "children": [{ "text": "Delete \"{name}\"? This cannot be undone." }] },
+  "dialog.delete_scratch.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "danger", "label": "Delete" }
+    ]
+  },
+  "dialog.diff_preview": { "element": "dialog.body", "style": { "height": "{height}" }, "children": [{ "slot": "diff" }] },
+  "dialog.diff_preview.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [{ "button": "open_in_tab", "variant": "primary", "label": "Open in Tab" }]
+  },
+  "dialog.name": { "element": "dialog.body", "children": [{ "slot": "field" }] },
+  "dialog.name.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "primary", "label": "OK" }
+    ]
+  },
+  "dialog.claude_args": {
+    "element": "dialog.body",
+    "children": [{ "slot": "field" }, { "element": "dialog.note", "text": "Passed to every new Claude tab, in shell syntax." }]
+  },
+  "dialog.claude_args.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "primary", "label": "Save" }
+    ]
+  },
+  "dialog.theme": { "element": "dialog.body", "children": [{ "slot": "list" }] },
+  "menu.explorer": {
+    "children": [
+      { "action": "file_tree::NewFile", "label": "New File…" },
+      { "action": "file_tree::NewFolder", "label": "New Folder…" },
+      { "separator": true },
+      { "action": "file_tree::RevealInFinder", "label": "{reveal}" },
+      { "separator": true },
+      { "when": "on_entry", "action": "file_tree::CutEntries", "label": "Cut" },
+      { "when": "on_entry", "action": "file_tree::CopyEntries", "label": "Copy" },
+      { "action": "file_tree::Paste", "label": "Paste", "disabled": "!can_paste" },
+      { "separator": true },
+      { "action": "file_tree::CopyPath", "label": "Copy Path" },
+      { "action": "file_tree::CopyRelativePath", "label": "Copy Relative Path" },
+      { "separator": true },
+      { "when": "on_entry", "action": "file_tree::Rename", "label": "Rename…" },
+      { "when": "on_entry", "action": "file_tree::Delete", "label": "Delete" },
+      { "when": "!on_entry", "action": "file_tree::CollapseAll", "label": "Collapse Folders" }
+    ]
+  },
+  "menu.scratch": {
+    "children": [
+      { "button": "open", "label": "Open" },
+      { "separator": true },
+      { "button": "copy_path", "label": "Copy Path" },
+      { "button": "reveal", "label": "{reveal}" },
+      { "separator": true },
+      { "button": "delete", "label": "Delete…" }
+    ]
+  },
+  "menu.new_scratch": { "children": [{ "each": "kinds", "item": { "button": "new", "label": "{label}  .{ext}" } }] },
+  "menu.workspace_tab": {
+    "children": [
+      { "button": "close", "label": "Close Workspace" },
+      { "button": "close_others", "label": "Close Other Workspaces", "disabled": "single" },
+      { "separator": true },
+      { "button": "move_new_window", "label": "Move to New Window", "disabled": "single" },
+      { "each": "windows", "item": { "button": "move_to_window", "label": "Move to Window: {label}" } },
+      { "separator": true },
+      { "button": "copy_path", "label": "Copy Path" },
+      { "button": "reveal", "label": "{reveal}" }
+    ]
+  },
+  "menu.new_tab": {
+    "children": [
+      { "action": "tern::OpenFolder", "label": "Open Workspace…" },
+      { "separator": true },
+      { "action": "workspace::NewClaudeTab", "label": "New Claude Tab" },
+      { "action": "workspace::NewShellTab", "label": "New Shell Tab" },
+      {
+        "label": "Claude Options",
+        "children": [
+          { "each": "flags", "item": { "button": "flag", "label": "{label}  {flag}", "selected": "on" } },
+          { "separator": true },
+          { "button": "edit_args", "label": "Edit Arguments…" },
+          { "text": "Applies to Claude tabs opened from now on" }
+        ]
+      },
+      { "separator": true },
+      { "action": "workspace::NewScratch", "label": "New Scratch File" },
+      { "label": "New Scratch File of Type", "children": [{ "use": "menu.new_scratch" }] },
+      {
+        "label": "Scratches",
+        "children": [
+          { "each": "scratch_files", "item": { "button": "open_scratch", "label": "{name}" } },
+          { "when": "scratch_count == 0", "button": "none", "label": "No scratch files", "disabled": true }
+        ]
+      },
+      { "action": "workspace::OpenScratchesFolder", "label": "Open Scratches Folder" },
+      { "separator": true },
+      { "label": "Pane Layout", "children": [{ "use": "menu.pane_layout" }] },
+      { "label": "Tab Layout", "children": [{ "use": "menu.tab_layout" }] }
+    ]
+  },
+  "menu.pane_layout": {
+    "children": [
+      { "each": "presets", "item": { "button": "preset", "label": "{label}", "selected": "on" } },
+      { "separator": true },
+      { "action": "workspace::TileTabs", "label": "Tile All Tabs" },
+      { "action": "workspace::SplitRight", "label": "Split Right" },
+      { "action": "workspace::SplitDown", "label": "Split Down" },
+      { "action": "workspace::ToggleZoomPane", "label": "Maximize Pane" },
+      { "button": "even", "label": "Even Pane Sizes", "disabled": "panes < 2" }
+    ]
+  },
+  "menu.tab_layout": { "children": [{ "each": "layouts", "item": { "button": "tab_layout", "label": "{label}", "selected": "on" } }] },
+  "menu.tab": {
+    "children": [
+      { "button": "close", "label": "Close" },
+      { "button": "close_others", "label": "Close Others", "disabled": "!others" },
+      { "button": "close_right", "label": "Close to the Right", "disabled": "!right" },
+      { "button": "close_file_tabs", "label": "Close File Tabs", "disabled": "!file_tabs" },
+      { "separator": true },
+      { "button": "new_group", "label": "Add Tab to New Group" },
+      {
+        "each": "groups",
+        "item": {
+          "button": "add_to_group",
+          "layout": "row",
+          "align": "center",
+          "style": { "gap": "0.5rem" },
+          "children": [{ "style": { "width": 8, "height": 8, "radius": 4, "background": "{color}" } }, { "text": "Add Tab to {title}" }]
+        }
+      },
+      { "when": "grouped", "button": "remove_from_group", "label": "Remove from Group" },
+      { "separator": true },
+      { "when": "renamable", "button": "rename", "label": "Rename…" },
+      { "when": "diff_file", "button": "open_file", "label": "Open File" },
+      { "when": "has_path", "button": "copy_path", "label": "Copy Path" },
+      { "when": "has_path", "button": "reveal", "label": "{reveal}" },
+      { "separator": true },
+      { "button": "split_right", "label": "Split Right" },
+      { "button": "split_left", "label": "Split Left" },
+      { "button": "split_down", "label": "Split Down" },
+      { "button": "split_up", "label": "Split Up" },
+      { "separator": true },
+      { "text": "Tab Layout" },
+      { "use": "menu.tab_layout" }
+    ]
+  },
+  "menu.tab_group": {
+    "children": [
+      { "button": "rename", "label": "Name Group…" },
+      { "button": "new_claude", "label": "New Claude Tab in Group" },
+      { "button": "new_shell", "label": "New Shell Tab in Group" },
+      { "when": "collapsed", "button": "toggle", "label": "Expand Group" },
+      { "when": "!collapsed", "button": "toggle", "label": "Collapse Group" },
+      { "separator": true },
+      {
+        "each": "colors",
+        "item": {
+          "button": "color",
+          "selected": "on",
+          "layout": "row",
+          "align": "center",
+          "style": { "gap": "0.5rem" },
+          "children": [{ "style": { "width": 10, "height": 10, "radius": 5, "background": "{color}" } }, { "text": "{label}" }]
+        }
+      },
+      { "separator": true },
+      { "button": "ungroup", "label": "Ungroup" },
+      { "button": "close", "label": "Close Group", "disabled": "all" }
+    ]
+  },
+  "menu.tab_bar": {
+    "children": [
+      { "text": "Pane Layout" },
+      { "use": "menu.pane_layout" },
+      { "separator": true },
+      { "text": "Tab Layout" },
+      { "use": "menu.tab_layout" }
+    ]
+  },
+  "menu.tabs": { "children": [{ "each": "tabs", "item": { "button": "show", "label": "{label}", "selected": "on" } }] }
 }

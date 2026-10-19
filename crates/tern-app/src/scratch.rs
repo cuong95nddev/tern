@@ -32,6 +32,11 @@ pub const KINDS: &[(&str, &str)] = &[
     ("CSS", "css"),
 ];
 
+/// The kinds as the `kinds` list of `menu.new_scratch`.
+pub fn kind_entries() -> Vec<crate::template::Scope> {
+    KINDS.iter().map(|(label, ext)| crate::template::Scope::default().var("label", *label).var("ext", *ext)).collect()
+}
+
 actions!(scratch, [SaveScratch]);
 
 pub fn bind_keys(cx: &mut App) {

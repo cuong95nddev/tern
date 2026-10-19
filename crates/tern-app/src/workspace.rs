@@ -14,7 +14,7 @@ use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
@@ -394,15 +394,22 @@ impl EventEmitter<WorkspaceEvent> for Workspace {}
 /// Common `claude` flags, toggled from the new-tab menu.
 const CLAUDE_FLAGS: [(&str, &str); 2] = [("Skip Permissions", "--dangerously-skip-permissions"), ("Chrome", "--chrome")];
 
-/// The tab layout choices (scroll, wrap, vertical), for every window.
-fn tab_layout_items(mut menu: PopupMenu) -> PopupMenu {
-    for (layout, label) in TabLayout::ALL {
-        menu = menu.item(PopupMenuItem::new(label).checked(window_state::tab_layout() == layout).on_click(move |_, _, cx| {
-            window_state::set_tab_layout(layout);
-            cx.refresh_windows();
-        }));
-    }
-    menu
+/// The tab layout choices (scroll, wrap, vertical), for every window: the
+/// `layouts` list of `menu.tab_layout`.
+fn tab_layout_entries() -> Vec<template::Scope> {
+    let now = window_state::tab_layout();
+    TabLayout::ALL.iter().map(|(layout, label)| template::Scope::default().var("label", *label).var("on", now == *layout)).collect()
+}
+
+/// A menu item that runs `f` on the workspace.
+fn on_ws(
+    ws: &WeakEntity<Workspace>,
+    f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> Option<template::MenuHandler> {
+    let ws = ws.clone();
+    Some(Rc::new(move |_, window, cx| {
+        let _ = ws.update(cx, |this, cx| f(this, window, cx));
+    }))
 }
 
 /// `s` as one word of the shell Claude tabs run in (see `platform::shell`).
@@ -833,25 +840,32 @@ impl Workspace {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let ws = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (ws, path) = (ws.clone(), path.clone());
+            let footer = template::render(
+                "dialog.delete_scratch.footer",
+                template::Scope::new("delete-scratch"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let (ws, path) = (ws.clone(), path.clone());
+                        b.on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = ws.update(cx, |this, cx| this.delete_scratch(&path, window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            let name = name.clone();
             dialog
                 .w(style::dialog_width(false, cx))
                 .title("Delete Scratch File")
-                .content({
-                    let name = name.clone();
-                    move |c, _, _| c.child(format!("Delete \"{name}\"? This cannot be undone."))
+                .content(move |c, _, cx| {
+                    let scope = template::Scope::new("delete-scratch").var("name", name.clone());
+                    c.child(template::render_plain("dialog.delete_scratch", scope, cx))
                 })
-                .footer(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(Button::new("delete-cancel").small().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("delete-ok").small().danger().label("Delete").on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
-                            let _ = ws.update(cx, |this, cx| this.delete_scratch(&path, window, cx));
-                        })),
-                )
+                .footer(footer)
         });
     }
 
@@ -1272,20 +1286,35 @@ impl Workspace {
         let pane = cx.new(|cx| DiffPane::new(path, cx));
         self.preview = Some(pane.downgrade());
         let ws = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, window, _| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let vp = window.viewport_size();
-            let (body, pane, ws) = (pane.clone(), pane.clone(), ws.clone());
+            let body = pane.clone();
+            let footer = template::render(
+                "dialog.diff_preview.footer",
+                template::Scope::new("diff-preview"),
+                &mut |n, _, f| match (n, f) {
+                    ("open_in_tab", Framed::Button(b)) => {
+                        let (pane, ws) = (pane.clone(), ws.clone());
+                        b.on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = ws.update(cx, |this, cx| this.open_diff_tab(pane.clone(), window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
             dialog
                 .w(vp.width * 0.8)
                 .margin_top(vp.height * 0.06)
                 .title(title.clone())
-                .content(move |c, window, _| c.child(div().h(window.viewport_size().height * 0.7).child(body.clone())))
-                .footer(div().flex().justify_end().child(Button::new("open-in-tab").small().primary().label("Open in Tab").on_click(
-                    move |_, window, cx| {
-                        window.close_dialog(cx);
-                        let _ = ws.update(cx, |this, cx| this.open_diff_tab(pane.clone(), window, cx));
-                    },
-                )))
+                .content(move |c, window, cx| {
+                    let height = f64::from(f32::from(window.viewport_size().height * 0.7));
+                    let scope = template::Scope::new("diff-preview").var("height", height).slot("diff", body.clone());
+                    c.child(template::render_plain("dialog.diff_preview", scope, cx))
+                })
+                .footer(footer)
         });
     }
 
@@ -1807,9 +1836,11 @@ impl Workspace {
             "pane_layout" => {
                 let ws = ws.clone();
                 return Ok(b
-                    .dropdown_menu(move |menu, _, cx| match ws.upgrade() {
-                        Some(this) => Self::pane_layout_items(menu, &ws, this.read(cx)),
-                        None => menu,
+                    .dropdown_menu(move |menu, window, cx| {
+                        let Some(this) = ws.upgrade() else { return menu };
+                        let scope = this.read(cx).layout_menus(template::Scope::new("pane-layout"));
+                        let ws = ws.clone();
+                        template::menu("menu.pane_layout", scope, menu, Rc::new(move |n, e| Self::layout_item(&ws, n, e)), window, cx)
                     })
                     .into_any_element());
             },
@@ -1822,61 +1853,48 @@ impl Workspace {
     /// The new-tab button's menu on `b`.
     fn new_tab_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
         b.dropdown_menu(move |menu, window, cx| {
-            let (ws, ws2, ws3, ws4) = (ws.clone(), ws.clone(), ws.clone(), ws.clone());
-            menu.menu("Open Workspace…", Box::new(crate::OpenFolder))
-                .separator()
-                .menu("New Claude Tab", Box::new(NewClaudeTab))
-                .menu("New Shell Tab", Box::new(NewShellTab))
-                .submenu("Claude Options", window, cx, move |mut menu, _, _| {
-                    let args = window_state::claude_args();
-                    for (label, flag) in CLAUDE_FLAGS {
-                        menu = menu.item(
-                            PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
-                                move |_, _, _| {
-                                    window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
-                                },
-                            ),
-                        );
-                    }
-                    let ws = ws3.clone();
-                    menu.separator()
-                        .item(PopupMenuItem::new("Edit Arguments…").on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.edit_claude_args(window, cx));
-                        }))
-                        .item(PopupMenuItem::label("Applies to Claude tabs opened from now on"))
+            let Some(this) = ws.upgrade() else { return menu };
+            let args = window_state::claude_args();
+            let flags = CLAUDE_FLAGS
+                .iter()
+                .map(|(label, flag)| {
+                    template::Scope::default().var("label", *label).var("flag", *flag).var("on", window_state::has_flag(&args, flag))
                 })
-                .separator()
-                .menu("New Scratch File", Box::new(NewScratch))
-                .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
-                    for (label, ext) in scratch::KINDS {
-                        let ws = ws.clone();
-                        menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
-                        }));
-                    }
-                    menu
+                .collect();
+            let files: Vec<PathBuf> = scratch::list(&scratch::dir()).into_iter().take(30).collect();
+            let names = files
+                .iter()
+                .map(|p| {
+                    template::Scope::default().var("name", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
                 })
-                .submenu("Scratches", window, cx, move |mut menu, _, _| {
-                    let files = scratch::list(&scratch::dir());
-                    if files.is_empty() {
-                        return menu.item(PopupMenuItem::new("No scratch files").disabled(true));
-                    }
-                    for path in files.into_iter().take(30) {
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let ws = ws2.clone();
-                        menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                            let _ = ws.update(cx, |this, cx| this.open_scratch(path.clone(), window, cx));
-                        }));
-                    }
-                    menu
-                })
-                .menu("Open Scratches Folder", Box::new(OpenScratchesFolder))
-                .separator()
-                .submenu("Pane Layout", window, cx, move |menu, _, cx| match ws4.upgrade() {
-                    Some(this) => Self::pane_layout_items(menu, &ws4, this.read(cx)),
-                    None => menu,
-                })
-                .submenu("Tab Layout", window, cx, |menu, _, _| tab_layout_items(menu))
+                .collect();
+            let scope = this
+                .read(cx)
+                .layout_menus(template::Scope::new("new-tab"))
+                .list("flags", flags)
+                .list("kinds", scratch::kind_entries())
+                .var("scratch_count", files.len())
+                .list("scratch_files", names);
+            let ws = ws.clone();
+            let items: template::MenuItems = Rc::new(move |name, entry| match name {
+                "flag" => {
+                    let (_, flag) = *CLAUDE_FLAGS.get(entry?)?;
+                    Some(Rc::new(move |_, _, _| {
+                        window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
+                    }))
+                },
+                "edit_args" => on_ws(&ws, |this, window, cx| this.edit_claude_args(window, cx)),
+                "new" => {
+                    let (_, ext) = *scratch::KINDS.get(entry?)?;
+                    on_ws(&ws, move |this, window, cx| this.new_scratch(ext, window, cx))
+                },
+                "open_scratch" => {
+                    let path = files.get(entry?)?.clone();
+                    on_ws(&ws, move |this, window, cx| this.open_scratch(path.clone(), window, cx))
+                },
+                _ => Self::layout_item(&ws, name, entry),
+            });
+            template::menu("menu.new_tab", scope, menu, items, window, cx)
         })
     }
 
@@ -2023,20 +2041,20 @@ impl Workspace {
                     this.menu_group = None;
                 }
             }))
-            .context_menu(move |menu, _, cx| {
+            .context_menu(move |menu, window, cx| {
                 let ws = &menu_ws;
                 let Some(this) = ws.upgrade() else { return menu };
                 let this = this.read(cx);
-                if let Some(g) = this.menu_group.filter(|&g| this.group(g).is_some()) {
-                    return Self::group_menu(menu, ws, g, this);
-                }
-                match this.menu_tab.filter(|&ix| ix < this.tabs.len()) {
-                    Some(ix) => Self::tab_menu(menu, ws, ix, this, cx),
-                    None => {
-                        let menu = Self::pane_layout_items(menu.item(PopupMenuItem::label("Pane Layout")), ws, this);
-                        tab_layout_items(menu.separator().item(PopupMenuItem::label("Tab Layout")))
-                    },
-                }
+                let (name, scope, items) = if let Some(g) = this.menu_group.filter(|&g| this.group(g).is_some()) {
+                    Self::group_menu(ws, g, this)
+                } else if let Some(ix) = this.menu_tab.filter(|&ix| ix < this.tabs.len()) {
+                    Self::tab_menu(ws, ix, this, cx)
+                } else {
+                    let ws = ws.clone();
+                    let items: template::MenuItems = Rc::new(move |n, e| Self::layout_item(&ws, n, e));
+                    ("menu.tab_bar", this.layout_menus(template::Scope::new("tab-bar")), items)
+                };
+                template::menu(name, scope, menu, items, window, cx)
             })
     }
 
@@ -2106,20 +2124,24 @@ impl Workspace {
                     let ws = ws.clone();
                     let menu: Vec<(Slot, SharedString)> = entries.iter().map(|e| (e.slot, e.label.clone())).collect();
                     b.dropdown_caret(true)
-                        .dropdown_menu(move |mut m, _, _| {
-                            m = m.scrollable(true);
-                            for (slot, label) in &menu {
-                                let (ws, slot) = (ws.clone(), *slot);
-                                m = m.item(PopupMenuItem::new(label.clone()).checked(shown.map(Slot::Tab) == Some(slot)).on_click(
-                                    move |_, window, cx| {
-                                        let _ = ws.update(cx, |this, cx| match slot {
-                                            Slot::Group(g) => this.toggle_group(g, window, cx),
-                                            Slot::Tab(i) => this.activate(i, window, cx),
-                                        });
-                                    },
-                                ));
-                            }
-                            m
+                        .dropdown_menu(move |m, window, cx| {
+                            let tabs = menu
+                                .iter()
+                                .map(|(slot, label)| {
+                                    template::Scope::default().var("label", label.clone()).var("on", shown.map(Slot::Tab) == Some(*slot))
+                                })
+                                .collect();
+                            let slots: Vec<Slot> = menu.iter().map(|(slot, _)| *slot).collect();
+                            let ws = ws.clone();
+                            let items: template::MenuItems = Rc::new(move |name, entry| {
+                                let slot = *slots.get(entry?).filter(|_| name == "show")?;
+                                on_ws(&ws, move |this, window, cx| match slot {
+                                    Slot::Group(g) => this.toggle_group(g, window, cx),
+                                    Slot::Tab(i) => this.activate(i, window, cx),
+                                })
+                            });
+                            let scope = template::Scope::new("tabs").list("tabs", tabs);
+                            template::menu("menu.tabs", scope, m.scrollable(true), items, window, cx)
                         })
                         .anchor(Anchor::TopRight)
                         .into_any_element()
@@ -2154,93 +2176,88 @@ impl Workspace {
         )
     }
 
-    /// Right-click menu of tab `ix`.
-    fn tab_menu(menu: PopupMenu, ws: &WeakEntity<Self>, ix: usize, this: &Self, cx: &App) -> PopupMenu {
-        type Handler = fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>);
-        let item = |label: &'static str, f: Handler| {
-            let ws = ws.clone();
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let _ = ws.update(cx, |this, cx| f(this, ix, window, cx));
-            })
-        };
+    /// Right-click menu of tab `ix`: the template, its values, what its items do.
+    fn tab_menu(ws: &WeakEntity<Self>, ix: usize, this: &Self, cx: &App) -> (&'static str, template::Scope, template::MenuItems) {
         let is_file = |t: &CenterTab| !matches!(t, CenterTab::Term(_));
         let tab = &this.tabs[ix];
         let path = tab.file_path(cx);
         let siblings = this.pane_tabs(this.pane_of(ix));
-        let mut menu = menu
-            .item(item("Close", Self::close_tab))
-            .item(item("Close Others", Self::close_others).disabled(siblings.len() < 2))
-            .item(item("Close to the Right", Self::close_to_right).disabled(siblings.last().is_none_or(|&l| l <= ix)))
-            // Terminals stay, so this never empties the window.
-            .item(item("Close File Tabs", Self::close_file_tabs).disabled(this.tabs.iter().all(is_file) || !this.tabs.iter().any(is_file)))
-            .separator()
-            .item(item("Add Tab to New Group", Self::add_to_new_group));
         let own = this.group_of(ix);
-        for g in this.groups.iter().filter(|g| Some(g.id) != own) {
-            let (ws, id, color) = (ws.clone(), g.id, group_color(g.color));
-            let label = format!("Add Tab to {}", g.title());
-            menu = menu.item(
-                PopupMenuItem::element(move |_, _| {
-                    div().flex().items_center().gap_2().child(div().size(px(8.)).rounded_full().bg(color)).child(label.clone())
-                })
-                .on_click(move |_, _, cx| {
-                    let _ = ws.update(cx, |this, cx| this.add_to_group(ix, id, cx));
-                }),
-            );
-        }
-        if own.is_some() {
-            menu = menu.item(item("Remove from Group", Self::remove_from_group));
-        }
-        menu = menu.separator();
-        if matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }) {
-            menu = menu.item(item("Rename…", Self::rename_tab));
-        }
-        if matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()) {
-            menu = menu.item(item("Open File", Self::open_tab_file));
-        }
-        if path.is_some() {
-            menu = menu.item(item("Copy Path", Self::copy_tab_path)).item(item(crate::platform::REVEAL, Self::reveal_tab_file));
-        }
-        menu = menu
-            .separator()
-            .item(item("Split Right", |this, ix, w, cx| this.split(ix, Edge::Right, w, cx)))
-            .item(item("Split Left", |this, ix, w, cx| this.split(ix, Edge::Left, w, cx)))
-            .item(item("Split Down", |this, ix, w, cx| this.split(ix, Edge::Bottom, w, cx)))
-            .item(item("Split Up", |this, ix, w, cx| this.split(ix, Edge::Top, w, cx)));
-        tab_layout_items(menu.separator().item(PopupMenuItem::label("Tab Layout")))
+        let others: Vec<&TabGroup> = this.groups.iter().filter(|g| Some(g.id) != own).collect();
+        let ids: Vec<u64> = others.iter().map(|g| g.id).collect();
+        let groups = others.iter().map(|g| template::Scope::default().var("title", g.title()).var("color", group_color(g.color))).collect();
+        let scope = template::Scope::new("tab-menu")
+            .var("others", siblings.len() >= 2)
+            .var("right", siblings.last().is_some_and(|&l| l > ix))
+            // Terminals stay, so this never empties the window.
+            .var("file_tabs", !this.tabs.iter().all(is_file) && this.tabs.iter().any(is_file))
+            .var("grouped", own.is_some())
+            .var("renamable", matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }))
+            .var("diff_file", matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()))
+            .var("has_path", path.is_some())
+            .var("reveal", crate::platform::REVEAL)
+            .list("groups", groups)
+            .list("layouts", tab_layout_entries());
+        let ws = ws.clone();
+        let items: template::MenuItems = Rc::new(move |name, entry| {
+            type Handler = fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>);
+            let f: Handler = match name {
+                "close" => Self::close_tab,
+                "close_others" => Self::close_others,
+                "close_right" => Self::close_to_right,
+                "close_file_tabs" => Self::close_file_tabs,
+                "new_group" => Self::add_to_new_group,
+                "add_to_group" => {
+                    let id = *ids.get(entry?)?;
+                    return on_ws(&ws, move |this, _, cx| this.add_to_group(ix, id, cx));
+                },
+                "remove_from_group" => Self::remove_from_group,
+                "rename" => Self::rename_tab,
+                "open_file" => Self::open_tab_file,
+                "copy_path" => Self::copy_tab_path,
+                "reveal" => Self::reveal_tab_file,
+                "split_right" => |this, ix, w, cx| this.split(ix, Edge::Right, w, cx),
+                "split_left" => |this, ix, w, cx| this.split(ix, Edge::Left, w, cx),
+                "split_down" => |this, ix, w, cx| this.split(ix, Edge::Bottom, w, cx),
+                "split_up" => |this, ix, w, cx| this.split(ix, Edge::Top, w, cx),
+                _ => return Self::layout_item(&ws, name, entry),
+            };
+            on_ws(&ws, move |this, window, cx| f(this, ix, window, cx))
+        });
+        ("menu.tab", scope, items)
     }
 
-    /// Right-click menu of group `g`'s chip.
-    fn group_menu(menu: PopupMenu, ws: &WeakEntity<Self>, g: u64, this: &Self) -> PopupMenu {
-        type Handler = fn(&mut Workspace, u64, &mut Window, &mut Context<Workspace>);
-        let item = |label: &'static str, f: Handler| {
-            let ws = ws.clone();
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let _ = ws.update(cx, |this, cx| f(this, g, window, cx));
-            })
-        };
-        let Some(group) = this.group(g) else { return menu };
-        let mut menu = menu
-            .item(item("Name Group…", Self::rename_group))
-            .item(item("New Claude Tab in Group", |this, g, w, cx| this.new_tab_in_group(TabKind::Claude, g, w, cx)))
-            .item(item("New Shell Tab in Group", |this, g, w, cx| this.new_tab_in_group(TabKind::Shell, g, w, cx)))
-            .item(item(if group.collapsed { "Expand Group" } else { "Collapse Group" }, Self::toggle_group))
-            .separator();
-        for (ix, (_, label, _)) in GROUP_COLORS.iter().enumerate() {
-            let (ws, color) = (ws.clone(), group_color(ix));
-            menu = menu.item(
-                PopupMenuItem::element(move |_, _| {
-                    div().flex().items_center().gap_2().child(div().size(px(10.)).rounded_full().bg(color)).child(*label)
-                })
-                .checked(group.color == ix)
-                .on_click(move |_, _, cx| {
-                    let _ = ws.update(cx, |this, cx| this.set_group_color(g, ix, cx));
-                }),
-            );
-        }
-        menu.separator()
-            .item(item("Ungroup", Self::ungroup))
-            .item(item("Close Group", Self::close_group).disabled(this.group_tabs(g).is_some_and(|r| r.len() == this.tabs.len())))
+    /// Right-click menu of group `g`'s chip: the template, its values, what its items do.
+    fn group_menu(ws: &WeakEntity<Self>, g: u64, this: &Self) -> (&'static str, template::Scope, template::MenuItems) {
+        let (collapsed, color) = this.group(g).map_or((false, 0), |group| (group.collapsed, group.color));
+        let colors = GROUP_COLORS
+            .iter()
+            .enumerate()
+            .map(|(ix, (_, label, _))| template::Scope::default().var("label", *label).var("color", group_color(ix)).var("on", color == ix))
+            .collect();
+        let scope = template::Scope::new("group-menu")
+            .var("collapsed", collapsed)
+            .var("all", this.group_tabs(g).is_some_and(|r| r.len() == this.tabs.len()))
+            .list("colors", colors);
+        let ws = ws.clone();
+        let items: template::MenuItems = Rc::new(move |name, entry| {
+            type Handler = fn(&mut Workspace, u64, &mut Window, &mut Context<Workspace>);
+            let f: Handler = match name {
+                "rename" => Self::rename_group,
+                "new_claude" => |this, g, w, cx| this.new_tab_in_group(TabKind::Claude, g, w, cx),
+                "new_shell" => |this, g, w, cx| this.new_tab_in_group(TabKind::Shell, g, w, cx),
+                "toggle" => Self::toggle_group,
+                "color" => {
+                    let ix = entry?;
+                    return on_ws(&ws, move |this, _, cx| this.set_group_color(g, ix, cx));
+                },
+                "ungroup" => Self::ungroup,
+                "close" => Self::close_group,
+                _ => return None,
+            };
+            on_ws(&ws, move |this, window, cx| f(this, g, window, cx))
+        });
+        ("menu.tab_group", scope, items)
     }
 
     /// Close every tab `close` picks, last first, asking first when that
@@ -2343,18 +2360,32 @@ impl Workspace {
             if first.replace(false) {
                 input.focus_handle(cx).focus(window, cx);
             }
-            let (field, input, ws, apply) = (input.clone(), input.clone(), ws.clone(), apply.clone());
-            dialog.w(style::dialog_width(false, cx)).title(title).content(move |c, _, _| c.child(Input::new(&field))).footer(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Button::new("rename-cancel").small().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
-                    .child(Button::new("rename-ok").small().primary().label("OK").on_click(move |_, window, cx| {
-                        let name = input.read(cx).value().to_string();
-                        let _ = ws.update(cx, |this, cx| apply(this, &name, window, cx));
-                    })),
-            )
+            let field = input.clone();
+            let footer = template::render(
+                "dialog.name.footer",
+                template::Scope::new("name"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let (input, ws, apply) = (input.clone(), ws.clone(), apply.clone());
+                        b.on_click(move |_, window, cx| {
+                            let name = input.read(cx).value().to_string();
+                            let _ = ws.update(cx, |this, cx| apply(this, &name, window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            dialog
+                .w(style::dialog_width(false, cx))
+                .title(title)
+                .content(move |c, _, cx| {
+                    let scope = template::Scope::new("name").slot("field", Input::new(&field));
+                    c.child(template::render_plain("dialog.name", scope, cx))
+                })
+                .footer(footer)
         });
     }
 
@@ -2376,26 +2407,32 @@ impl Workspace {
             if first.replace(false) {
                 input.focus_handle(cx).focus(window, cx);
             }
-            let (field, input) = (input.clone(), input.clone());
+            let field = input.clone();
+            let footer = template::render(
+                "dialog.claude_args.footer",
+                template::Scope::new("claude-args"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let input = input.clone();
+                        b.on_click(move |_, window, cx| {
+                            window_state::set_claude_args(&input.read(cx).value());
+                            window.close_dialog(cx);
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
             dialog
                 .w(style::dialog_width(true, cx))
                 .title("Claude Arguments")
                 .content(move |c, _, cx| {
-                    let muted = cx.theme().muted_foreground;
-                    c.child(Input::new(&field))
-                        .child(div().pt_2().text_xs().text_color(muted).child("Passed to every new Claude tab, in shell syntax."))
+                    let scope = template::Scope::new("claude-args").slot("field", Input::new(&field));
+                    c.child(template::render_plain("dialog.claude_args", scope, cx))
                 })
-                .footer(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(Button::new("args-cancel").small().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("args-ok").small().primary().label("Save").on_click(move |_, window, cx| {
-                            window_state::set_claude_args(&input.read(cx).value());
-                            window.close_dialog(cx);
-                        })),
-                )
+                .footer(footer)
         });
     }
 
@@ -2815,28 +2852,39 @@ impl Workspace {
         }
     }
 
-    /// The pane layouts (VS Code's Editor Layout, tmux's tiled), for menus.
-    fn pane_layout_items(mut menu: PopupMenu, ws: &WeakEntity<Self>, this: &Self) -> PopupMenu {
-        let order = this.layout.panes();
-        for (cols, rows, label) in panes::PRESETS {
-            let ws = ws.clone();
-            let checked = order.len() == cols * rows && this.layout == Layout::grid(cols, rows, &order);
-            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(move |_, window, cx| {
-                let _ = ws.update(cx, |this, cx| this.apply_layout(cols, rows, window, cx));
-            }));
+    /// `scope` with what `menu.pane_layout` and `menu.tab_layout` show here.
+    fn layout_menus(&self, scope: template::Scope) -> template::Scope {
+        let order = self.layout.panes();
+        let presets = panes::PRESETS
+            .iter()
+            .map(|&(cols, rows, label)| {
+                let on = order.len() == cols * rows && self.layout == Layout::grid(cols, rows, &order);
+                template::Scope::default().var("label", label).var("on", on)
+            })
+            .collect();
+        scope.var("panes", order.len()).list("presets", presets).list("layouts", tab_layout_entries())
+    }
+
+    /// What the items of `menu.pane_layout` and `menu.tab_layout` do.
+    fn layout_item(ws: &WeakEntity<Self>, name: &str, entry: Option<usize>) -> Option<template::MenuHandler> {
+        match name {
+            "preset" => {
+                let (cols, rows, _) = *panes::PRESETS.get(entry?)?;
+                on_ws(ws, move |this, window, cx| this.apply_layout(cols, rows, window, cx))
+            },
+            "even" => on_ws(ws, |this, _, cx| {
+                this.layout_epoch += 1;
+                cx.notify();
+            }),
+            "tab_layout" => {
+                let (layout, _) = *TabLayout::ALL.get(entry?)?;
+                Some(Rc::new(move |_, _, cx| {
+                    window_state::set_tab_layout(layout);
+                    cx.refresh_windows();
+                }))
+            },
+            _ => None,
         }
-        let ws = ws.clone();
-        menu.separator()
-            .menu("Tile All Tabs", Box::new(TileTabs))
-            .menu("Split Right", Box::new(SplitRight))
-            .menu("Split Down", Box::new(SplitDown))
-            .menu("Maximize Pane", Box::new(ToggleZoomPane))
-            .item(PopupMenuItem::new("Even Pane Sizes").disabled(order.len() < 2).on_click(move |_, _, cx| {
-                let _ = ws.update(cx, |this, cx| {
-                    this.layout_epoch += 1;
-                    cx.notify();
-                });
-            }))
     }
 
     /// The center's split `node`; `path` names its resizable groups.

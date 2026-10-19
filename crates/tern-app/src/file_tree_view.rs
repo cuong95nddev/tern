@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::scroll::Scrollbar;
@@ -502,27 +502,33 @@ impl FileTreeView {
         };
         let me = cx.entity().downgrade();
         let width = style::el("dialog", cx).px("width");
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (me, paths, question) = (me.clone(), paths.clone(), question.clone());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let question = question.clone();
+            let footer = template::render(
+                "dialog.trash.footer",
+                template::Scope::new("trash"),
+                &mut |name, _, f| match (name, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let (me, paths) = (me.clone(), paths.clone());
+                        b.on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = me.update(cx, |this, cx| this.trash(&paths, window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
             dialog
                 .w(width)
                 .title("Delete")
                 .content(move |c, _, cx| {
-                    let muted = cx.theme().muted_foreground;
-                    c.child(div().whitespace_normal().child(question.clone()))
-                        .child(div().pt_2().text_xs().text_color(muted).child("You can restore it from the Trash."))
+                    let scope = template::Scope::new("trash").var("question", question.clone());
+                    c.child(template::render_plain("dialog.trash", scope, cx))
                 })
-                .footer(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(Button::new("trash-cancel").small().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("trash-ok").small().danger().label("Move to Trash").on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
-                            let _ = me.update(cx, |this, cx| this.trash(&paths, window, cx));
-                        })),
-                )
+                .footer(footer)
         });
     }
 
@@ -721,29 +727,15 @@ impl FileTreeView {
 
     // ----- render -----
 
-    fn context_menu(menu: PopupMenu, me: &WeakEntity<Self>, cx: &App) -> PopupMenu {
+    fn context_menu(menu: PopupMenu, me: &WeakEntity<Self>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
         let Some(this) = me.upgrade() else { return menu };
         let this = this.read(cx);
-        let on_entry = !this.targets().is_empty();
-        let can_paste = this.clip.as_ref().is_some_and(|c| !c.paths.is_empty());
-        let menu = menu
-            .action_context(this.focus.clone())
-            .menu("New File…", Box::new(NewFile))
-            .menu("New Folder…", Box::new(NewFolder))
-            .separator()
-            .menu(crate::platform::REVEAL, Box::new(RevealInFinder))
-            .separator();
-        let menu = if on_entry { menu.menu("Cut", Box::new(CutEntries)).menu("Copy", Box::new(CopyEntries)) } else { menu };
-        let menu = menu
-            .menu_with_disabled("Paste", Box::new(Paste), !can_paste)
-            .separator()
-            .menu("Copy Path", Box::new(CopyPath))
-            .menu("Copy Relative Path", Box::new(CopyRelativePath));
-        if on_entry {
-            menu.separator().menu("Rename…", Box::new(Rename)).menu("Delete", Box::new(Delete))
-        } else {
-            menu.separator().menu("Collapse Folders", Box::new(CollapseAll))
-        }
+        let scope = template::Scope::new("explorer-menu")
+            .var("on_entry", !this.targets().is_empty())
+            .var("can_paste", this.clip.as_ref().is_some_and(|c| !c.paths.is_empty()))
+            .var("reveal", crate::platform::REVEAL);
+        let menu = menu.action_context(this.focus.clone());
+        template::menu("menu.explorer", scope, menu, Rc::new(|_, _| None), window, cx)
     }
 
     /// The row likely to be widest, which the list measures for its
@@ -941,7 +933,7 @@ impl Render for FileTreeView {
                     // Both bars, so names wider than the panel can be scrolled to.
                     .child(Scrollbar::new(&self.scroll).id("file-tree-scrollbar"))
                     .map(|d| style::el("explorer.list", cx).apply(d))
-                    .context_menu(move |menu, _, cx| Self::context_menu(menu, &me, cx)),
+                    .context_menu(move |menu, window, cx| Self::context_menu(menu, &me, window, cx)),
             )
     }
 }

@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt as _};
 use gpui_kit::*;
 
@@ -769,12 +769,12 @@ impl MainWindow {
                 ("bar", Framed::Box(d), _) => {
                     let menu_me = me.clone();
                     d.id("workspace-bar")
-                        .context_menu(move |menu, _, cx| {
+                        .context_menu(move |menu, window, cx| {
                             let Some(this) = menu_me.upgrade() else { return menu };
                             let this = this.read(cx);
                             let Some(ix) = this.menu_ix.filter(|&ix| ix < this.slots.len()) else { return menu };
                             let (root, single) = (this.slots[ix].ws.read(cx).root().to_owned(), this.slots.len() < 2);
-                            Self::tab_menu(menu, &menu_me, ix, root, single, cx)
+                            Self::tab_menu(menu, &menu_me, ix, root, single, window, cx)
                         })
                         .into_any_element()
                 },
@@ -851,34 +851,53 @@ impl MainWindow {
     }
 
     /// Right-click menu of workspace tab `ix`.
-    fn tab_menu(menu: PopupMenu, me: &WeakEntity<Self>, ix: usize, root: PathBuf, single: bool, cx: &mut App) -> PopupMenu {
-        type Handler = fn(&mut MainWindow, usize, &mut Window, &mut Context<MainWindow>);
-        let item = |label: &'static str, f: Handler| {
-            let me = me.clone();
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let _ = me.update(cx, |this, cx| f(this, ix, window, cx));
-            })
-        };
-        let mut menu = menu
-            .item(item("Close Workspace", Self::request_close))
-            .item(item("Close Other Workspaces", Self::request_close_others).disabled(single))
-            .separator()
-            .item(item("Move to New Window", |this, ix, window, cx| this.detach(ix, None, window, cx)).disabled(single));
+    fn tab_menu(
+        menu: PopupMenu,
+        me: &WeakEntity<Self>,
+        ix: usize,
+        root: PathBuf,
+        single: bool,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
         let me_id = me.entity_id();
+        let mut others = vec![];
+        let mut labels = vec![];
         for (handle, main) in windows(cx).into_iter().filter(|(_, m)| m.entity_id() != me_id) {
             let names: Vec<String> = main.read(cx).slots.iter().map(|s| s.ws.read(cx).name()).collect();
-            let label = if names.is_empty() { "Empty Window".to_owned() } else { names.join(", ") };
-            let me = me.clone();
-            menu = menu.item(PopupMenuItem::new(format!("Move to Window: {label}")).on_click(move |_, window, cx| {
-                let _ = me.update(cx, |this, cx| this.move_to(ix, handle, window, cx));
-            }));
+            labels
+                .push(template::Scope::default().var("label", if names.is_empty() { "Empty Window".to_owned() } else { names.join(", ") }));
+            others.push(handle);
         }
-        let (copy, reveal) = (root.clone(), root);
-        menu.separator()
-            .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy.display().to_string()));
+        let me = me.clone();
+        let items: template::MenuItems = Rc::new(move |name, entry| {
+            type Handler = Box<dyn Fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>)>;
+            let f: Handler = match name {
+                "close" => Box::new(move |this, window, cx| this.request_close(ix, window, cx)),
+                "close_others" => Box::new(move |this, window, cx| this.request_close_others(ix, window, cx)),
+                "move_new_window" => Box::new(move |this, window, cx| this.detach(ix, None, window, cx)),
+                "move_to_window" => {
+                    let handle = *others.get(entry?)?;
+                    Box::new(move |this, window, cx| this.move_to(ix, handle, window, cx))
+                },
+                "copy_path" => {
+                    let root = root.clone();
+                    return Some(Rc::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(root.display().to_string()))));
+                },
+                "reveal" => {
+                    let root = root.clone();
+                    return Some(Rc::new(move |_, _, cx| cx.reveal_path(&root)));
+                },
+                _ => return None,
+            };
+            let me = me.clone();
+            Some(Rc::new(move |_, window, cx| {
+                let _ = me.update(cx, |this, cx| f(this, window, cx));
             }))
-            .item(PopupMenuItem::new(crate::platform::REVEAL).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+        });
+        let scope =
+            template::Scope::new("workspace-menu").var("single", single).var("reveal", crate::platform::REVEAL).list("windows", labels);
+        template::menu("menu.workspace_tab", scope, menu, items, window, cx)
     }
 
     /// The page of a window with no workspace (`welcome`).

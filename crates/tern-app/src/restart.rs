@@ -8,13 +8,13 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt};
+use gpui_kit::component::WindowExt;
 use gpui_kit::*;
 
 use tern_mux::client::{Connector, OtherDaemon};
 
 use crate::AppServices;
+use crate::template::{self, Framed};
 
 actions!(tern, [RestartBackground]);
 
@@ -139,29 +139,32 @@ fn open(o: &Outlook, at_launch: bool, window: &mut Window, cx: &mut App) {
         "{what}{server}{others} Restarting ends every program in them, in all windows. The tabs start again \
          in the folders they were in, and Claude Code conversations resume."
     );
-    let (title, later) =
-        if at_launch { ("Background Terminals Run an Older Tern", "Later") } else { ("Restart Background Terminals", "Cancel") };
+    let title = if at_launch { "Background Terminals Run an Older Tern" } else { "Restart Background Terminals" };
     window.open_dialog(cx, move |dialog, _, cx| {
         let text = text.clone();
+        let footer = template::render(
+            "dialog.restart.footer",
+            template::Scope::new("restart").var("at_launch", at_launch),
+            &mut |name, _, f| match (name, f) {
+                ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                ("ok", Framed::Button(b)) => b
+                    .on_click(|_, window, cx| {
+                        window.close_dialog(cx);
+                        restart(cx);
+                    })
+                    .into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
         dialog
             .w(crate::style::dialog_width(true, cx))
             .title(title)
             .content(move |c, _, cx| {
-                c.child(div().whitespace_normal().child(text.clone())).child(
-                    div().pt_2().text_xs().text_color(cx.theme().muted_foreground).child("Unsaved work in terminal programs is lost."),
-                )
+                let scope = template::Scope::new("restart").var("message", text.clone());
+                c.child(template::render_plain("dialog.restart", scope, cx))
             })
-            .footer(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Button::new("restart-cancel").small().label(later).on_click(|_, window, cx| window.close_dialog(cx)))
-                    .child(Button::new("restart-ok").small().danger().label("Restart").on_click(|_, window, cx| {
-                        window.close_dialog(cx);
-                        restart(cx);
-                    })),
-            )
+            .footer(footer)
     });
 }
 
