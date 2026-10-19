@@ -22,7 +22,9 @@ let sessions = [];
 let current = null;
 let pending = null;
 let size = { cols: 80, rows: 24 };
-let fit = localStorage.getItem("tern.fit") === "1";
+// A phone fits the terminal to its screen unless told otherwise: the
+// desktop's grid can't be read at a size that fits there.
+let fit = (localStorage.getItem("tern.fit") ?? (matchMedia("(pointer: coarse)").matches ? "1" : "0")) === "1";
 let term = null;
 let snapshotNext = false;
 
@@ -292,17 +294,17 @@ function input(d) {
   if (current != null && pending == null) send({ t: "input", d });
 }
 
-// The width of one cell per pixel of font size: as xterm.js drew it, else
-// as measured.
-let cellRatio = null;
-function charRatio() {
-  const drawn = term && term._core && term._core._renderService && term._core._renderService.dimensions.css.cell.width;
-  if (drawn) return drawn / term.options.fontSize;
-  if (cellRatio) return cellRatio;
-  const c = document.createElement("canvas").getContext("2d");
-  c.font = `100px ${FONT}`;
-  cellRatio = c.measureText("W").width / 100;
-  return cellRatio;
+// The size of one cell at font size `fs`, as xterm.js draws it. It rounds
+// cells to device pixels, so they don't scale with the font size: measured
+// at that size, not worked out from another.
+function cellAt(fs) {
+  const dims = () => term._core && term._core._renderService && term._core._renderService.dimensions.css.cell;
+  const was = term.options.fontSize;
+  if (was !== fs) term.options.fontSize = fs;
+  const c = dims();
+  const cell = c && c.width ? { w: c.width, h: c.height } : { w: fs * 0.6, h: Math.ceil(fs * 1.2 * LINE_HEIGHT) };
+  if (was !== fs) term.options.fontSize = was;
+  return cell;
 }
 
 function room() {
@@ -313,18 +315,27 @@ function room() {
   return { w, h };
 }
 
-// Draw the session's grid as large as fits the width.
+// Draw the session's grid as large as fits the width (and the height, when
+// it was fitted to this screen).
 function layout() {
   if (!term || $("term-view").hidden) return;
-  const { w } = room();
-  const fs = Math.max(MIN_FONT, Math.min(MAX_FONT, Math.floor((w / (size.cols * charRatio())) * 4) / 4));
+  const { w, h } = room();
+  let fs = MIN_FONT;
+  for (let f = MAX_FONT; f > MIN_FONT; f -= 0.5) {
+    const c = cellAt(f);
+    if (size.cols * c.w <= w && (!fit || size.rows * c.h <= h)) {
+      fs = f;
+      break;
+    }
+  }
   if (term.options.fontSize !== fs) term.options.fontSize = fs;
 }
 
 function sendFit() {
   const { w, h } = room();
-  const cols = Math.floor(w / (FIT_FONT * charRatio()));
-  const rows = Math.floor(h / Math.ceil(FIT_FONT * LINE_HEIGHT));
+  const c = cellAt(FIT_FONT);
+  const cols = Math.floor(w / c.w);
+  const rows = Math.floor(h / c.h);
   if (cols > 0 && rows > 0 && (cols !== size.cols || rows !== size.rows)) send({ t: "resize", cols, rows });
 }
 
