@@ -1,7 +1,9 @@
 //! The tray: a small floating panel collecting captures, with the prompt
 //! and the tab they go to, until they are sent.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -21,12 +23,19 @@ const HEIGHT: f32 = 200.;
 const PLACE_H: f32 = 240.;
 /// The gap between the tray and the region or the display's edges.
 const GAP: f32 = 8.;
+/// A capture's thumbnail, in points.
+const THUMB: (f32, f32) = (104., 68.);
 
 /// What the tray holds; it outlives the tray window, which closes while a
 /// capture is on screen.
 #[derive(Default)]
 struct TrayData {
     shots: Vec<PathBuf>,
+    /// Small copies of the captures, made in the background: `img(path)`
+    /// would keep each full-size capture in the app's asset cache for good.
+    thumbs: HashMap<PathBuf, Arc<RenderImage>>,
+    /// Thumbnails being made.
+    making: HashSet<PathBuf>,
     prompt: String,
     dest: Option<Dest>,
     window: Option<AnyWindowHandle>,
@@ -333,9 +342,49 @@ impl Tray {
     }
 }
 
+/// `path`'s image shrunk to fit `w` × `h` pixels.
+fn thumbnail(path: &Path, w: u32, h: u32) -> Option<Arc<RenderImage>> {
+    let img = image::open(path).ok()?.to_rgba8();
+    let scale = (w as f32 / img.width() as f32).min(h as f32 / img.height() as f32).min(1.);
+    let (tw, th) = (((img.width() as f32 * scale).round() as u32).max(1), ((img.height() as f32 * scale).round() as u32).max(1));
+    Some(super::paint::picture(&image::imageops::thumbnail(&img, tw, th)))
+}
+
+impl Tray {
+    /// The thumbnail of each capture that has one; starts making the others.
+    fn thumbs(&mut self, shots: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) -> Vec<Option<Arc<RenderImage>>> {
+        let data = cx.default_global::<TrayData>();
+        data.thumbs.retain(|p, _| shots.contains(p));
+        data.making.retain(|p| shots.contains(p));
+        let todo: Vec<PathBuf> =
+            shots.iter().filter(|p| !data.thumbs.contains_key(*p) && data.making.insert((*p).clone())).cloned().collect();
+        let out = shots.iter().map(|p| data.thumbs.get(p).cloned()).collect();
+        let scale = window.scale_factor();
+        let (w, h) = ((THUMB.0 * scale) as u32, (THUMB.1 * scale) as u32);
+        for path in todo {
+            cx.spawn(async move |this, cx| {
+                let p = path.clone();
+                let thumb = cx.background_spawn(async move { thumbnail(&p, w, h) }).await;
+                // One that can't be read stays in `making`: not tried again.
+                cx.update(|cx| {
+                    if let Some(t) = thumb {
+                        let data = cx.default_global::<TrayData>();
+                        data.making.remove(&path);
+                        data.thumbs.insert(path, t);
+                    }
+                });
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        out
+    }
+}
+
 impl Render for Tray {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shots = cx.default_global::<TrayData>().shots.clone();
+        let thumbs = self.thumbs(&shots, window, cx);
         let theme = cx.theme().clone();
         let header = div()
             .flex()
@@ -368,7 +417,7 @@ impl Render for Tray {
                     .on_click(|_, _, cx| discard(cx)),
             );
         let mut strip = div().id("shots").flex().gap_2().overflow_x_scroll().py_1();
-        for (i, path) in shots.iter().enumerate() {
+        for (i, thumb) in thumbs.into_iter().enumerate() {
             strip = strip.child(
                 div()
                     .id(("shot", i))
@@ -383,7 +432,7 @@ impl Render for Tray {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.muted)
-                    .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
+                    .when_some(thumb, |d, t| d.child(img(ImageSource::Render(t)).size_full().object_fit(ObjectFit::Contain)))
                     .child(div().absolute().top(px(2.)).right(px(2.)).child(
                         Button::new(("remove", i)).icon(icons::icon(icons::CLOSE)).xsmall().tooltip("Remove").on_click(cx.listener(
                             move |this, _, _, cx| {

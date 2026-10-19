@@ -56,12 +56,6 @@ fn image_format(path: &Path) -> Option<ImageFormat> {
     })
 }
 
-pub struct ViewerState {
-    path: Option<PathBuf>,
-    mode: Mode,
-    unsaved: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub enum ViewerEvent {
     /// A relative link in the Markdown preview points at this file.
@@ -80,6 +74,9 @@ pub struct Viewer {
     dirty: bool,
     /// Ignore the Change event caused by our own `set_value`.
     loading: bool,
+    /// The editor's highlighter language: setting it again rebuilds the
+    /// highlighter, so a reload of the same file keeps it.
+    language: Option<SharedString>,
     message: Option<SharedString>,
     /// Where to put the cursor once the file being loaded is in.
     go_to: Option<Position>,
@@ -184,10 +181,12 @@ impl Viewer {
             mode: Mode::Edit,
             dirty: false,
             loading: false,
+            language: None,
             go_to: None,
             message: None,
             focus: cx.focus_handle(),
-            _subs: vec![sub],
+            // The decoded image stays in the app's asset cache until removed.
+            _subs: vec![sub, cx.on_release(|this: &mut Self, cx| this.set_image(None, cx))],
             _load: None,
         }
     }
@@ -204,8 +203,19 @@ impl Viewer {
         self.path = Some(path);
         self.dirty = false;
         self.diff = None;
-        self.image = None;
+        self.set_image(None, cx);
         self.reload(window, cx);
+    }
+
+    /// Show `image` (or none), dropping the one shown before from the app's
+    /// asset cache, which keeps every image decoded for good otherwise.
+    fn set_image(&mut self, image: Option<Arc<Image>>, cx: &mut App) {
+        if let Some(old) = self.image.take()
+            && image.as_ref().is_none_or(|new| new.id != old.id)
+        {
+            old.remove_asset(cx);
+        }
+        self.image = image;
     }
 
     /// Put the cursor on 1-based `line` (and `col`) once the file loads.
@@ -230,19 +240,25 @@ impl Viewer {
                 match loaded {
                     Loaded::Image(image) => {
                         this.message = None;
-                        this.image = Some(image);
+                        this.set_image(Some(image), cx);
                     },
                     Loaded::Text(text) => {
                         this.message = None;
-                        this.image = None;
+                        this.set_image(None, cx);
                         this.loading = true;
                         // Restoring the cursor focuses the editor; a reload
                         // must not take focus from where it is.
                         let focused = window.focused(cx);
+                        let lang = (this.language.as_ref() != Some(&lang)).then(|| {
+                            this.language = Some(lang.clone());
+                            lang
+                        });
                         this.editor.update(cx, |ed, cx| {
+                            if let Some(lang) = lang {
+                                ed.set_highlighter(lang, cx);
+                            }
                             if ed.value().as_ref() != text {
                                 let cursor = ed.cursor_position();
-                                ed.set_highlighter(lang, cx);
                                 ed.set_value(text, window, cx);
                                 ed.set_cursor_position(cursor, window, cx);
                             }
@@ -374,6 +390,7 @@ impl Viewer {
     /// unsaved edits.
     pub fn set_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let lang = language_for(&path);
+        self.language = Some(lang.clone());
         self.editor.update(cx, |ed, cx| ed.set_highlighter(lang, cx));
         self.path = Some(path);
         self.reload(window, cx);
@@ -386,32 +403,6 @@ impl Viewer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
-    }
-
-    /// What a rebuilt viewer needs to show the same thing.
-    pub fn state(&self, cx: &App) -> ViewerState {
-        ViewerState { path: self.path.clone(), mode: self.mode, unsaved: self.dirty.then(|| self.editor.read(cx).value().to_string()) }
-    }
-
-    /// Show `state` (from another viewer), unsaved edits included.
-    pub fn restore(&mut self, state: ViewerState, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = state.path else { return };
-        self.mode = state.mode;
-        self.path = Some(path.clone());
-        let Some(text) = state.unsaved else { return self.reload(window, cx) };
-        self.loading = true;
-        self.editor.update(cx, |ed, cx| {
-            ed.set_highlighter(language_for(&path), cx);
-            ed.set_value(text, window, cx);
-        });
-        self.loading = false;
-        self.dirty = true;
-        match self.mode {
-            Mode::Diff => self.show_diff(cx),
-            Mode::Preview => self.sync_preview(cx),
-            Mode::Edit => {},
-        }
-        cx.notify();
     }
 
     #[cfg(debug_assertions)]

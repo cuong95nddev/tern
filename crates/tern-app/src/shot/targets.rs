@@ -34,20 +34,18 @@ pub fn choices(cx: &mut App) -> Vec<Choice> {
     let mut out = Vec::new();
     for (window, ws) in &all {
         let w = ws.read(cx);
-        let name = w.name();
         for t in w.term_tabs(cx) {
             out.push(Choice {
-                label: format!("{name} › {}", t.title),
+                label: format!("{} › {}", t.folder, t.title),
                 agent: t.agent,
                 dest: Dest::Tab { window: *window, ws: ws.entity_id(), tab: t.id },
             });
         }
     }
     if let Some((window, ws)) = all.first() {
-        let name = ws.read(cx).name();
         for agent in NEW_AGENTS {
             out.push(Choice {
-                label: format!("New {} tab in {name}", agent.name()),
+                label: format!("New {} tab", agent.name()),
                 agent: Some(agent),
                 dest: Dest::New { window: *window, ws: ws.entity_id(), agent },
             });

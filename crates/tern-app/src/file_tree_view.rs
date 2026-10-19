@@ -1,5 +1,6 @@
-//! Explorer pane: virtualized rows over [`tern_fs::FileTree`], live-updated by
-//! the fs watcher, with git status and "edited by Claude" badges. Files and
+//! Explorer pane: virtualized rows over [`tern_fs::FileTree`], one top-level
+//! row per folder of the workspace, live-updated by the fs watchers, with git
+//! status and "edited by Claude" badges. Files and
 //! folders are created, renamed, moved, copied and trashed the way VS Code's
 //! explorer does it: inline name editing, a context menu, multi-selection,
 //! drag and drop and the same keys.
@@ -49,6 +50,9 @@ actions!(
         OpenEntry,
         OpenEntryPinned,
         Cancel,
+        RemoveFolder,
+        NewClaudeHere,
+        NewShellHere,
     ]
 );
 
@@ -82,15 +86,19 @@ pub fn bind_keys(cx: &mut App) {
 pub enum FileTreeEvent {
     /// A file clicked: once to preview it, twice (`pin`) to keep its tab.
     OpenFile { path: PathBuf, pin: bool },
-    /// Batch of changed paths from disk (for the viewer to reload). Empty
-    /// when only git metadata changed.
-    Changed(Vec<PathBuf>),
+    /// Changed paths from disk (for the viewer to reload) and repos whose
+    /// git metadata changed.
+    Changed(ChangeBatch),
     /// A file or folder was renamed or moved from `from` to `to`.
     Moved { from: PathBuf, to: PathBuf },
     /// Files or folders moved to the Trash.
     Deleted(Vec<PathBuf>),
     /// The header's close button: hide the explorer.
     Hide,
+    /// Take this folder out of the workspace.
+    RemoveFolder(PathBuf),
+    /// Open a terminal tab in this folder: Claude, else a shell.
+    NewTerminal { dir: PathBuf, claude: bool },
 }
 
 /// What the inline name field is for.
@@ -137,7 +145,9 @@ pub struct FileTreeView {
     clip: Option<Clip>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
-    _watcher: Option<FsWatcher>,
+    /// One per root, all sending to `changes`.
+    watchers: HashMap<PathBuf, FsWatcher>,
+    changes: flume::Sender<ChangeBatch>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -150,29 +160,19 @@ impl Focusable for FileTreeView {
 }
 
 impl FileTreeView {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(roots: &[PathBuf], cx: &mut Context<Self>) -> Self {
         let (tx, rx) = flume::unbounded::<ChangeBatch>();
-        let watcher = FsWatcher::new(&root, Duration::from_millis(40), move |b| {
-            let _ = tx.send(b);
-        })
-        .map_err(|e| log::warn!("fs watcher failed: {e}"))
-        .ok();
-
         let pump = cx.spawn(async move |this, cx| {
-            while let Ok(first) = rx.recv_async().await {
-                let mut paths = first.paths;
-                let mut git_changed = first.git_changed;
+            while let Ok(mut batch) = rx.recv_async().await {
                 for b in rx.try_iter() {
-                    paths.extend(b.paths);
-                    git_changed |= b.git_changed;
+                    batch.paths.extend(b.paths);
+                    batch.git_repos.extend(b.git_repos);
                 }
                 let ok = this.update(cx, |view, cx| {
-                    if view.tree.apply_changes(paths.iter().map(PathBuf::as_path)) {
+                    if view.tree.apply_changes(batch.paths.iter().map(PathBuf::as_path)) {
                         cx.notify();
                     }
-                    if !paths.is_empty() || git_changed {
-                        cx.emit(FileTreeEvent::Changed(paths));
-                    }
+                    cx.emit(FileTreeEvent::Changed(batch));
                 });
                 if ok.is_err() {
                     break;
@@ -180,8 +180,8 @@ impl FileTreeView {
             }
         });
 
-        Self {
-            tree: FileTree::new(root),
+        let mut this = Self {
+            tree: FileTree::new(vec![]),
             git: HashMap::new(),
             claude_touched: HashSet::new(),
             selected: vec![],
@@ -190,12 +190,51 @@ impl FileTreeView {
             clip: None,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _watcher: watcher,
+            watchers: HashMap::new(),
+            changes: tx,
             _tasks: vec![pump],
-        }
+        };
+        this.set_roots(roots, cx);
+        this
     }
 
-    /// Git status from the changes panel (all repos under the root).
+    /// Show these folders, in this order.
+    pub fn set_roots(&mut self, roots: &[PathBuf], cx: &mut Context<Self>) {
+        if self.tree.roots() == roots {
+            return;
+        }
+        let gone: Vec<PathBuf> = self.tree.roots().iter().filter(|r| !roots.contains(r)).cloned().collect();
+        for root in &gone {
+            self.tree.remove_root(root);
+            self.watchers.remove(root);
+        }
+        let unseen = |p: &PathBuf| !roots.iter().any(|r| p.starts_with(r));
+        self.selected.retain(|p| !unseen(p));
+        if self.cursor.as_ref().is_some_and(unseen) {
+            self.cursor = None;
+        }
+        for root in roots {
+            if self.watchers.contains_key(root) {
+                continue;
+            }
+            let tx = self.changes.clone();
+            let watcher = FsWatcher::new(root, Duration::from_millis(40), move |b| {
+                let _ = tx.send(b);
+            });
+            match watcher {
+                Ok(w) => {
+                    self.watchers.insert(root.clone(), w);
+                },
+                Err(e) => log::warn!("fs watcher failed for {}: {e}", root.display()),
+            }
+        }
+        for root in roots {
+            self.tree.add_root(root.clone());
+        }
+        cx.notify();
+    }
+
+    /// Git status from the changes panel (all repos under the roots).
     pub fn set_git(&mut self, git: HashMap<PathBuf, GitStatus>, cx: &mut Context<Self>) {
         if self.git != git {
             self.git = git;
@@ -218,8 +257,9 @@ impl FileTreeView {
         }
     }
 
-    fn root(&self) -> &Path {
-        self.tree.root()
+    /// The folder of the workspace `path` is in.
+    fn root_of(&self, path: &Path) -> Option<&Path> {
+        self.tree.root_of(path)
     }
 
     fn select_only(&mut self, path: PathBuf) {
@@ -235,22 +275,23 @@ impl FileTreeView {
         {
             paths = vec![c.clone()];
         }
-        paths.retain(|p| p != self.root());
+        paths.retain(|p| !self.tree.is_root(p));
         ops::outermost(&paths)
     }
 
     /// The folder new entries and pastes go into: the cursor if it is a
-    /// folder, else the cursor's folder, else the root.
-    fn target_dir(&self) -> PathBuf {
+    /// folder, else the cursor's folder, else the first root.
+    fn target_dir(&self) -> Option<PathBuf> {
         match &self.cursor {
-            Some(p) if p.is_dir() => p.clone(),
-            Some(p) => p.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root().to_path_buf()),
-            None => self.root().to_path_buf(),
+            Some(p) if p.is_dir() => Some(p.clone()),
+            Some(p) => p.parent().map(Path::to_path_buf),
+            None => self.tree.roots().first().cloned(),
         }
     }
 
+    /// `path` from its folder of the workspace.
     fn rel(&self, path: &Path) -> String {
-        path.strip_prefix(self.root()).unwrap_or(path).display().to_string()
+        self.root_of(path).and_then(|r| path.strip_prefix(r).ok()).unwrap_or(path).display().to_string()
     }
 
     // ----- rows -----
@@ -258,9 +299,6 @@ impl FileTreeView {
     /// Where the "new entry" field sits among the rows, and its depth.
     fn new_row(&self) -> Option<(usize, usize)> {
         let EditKind::New { parent, .. } = &self.edit.as_ref()?.kind else { return None };
-        if parent == self.root() {
-            return Some((0, 0));
-        }
         let ix = self.tree.row_of(parent)?;
         Some((ix + 1, self.tree.rows()[ix].depth + 1))
     }
@@ -359,7 +397,7 @@ impl FileTreeView {
     // ----- name field -----
 
     fn new_entry(&mut self, dir: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let parent = self.target_dir();
+        let Some(parent) = self.target_dir() else { return };
         self.tree.expand(&parent);
         self.start_edit(EditKind::New { parent, dir }, "", window, cx);
         if let Some((ix, _)) = self.new_row() {
@@ -402,7 +440,7 @@ impl FileTreeView {
         let result = match &kind {
             EditKind::Rename(from) if from.file_name().is_some_and(|n| n.to_string_lossy() == name) => Ok(None),
             EditKind::Rename(from) => {
-                let parent = from.parent().unwrap_or(self.root()).to_path_buf();
+                let parent = from.parent().unwrap_or(from).to_path_buf();
                 ops::child_path(&parent, &name).and_then(|to| ops::rename(from, &to).map(|()| Some(to)))
             },
             EditKind::New { .. } if name.is_empty() => Ok(None),
@@ -440,7 +478,7 @@ impl FileTreeView {
     /// Reload the folders `path` and any new folders above it (`a/b/c.txt`)
     /// appeared in.
     fn show_new(&mut self, path: &Path) {
-        let root = self.root().to_path_buf();
+        let Some(root) = self.root_of(path).map(Path::to_path_buf) else { return };
         let fresh: Vec<PathBuf> = path.ancestors().take_while(|a| *a != root).map(Path::to_path_buf).collect();
         self.tree.apply_changes(fresh.iter().map(PathBuf::as_path));
     }
@@ -469,7 +507,7 @@ impl FileTreeView {
     }
 
     fn on_rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.cursor.clone().filter(|p| p != self.root()) else { return };
+        let Some(path) = self.cursor.clone().filter(|p| !self.tree.is_root(p)) else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.scroll_to(&path);
         self.start_edit(EditKind::Rename(path), &name, window, cx);
@@ -573,7 +611,7 @@ impl FileTreeView {
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(clip) = &self.clip else { return };
         let (paths, cut) = (clip.paths.clone(), clip.cut);
-        let dir = self.target_dir();
+        let Some(dir) = self.target_dir() else { return };
         if cut {
             self.clip = None;
         }
@@ -623,9 +661,39 @@ impl FileTreeView {
         }
     }
 
+    /// The targets; else the folder the cursor is on, else every folder.
     fn targets_or_root(&self) -> Vec<PathBuf> {
         let t = self.targets();
-        if t.is_empty() { vec![self.root().to_path_buf()] } else { t }
+        if !t.is_empty() {
+            return t;
+        }
+        match self.cursor_root() {
+            Some(root) => vec![root],
+            None => self.tree.roots().to_vec(),
+        }
+    }
+
+    /// The folder the cursor is on, if it is one of the workspace's.
+    fn cursor_root(&self) -> Option<PathBuf> {
+        self.cursor.clone().filter(|c| self.tree.is_root(c))
+    }
+
+    fn on_remove_folder(&mut self, _: &RemoveFolder, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(root) = self.cursor_root() {
+            cx.emit(FileTreeEvent::RemoveFolder(root));
+        }
+    }
+
+    fn on_new_claude_here(&mut self, _: &NewClaudeHere, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dir) = self.target_dir() {
+            cx.emit(FileTreeEvent::NewTerminal { dir, claude: true });
+        }
+    }
+
+    fn on_new_shell_here(&mut self, _: &NewShellHere, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dir) = self.target_dir() {
+            cx.emit(FileTreeEvent::NewTerminal { dir, claude: false });
+        }
     }
 
     fn on_collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -712,11 +780,21 @@ impl FileTreeView {
     /// Rows, selection, cursor and name field, for the control socket.
     #[cfg(debug_assertions)]
     pub fn debug_state(&self, cx: &App) -> String {
-        let rows: Vec<String> = self.tree.rows().iter().map(|r| format!("{}{}", "  ".repeat(r.depth), r.entry.name)).collect();
+        let rows: Vec<String> = self
+            .tree
+            .rows()
+            .iter()
+            .map(|r| {
+                let git = self.git.get(&*r.entry.path).map(|g| format!(" [{}]", g.letter())).unwrap_or_default();
+                format!("{}{}{git}", "  ".repeat(r.depth), r.entry.name)
+            })
+            .collect();
         let rel = |p: &PathBuf| self.rel(p);
         let edit = self.edit.as_ref().map(|e| format!("{:?}={:?}", e.kind, e.input.read(cx).value()));
+        let mut git: Vec<String> = self.git.iter().map(|(p, s)| format!("{}={}", rel(p), s.letter())).collect();
+        git.sort();
         format!(
-            "rows={rows:?} selected={:?} cursor={:?} edit={edit:?} clip={:?}",
+            "rows={rows:?} git={git:?} selected={:?} cursor={:?} edit={edit:?} clip={:?}",
             self.selected.iter().map(rel).collect::<Vec<_>>(),
             self.cursor.as_ref().map(rel),
             self.clip.as_ref().map(|c| (c.cut, c.paths.iter().map(rel).collect::<Vec<_>>())),
@@ -728,12 +806,19 @@ impl FileTreeView {
     fn context_menu(menu: PopupMenu, me: &WeakEntity<Self>, cx: &App) -> PopupMenu {
         let Some(this) = me.upgrade() else { return menu };
         let this = this.read(cx);
+        if this.tree.roots().is_empty() {
+            return menu.menu("Add Folder to Workspace…", Box::new(crate::OpenFolder));
+        }
         let on_entry = !this.targets().is_empty();
+        let on_root = this.cursor_root().is_some();
         let can_paste = this.clip.as_ref().is_some_and(|c| !c.paths.is_empty());
         let menu = menu
             .action_context(this.focus.clone())
             .menu("New File…", Box::new(NewFile))
             .menu("New Folder…", Box::new(NewFolder))
+            .separator()
+            .menu("New Claude Tab Here", Box::new(NewClaudeHere))
+            .menu("New Shell Tab Here", Box::new(NewShellHere))
             .separator()
             .menu(crate::platform::REVEAL, Box::new(RevealInFinder))
             .separator();
@@ -743,11 +828,13 @@ impl FileTreeView {
             .separator()
             .menu("Copy Path", Box::new(CopyPath))
             .menu("Copy Relative Path", Box::new(CopyRelativePath));
-        if on_entry {
+        let menu = if on_entry {
             menu.separator().menu("Rename…", Box::new(Rename)).menu("Delete", Box::new(Delete))
         } else {
             menu.separator().menu("Collapse Folders", Box::new(CollapseAll))
-        }
+        };
+        let menu = menu.separator().menu("Add Folder to Workspace…", Box::new(crate::OpenFolder));
+        if on_root { menu.menu("Remove Folder from Workspace", Box::new(RemoveFolder)) } else { menu }
     }
 
     /// The row likely to be widest, which the list measures for its
@@ -825,7 +912,8 @@ impl FileTreeView {
             1 => name.to_string().into(),
             n => format!("{n} items").into(),
         };
-        let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(self.root()).to_path_buf() };
+        let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
+        let is_root = row.depth == 0;
 
         let el = Self::row_div(ix, row.depth, cx)
             .when(selected, |d| d.bg(active).when_some(selected_text, |d, c| d.text_color(c)))
@@ -834,7 +922,10 @@ impl FileTreeView {
             .hover(|d| d.bg(hover))
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(real, ev, window, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, window, cx| this.right_click(Some(real), window, cx)))
-            .when(renaming.is_none(), |d| d.on_drag(DraggedEntries { paths: drag_paths, label }, |d, _, _, cx| cx.new(|_| d.clone())))
+            .when(is_root, |d| d.font_weight(FontWeight::SEMIBOLD))
+            .when(renaming.is_none() && !is_root, |d| {
+                d.on_drag(DraggedEntries { paths: drag_paths, label }, |d, _, _, cx| cx.new(|_| d.clone()))
+            })
             .drag_over::<DraggedEntries>(move |s, _, _, _| s.bg(drop_bg))
             .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(drop_dir.clone(), &d.paths, window, cx)))
             .child(match chevron {
@@ -858,9 +949,13 @@ impl FileTreeView {
 impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = style::el("explorer", cx);
-        let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let me = cx.entity().downgrade();
-        let root = self.root().to_path_buf();
+        // Empty space takes drops for the only folder; with several, a row must.
+        let only_root = match self.tree.roots() {
+            [one] => Some(one.clone()),
+            _ => None,
+        };
+        let empty = self.tree.roots().is_empty();
         let header_button =
             |id: &'static str, icon: Icon, tip: SharedString| style::header_button("explorer.header.button", id, icon, cx).tooltip(tip);
         div()
@@ -885,6 +980,9 @@ impl Render for FileTreeView {
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_open_pinned))
             .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_remove_folder))
+            .on_action(cx.listener(Self::on_new_claude_here))
+            .on_action(cx.listener(Self::on_new_shell_here))
             .size_full()
             .relative()
             .flex()
@@ -893,9 +991,12 @@ impl Render for FileTreeView {
             .child(crate::dock::panel_header(
                 "explorer",
                 "explorer.header",
-                root_name,
+                "Explorer",
                 None,
                 [
+                    header_button("add-folder", Icon::new(AssetIcon::FolderOpen), "Add Folder to Workspace…".into())
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenFolder), cx))
+                        .into_any_element(),
                     header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into())
                         .on_click(cx.listener(|this, _, window, cx| {
                             window.focus(&this.focus, cx);
@@ -938,7 +1039,22 @@ impl Render for FileTreeView {
                         }
                     }))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)))
-                    .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)))
+                    .when_some(only_root, |d, root| {
+                        d.on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)))
+                    })
+                    .when(empty, |d| {
+                        d.child(crate::template::render(
+                            "explorer.empty",
+                            crate::template::Scope::new("explorer-empty").var("add_key", crate::platform::shortcut("⌘O").to_string()),
+                            &mut |name, _, f| match (name, f) {
+                                ("add_folder", crate::template::Framed::Button(b)) => {
+                                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenFolder), cx)).into_any_element()
+                                },
+                                (_, f) => f.into_any_element(),
+                            },
+                            cx,
+                        ))
+                    })
                     .child(
                         uniform_list("file-tree", self.display_len(), cx.processor(Self::render_rows))
                             .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)

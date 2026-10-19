@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tern_mux::client::{Connector, Open, RemoteSession};
+use tern_mux::client::{Connector, Foreground, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
@@ -215,6 +215,9 @@ pub struct TerminalView {
     output_since_ready: bool,
     config: TerminalConfig,
     focus: FocusHandle,
+    /// The title the program set, as it set it (spinner and all).
+    raw_title: SharedString,
+    /// `raw_title` without an agent's spinner: what the tab shows.
     title: SharedString,
     default_title: SharedString,
     status: ActivityStatus,
@@ -254,10 +257,19 @@ pub struct TerminalView {
     /// goes down or the text changes.
     mouse_pos: Option<Point<Pixels>>,
     hover_link: Option<HoverLink>,
-    /// The last path looked up for a link and where it resolved, so moving
-    /// over the same word doesn't search the disk again. Dropped when ⌘ goes
-    /// down.
-    resolved: RefCell<Option<(String, Option<PathBuf>)>>,
+    /// Paths looked up for links and where they resolved (newest last), so
+    /// moving over the same words doesn't search the disk again. Dropped
+    /// when ⌘ goes down: files may have come or gone since.
+    resolved: RefCell<Vec<(String, Option<PathBuf>)>>,
+    /// A path hovered but not in `resolved`: `update_hover` looks it up in
+    /// the background.
+    unresolved: RefCell<Option<String>>,
+    /// The path being looked up, and the task doing it.
+    resolving: Option<(String, Task<()>)>,
+    /// ⌘ is held (as of the last `update_hover`).
+    cmd_held: bool,
+    /// [`Ticker`] ticks since the program last wrote (after a quiet 10s).
+    idle_ticks: u32,
     /// The coding agent running in the foreground, if any.
     agent: Option<Agent>,
     /// When the program last wrote something.
@@ -273,6 +285,60 @@ impl EventEmitter<TerminalEvent> for TerminalView {}
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// One timer for every tab, rather than one each: a single wakeup per
+/// second, and the tabs' foreground programs read together, so one scan of
+/// every process serves them all. Runs while there are tabs.
+#[derive(Default)]
+struct Ticker {
+    views: Vec<WeakEntity<TerminalView>>,
+    running: bool,
+}
+
+impl Global for Ticker {}
+
+impl Ticker {
+    fn add(view: WeakEntity<TerminalView>, cx: &mut App) {
+        let t = cx.default_global::<Ticker>();
+        t.views.push(view);
+        if std::mem::replace(&mut t.running, true) {
+            return;
+        }
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let probes = cx.update(|cx| {
+                    let mut views = std::mem::take(&mut cx.global_mut::<Ticker>().views);
+                    let probes: Vec<_> =
+                        views.iter().filter_map(|v| Some((v.clone(), v.update(cx, |view, cx| view.tick(cx)).ok()??))).collect();
+                    views.retain(|v| v.upgrade().is_some());
+                    let t = cx.global_mut::<Ticker>();
+                    // Tabs added meanwhile are in `t.views`.
+                    views.append(&mut t.views);
+                    t.views = views;
+                    t.running = !t.views.is_empty();
+                    t.running.then_some(probes)
+                });
+                let Some(probes) = probes else { break };
+                if probes.is_empty() {
+                    continue;
+                }
+                let (views, fgs): (Vec<_>, Vec<_>) = probes.into_iter().unzip();
+                let programs = cx
+                    .background_spawn(
+                        async move { fgs.into_iter().map(|f| f.map(|f| f.programs()).unwrap_or_default()).collect::<Vec<_>>() },
+                    )
+                    .await;
+                cx.update(|cx| {
+                    for (v, programs) in views.into_iter().zip(programs) {
+                        let _ = v.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx));
+                    }
+                });
+            }
+        })
+        .detach();
     }
 }
 
@@ -300,6 +366,7 @@ impl TerminalView {
             output_since_ready: false,
             config,
             focus: cx.focus_handle(),
+            raw_title: title.clone(),
             title: title.clone(),
             default_title: title,
             status: ActivityStatus::None,
@@ -324,7 +391,11 @@ impl TerminalView {
             mouse_button_down: None,
             mouse_pos: None,
             hover_link: None,
-            resolved: RefCell::new(None),
+            resolved: RefCell::new(Vec::new()),
+            unresolved: RefCell::new(None),
+            resolving: None,
+            cmd_held: false,
+            idle_ticks: 0,
             agent: None,
             last_output: Instant::now(),
             _pump: None,
@@ -334,33 +405,25 @@ impl TerminalView {
         this._watch = cx.spawn(async move |this, cx| {
             // A tab that isn't shown never lays out: start it anyway.
             cx.background_executor().timer(Duration::from_millis(150)).await;
-            if this.update(cx, |view, cx| view.start_once(cx)).is_err() {
-                return;
-            }
-            // Each second while the program writes (an agent starting or
-            // ending shows), else every few: a scan reads every process.
-            let mut idle_ticks = 0;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Ok(probe) = this.update(cx, |view, cx| {
-                    view.read_agent_status(cx);
-                    let busy = view.last_output.elapsed() < Duration::from_secs(10);
-                    idle_ticks = if busy { 0 } else { idle_ticks + 1 };
-                    (busy || idle_ticks % 5 == 0).then(|| view.session.as_ref().map(RemoteSession::foreground))
-                }) else {
-                    break;
-                };
-                let Some(probe) = probe else { continue };
-                let programs = match probe {
-                    Some(p) => cx.background_spawn(async move { p.programs() }).await,
-                    None => Vec::new(),
-                };
-                if this.update(cx, |view, cx| view.set_agent(Agent::detect(&programs), cx)).is_err() {
-                    break;
-                }
-            }
+            let _ = this.update(cx, |view, cx| view.start_once(cx));
         });
+        Ticker::add(cx.entity().downgrade(), cx);
         this
+    }
+
+    /// One tick of [`Ticker`]. `Some` when this tab's foreground programs
+    /// should be read: each tick while the program writes (an agent starting
+    /// or ending shows), else every fifth.
+    fn tick(&mut self, cx: &mut Context<Self>) -> Option<Option<Foreground>> {
+        // Rendering clears the wakeup flag; a tab not shown never renders,
+        // so clear it here or its output stops waking it.
+        if let Some(s) = &self.session {
+            s.take_wakeup();
+        }
+        self.read_agent_status(cx);
+        let busy = self.last_output.elapsed() < Duration::from_secs(10);
+        self.idle_ticks = if busy { 0 } else { self.idle_ticks + 1 };
+        (busy || self.idle_ticks.is_multiple_of(5)).then(|| self.session.as_ref().map(RemoteSession::foreground))
     }
 
     fn start_once(&mut self, cx: &mut Context<Self>) {
@@ -443,8 +506,19 @@ impl TerminalView {
         }
     }
 
+    /// The title to show: an agent's spinner frames left out (its status
+    /// badge shows it working), so they don't redraw the tab bar.
     pub fn title(&self) -> &SharedString {
         &self.title
+    }
+
+    fn set_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        let label = strip_spinner(&title);
+        if *label != *self.title {
+            self.title = label.to_owned().into();
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+        self.raw_title = title;
     }
 
     pub fn status(&self) -> ActivityStatus {
@@ -590,14 +664,12 @@ impl TerminalView {
                 cx.notify()
             },
             TermEvent::Title(t) => {
-                self.title = t.into();
-                cx.emit(TerminalEvent::TitleChanged);
-                self.read_agent_status(cx);
+                if *t != *self.raw_title {
+                    self.set_title(t.into(), cx);
+                    self.read_agent_status(cx);
+                }
             },
-            TermEvent::ResetTitle => {
-                self.title = self.default_title.clone();
-                cx.emit(TerminalEvent::TitleChanged);
-            },
+            TermEvent::ResetTitle => self.set_title(self.default_title.clone(), cx),
             TermEvent::Bell => cx.emit(TerminalEvent::Bell),
             TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             // Ended by a restart on purpose: wait for the connection to go,
@@ -710,7 +782,7 @@ impl TerminalView {
         };
         let bottom = self.bottom_text(AGENT_SCREEN_LINES);
         let read = agent
-            .read_screen(&self.title, &bottom)
+            .read_screen(&self.raw_title, &bottom)
             .unwrap_or_else(|| if self.last_output.elapsed() < Duration::from_millis(1500) { Working } else { None });
         // A turn's spinner may pause: it ends on a second read.
         if read == None && self.status == Working {
@@ -783,7 +855,7 @@ impl TerminalView {
     }
 
     fn mode(&self) -> TermMode {
-        self.session.as_ref().map(|s| *s.term().lock().mode()).unwrap_or(TermMode::empty())
+        self.session.as_ref().map_or(TermMode::empty(), RemoteSession::mode)
     }
 
     // ---- keyboard -------------------------------------------------------
@@ -990,7 +1062,7 @@ impl TerminalView {
         window.focus(&self.focus, cx);
         if ev.button == MouseButton::Left
             && ev.modifiers.secondary()
-            && let Some(link) = self.link_at(ev.position)
+            && let Some(link) = self.link_at(ev.position, true)
         {
             self.open_link(link.target, cx);
             return;
@@ -1077,7 +1149,7 @@ impl TerminalView {
 
     fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
         if ev.modifiers.secondary() && self.hover_link.is_none() {
-            self.resolved.take();
+            self.resolved.borrow_mut().clear();
         }
         self.update_hover(ev.modifiers.secondary(), cx);
     }
@@ -1091,17 +1163,56 @@ impl TerminalView {
 
     /// Underline the link under the mouse while `cmd` is held.
     fn update_hover(&mut self, cmd: bool, cx: &mut Context<Self>) {
-        let link = if cmd { self.mouse_pos.and_then(|p| self.link_at(p)) } else { None };
+        self.cmd_held = cmd;
+        let link = if cmd { self.mouse_pos.and_then(|p| self.link_at(p, false)) } else { None };
         if link != self.hover_link {
             self.hover_link = link;
             cx.notify();
         }
+        let Some(path) = self.unresolved.take() else { return };
+        if self.resolving.as_ref().is_some_and(|(p, _)| *p == path) {
+            return;
+        }
+        let Some(s) = &self.session else { return };
+        // The disk (`exists`, a few levels of `read_dir`) and the foreground
+        // process's cwd are read off the UI thread; the link shows when done.
+        let fg = s.foreground();
+        let cwd = self.spawn_cfg.cwd.clone();
+        let p = path.clone();
+        let key = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let bases: Vec<PathBuf> = fg.cwd().into_iter().chain(cwd).collect();
+                    links::resolve(&p, &bases)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.resolving = None;
+                this.remember(key, found);
+                if this.cmd_held {
+                    this.update_hover(true, cx);
+                }
+            });
+        });
+        self.resolving = Some((path, task));
+    }
+
+    fn remember(&self, path: String, found: Option<PathBuf>) {
+        const MAX_RESOLVED: usize = 64;
+        let mut cache = self.resolved.borrow_mut();
+        cache.retain(|(p, _)| *p != path);
+        if cache.len() >= MAX_RESOLVED {
+            cache.remove(0);
+        }
+        cache.push((path, found));
     }
 
     /// The link at `pos`: an OSC 8 hyperlink, a URL, or the path of a file
     /// or folder that exists. Text wrapped over several rows counts as one
-    /// line.
-    fn link_at(&self, pos: Point<Pixels>) -> Option<HoverLink> {
+    /// line. A path not looked up yet is looked up now if `wait`, else left
+    /// in `unresolved` (no link for now).
+    fn link_at(&self, pos: Point<Pixels>, wait: bool) -> Option<HoverLink> {
         let (col, row, _) = self.grid_point(pos)?;
         let s = self.session.as_ref()?;
         let (text, points, hyperlinks, ix) = {
@@ -1144,14 +1255,18 @@ impl TerminalView {
         let target = match link {
             Link::Url(url) => Target::Url(url),
             Link::Path { path, line, col } => {
-                let mut cache = self.resolved.borrow_mut();
-                let found = match &*cache {
-                    Some((p, found)) if *p == path => found.clone(),
-                    _ => {
+                let cached = self.resolved.borrow().iter().find(|(p, _)| *p == path).map(|(_, f)| f.clone());
+                let found = match cached {
+                    Some(found) => found,
+                    None if wait => {
                         let bases: Vec<PathBuf> = s.foreground_cwd().into_iter().chain(self.spawn_cfg.cwd.clone()).collect();
                         let found = links::resolve(&path, &bases);
-                        *cache = Some((path, found.clone()));
+                        self.remember(path, found.clone());
                         found
+                    },
+                    None => {
+                        *self.unresolved.borrow_mut() = Some(path);
+                        return None;
                     },
                 };
                 Target::Path { path: found?, line, col }
@@ -1446,7 +1561,9 @@ fn face(style: &Style) -> usize {
 
 impl<'a> RowBuilder<'a> {
     fn push(&mut self, col: usize, s: &str, style: Style, out: &mut Vec<PendingText>) {
-        if !self.text.is_empty() && col != self.next_col {
+        if !self.text.is_empty() && col > self.next_col {
+            self.pad(col - self.next_col);
+        } else if !self.text.is_empty() && col != self.next_col {
             self.flush(out);
         }
         if self.text.is_empty() {
@@ -1475,6 +1592,21 @@ impl<'a> RowBuilder<'a> {
         }
         self.text.push_str(s);
         self.next_col = col + 1;
+    }
+
+    /// Fill `n` skipped blank cells with spaces, so a row is one segment
+    /// (one shaped line) rather than one per word.
+    fn pad(&mut self, n: usize) {
+        let Some(last) = self.runs.last_mut() else { return };
+        if last.underline.is_none() && last.strikethrough.is_none() {
+            last.len += n;
+        } else {
+            // The blanks carry no line.
+            let plain = TextRun { len: n, underline: None, strikethrough: None, ..last.clone() };
+            self.runs.push(plain);
+        }
+        self.text.extend(std::iter::repeat_n(' ', n));
+        self.next_col += n;
     }
 
     fn flush(&mut self, out: &mut Vec<PendingText>) {
@@ -1625,6 +1757,7 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
     let mut pending: Vec<PendingText> = Vec::new();
     // Neighboring cells mostly share a color.
     let mut last_fg: Option<(Rgb, Hsla)> = None;
+    let mut last_bg: Option<(Rgb, Hsla)> = None;
     let mut buf = String::new();
     for indexed in content.display_iter {
         let vp_line = indexed.point.line.0 + offset;
@@ -1675,7 +1808,14 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         let cell_bg = if selected {
             Some(sel_bg)
         } else if bg != default_bg {
-            Some(rgb_to_hsla(bg))
+            Some(match last_bg {
+                Some((rgb, h)) if rgb == bg => h,
+                _ => {
+                    let h = rgb_to_hsla(bg);
+                    last_bg = Some((bg, h));
+                    h
+                },
+            })
         } else {
             None
         };
@@ -1791,6 +1931,20 @@ fn sanitize_paste(text: &str) -> String {
     text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !(c.is_control())).collect()
 }
 
+/// `title` without the spinner an agent leads it with: Claude's half
+/// circles or braille dots while working and its asterisk when idle, or
+/// Codex's dots.
+fn strip_spinner(title: &str) -> &str {
+    let mut chars = title.chars();
+    match (chars.next(), chars.next()) {
+        (
+            Some('\u{25D0}'..='\u{25D3}' | '\u{2800}'..='\u{28FF}' | '\u{2722}' | '\u{2733}' | '\u{2736}' | '\u{273B}' | '\u{273D}'),
+            Some(' '),
+        ) => chars.as_str(),
+        _ => title,
+    }
+}
+
 /// A path as a shell word, for PowerShell (the default shell) and cmd
 /// alike: plain when it holds only safe characters, else double-quoted, as
 /// cmd reads quotes, so `& | < > ^` stay literal there. In PowerShell `$`,
@@ -1829,8 +1983,18 @@ pub(crate) fn escape_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_path, sanitize_paste};
+    use super::{escape_path, sanitize_paste, strip_spinner};
     use std::path::Path;
+
+    #[test]
+    fn strips_agent_spinners() {
+        assert_eq!(strip_spinner("\u{280b} Fix the build"), "Fix the build");
+        assert_eq!(strip_spinner("\u{2733} Fix the build"), "Fix the build");
+        assert_eq!(strip_spinner("\u{25d0} x"), "x");
+        assert_eq!(strip_spinner("\u{2733}"), "\u{2733}");
+        assert_eq!(strip_spinner("vim main.rs"), "vim main.rs");
+        assert_eq!(strip_spinner(""), "");
+    }
 
     #[test]
     #[cfg(windows)]

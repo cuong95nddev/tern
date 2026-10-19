@@ -7,6 +7,7 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_kit::component::highlighter::Language;
 use gpui_kit::*;
+use tern_fs::ChangeBatch;
 
 pub fn language_for(path: &Path) -> SharedString {
     let ext = path.extension().and_then(|e| e.to_str()).or_else(|| path.file_name().and_then(|n| n.to_str())).unwrap_or("");
@@ -66,10 +67,10 @@ impl DiffPane {
         }));
     }
 
-    /// Paths changed on disk: reload if this file or git metadata (commit,
-    /// stage, checkout) is among them.
-    pub fn files_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        if paths.iter().any(|p| p == &self.path || p.components().any(|c| c.as_os_str() == ".git")) {
+    /// Paths changed on disk: reload if this file is among them, or git
+    /// metadata (commit, stage, checkout) of a repo holding it changed.
+    pub fn files_changed(&mut self, batch: &ChangeBatch, cx: &mut Context<Self>) {
+        if batch.paths.contains(&self.path) || batch.git_repos.iter().any(|r| self.path.starts_with(r)) {
             self.reload(cx);
         }
     }

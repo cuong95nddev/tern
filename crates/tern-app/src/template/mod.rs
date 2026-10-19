@@ -32,7 +32,7 @@ use crate::style::{self, Props, Val};
 mod draw;
 
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use draw::{Frames, render};
+pub use draw::{Framed, Frames, on_event, render};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -51,9 +51,36 @@ pub struct Spec {
     #[serde(rename = "use")]
     pub use_: Option<String>,
     /// A list the code provides: `item` is drawn once for each entry, with
-    /// the entry's values and slots.
+    /// the entry's values and slots (and `index`, its place); `children`
+    /// come after the entries.
     pub each: Option<String>,
     pub item: Option<Box<Spec>>,
+    /// An icon by name (`"plus"`, `"columns-2"`: the bundled Lucide names),
+    /// or `"{name}"` for one the code gives. On a `button`: its icon.
+    pub icon: Option<String>,
+    /// A button; the code attaches what it does by this name, as for `frame`.
+    /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
+    /// `disabled` and `loading`.
+    pub button: Option<String>,
+    /// A button's text; `{name}` puts in a value.
+    pub label: Option<String>,
+    /// What a button says under the pointer; `{name}` puts in a value.
+    pub tooltip: Option<String>,
+    /// A button's look: `ghost` (the default), `primary`, `secondary`,
+    /// `danger`, `outline` or `text`.
+    pub variant: Option<String>,
+    /// A button drawn as on: `true`, `false` or a condition.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub selected: Option<serde_json::Value>,
+    /// A button that can't be clicked: `true`, `false` or a condition.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub disabled: Option<serde_json::Value>,
+    /// A button that shows a spinner for its icon: `true`, `false` or a
+    /// condition.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub loading: Option<serde_json::Value>,
+    /// Names this box for `"hover:<group>"` states of the boxes in it.
+    pub group: Option<String>,
     /// A name the code attaches behavior to (clicks, drags, focus).
     pub frame: Option<String>,
     /// The element whose properties this box takes (see `reference/elements.md`).
@@ -61,11 +88,15 @@ pub struct Spec {
     /// one `$element` names in it (`"$element"`, `"$element.count_gap"`).
     pub element: Option<String>,
     /// Properties of the box, over its element's: any of an element's box
-    /// properties (`padding`, `background`, `border_width`, …).
+    /// properties (`padding`, `background`, `border_width`, …). `"{name}"`
+    /// takes a value the code gives (a tab group's color).
     #[schemars(with = "BTreeMap<String, serde_json::Value>")]
     pub style: BTreeMap<String, serde_json::Value>,
     /// Properties over `style` while a condition holds:
-    /// `{"focused": {"border": "$accent"}}`.
+    /// `{"focused": {"border": "$accent"}}`. `hover` holds under the pointer,
+    /// `hover:<group>` while the box named `group` is (`"hover && !selected"`).
+    /// `"element": "x"` among them takes element x's properties (`{"active":
+    /// {"element": "pane_tab_bar.tab_active"}}`).
     #[schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")]
     pub states: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// How the children line up: `column` (the default), `row`, or `wrap`
@@ -100,7 +131,8 @@ pub struct Spec {
     /// Its children are panels the user resizes, side by side (`row`) or
     /// one above another (`column`).
     pub split: Option<String>,
-    /// As a split's panel: its starting size.
+    /// As a split's panel: its starting size. On a `button`: `xsmall`,
+    /// `small`, `medium` or `large`.
     #[schemars(with = "Option<serde_json::Value>")]
     pub size: Option<serde_json::Value>,
     /// As a split's panel: how small and how large it may get.
@@ -171,6 +203,8 @@ pub enum Value {
     Bool(bool),
     Num(f64),
     Text(SharedString),
+    /// For a `"{name}"` color in a style.
+    Color(Hsla),
 }
 
 impl Value {
@@ -179,6 +213,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.,
             Value::Text(t) => !t.is_empty(),
+            Value::Color(c) => c.a > 0.,
         }
     }
 
@@ -187,6 +222,7 @@ impl Value {
             Value::Bool(b) => f64::from(u8::from(*b)),
             Value::Num(n) => *n,
             Value::Text(t) => t.parse().unwrap_or(0.),
+            Value::Color(_) => 0.,
         }
     }
 
@@ -195,7 +231,25 @@ impl Value {
             Value::Bool(b) => b.to_string().into(),
             Value::Num(n) => n.to_string().into(),
             Value::Text(t) => t.clone(),
+            Value::Color(_) => SharedString::default(),
         }
+    }
+
+    /// As a property of `kind`, when it can be one.
+    fn val(&self, kind: style::Kind) -> Option<Val> {
+        match (kind, self) {
+            (style::Kind::Color, Value::Color(c)) => Some(Val::Color(*c)),
+            (style::Kind::Len, Value::Num(n)) => Some(Val::Len(px(*n as f32).into())),
+            (style::Kind::Num, v @ (Value::Num(_) | Value::Bool(_))) => Some(Val::Num(v.num() as f32)),
+            (style::Kind::Text, Value::Text(t)) => Some(Val::Text(t.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl From<Hsla> for Value {
+    fn from(c: Hsla) -> Self {
+        Value::Color(c)
     }
 }
 
@@ -274,8 +328,7 @@ impl Scope {
         self
     }
 
-    // Lists come with the tab and row templates.
-    #[allow(dead_code)]
+    /// List `name`'s entries, for `each`.
     pub fn list(mut self, name: &'static str, items: Vec<Scope>) -> Self {
         let items = items.into_iter().enumerate().map(|(i, s)| Scope { index: Some(i), ..s }).collect();
         self.lists.insert(name, items);
@@ -369,6 +422,55 @@ enum What {
     Part(&'static str),
     Text(Vec<Part>),
     Each(SharedString, Arc<Node>),
+    /// An icon's name.
+    Icon(Vec<Part>),
+    Button(Arc<ButtonNode>),
+}
+
+/// A button: the code attaches what it does by `frame`.
+#[derive(Debug, Clone)]
+struct ButtonNode {
+    frame: SharedString,
+    icon: Option<Vec<Part>>,
+    label: Option<Vec<Part>>,
+    tooltip: Option<Vec<Part>>,
+    variant: Variant,
+    size: ButtonSize,
+    selected: Option<Cond>,
+    disabled: Option<Cond>,
+    loading: Option<Cond>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Variant {
+    Ghost,
+    Primary,
+    Secondary,
+    Danger,
+    Outline,
+    Text,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ButtonSize {
+    XSmall,
+    Small,
+    Medium,
+    Large,
+}
+
+/// Properties a value the code gives fills in (`"{name}"`): the property,
+/// what it holds, the value's name.
+type Holes = Vec<(&'static str, style::Kind, String)>;
+
+/// Properties over a node's style: when they apply, what they are.
+#[derive(Debug, Clone)]
+struct State {
+    when: Option<Cond>,
+    /// Under the pointer: over this box (`Some("")`) or the named group.
+    hover: Option<SharedString>,
+    props: HashMap<&'static str, Val>,
+    holes: Holes,
 }
 
 #[derive(Debug, Clone)]
@@ -484,7 +586,11 @@ pub struct Node {
     path: SharedString,
     element: &'static str,
     style: Arc<HashMap<&'static str, Val>>,
-    states: Vec<(Cond, HashMap<&'static str, Val>)>,
+    /// Style properties the code's values fill in.
+    holes: Holes,
+    states: Vec<State>,
+    /// Its name for the `hover:<group>` states inside it.
+    group: Option<SharedString>,
     layout: Layout,
     align: Option<Align>,
     justify: Option<Justify>,
@@ -516,7 +622,6 @@ pub struct Node {
 const SLOTS: &[&str] = &[
     "menu_bar",
     "welcome",
-    "workspace_tabs",
     "workspace",
     "left_strip",
     "right_strip",
@@ -529,6 +634,8 @@ const SLOTS: &[&str] = &[
     "content",
     "drop_overlay",
     "buttons",
+    "icon",
+    "scrollbar",
 ];
 
 /// The parts a template may name.
@@ -718,6 +825,124 @@ impl Compiler<'_, '_> {
         Cond::parse(text).map_err(|e| self.problems.push(format!("{at}: {e}"))).ok()
     }
 
+    /// `raw` (a `style` or a state's properties) read for `element`: the
+    /// values, and the properties a `"{name}"` leaves to the code.
+    fn style(
+        &mut self,
+        element: Option<&'static style::Element>,
+        raw: &BTreeMap<String, serde_json::Value>,
+        at: &str,
+    ) -> (HashMap<&'static str, Val>, Holes) {
+        let mut fixed = BTreeMap::new();
+        let mut holes = vec![];
+        let mut raw = self.bind(raw);
+        // `"element": "x"`: x's properties, under those given here.
+        if let Some(v) = raw.remove("element") {
+            match v.as_str().and_then(style::element) {
+                Some(e) => {
+                    for &(prop, _, _) in e.props() {
+                        let takes = element.is_some_and(|own| own.prop(prop).is_some()) || style::BOX.iter().any(|p| p.0 == prop);
+                        if takes && !raw.contains_key(prop) {
+                            raw.insert(prop.to_owned(), serde_json::Value::String(format!("${}.{prop}", e.name)));
+                        }
+                    }
+                },
+                None => self.problems.push(format!("{at}.element: no element {v}")),
+            }
+        }
+        for (name, v) in raw {
+            let var = v.as_str().and_then(|t| t.strip_prefix('{')).and_then(|t| t.strip_suffix('}')).map(str::trim);
+            let Some(var) = var else {
+                fixed.insert(name, v);
+                continue;
+            };
+            match element.and_then(|e| e.prop(&name)).or_else(|| style::box_prop(&name)) {
+                Some(&(prop, kind, _)) if ident(var).is_ok() => holes.push((prop, kind, var.to_owned())),
+                Some(_) => self.problems.push(format!("{at}.{name}: \"{{{var}}}\" is not a name")),
+                None => self.problems.push(format!("{at}: no property \"{name}\"")),
+            }
+        }
+        (self.props.compile(element, &fixed, at, self.problems), holes)
+    }
+
+    /// A state's key: its condition, and whether it holds under the pointer
+    /// (`hover`, or `hover:<group>`), as one of its `&&` terms.
+    fn state_key(&mut self, key: &str, at: &str) -> Option<(Option<Cond>, Option<SharedString>)> {
+        let is_hover = |t: &str| t == "hover" || t.starts_with("hover:");
+        if key.contains("||") && key.split("||").flat_map(|a| a.split("&&")).any(|t| is_hover(t.trim())) {
+            self.problems.push(format!("{at}: \"{key}\": hover can't be in an ||"));
+            return None;
+        }
+        let mut hover = None;
+        let mut rest = vec![];
+        for term in key.split("&&").map(str::trim) {
+            let group = match term {
+                "hover" => Some(""),
+                t => t.strip_prefix("hover:").map(str::trim),
+            };
+            match group {
+                Some(_) if hover.is_some() => {
+                    self.problems.push(format!("{at}: \"{key}\": hover twice"));
+                    return None;
+                },
+                Some(g) => hover = Some(SharedString::from(g.to_owned())),
+                None => rest.push(term),
+            }
+        }
+        let when = if rest.is_empty() { None } else { Some(self.cond(&rest.join(" && "), at)?) };
+        Some((when, hover))
+    }
+
+    /// An icon's name: a bundled one, or `{name}`s the code fills in.
+    fn icon(&mut self, name: &str, at: &str) -> Vec<Part> {
+        let p = parts(name);
+        if let [Part::Lit(n)] = &p[..]
+            && !icon_exists(n)
+        {
+            self.problems.push(format!("{at}: no icon \"{n}\""));
+        }
+        p
+    }
+
+    fn button(&mut self, frame: &str, s: &Spec, at: &str) -> ButtonNode {
+        let variant = match s.variant.as_deref() {
+            None | Some("ghost") => Variant::Ghost,
+            Some("primary") => Variant::Primary,
+            Some("secondary") => Variant::Secondary,
+            Some("danger") => Variant::Danger,
+            Some("outline") => Variant::Outline,
+            Some("text") => Variant::Text,
+            Some(v) => {
+                self.problems.push(format!("{at}.variant: \"{v}\" is not one of ghost, primary, secondary, danger, outline, text"));
+                Variant::Ghost
+            },
+        };
+        let size = match s.size.as_ref() {
+            None => ButtonSize::Small,
+            Some(v) => match v.as_str() {
+                Some("xsmall") => ButtonSize::XSmall,
+                Some("small") => ButtonSize::Small,
+                Some("medium") => ButtonSize::Medium,
+                Some("large") => ButtonSize::Large,
+                _ => {
+                    self.problems.push(format!("{at}.size: a button's size is one of xsmall, small, medium, large"));
+                    ButtonSize::Small
+                },
+            },
+        };
+        ButtonNode {
+            frame: frame.to_owned().into(),
+            icon: s.icon.as_deref().map(|i| self.icon(i, &format!("{at}.icon"))),
+            label: s.label.as_deref().map(parts),
+            tooltip: s.tooltip.as_deref().map(parts),
+            variant,
+            size,
+            selected: self.flag(&s.selected, &format!("{at}.selected")),
+            disabled: self.flag(&s.disabled, &format!("{at}.disabled")),
+            loading: self.flag(&s.loading, &format!("{at}.loading")),
+        }
+    }
+
     fn node(&mut self, s: &Spec, at: &str) -> Node {
         let mut node = match &s.use_ {
             Some(name) => match match s.element.as_deref() {
@@ -796,18 +1021,30 @@ impl Compiler<'_, '_> {
 
     fn panel(&mut self, s: &Spec, at: &str) -> Panel {
         let fixed = self.flag(&s.fixed, &format!("{at}.fixed")).filter(|c| !c.0.is_empty());
-        Panel {
-            size: self.len(&s.size, &format!("{at}.size")),
-            min: self.len(&s.min, &format!("{at}.min")),
-            max: self.len(&s.max, &format!("{at}.max")),
-            fixed,
-        }
+        // A button's `size` is its own.
+        let size = if s.button.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
+        Panel { size, min: self.len(&s.min, &format!("{at}.min")), max: self.len(&s.max, &format!("{at}.max")), fixed }
     }
 
     fn own(&mut self, s: &Spec, at: &str) -> Node {
-        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some()];
+        let icon = s.icon.is_some() && s.button.is_none();
+        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some(), icon, s.button.is_some()];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each and use"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon and button"));
+        }
+        if s.button.is_none() {
+            for (field, set) in [
+                ("label", s.label.is_some()),
+                ("tooltip", s.tooltip.is_some()),
+                ("variant", s.variant.is_some()),
+                ("selected", s.selected.is_some()),
+                ("disabled", s.disabled.is_some()),
+                ("loading", s.loading.is_some()),
+            ] {
+                if set {
+                    self.problems.push(format!("{at}.{field}: only a button takes it"));
+                }
+            }
         }
         let element = match &s.element {
             Some(name) => self.element(name, at),
@@ -831,6 +1068,10 @@ impl Compiler<'_, '_> {
             }
         } else if let Some(text) = &s.text {
             What::Text(parts(text))
+        } else if let Some(frame) = &s.button {
+            What::Button(Arc::new(self.button(frame, s, at)))
+        } else if let Some(name) = &s.icon {
+            What::Icon(self.icon(name, &format!("{at}.icon")))
         } else if let Some(list) = &s.each {
             match &s.item {
                 Some(item) => What::Each(list.clone().into(), Arc::new(self.node(item, &format!("{at}.item")))),
@@ -842,12 +1083,12 @@ impl Compiler<'_, '_> {
         } else {
             What::Box
         };
-        let style = self.props.compile(element, &self.bind(&s.style), &format!("{at}.style"), self.problems);
+        let (style, holes) = self.style(element, &s.style, &format!("{at}.style"));
         let mut states = vec![];
-        for (cond, props) in &s.states {
-            let Some(c) = self.cond(cond, &format!("{at}.states")) else { continue };
-            let props = self.bind(props);
-            states.push((c, self.props.compile(element, &props, &format!("{at}.states.{cond}"), self.problems)));
+        for (key, props) in &s.states {
+            let Some((when, hover)) = self.state_key(key, &format!("{at}.states")) else { continue };
+            let (props, holes) = self.style(element, props, &format!("{at}.states.{key}"));
+            states.push(State { when, hover, props, holes });
         }
         let pick = |v: &Option<String>, what: &str, problems: &mut Vec<String>, opts: &[&str]| -> Option<usize> {
             let v = v.as_deref()?;
@@ -877,7 +1118,9 @@ impl Compiler<'_, '_> {
             path: at.into(),
             element: element.map_or("", |e| e.name),
             style: Arc::new(style),
+            holes,
             states,
+            group: s.group.clone().map(Into::into),
             layout,
             align,
             justify,
@@ -986,6 +1229,19 @@ fn dock_defaults(dir: Dir, children: &[Node]) -> Tree {
         1 => items.remove(0).0,
         _ => Tree::Split(dir, items),
     }
+}
+
+/// Where the bundled icon `name` is.
+fn icon_path(name: &str) -> SharedString {
+    format!("icons/{name}.svg").into()
+}
+
+/// Whether `name` is a bundled icon.
+fn icon_exists(name: &str) -> bool {
+    use gpui_kit::assets::IconName;
+    static PATHS: std::sync::LazyLock<BTreeSet<SharedString>> =
+        std::sync::LazyLock::new(|| IconName::ALL.iter().map(|i| i.path()).collect());
+    PATHS.contains(&icon_path(name))
 }
 
 fn parts(text: &str) -> Vec<Part> {
@@ -1204,6 +1460,72 @@ mod tests {
         let n = t.part("scratches").unwrap();
         assert!(n.panel.fixed.is_some() && n.panel.size.is_some() && n.panel.min.is_some());
         assert_eq!(t.parts(), [("scratches", "tool".to_string())]);
+    }
+
+    #[test]
+    fn icons_and_buttons_compile() {
+        let (t, problems) = compiled(
+            r#"{"w": {"children": [
+                {"icon": "plus"}, {"icon": "{icon}"},
+                {"button": "go", "icon": "close", "label": "Go {n}", "tooltip": "Go", "size": "xsmall", "variant": "primary",
+                    "selected": "on", "disabled": false, "loading": "busy"}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let kids = &t.nodes["w"].children;
+        assert!(matches!(kids[0].what, super::What::Icon(_)));
+        let super::What::Button(b) = &kids[2].what else { panic!("not a button") };
+        assert_eq!(b.frame, "go");
+        assert!(matches!(b.size, super::ButtonSize::XSmall) && matches!(b.variant, super::Variant::Primary));
+        assert!(b.loading.is_some());
+        // A button's size is no panel size.
+        assert!(kids[2].panel.size.is_none());
+    }
+
+    #[test]
+    fn any_box_takes_a_background_image() {
+        let (_, problems) = compiled(
+            r#"{"w": {"style": {"background_image": "$welcome.background_image", "background_image_fit": "contain",
+                "background_image_opacity": 0.5}}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn icon_and_button_mistakes_are_reported() {
+        let (_, problems) = compiled(
+            r#"{"w": {"children": [{"icon": "no-such-icon"}, {"label": "x"}, {"button": "b", "size": 12, "variant": "loud"},
+                {"icon": "plus", "text": "x"}]}}"#,
+        );
+        assert_eq!(problems.len(), 5, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("no icon \"no-such-icon\"")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("only a button takes it")), "{problems:?}");
+    }
+
+    #[test]
+    fn values_fill_style_holes() {
+        let (t, problems) = compiled(
+            r#"{"w": {"element": "pane_tab_bar.tab", "style": {"background": "{color}", "height": "{h}"},
+                "states": {"active": {"element": "pane_tab_bar.tab_active"}, "hover && !active": {"text": "{fg}"},
+                    "hover:row": {"opacity": 1}}}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let n = &t.nodes["w"];
+        assert_eq!(n.holes.len(), 2);
+        assert!(!n.style.contains_key("background"));
+        let active = n.states.iter().find(|s| s.hover.is_none()).unwrap();
+        // The element's set properties, as values.
+        assert!(active.props.contains_key("background") && active.props.contains_key("border"), "{:?}", active.props);
+        let hover = n.states.iter().find(|s| s.hover.as_deref() == Some("")).unwrap();
+        assert!(hover.when.is_some() && hover.holes.len() == 1);
+        assert!(n.states.iter().any(|s| s.hover.as_deref() == Some("row") && s.when.is_none()));
+        assert_eq!(super::Value::Num(3.).val(style::Kind::Len), Some(style::Val::Len(gpui_kit::px(3.).into())));
+        assert_eq!(super::Value::Text("x".into()).val(style::Kind::Color), None);
+    }
+
+    #[test]
+    fn hover_in_an_or_is_reported() {
+        let (_, problems) = compiled(r#"{"w": {"states": {"hover || a": {"opacity": 1}, "hover && hover:g": {"opacity": 1}}}}"#);
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 
     #[test]

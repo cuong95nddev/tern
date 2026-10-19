@@ -5,16 +5,17 @@
 //! the terminal view used on an in-process session.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use tern_term::mirror::{Mirror, MirrorTerm};
+use tern_term::mirror::{self, Mirror, MirrorTerm};
 use tern_term::vt::sync::FairMutex;
+use tern_term::vt::term::TermMode;
 use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
@@ -40,6 +41,12 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(2);
 const INPUT_CHUNK: usize = 1 << 20;
 /// Input typed before the daemon answered, kept to send once it has.
 const MAX_EARLY_INPUT: usize = 16 << 20;
+/// Input waiting for the writer thread past this makes the sender wait:
+/// only a daemon that stopped reading lets it pile up so far.
+const MAX_QUEUED_INPUT: usize = 64 << 20;
+/// How long closing the connection waits for queued messages (a tab's
+/// `Close` as the app quits) to go out.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
@@ -54,6 +61,7 @@ struct Slot {
     mirror: Mutex<Mirror>,
     term: Arc<FairMutex<MirrorTerm>>,
     wake: Arc<AtomicBool>,
+    mode: Arc<AtomicU32>,
     sink: EventSink,
     /// Set once the daemon answered; while `None`, input waits in `early`
     /// (its lock is held to set the id).
@@ -72,7 +80,7 @@ struct Slot {
 }
 
 struct Inner {
-    writer: Mutex<UnixStream>,
+    outbox: Outbox,
     alive: AtomicBool,
     next_req: AtomicU64,
     pending: Mutex<HashMap<u64, Arc<Slot>>>,
@@ -86,12 +94,12 @@ struct Inner {
 }
 
 impl Inner {
-    fn send(&self, msg: &ClientMsg) -> io::Result<()> {
+    /// Queue `msg` for the writer thread. Never waits on the socket.
+    fn send(&self, msg: ClientMsg) -> io::Result<()> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        let frame = proto::encode(msg)?;
-        self.writer.lock().unwrap().write_all(&frame)
+        self.outbox.push(msg)
     }
 
     fn req(&self) -> u64 {
@@ -100,7 +108,113 @@ impl Inner {
 
     fn input(&self, id: u64, bytes: &[u8]) {
         for chunk in bytes.chunks(INPUT_CHUNK) {
-            let _ = self.send(&ClientMsg::Input { id, bytes: chunk.to_vec() });
+            let _ = self.send(ClientMsg::Input { id, bytes: chunk.to_vec() });
+        }
+    }
+}
+
+/// Messages waiting for the connection's writer thread. The UI thread only
+/// queues: a daemon that is slow to read would otherwise freeze it (for up
+/// to the write timeout per message), and a write timing out halfway would
+/// leave half a frame on the wire.
+#[derive(Default)]
+struct Outbox {
+    state: Mutex<OutboxState>,
+    /// Something to write, or closed.
+    ready: Condvar,
+    /// Queued input went down, a batch was written, or closed.
+    room: Condvar,
+}
+
+#[derive(Default)]
+struct OutboxState {
+    msgs: VecDeque<ClientMsg>,
+    /// Input bytes in `msgs`.
+    input: usize,
+    /// The writer thread is writing a batch.
+    writing: bool,
+    closed: bool,
+}
+
+impl Outbox {
+    fn push(&self, msg: ClientMsg) -> io::Result<()> {
+        let size = match &msg {
+            ClientMsg::Input { bytes, .. } => bytes.len(),
+            _ => 0,
+        };
+        let mut st = self.state.lock().unwrap();
+        while !st.closed && st.input > 0 && st.input + size > MAX_QUEUED_INPUT {
+            st = self.room.wait(st).unwrap();
+        }
+        if st.closed {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        st.input += size;
+        st.msgs.push_back(msg);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Everything queued, once there is something; `None` once closed.
+    fn take(&self) -> Option<Vec<ClientMsg>> {
+        let mut st = self.state.lock().unwrap();
+        while st.msgs.is_empty() && !st.closed {
+            st = self.ready.wait(st).unwrap();
+        }
+        if st.closed {
+            return None;
+        }
+        st.input = 0;
+        st.writing = true;
+        self.room.notify_all();
+        Some(st.msgs.drain(..).collect())
+    }
+
+    fn written(&self) {
+        self.state.lock().unwrap().writing = false;
+        self.room.notify_all();
+    }
+
+    /// Wait (up to `timeout`) until everything queued has been written.
+    fn flush(&self, timeout: Duration) {
+        let st = self.state.lock().unwrap();
+        let _ = self.room.wait_timeout_while(st, timeout, |st| !st.closed && (st.writing || !st.msgs.is_empty()));
+    }
+
+    /// Drop what's queued and refuse more; the writer thread ends.
+    fn close(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.closed = true;
+        st.msgs.clear();
+        st.input = 0;
+        self.ready.notify_all();
+        self.room.notify_all();
+    }
+}
+
+/// Write what's queued, as one write per batch. A failed write ends the
+/// connection: the reader then sees it closed and tells every tab.
+fn write_loop(inner: &Inner, mut stream: UnixStream) {
+    let mut buf = Vec::new();
+    while let Some(msgs) = inner.outbox.take() {
+        buf.clear();
+        for msg in &msgs {
+            match proto::encode(msg) {
+                Ok(frame) => buf.extend_from_slice(&frame),
+                Err(e) => log::error!("can't encode a message for the daemon: {e}"),
+            }
+        }
+        if let Err(e) = stream.write_all(&buf) {
+            log::warn!("writing to the daemon failed: {e}");
+            inner.alive.store(false, Ordering::Release);
+            inner.outbox.close();
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+        inner.outbox.written();
+        // A big paste needn't keep its buffer.
+        if buf.capacity() > INPUT_CHUNK * 2 {
+            buf = Vec::new();
         }
     }
 }
@@ -113,10 +227,13 @@ pub struct MuxClient {
     _conn: Arc<Closer>,
 }
 
-struct Closer(UnixStream);
+struct Closer(UnixStream, Arc<Inner>);
 
 impl Drop for Closer {
     fn drop(&mut self) {
+        // Tabs dropped just before (the app quitting) queued their `Close`
+        // or `Detach`: send those first.
+        self.1.outbox.flush(FLUSH_TIMEOUT);
         let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
 }
@@ -193,8 +310,9 @@ impl MuxClient {
         // on Windows a clone's timeout is its own, and a quiet session would
         // drop the connection every few seconds.
         reader.get_ref().set_read_timeout(None)?;
+        let closer = writer.try_clone()?;
         let inner = Arc::new(Inner {
-            writer: Mutex::new(writer),
+            outbox: Outbox::default(),
             alive: AtomicBool::new(true),
             next_req: AtomicU64::new(1),
             pending: Mutex::default(),
@@ -206,10 +324,15 @@ impl MuxClient {
             server_version,
             server_build,
         });
-        let closer = Closer(inner.writer.lock().unwrap().try_clone()?);
         let i = inner.clone();
-        std::thread::Builder::new().name("mux reader".into()).spawn(move || read_loop(&i, reader))?;
-        Ok(Self { inner, _conn: Arc::new(closer) })
+        std::thread::Builder::new().name("mux writer".into()).spawn(move || write_loop(&i, writer))?;
+        let i = inner.clone();
+        let spawned = std::thread::Builder::new().name("mux reader".into()).spawn(move || read_loop(&i, reader));
+        if let Err(e) = spawned {
+            inner.outbox.close();
+            return Err(e);
+        }
+        Ok(Self { _conn: Arc::new(Closer(closer, inner.clone())), inner })
     }
 
     pub fn alive(&self) -> bool {
@@ -250,6 +373,7 @@ impl MuxClient {
             close: AtomicBool::new(false),
             term: mirror.term().clone(),
             wake: mirror.wake_flag().clone(),
+            mode: mirror.mode_flag().clone(),
             mirror: Mutex::new(mirror),
             sink,
             id: Mutex::new(None),
@@ -265,7 +389,7 @@ impl MuxClient {
             },
             Open::Attach { id } => ClientMsg::Attach { req, id, size },
         };
-        if self.inner.send(&msg).is_err() && self.inner.pending.lock().unwrap().remove(&req).is_some() {
+        if self.inner.send(msg).is_err() && self.inner.pending.lock().unwrap().remove(&req).is_some() {
             (slot.sink)(TermEvent::ServerLost);
         }
         RemoteSession { inner: self.inner.clone(), slot, closed: false }
@@ -276,7 +400,7 @@ impl MuxClient {
         let req = self.inner.req();
         let (tx, rx) = mpsc::channel();
         self.inner.lists.lock().unwrap().insert(req, tx);
-        self.inner.send(&ClientMsg::List { req })?;
+        self.inner.send(ClientMsg::List { req })?;
         let r = rx.recv_timeout(LIST_TIMEOUT).map_err(|_| io::Error::from(io::ErrorKind::TimedOut));
         self.inner.lists.lock().unwrap().remove(&req);
         r
@@ -284,7 +408,7 @@ impl MuxClient {
 
     /// End session `id` (one this client has no tab for).
     pub fn close(&self, id: u64) {
-        let _ = self.inner.send(&ClientMsg::Close { id });
+        let _ = self.inner.send(ClientMsg::Close { id });
     }
 }
 
@@ -605,7 +729,7 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 if slot.gone.load(Ordering::SeqCst) {
                     // Its tab went away before the answer.
                     let msg = if slot.close.load(Ordering::SeqCst) { ClientMsg::Close { id } } else { ClientMsg::Detach { id } };
-                    let _ = inner.send(&msg);
+                    let _ = inner.send(msg);
                     continue;
                 }
                 *slot.tty.lock().unwrap() = tty;
@@ -615,7 +739,7 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                 // have moved on since.
                 let want = *slot.want.lock().unwrap();
                 if want != slot.sent {
-                    let _ = inner.send(&ClientMsg::Resize { id, size: want });
+                    let _ = inner.send(ClientMsg::Resize { id, size: want });
                 }
                 inner.input(id, &early);
             },
@@ -658,6 +782,7 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
         }
     }
     inner.alive.store(false, Ordering::Release);
+    inner.outbox.close();
     let slots: Vec<_> =
         inner.pending.lock().unwrap().drain().map(|(_, s)| s).chain(inner.sessions.lock().unwrap().drain().map(|(_, s)| s)).collect();
     for slot in slots {
@@ -678,6 +803,14 @@ impl Foreground {
         #[cfg(windows)]
         return self.0.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
     }
+
+    /// See [`tern_term::procs::foreground_cwd`].
+    pub fn cwd(&self) -> Option<PathBuf> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
+        #[cfg(windows)]
+        return self.0.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
+    }
 }
 
 /// A tab's session in the daemon. Dropping it detaches (the program keeps
@@ -692,6 +825,11 @@ impl RemoteSession {
     /// The mirror terminal. Lock briefly (render prep only).
     pub fn term(&self) -> &Arc<FairMutex<MirrorTerm>> {
         &self.slot.term
+    }
+
+    /// The terminal's mode, without locking it.
+    pub fn mode(&self) -> TermMode {
+        mirror::mode_of(&self.slot.mode)
     }
 
     /// Clears the pending-wakeup flag; returns whether one was pending.
@@ -730,7 +868,7 @@ impl RemoteSession {
             *want = size;
         }
         if let Some(id) = self.id() {
-            let _ = self.inner.send(&ClientMsg::Resize { id, size });
+            let _ = self.inner.send(ClientMsg::Resize { id, size });
         }
     }
 
@@ -752,10 +890,7 @@ impl RemoteSession {
 
     /// See [`tern_term::procs::foreground_cwd`].
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
-        #[cfg(unix)]
-        return self.slot.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_cwd);
-        #[cfg(windows)]
-        return self.slot.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
+        self.foreground().cwd()
     }
 
     /// End the program and forget the session.
@@ -764,7 +899,7 @@ impl RemoteSession {
         // Holding the PTY would keep its programs from getting a hangup.
         self.slot.tty.lock().unwrap().take();
         if let Some(id) = self.id() {
-            let _ = self.inner.send(&ClientMsg::Close { id });
+            let _ = self.inner.send(ClientMsg::Close { id });
         }
     }
 }
@@ -778,8 +913,45 @@ impl Drop for RemoteSession {
         if let Some(id) = self.id() {
             self.inner.sessions.lock().unwrap().remove(&id);
             if !self.closed {
-                let _ = self.inner.send(&ClientMsg::Detach { id });
+                let _ = self.inner.send(ClientMsg::Detach { id });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbox_batches_and_waits_for_room() {
+        let outbox = Arc::new(Outbox::default());
+        outbox.push(ClientMsg::Close { id: 1 }).unwrap();
+        outbox.push(ClientMsg::Input { id: 1, bytes: vec![0; MAX_QUEUED_INPUT] }).unwrap();
+        // Over the limit: the sender waits until the writer takes the queue.
+        let o = outbox.clone();
+        let sender = std::thread::spawn(move || o.push(ClientMsg::Input { id: 1, bytes: vec![1] }));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!sender.is_finished());
+        assert_eq!(outbox.take().unwrap().len(), 2);
+        sender.join().unwrap().unwrap();
+        outbox.written();
+        assert_eq!(outbox.take().unwrap().len(), 1);
+        outbox.written();
+        // Nothing queued: flush returns at once.
+        let t = Instant::now();
+        outbox.flush(Duration::from_secs(5));
+        assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn closed_outbox_refuses_and_frees_waiters() {
+        let outbox = Arc::new(Outbox::default());
+        let o = outbox.clone();
+        let writer = std::thread::spawn(move || o.take().is_none());
+        std::thread::sleep(Duration::from_millis(50));
+        outbox.close();
+        assert!(writer.join().unwrap());
+        assert!(outbox.push(ClientMsg::Close { id: 1 }).is_err());
     }
 }

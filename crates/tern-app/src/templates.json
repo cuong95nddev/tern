@@ -12,7 +12,6 @@
         "children": [{ "slot": "menu_bar" }]
       },
       { "when": "!workspace", "grow": 1, "children": [{ "slot": "welcome" }] },
-      { "when": "workspace", "slot": "workspace_tabs" },
       { "when": "workspace", "grow": 1, "children": [{ "slot": "workspace" }] }
     ]
   },
@@ -90,6 +89,23 @@
   "explorer.header": { "use": "panel_header", "element": "explorer.header" },
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
+  "explorer.empty": {
+    "element": "explorer.empty",
+    "position": { "top": 0, "left": 0, "right": 0, "bottom": 0 },
+    "align": "center",
+    "justify": "center",
+    "children": [
+      { "text": "No folders in the workspace" },
+      {
+        "button": "add_folder",
+        "variant": "primary",
+        "size": "small",
+        "icon": "folder-open",
+        "label": "Add Folder…",
+        "tooltip": "Add Folder to Workspace ({add_key})"
+      }
+    ]
+  },
   "status_bar": {
     "element": "workspace.status_bar",
     "layout": "row",
@@ -98,13 +114,22 @@
       { "text": "{path}" },
       { "text": "{background}" },
       {
-        "when": "settings_error",
         "grow": 1,
         "layout": "row",
         "justify": "end",
         "style": { "text": "$workspace.status_bar.error_text" },
-        "children": [{ "truncate": true, "text": "Settings: {settings_error}" }]
-      }
+        "children": [{ "when": "settings_error", "truncate": true, "text": "Settings: {settings_error}" }]
+      },
+      {
+        "when": "update",
+        "button": "update",
+        "size": "xsmall",
+        "icon": "circle-arrow-down",
+        "label": "{update}",
+        "loading": "installing",
+        "tooltip": "A new version of Tern is available"
+      },
+      { "button": "agent_monitor", "size": "xsmall", "icon": "bot", "selected": "monitor", "tooltip": "Agent Monitor" }
     ]
   },
   "pane": {
@@ -174,6 +199,404 @@
             ]
           }
         ]
+      }
+    ]
+  },
+  "pane.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": 4 },
+    "children": [
+      {
+        "button": "split",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "columns-2",
+        "tooltip": "Split Right ({split_key})"
+      },
+      {
+        "when": "panes > 1 && zoomed",
+        "button": "zoom",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "minimize-2",
+        "selected": true,
+        "tooltip": "Restore Panes ({zoom_key})"
+      },
+      {
+        "when": "panes > 1 && !zoomed",
+        "button": "zoom",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "maximize-2",
+        "tooltip": "Maximize Pane ({zoom_key})"
+      },
+      {
+        "when": "panes > 1",
+        "button": "close_pane",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Close Pane (its tabs join the pane before it)"
+      },
+      {
+        "when": "corner",
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_x": 4, "gap": 2 },
+        "children": [
+          { "button": "pane_layout", "size": "xsmall", "icon": "layout-grid", "selected": "panes > 1", "tooltip": "Pane Layout" }
+        ]
+      }
+    ]
+  },
+  "pane.new_tab": { "button": "new_tab", "element": "pane_tab_bar.button", "size": "xsmall", "icon": "plus" },
+  "pane.empty": {
+    "element": "pane.empty",
+    "fill": true,
+    "justify": "center",
+    "clip": true,
+    "children": [
+      { "layout": "row", "justify": "center", "children": [{ "text": "Drag a tab here, or open one" }] },
+      {
+        "layout": "wrap",
+        "justify": "center",
+        "style": { "gap": 8 },
+        "children": [
+          { "button": "new_claude", "variant": "secondary", "label": "New Claude Tab" },
+          { "button": "new_shell", "variant": "secondary", "label": "New Shell Tab" },
+          { "button": "close_pane", "label": "Close Pane" }
+        ]
+      }
+    ]
+  },
+  "pane_tab_bar": {
+    "frame": "bar",
+    "element": "pane_tab_bar",
+    "layout": "row",
+    "align": "start",
+    "shrink": 0,
+    "style": { "border_bottom_width": 0 },
+    "states": { "wrap": { "border_bottom_width": "$pane_tab_bar.border_bottom_width" } },
+    "children": [
+      {
+        "when": "!wrap",
+        "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+        "style": { "border_bottom_width": "$pane_tab_bar.border_bottom_width", "border": "$pane_tab_bar.border" }
+      },
+      {
+        "when": "!wrap",
+        "each": "items",
+        "frame": "tabs",
+        "grow": 1,
+        "layout": "row",
+        "item": { "use": "pane_tab_bar.item" },
+        "children": [{ "use": "pane_tab_bar.end" }]
+      },
+      {
+        "when": "wrap",
+        "each": "items",
+        "grow": 1,
+        "layout": "wrap",
+        "item": { "use": "pane_tab_bar.item" },
+        "children": [{ "use": "pane_tab_bar.end" }]
+      },
+      {
+        "when": "overflows",
+        "layout": "row",
+        "align": "center",
+        "style": { "height": 32 },
+        "children": [{ "button": "more", "size": "xsmall" }]
+      },
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "height": 32 },
+        "states": { "wrap": { "height": 30 } },
+        "children": [{ "use": "pane.buttons" }]
+      },
+      { "slot": "scrollbar" }
+    ]
+  },
+  "pane_tab_bar.item": {
+    "shrink": 0,
+    "children": [
+      { "when": "group", "use": "pane_tab_bar.chip" },
+      { "when": "!group", "use": "pane_tab_bar.tab" }
+    ]
+  },
+  "pane_tab_bar.end": {
+    "frame": "end",
+    "grow": 1,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_x": 4, "min_width": 32, "height": 32 },
+    "states": { "wrap": { "height": 30 } },
+    "children": [{ "use": "pane.new_tab" }]
+  },
+  "pane_tab_bar.tab": {
+    "frame": "tab",
+    "element": "pane_tab_bar.tab",
+    "layout": "row",
+    "align": "center",
+    "clip": true,
+    "states": {
+      "active": { "element": "pane_tab_bar.tab_active" },
+      "wrap": { "border_left_width": 0 },
+      "hover && !active": { "text": "$pane_tab_bar.tab.hover_text" }
+    },
+    "children": [
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_left": 8, "gap": 8 },
+        "children": [
+          { "slot": "icon" },
+          { "when": "badge", "text": "{badge}", "style": { "text": "{badge_color}" } }
+        ]
+      },
+      {
+        "truncate": true,
+        "text": "{label}",
+        "style": { "padding_x": 12, "text_transform": "$pane_tab_bar.tab.text_transform" },
+        "states": {
+          "active": { "text_transform": "$pane_tab_bar.tab_active.text_transform" },
+          "preview": { "italic": 1 }
+        }
+      },
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_right": 4 },
+        "children": [
+          {
+            "button": "close",
+            "element": "pane_tab_bar.button",
+            "size": "xsmall",
+            "icon": "close",
+            "tooltip": "Close ({close_key})",
+            "style": { "text": "$pane_tab_bar.tab.close_text" },
+            "states": { "active": { "text": "$pane_tab_bar.tab_active.close_text" } }
+          }
+        ]
+      },
+      {
+        "when": "grouped && !active",
+        "position": { "left": -1, "right": -1, "bottom": 0 },
+        "style": { "height": 2, "background": "{group_color}" }
+      },
+      {
+        "when": "grouped && active",
+        "position": { "top": 0, "left": -1, "right": -1, "bottom": 0 },
+        "style": {
+          "border_top_width": 2,
+          "border_left_width": 2,
+          "border_right_width": 2,
+          "border": "{group_color}",
+          "radius_top_left": 8,
+          "radius_top_right": 8
+        }
+      }
+    ]
+  },
+  "pane_tab_bar.chip": {
+    "frame": "chip",
+    "element": "pane_tab_bar.tab",
+    "layout": "row",
+    "align": "center",
+    "clip": true,
+    "states": { "wrap": { "border_left_width": 0 } },
+    "children": [
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_x": 12 },
+        "states": { "open": { "padding_left": 16 } },
+        "children": [
+          {
+            "when": "!text",
+            "style": { "width": 10, "height": 10, "margin_x": 4, "radius": 99, "background": "{group_color}" }
+          },
+          {
+            "when": "text",
+            "element": "pane_tab_bar.group",
+            "layout": "row",
+            "align": "center",
+            "truncate": true,
+            "text": "{text}",
+            "style": { "background": "{group_color}" }
+          }
+        ]
+      },
+      {
+        "when": "open",
+        "position": { "left": 6, "right": -1, "bottom": 0 },
+        "style": { "height": 2, "background": "{group_color}", "radius_top_left": 99, "radius_bottom_left": 99 }
+      }
+    ]
+  },
+  "vertical_tabs": {
+    "frame": "root",
+    "element": "vertical_tabs",
+    "fill": true,
+    "children": [
+      {
+        "element": "vertical_tabs.header",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "children": [{ "use": "pane.new_tab" }, { "grow": 1 }, { "use": "pane.buttons" }]
+      },
+      {
+        "frame": "list",
+        "element": "vertical_tabs.list",
+        "grow": 1,
+        "each": "items",
+        "item": {
+          "shrink": 0,
+          "children": [
+            { "when": "group", "use": "vertical_tabs.group" },
+            { "when": "!group", "use": "vertical_tabs.tab" }
+          ]
+        },
+        "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
+      }
+    ]
+  },
+  "vertical_tabs.tab": {
+    "frame": "tab",
+    "group": "vtab",
+    "layout": "row",
+    "shrink": 0,
+    "style": { "height": "$vertical_tabs.row.height" },
+    "states": { "grouped": { "padding_left": "$vertical_tabs.row.group_indent" } },
+    "children": [
+      {
+        "when": "grouped",
+        "position": { "top": -1, "bottom": -1, "left": 4 },
+        "style": { "width": 3, "background": "{group_color}" },
+        "states": {
+          "group_first": { "margin_top": 1, "radius_top_left": 99, "radius_top_right": 99 },
+          "group_last": { "margin_bottom": 1, "radius_bottom_left": 99, "radius_bottom_right": 99 }
+        }
+      },
+      {
+        "element": "vertical_tabs.row",
+        "grow": 1,
+        "layout": "row",
+        "align": "center",
+        "states": {
+          "active": { "background": "$vertical_tabs.row.selected_background" },
+          "hover && !active": { "background": "$vertical_tabs.row.hover_background" }
+        },
+        "children": [
+          { "slot": "icon" },
+          { "when": "badge", "text": "{badge}", "style": { "text": "{badge_color}" } },
+          { "grow": 1, "truncate": true, "text": "{label}", "states": { "preview": { "italic": 1 } } },
+          {
+            "shrink": 0,
+            "states": { "!active": { "opacity": 0 }, "hover:vtab": { "opacity": 1 } },
+            "children": [
+              {
+                "button": "close",
+                "element": "pane_tab_bar.button",
+                "size": "xsmall",
+                "icon": "close",
+                "tooltip": "Close ({close_key})"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vertical_tabs.group": {
+    "frame": "group",
+    "element": "vertical_tabs.group",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "style": { "background": "{group_color}" },
+    "states": { "hover": { "opacity": 0.9 } },
+    "children": [
+      { "grow": 1, "truncate": true, "text": "{name}" },
+      { "when": "collapsed", "shrink": 0, "style": { "font_size": "0.75rem" }, "text": "{count}" },
+      {
+        "when": "collapsed",
+        "icon": "chevron-down",
+        "style": { "width": 14, "height": 14, "text": "$vertical_tabs.group.text" }
+      },
+      {
+        "when": "!collapsed",
+        "icon": "chevron-up",
+        "style": { "width": 14, "height": 14, "text": "$vertical_tabs.group.text" }
+      }
+    ]
+  },
+  "welcome": {
+    "fill": true,
+    "align": "center",
+    "justify": "center",
+    "style": {
+      "background_image": "$welcome.background_image",
+      "background_image_fit": "$welcome.background_image_fit",
+      "background_image_opacity": "$welcome.background_image_opacity"
+    },
+    "children": [
+      {
+        "element": "welcome",
+        "style": { "background_image": "" },
+        "children": [
+          {
+            "style": { "gap": 4 },
+            "children": [
+              { "element": "welcome.title", "text": "Tern" },
+              { "element": "welcome.subtitle", "text": "Terminals, files and git changes of the folders you add." }
+            ]
+          },
+          {
+            "layout": "row",
+            "style": { "gap": 8 },
+            "children": [
+              { "button": "open", "variant": "primary", "size": "medium", "icon": "folder-plus", "label": "Add Folder…" }
+            ]
+          },
+          {
+            "when": "recents > 0",
+            "style": { "gap": 4 },
+            "children": [
+              { "text": "Recent", "style": { "font_size": "$text_sm", "text": "$welcome.keys.detail_text" } },
+              { "each": "recent", "style": { "gap": 2 }, "item": { "use": "welcome.recent" } }
+            ]
+          },
+          {
+            "element": "welcome.keys",
+            "children": [
+              {
+                "layout": "row",
+                "justify": "between",
+                "style": { "gap": 32 },
+                "children": [{ "text": "Add folder", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{open_key}" }]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "welcome.recent": {
+    "frame": "recent",
+    "element": "welcome.recent",
+    "layout": "row",
+    "align": "center",
+    "states": { "hover": { "background": "$welcome.recent.hover_background" } },
+    "children": [
+      { "icon": "folder-open", "style": { "width": 14, "height": 14, "text": "$welcome.recent.detail_text" } },
+      { "text": "{name}" },
+      {
+        "truncate": true,
+        "text": "{path}",
+        "style": { "font_size": "$welcome.recent.detail_font_size", "text": "$welcome.recent.detail_text" }
       }
     ]
   }

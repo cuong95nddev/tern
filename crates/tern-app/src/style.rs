@@ -20,14 +20,6 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, ThemeColor, try_parse_colo
 use gpui_kit::*;
 use tern_fs::GitStatus;
 
-/// A horizontal tab bar's height, without its bottom border line. It's
-/// gpui-component's `Tab`, so it can't be changed; what sits in the bar
-/// matches it.
-pub const TAB_BAR_H: Pixels = px(30.);
-/// A tab in a horizontal tab bar (the bar plus its bottom border line).
-/// gpui-component's `Tab` sets it, so it can't be changed.
-pub const TAB_H: Pixels = px(32.);
-
 /// What a property holds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -140,6 +132,12 @@ pub const BOX: &[Prop] = &[
     ("text_transform", Text, ""),
 ];
 
+/// A template box's own properties: those of [`BOX`], and of [`IMAGE`] (any
+/// box can show an image behind its children).
+pub fn box_prop(name: &str) -> Option<&'static Prop> {
+    BOX.iter().chain(IMAGE).find(|p| p.0 == name)
+}
+
 /// A container that can show an image behind its content: the file
 /// (absolute, `~/…`, or relative to the config folder), how it fits
 /// (`cover`, `contain`, `fill`, `scale_down`, `none`), and its opacity.
@@ -197,6 +195,23 @@ const STRIP: &[Prop] = &[
 /// A tab in a horizontal bar (gpui-component's `Tab`; unset keeps its look).
 const TAB: &[Prop] = &[("text_transform", Text, "none"), ("icon_text", Color, ""), ("close_text", Color, "")];
 
+/// A tab in a horizontal tab bar drawn by a template (`pane_tab_bar.tab`,
+/// `workspace_tabs.tab`).
+const BAR_TAB: &[Prop] = &[
+    ("height", Len, "32"),
+    ("gap", Len, "4"),
+    ("font_size", Len, "$text_sm"),
+    ("text", Color, "$tab.foreground"),
+    ("hover_text", Color, "$tab.active.foreground"),
+    ("border", Color, "transparent"),
+    ("border_left_width", Len, "1"),
+    ("border_right_width", Len, "1"),
+];
+
+/// The shown tab, over [`BAR_TAB`].
+const BAR_TAB_ACTIVE: &[Prop] =
+    &[("background", Color, "$tab.active.background"), ("text", Color, "$tab.active.foreground"), ("border", Color, "$border")];
+
 macro_rules! simple {
     ($name:literal, $about:literal) => {
         Element { name: $name, about: $about, groups: &[] }
@@ -231,25 +246,13 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element {
-        name: "workspace_tabs",
-        about: "The bar of workspace tabs at the top",
-        groups: &[&[("background", Color, "$tab_bar_background"), ("border", Color, "$border"), ("border_bottom_width", Len, "1")]],
-    },
-    Element {
-        name: "workspace_tabs.tab",
-        about: "A workspace tab. `icon_text` and `close_text` color its folder icon and close button",
-        groups: &[TAB],
-    },
-    Element { name: "workspace_tabs.tab_active", about: "The active workspace tab, over `workspace_tabs.tab`", groups: &[TAB] },
-    Element { name: "workspace_tabs.button", about: "The buttons in the workspace bar (open, update, close)", groups: &[] },
-    Element {
         name: "workspace",
-        about: "One workspace: panels, tabs and the status bar",
+        about: "The workspace: panels, tabs and the status bar",
         groups: &[&[("background", Color, "$background")], IMAGE],
     },
     Element {
         name: "workspace.status_bar",
-        about: "The bar at the bottom of a workspace",
+        about: "The bar at the bottom of the workspace",
         groups: &[
             &[
                 ("height", Len, "22"),
@@ -275,9 +278,10 @@ pub const ELEMENTS: &[Element] = &[
     },
     simple!("tool_strip.button", "A button in a tool strip"),
     Element { name: "explorer", about: "The file explorer panel", groups: &[PANEL, &[("start_width", Len, "250")], IMAGE] },
-    Element { name: "explorer.header", about: "The explorer's title bar (its title is the folder's name)", groups: &[HEADER] },
+    Element { name: "explorer.header", about: "The explorer's title bar", groups: &[HEADER] },
     simple!("explorer.header.button", "A button in the explorer's title bar"),
     simple!("explorer.list", "The explorer's list of rows"),
+    Element { name: "explorer.empty", about: "What the explorer shows with no folder in the workspace", groups: &[EMPTY] },
     Element { name: "explorer.row", about: "A file or folder in the explorer", groups: &[ROW, &[("focus_border", Color, "$ring")]] },
     Element { name: "changes", about: "The git changes panel", groups: &[PANEL, &[("start_width", Len, "300")], IMAGE] },
     Element { name: "changes.header", about: "The changes panel's title bar", groups: &[HEADER] },
@@ -335,10 +339,10 @@ pub const ELEMENTS: &[Element] = &[
     Element {
         name: "pane_tab_bar.tab",
         about: "A tab in a pane's tab bar. `icon_text` colors a terminal or diff icon (file and agent icons keep theirs), \
-                `close_text` its close button",
-        groups: &[TAB],
+                `close_text` its close button, `hover_text` its text under the pointer",
+        groups: &[BAR_TAB, TAB],
     },
-    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[TAB] },
+    Element { name: "pane_tab_bar.tab_active", about: "The shown tab of a pane, over `pane_tab_bar.tab`", groups: &[BAR_TAB_ACTIVE, TAB] },
     Element {
         name: "pane_tab_bar.group",
         about: "A tab group's chip in a tab bar (its color is the group's)",
@@ -653,7 +657,7 @@ impl<'a> Props<'a> {
         Resolver { over: self.over, colors: &self.colors, config_dir: self.config_dir }
     }
 
-    /// `raw`'s properties: those of [`BOX`] and of `element` (when there is
+    /// `raw`'s properties: those of [`box_prop`] and of `element` (when there is
     /// one). `at` names where they are written, for `problems`.
     pub fn compile(
         &self,
@@ -665,7 +669,7 @@ impl<'a> Props<'a> {
         let r = self.resolver();
         let mut out = HashMap::new();
         for (name, v) in raw {
-            let found = element.and_then(|e| e.prop(name)).or_else(|| BOX.iter().find(|p| p.0 == name));
+            let found = element.and_then(|e| e.prop(name)).or_else(|| box_prop(name));
             let Some(&(prop, kind, _)) = found else {
                 problems.push(format!("{at}: no property \"{name}\""));
                 continue;
@@ -1059,16 +1063,27 @@ impl El {
     }
 
     /// The background image layer, to be the container's first child (the
-    /// container must be `relative`), when the element has one set.
+    /// container must be `relative`), when the element or the template box
+    /// has one set.
     pub fn backdrop(&self) -> Option<AnyElement> {
-        if element(self.name).is_none_or(|e| e.prop("background_image").is_none()) {
-            return None;
-        }
-        let path = self.text("background_image");
+        // A template box takes these without its element having them.
+        let image = |prop: &'static str| {
+            let own = element(self.name).is_some_and(|e| e.prop(prop).is_some());
+            self.inline.as_ref().and_then(|m| m.get(prop)).or_else(|| if own { self.get(prop) } else { None })
+        };
+        let text = |prop| match image(prop) {
+            Some(Val::Text(t)) => t.clone(),
+            _ => SharedString::default(),
+        };
+        let path = text("background_image");
         if path.is_empty() {
             return None;
         }
-        let fit = match self.text("background_image_fit").as_ref() {
+        let opacity = match image("background_image_opacity") {
+            Some(Val::Num(n)) => *n,
+            _ => 1.,
+        };
+        let fit = match text("background_image_fit").as_ref() {
             "contain" => ObjectFit::Contain,
             "fill" => ObjectFit::Fill,
             "scale_down" => ObjectFit::ScaleDown,
@@ -1082,7 +1097,7 @@ impl El {
                 .left_0()
                 .size_full()
                 .object_fit(fit)
-                .opacity(self.num("background_image_opacity").clamp(0., 1.))
+                .opacity(opacity.clamp(0., 1.))
                 .into_any_element(),
         )
     }

@@ -866,17 +866,27 @@ sit over its parent (`\"position\": {{\"top\": 0, \"right\": 8}}`, `z`,
 change while one does (`\"states\": {{\"focused\": {{\"border\": \"$accent\"}}}}`),
 or split into panels you resize (`\"split\": \"row\"`, with `size`, `min`, `max`,
 `fixed` on the panels). Leaves are text (`\"text\": \"{{title}}\"`), another
-template (`\"use\"`), or a piece Tern draws (`\"slot\"`).
+template (`\"use\"`), an icon (`\"icon\": \"folder-open\"`, a bundled Lucide
+name), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
+`selected`, `disabled`, `loading`), or a piece Tern draws (`\"slot\"`). A list
+the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
+`each` come after its entries.
 
 | Template | Values | Slots |
 |---|---|---|
-| `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace_tabs`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
+| `window` | `workspace`, `menu_bar` | `menu_bar`, `welcome`, `workspace` |
+| `workspace` | `explorer`, `scratches`, `changes`, `path`, `background`, `settings_error`, `update`, `installing`, `monitor` | `left_strip`, `right_strip`, `explorer`, `scratches`, `center`, `changes` |
 | `status_bar` | as `workspace` | as `workspace` |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
 | `explorer.header`, `changes.header`, `scratches.header` | as `panel_header` | as `panel_header` |
+| `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
+| `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
+| `vertical_tabs` | as `pane_tab_bar` | |
+| `explorer.empty` | `add_key` | |
+| `welcome` | `recents`, `open_key`; list `recent` | |
+| `welcome.recent` | `name`, `path` | |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
@@ -925,8 +935,9 @@ it. Copy the new `workspace` from `reference/templates.json`.
 
 ### Background images
 
-`window`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs` and
-`terminal` can show an image behind their content: `background_image` (a path:
+`window`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs`,
+`welcome` and `terminal` can show an image behind their content (so can any
+box of a template, through its `style`): `background_image` (a path:
 absolute, `~/…`, or relative to this folder), `background_image_fit` (`cover`,
 `contain`, `fill`, `scale_down`, `none`) and `background_image_opacity` (0 to
 1). An image shows only where what's in front of it is see-through: to see a

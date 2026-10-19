@@ -1,6 +1,6 @@
 //! Recursive FSEvents watcher with debouncing. Emits batches of changed paths.
 //! `.git/` internals (of the root repo and any nested repo) are dropped except
-//! the files that change git status, and so is everything inside heavy build
+//! the files that change git status (reported per repo), and so is everything inside heavy build
 //! dirs ([`crate::git::SKIP_DIRS`]: `node_modules`, `target`, ...).
 
 use std::collections::HashSet;
@@ -15,8 +15,9 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 pub struct ChangeBatch {
     /// Changed worktree paths (absolute).
     pub paths: Vec<PathBuf>,
-    /// Something under `.git` changed (HEAD/index/refs) — git status is stale.
-    pub git_changed: bool,
+    /// Worktree roots of the repos whose `.git` changed (HEAD/index/refs):
+    /// their git status is stale.
+    pub git_repos: Vec<PathBuf>,
 }
 
 pub struct FsWatcher {
@@ -24,8 +25,9 @@ pub struct FsWatcher {
 }
 
 impl FsWatcher {
-    /// Watch `root` recursively. `on_batch` runs on a background thread at most
-    /// once per `debounce` window.
+    /// Watch `root` recursively. `on_batch` runs on a background thread once
+    /// changes have been quiet for `debounce`, or `MAX_WAIT_FACTOR` times
+    /// that after the first one in a long burst.
     pub fn new(root: &Path, debounce: Duration, on_batch: impl Fn(ChangeBatch) + Send + 'static) -> notify::Result<Self> {
         let (tx, rx) = mpsc::channel::<notify::Event>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -43,52 +45,68 @@ impl FsWatcher {
     }
 }
 
+/// A burst is cut into batches at most this many debounce windows long.
+const MAX_WAIT_FACTOR: u32 = 10;
+
 fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duration, on_batch: impl Fn(ChangeBatch)) {
     loop {
         // Block for the first event.
         let Ok(first) = rx.recv() else { return };
-        let deadline = Instant::now() + window;
+        let start = Instant::now();
+        let cap = start + window * MAX_WAIT_FACTOR;
+        let mut deadline = start + window;
         let mut paths: HashSet<PathBuf> = HashSet::new();
-        let mut git_changed = false;
+        let mut git_repos: HashSet<PathBuf> = HashSet::new();
+        // Whether `ev` kept a path: only that extends the wait, so a busy
+        // `target/` or `.git/objects` can't hold a batch back.
         let mut absorb = |ev: notify::Event| {
+            let mut kept = false;
             if matches!(ev.kind, EventKind::Access(_)) {
-                return;
+                return kept;
             }
             for p in ev.paths {
-                if let Some(rel) = git_internal(&p) {
-                    git_changed |= is_git_status_file(rel);
+                if let Some((repo, rel)) = git_internal(&p) {
+                    if is_git_status_file(rel) {
+                        git_repos.insert(repo.to_path_buf());
+                        kept = true;
+                    }
                 } else if !in_skipped_dir(root, &p) {
                     paths.insert(p);
+                    kept = true;
                 }
             }
+            kept
         };
         absorb(first);
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(left) {
-                Ok(ev) => absorb(ev),
+                Ok(ev) => {
+                    if absorb(ev) {
+                        deadline = (Instant::now() + window).min(cap);
+                    }
+                },
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if paths.is_empty() && !git_changed {
+        if paths.is_empty() && git_repos.is_empty() {
             continue;
         }
         let mut paths: Vec<_> = paths.into_iter().collect();
         paths.sort();
-        on_batch(ChangeBatch { paths, git_changed });
+        let mut git_repos: Vec<_> = git_repos.into_iter().collect();
+        git_repos.sort();
+        on_batch(ChangeBatch { paths, git_repos });
     }
 }
 
-/// For a path inside some `.git` dir, the part after `.git/`.
-fn git_internal(p: &Path) -> Option<&Path> {
-    let mut comps = p.components();
-    while let Some(c) = comps.next() {
-        if c.as_os_str() == ".git" {
-            let rest = comps.as_path();
-            return (!rest.as_os_str().is_empty()).then_some(rest);
-        }
-    }
-    None
+/// For a path inside some `.git` dir, the worktree root (the dir holding
+/// `.git`) and the part after `.git/`.
+fn git_internal(p: &Path) -> Option<(&Path, &Path)> {
+    let at = p.components().position(|c| c.as_os_str() == ".git")?;
+    let git = p.ancestors().nth(p.components().count() - at - 1)?;
+    let rest = p.strip_prefix(git).ok()?;
+    (!rest.as_os_str().is_empty()).then_some((git.parent()?, rest))
 }
 
 /// Whether `p` is inside (not just named) a skipped dir below `root`.
@@ -101,7 +119,10 @@ fn in_skipped_dir(root: &Path, p: &Path) -> bool {
 
 fn is_git_status_file(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
-    s == "HEAD" || s == "index" || s.starts_with("refs/")
+    // `index.lock` too: when git gives up a lock without writing `index`,
+    // its removal is the only sign that a skipped status can run now. And
+    // the config: it decides whether status is safe to run at all.
+    matches!(s.as_ref(), "HEAD" | "index" | "index.lock" | "config" | "config.worktree") || s.starts_with("refs/")
 }
 
 #[cfg(test)]
@@ -146,10 +167,12 @@ mod tests {
 
     #[test]
     fn classifies_nested_git_internals() {
-        assert_eq!(git_internal(Path::new("/r/sub/.git/index")), Some(Path::new("index")));
+        assert_eq!(git_internal(Path::new("/r/sub/.git/index")), Some((Path::new("/r/sub"), Path::new("index"))));
         assert_eq!(git_internal(Path::new("/r/.git")), None);
         assert_eq!(git_internal(Path::new("/r/src/a.rs")), None);
         assert!(is_git_status_file(Path::new("refs/heads/main")));
+        assert!(is_git_status_file(Path::new("index.lock")));
+        assert!(is_git_status_file(Path::new("config")));
         assert!(!is_git_status_file(Path::new("objects/ab/cd")));
     }
 }

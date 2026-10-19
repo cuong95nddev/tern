@@ -1,6 +1,7 @@
 //! Debug-build control socket: lets scripts drive a window (clicks, keys,
 //! state dump) by injecting events into it, without touching the real mouse
-//! or keyboard. Enabled with `TERN_CONTROL=<socket path>`.
+//! or keyboard. Enabled with `TERN_CONTROL=<socket path>` (on Windows, a
+//! loopback address: `127.0.0.1:7777`).
 //!
 //! One command per line, one reply line each:
 //!   click X Y        left click at window coordinates (logical px)
@@ -11,7 +12,7 @@
 //!   scratch-new EXT  create and open a scratch file (as the + menu does)
 //!   scratch-open NAME   open an existing scratch file by file name
 //!   scratch-text T   replace the active scratch tab's text (`\n` = newline)
-//!   file-open PATH   open a file (relative to the workspace root) in a tab
+//!   file-open PATH   open a file (relative to the first folder) in a tab
 //!   tab-move FROM TO move center tab FROM to slot TO (as a drag does)
 //!   tab-layout scroll|wrap|vertical   how tabs are laid out
 //!   group-new TAB, group-add TAB GROUP, group-remove TAB, group-move GROUP TAB,
@@ -24,33 +25,67 @@
 //!   layout-reset                                    put the side panels back (View > Reset Layout)
 //!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
 //!                    (as dragging its header does); `state` ends with `arrange …`
-//!   windows / ws     list windows / this window's workspaces
-//!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
-//!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window
+//!   ws               the workspace's folders
+//!   ws-open PATH, ws-remove PATH   add a folder to the workspace / take it out
 //!   restart-background   end the daemon now (Restart Background Terminals, no dialog)
 //!   term-type TEXT   type into the active terminal (`\n` Enter, `\e` Esc, `\a` BEL)
 //!   term-screen      the active terminal's visible text
 //!   term-info        its size, focus reporting, exit; tabs that rang; what runs
 //!   term-paste-path P1|P2   paste paths as a file drop does
-//!   @N CMD           send CMD to window N instead of the active one
 
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use gpui_kit::*;
 
 pub type Request = (String, flume::Sender<String>);
 
-/// No Unix sockets here: the control socket is a Unix-only debug aid.
+/// No Unix sockets in std here: `TERN_CONTROL` is a loopback TCP address
+/// (`127.0.0.1:7777`) instead.
 #[cfg(not(unix))]
-pub fn listen(_path: PathBuf) -> Option<flume::Receiver<Request>> {
-    log::warn!("TERN_CONTROL needs a Unix socket; ignored");
-    None
+pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    let addr: SocketAddr = path.to_str()?.parse().map_err(|_| log::warn!("TERN_CONTROL: not an address like 127.0.0.1:7777")).ok()?;
+    if !addr.ip().is_loopback() {
+        log::warn!("TERN_CONTROL {addr} is not a loopback address");
+        return None;
+    }
+    let listener = TcpListener::bind(addr).map_err(|e| log::warn!("control socket: {e}")).ok()?;
+    log::info!("control socket at {addr}");
+    let incoming = std::iter::repeat_with(move || listener.accept()).filter_map(|r| r.ok().map(|(s, _)| s));
+    Some(serve(incoming, TcpStream::try_clone))
+}
+
+/// Answers each line of each connection `incoming` gives with the reply to
+/// its request; `clone` gives a connection's writing half.
+fn serve<S: Read + Write + Send + 'static>(
+    incoming: impl Iterator<Item = S> + Send + 'static,
+    clone: fn(&S) -> std::io::Result<S>,
+) -> flume::Receiver<Request> {
+    let (tx, rx) = flume::unbounded::<Request>();
+    std::thread::spawn(move || {
+        for stream in incoming {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let Ok(mut out) = clone(&stream) else { return };
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    let (reply_tx, reply_rx) = flume::bounded(1);
+                    if tx.send((line, reply_tx)).is_err() {
+                        return;
+                    }
+                    let reply = reply_rx.recv().unwrap_or_else(|_| "error: window closed".into());
+                    if writeln!(out, "{reply}").is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    rx
 }
 
 /// Start listening on `path` (from `TERN_CONTROL`); requests arrive on the
@@ -67,27 +102,9 @@ pub fn listen(path: PathBuf) -> Option<flume::Receiver<Request>> {
     }
     let listener = UnixListener::bind(&path).map_err(|e| log::warn!("control socket: {e}")).ok()?;
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    let (tx, rx) = flume::unbounded::<Request>();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let Ok(mut out) = stream.try_clone() else { return };
-                for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                    let (reply_tx, reply_rx) = flume::bounded(1);
-                    if tx.send((line, reply_tx)).is_err() {
-                        return;
-                    }
-                    let reply = reply_rx.recv().unwrap_or_else(|_| "error: window closed".into());
-                    if writeln!(out, "{reply}").is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
     log::info!("control socket at {}", path.display());
-    Some(rx)
+    let incoming = std::iter::repeat_with(move || listener.accept()).filter_map(|r| r.ok().map(|(s, _)| s));
+    Some(serve(incoming, UnixStream::try_clone))
 }
 
 /// Run an input command (`click`, `key`) against `window`. `None` if `line`
@@ -136,6 +153,25 @@ pub fn input(line: &str, window: &mut Window, cx: &mut App) -> Option<String> {
             window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: to, pressed_button: Some(button), modifiers }), cx);
             window.draw(cx).clear(cx);
             window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position: to, modifiers, click_count: 1 }), cx);
+            Some("ok".into())
+        },
+        // Move the pointer to X Y (hover), or scroll there by DX DY pixels.
+        cmd @ ("move" | "scroll") => {
+            let n: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
+            let (position, modifiers) = match n[..] {
+                [x, y, ..] => (point(px(x), px(y)), Modifiers::default()),
+                _ => return Some(format!("error: {cmd} X Y{}", if cmd == "scroll" { " DX DY" } else { "" })),
+            };
+            window.draw(cx).clear(cx);
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers }), cx);
+            if let [_, _, dx, dy] = n[..] {
+                let delta = ScrollDelta::Pixels(point(px(dx), px(dy)));
+                window
+                    .dispatch_event(PlatformInput::ScrollWheel(ScrollWheelEvent { position, delta, modifiers, ..Default::default() }), cx);
+            } else if cmd == "scroll" {
+                return Some("error: scroll X Y DX DY".into());
+            }
+            window.draw(cx).clear(cx);
             Some("ok".into())
         },
         "key" => {

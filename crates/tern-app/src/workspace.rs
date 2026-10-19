@@ -2,7 +2,7 @@
 //! files, diffs, scratches) | changes. A window shows one of its workspaces at a time (see
 //! `main_window`), and a workspace can move between windows.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -16,12 +16,10 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 use tern_bridge::HookEvent;
-use tern_fs::GitStatus;
+use tern_fs::{ChangeBatch, GitStatus};
 use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
@@ -38,7 +36,7 @@ use crate::scratch::{self, Scratch};
 use crate::scratches_view::{ScratchesEvent, ScratchesView};
 use crate::settings;
 use crate::style;
-use crate::template;
+use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
 use crate::theme_picker::OpenSettings;
 use crate::viewer::{self, Viewer, ViewerEvent};
@@ -130,6 +128,8 @@ struct TermTab {
     /// Title set with Rename…, shown instead of the terminal's own.
     rename: Option<SharedString>,
     kind: TabKind,
+    /// The folder its program starts in.
+    cwd: PathBuf,
     /// Hook token for Claude tabs.
     token: Option<String>,
     /// The Claude conversation running here (from hooks), to resume it.
@@ -260,6 +260,19 @@ enum Slot {
     Tab(usize),
 }
 
+/// An entry of a tab list as its frames need it.
+struct TabEntry {
+    slot: Slot,
+    /// What a drag of it shows.
+    name: SharedString,
+    /// Its line in the overflow menu.
+    label: SharedString,
+    /// Its group's color.
+    color: Hsla,
+    /// The tab, for a drag.
+    tab: Option<EntityId>,
+}
+
 /// A group's chip: its name on its color, a dot when it has no name, and
 /// `count` (its tabs) when collapsed.
 fn group_pill(name: SharedString, color: Hsla, count: Option<usize>, cx: &App) -> Div {
@@ -273,104 +286,6 @@ fn group_pill(name: SharedString, color: Hsla, count: Option<usize>, cx: &App) -
     }
     let look = style::el("pane_tab_bar.group", cx);
     look.apply(div().flex().items_center().bg(color).whitespace_nowrap()).child(look.label(text))
-}
-
-/// How far a group outline piece runs past its side; the tab clips it.
-const EDGE_RUN: Pixels = px(4000.);
-
-/// Which piece of a group's outline a tab draws, like Chrome's: a line along
-/// the bottom of its tabs that climbs around the active one (`active_outline`).
-#[derive(Clone, Copy)]
-enum GroupEdge {
-    /// Under the chip, starting a little in.
-    Start,
-    /// Under a tab.
-    Under,
-}
-
-/// A tab's prefix or suffix holder, as tall as the tab so a `group_edge` in
-/// it lines up with the tab's edges. The tab's own left/right 1px borders
-/// sit just outside it.
-fn tab_side() -> Div {
-    div().h(style::TAB_H).flex().items_center()
-}
-
-/// One piece of a group's outline, placed in a `tab_side`. It runs far past
-/// the tab on one side and the tab, which clips its children, cuts it off.
-fn group_edge(edge: GroupEdge, color: Hsla) -> Div {
-    let piece = div().absolute().bottom_0().w(EDGE_RUN).h(px(2.)).bg(color);
-    match edge {
-        GroupEdge::Start => piece.left(px(6.)).rounded_l_full(),
-        GroupEdge::Under => piece.left(px(-1.)),
-    }
-}
-
-/// The active tab's outline: its sides and rounded top, open at the bottom.
-/// Each piece goes in a `tab_side`: (prefix piece, suffix piece).
-fn active_outline(color: Hsla) -> (impl IntoElement, impl IntoElement) {
-    over_tab(move |b, window| {
-        let corners = Corners { top_left: px(8.), top_right: px(8.), ..Default::default() };
-        let w = px(2.);
-        let edges = Edges { top: w, left: w, right: w, bottom: px(0.) };
-        window.paint_quad(quad(b, corners, transparent_black(), edges, color, BorderStyle::Solid));
-    })
-}
-
-/// `tab` labelled `text` as element `look` writes it. gpui-component colors
-/// the label itself (the selected and hovered colors come from the theme),
-/// so an element's `text` color goes on a box of its own around it.
-pub(crate) fn tab_label(tab: Tab, look: &style::El, text: impl Into<SharedString>) -> Tab {
-    let text = look.label(text);
-    if look.is_set("text") { tab.child(div().text_color(look.color("text")).child(text)) } else { tab.label(text) }
-}
-
-/// The selected tab's 1px side borders in `color`, over gpui-component's
-/// (always the theme's `border`). Pieces as for [`active_outline`].
-pub(crate) fn tab_sides(color: Hsla) -> (impl IntoElement, impl IntoElement) {
-    over_tab(move |b, window| {
-        let side = |x: Pixels| Bounds::from_corners(point(x, b.top()), point(x + px(1.), b.bottom()));
-        window.paint_quad(fill(side(b.left()), color));
-        window.paint_quad(fill(side(b.right() - px(1.)), color));
-    })
-}
-
-/// Paints over a tab, its side borders included, after the tab itself.
-/// The tab's width isn't known when it's built, so the suffix's piece notes
-/// where the tab ends and the prefix's piece paints from there (prepaint
-/// runs for both before either paints). Each goes in a `tab_side`:
-/// (prefix piece, suffix piece).
-fn over_tab(paint: impl Fn(Bounds<Pixels>, &mut Window) + 'static) -> (impl IntoElement, impl IntoElement) {
-    let right = Rc::new(Cell::new(None::<Pixels>));
-    let r = right.clone();
-    let end = canvas(move |b, _, _| r.set(Some(b.right())), |_, _, _, _| {}).absolute().top_0().bottom_0().right_0();
-    let paint = Rc::new(paint);
-    let start = canvas(
-        move |b: Bounds<Pixels>, window, cx| {
-            // The tab clips its children inside its 1px side borders; draw
-            // later, clipped 1px wider.
-            let mask = window.content_mask().bounds;
-            let mask = ContentMask {
-                bounds: Bounds::from_corners(point(mask.left() - px(1.), mask.top()), point(mask.right() + px(1.), mask.bottom())),
-            };
-            let (right, paint) = (right.clone(), paint.clone());
-            let over = canvas(
-                |_, _, _| {},
-                move |_, _, window, _| {
-                    let Some(right) = right.get() else { return };
-                    paint(Bounds::from_corners(point(b.left() - px(1.), b.top()), point(right + px(1.), b.bottom())), window);
-                },
-            );
-            let mut over = over.into_any_element();
-            over.layout_as_root(AvailableSpace::min_size(), window, cx);
-            window.defer_draw(over, b.origin, 0, Some(mask));
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .bottom_0()
-    .left_0();
-    (start, end)
 }
 
 /// A pane's tab strip scroll state.
@@ -401,7 +316,8 @@ pub struct Services {
 }
 
 pub struct Workspace {
-    root: PathBuf,
+    /// The folders added to the workspace, in the explorer's order.
+    folders: Vec<PathBuf>,
     services: Services,
     tree: Entity<FileTreeView>,
     changes: Entity<ChangesView>,
@@ -465,14 +381,14 @@ pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
     pub agent: Option<Agent>,
+    /// The name of the folder it runs in (one of the workspace's, else its own).
+    pub folder: String,
     /// The workspace's active tab.
     pub active: bool,
     pub view: Entity<TerminalView>,
 }
 
 pub enum WorkspaceEvent {
-    /// The last tab closed: the workspace is done.
-    Close,
     /// Tabs opened, closed, switched or renamed, or a side panel shown or
     /// hidden: the session should be saved.
     TabsChanged,
@@ -517,9 +433,9 @@ impl Workspace {
     /// Open `saved.folder` with `saved`'s tabs; a Claude tab when none of
     /// them can come back.
     pub fn new(saved: SavedWorkspace, services: Services, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let root = saved.folder;
-        let tree = cx.new(|cx| FileTreeView::new(root.clone(), cx));
-        let changes = cx.new(|cx| ChangesView::new(root.clone(), cx));
+        let folders = saved.folders;
+        let tree = cx.new(|cx| FileTreeView::new(&folders, cx));
+        let changes = cx.new(|cx| ChangesView::new(folders.clone(), cx));
         let scratches = cx.new(ScratchesView::new);
 
         let tree_sub = cx.subscribe_in(&tree, window, |this, _, ev: &FileTreeEvent, window, cx| match ev {
@@ -532,13 +448,18 @@ impl Workspace {
             },
             FileTreeEvent::Moved { from, to } => this.file_moved(from, to, window, cx),
             FileTreeEvent::Deleted(paths) => this.files_deleted(paths, window, cx),
-            FileTreeEvent::Changed(paths) => {
-                this.changes.update(cx, |c, cx| c.files_changed(paths, cx));
-                this.files_changed(paths, window, cx);
+            FileTreeEvent::Changed(batch) => {
+                this.changes.update(cx, |c, cx| c.files_changed(batch, cx));
+                this.files_changed(batch, window, cx);
             },
             FileTreeEvent::Hide => {
                 this.show_explorer = false;
                 this.panels_changed(cx);
+            },
+            FileTreeEvent::RemoveFolder(root) => this.remove_folder(root, cx),
+            FileTreeEvent::NewTerminal { dir, claude } => {
+                let kind = if *claude { TabKind::Claude } else { TabKind::Shell };
+                this.add_term(kind, None, None, None, Some(dir.clone()), window, cx);
             },
         });
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
@@ -566,7 +487,7 @@ impl Workspace {
         });
 
         let mut this = Self {
-            root,
+            folders,
             services,
             tree,
             changes,
@@ -615,8 +536,8 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux } => this.add_term(TabKind::Claude, name, session, mux, window, cx),
-                SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, window, cx),
+                SavedTab::Claude { name, session, mux, cwd } => this.add_term(TabKind::Claude, name, session, mux, cwd, window, cx),
+                SavedTab::Shell { name, mux, cwd } => this.add_term(TabKind::Shell, name, None, mux, cwd, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
                 SavedTab::Scratch(p) if p.is_file() => this.open_scratch(p, window, cx),
@@ -633,12 +554,75 @@ impl Workspace {
         }
         this.regroup();
         this.restore_panes(&panes, &tab_panes, &pane_active, &made);
-        if this.tabs.is_empty() {
-            this.add_tab(TabKind::Claude, window, cx);
-        } else {
+        if !this.tabs.is_empty() {
             this.activate(saved.active.min(this.tabs.len() - 1), window, cx);
+        } else if !this.folders.is_empty() {
+            this.add_tab(TabKind::Claude, window, cx);
         }
         this
+    }
+
+    pub fn folders(&self) -> &[PathBuf] {
+        &self.folders
+    }
+
+    /// Nothing to show: no folder and no tab (the window shows its welcome).
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.tabs.is_empty()
+    }
+
+    /// Add `folder` (a Claude tab in it when there is no tab), or show it in
+    /// the explorer when it is in already.
+    pub fn add_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = dunce::canonicalize(&folder).unwrap_or(folder);
+        if !self.folders.contains(&folder) {
+            self.folders.push(folder.clone());
+            self.folders_changed(cx);
+        }
+        if !self.show_explorer {
+            self.show_explorer = true;
+            self.panels_changed(cx);
+        }
+        self.tree.update(cx, |t, cx| t.reveal(&folder, cx));
+        if self.tabs.is_empty() {
+            self.add_term(TabKind::Claude, None, None, None, Some(folder), window, cx);
+        }
+    }
+
+    /// Take `folder` out of the workspace. Its tabs stay.
+    pub fn remove_folder(&mut self, folder: &Path, cx: &mut Context<Self>) {
+        self.folders.retain(|f| f != folder);
+        self.folders_changed(cx);
+    }
+
+    fn folders_changed(&mut self, cx: &mut Context<Self>) {
+        let folders = self.folders.clone();
+        self.tree.update(cx, |t, cx| t.set_roots(&folders, cx));
+        self.changes.update(cx, |c, cx| c.set_roots(folders, cx));
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
+    /// The folder of the workspace `path` is in (the innermost).
+    fn folder_of(&self, path: &Path) -> Option<&Path> {
+        self.folders.iter().filter(|f| path.starts_with(f)).max_by_key(|f| f.components().count()).map(PathBuf::as_path)
+    }
+
+    /// Where a new terminal starts: the active tab's folder, else the first
+    /// folder, else home.
+    fn default_cwd(&self, cx: &App) -> PathBuf {
+        let active = self.tabs.get(self.active).and_then(|t| match t {
+            CenterTab::Term(t) => Some(self.folder_of(&t.cwd).unwrap_or(&t.cwd).to_owned()),
+            t => t.file_path(cx).and_then(|p| self.folder_of(&p).map(Path::to_owned)),
+        });
+        active.or_else(|| self.folders.first().cloned()).unwrap_or_else(|| crate::dirs::home().unwrap_or_default())
+    }
+
+    /// The folder relative links in a file at `path` resolve from and stay in.
+    fn link_root(&self, path: Option<&Path>) -> PathBuf {
+        path.and_then(|p| self.folder_of(p).map(Path::to_owned).or_else(|| p.parent().map(Path::to_owned)))
+            .or_else(|| self.folders.first().cloned())
+            .unwrap_or_else(|| crate::dirs::home().unwrap_or_default())
     }
 
     /// Split the center as saved: `layout` (`Layout::encode`), each saved
@@ -668,9 +652,10 @@ impl Workspace {
                 CenterTab::Term(t) => {
                     let name = t.rename.as_ref().map(|r| r.to_string());
                     let mux = t.view.read(cx).mux_id();
+                    let cwd = Some(t.cwd.clone());
                     match t.kind {
-                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux },
-                        TabKind::Shell => SavedTab::Shell { name, mux },
+                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux, cwd },
+                        TabKind::Shell => SavedTab::Shell { name, mux, cwd },
                     }
                 },
                 CenterTab::File { view, .. } => SavedTab::File(view.read(cx).path().map(Path::to_owned).unwrap_or_default()),
@@ -700,7 +685,7 @@ impl Workspace {
             .map(|(name, _)| name.to_owned())
             .collect();
         SavedWorkspace {
-            folder: self.root.clone(),
+            folders: self.folders.clone(),
             tabs,
             tab_groups,
             groups,
@@ -723,58 +708,8 @@ impl Workspace {
         ]
     }
 
-    /// The workspace moved into `window`. Views holding text inputs listen
-    /// for focus in the window they were made in, so rebuild those here,
-    /// keeping what they showed (unsaved file edits included).
-    pub fn rehost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._rename = None;
-        self.preview = None;
-        for tab in &mut self.tabs {
-            let old = tab.entity_id();
-            if let CenterTab::File { view, _subs } = tab {
-                let state = view.read(cx).state(cx);
-                let root = self.root.clone();
-                *view = cx.new(|cx| {
-                    let mut v = Viewer::new(root, window, cx);
-                    v.restore(state, window, cx);
-                    v
-                });
-                *_subs = Self::subscribe_viewer(view, window, cx);
-            }
-            if let CenterTab::Scratch { view, _sub } = tab {
-                view.update(cx, |s, cx| s.flush(cx));
-                let path = view.read(cx).path().to_owned();
-                *view = cx.new(|cx| Scratch::open(path, window, cx));
-                *_sub = cx.observe(view, |_, _, cx| cx.notify());
-            }
-            // The views above are new entities: keep their tabs' groups.
-            if let Some(g) = self.tab_group.remove(&old) {
-                self.tab_group.insert(tab.entity_id(), g);
-            }
-            if let Some(p) = self.tab_pane.remove(&old) {
-                self.tab_pane.insert(tab.entity_id(), p);
-            }
-            for shown in self.pane_active.values_mut().filter(|id| **id == old) {
-                *shown = tab.entity_id();
-            }
-            if self.preview_tab == Some(old) {
-                self.preview_tab = Some(tab.entity_id());
-            }
-        }
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    /// The workspace is being closed: save scratches (dropping empty ones).
-    /// Terminals and hook registrations go when the workspace is dropped.
-    /// End every terminal's program (the workspace or its window was
-    /// closed). Quitting Tern doesn't: they keep running in the background.
-    pub fn end_terminals(&mut self, cx: &mut Context<Self>) {
-        for t in self.tabs.iter().filter_map(CenterTab::term) {
-            t.view.update(cx, |v, _| v.close());
-        }
-    }
-
+    /// The window is closing (Tern quits): save scratches (dropping empty
+    /// ones). Terminals keep running in the background.
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             if let CenterTab::Scratch { view, .. } = tab {
@@ -783,24 +718,16 @@ impl Workspace {
         }
     }
 
-    /// The folder's name, for tab and window titles.
+    /// The folders' names, for the window title.
     pub fn name(&self) -> String {
-        self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into_owned())
-    }
-
-    /// Whether a Claude tab is mid-turn or waiting for input.
-    pub fn busy(&self, cx: &App) -> bool {
-        self.tabs
-            .iter()
-            .filter_map(CenterTab::term)
-            .any(|t| matches!(t.view.read(cx).status(), ActivityStatus::Working | ActivityStatus::Blocked))
+        self.folders.iter().map(|f| folder_name(f)).collect::<Vec<_>>().join(", ")
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_active(window, cx);
     }
 
-    fn spawn_config(&self, kind: TabKind, resume: Option<&str>) -> (SpawnConfig, &'static str) {
+    fn spawn_config(kind: TabKind, resume: Option<&str>, cwd: &Path) -> (SpawnConfig, &'static str) {
         let shell = crate::platform::shell();
         let mut env = std::collections::HashMap::new();
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
@@ -836,7 +763,7 @@ impl Workspace {
             SpawnConfig {
                 program: Some(shell),
                 args,
-                cwd: Some(self.root.clone()),
+                cwd: Some(cwd.to_owned()),
                 env,
                 size: TermSize { cols: 120, rows: 40, cell_width: 8, cell_height: 16 },
                 scrollback: 10_000,
@@ -846,23 +773,27 @@ impl Workspace {
     }
 
     fn add_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(kind, None, None, None, window, cx);
+        self.add_term(kind, None, None, None, None, window, cx);
     }
 
     /// A new terminal tab named `rename`: background session `mux` when it
-    /// still runs, else a new program (a Claude one resumes `session`).
+    /// still runs, else a new program in `cwd` (by default the active tab's
+    /// folder; a Claude one resumes `session`).
+    #[allow(clippy::too_many_arguments)]
     fn add_term(
         &mut self,
         kind: TabKind,
         rename: Option<String>,
         session: Option<String>,
         mux: Option<u64>,
+        cwd: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Known once the daemon answers (`TerminalEvent::Ready`).
         let token = None;
-        let (cfg, title) = self.spawn_config(kind, session.as_deref());
+        let cwd = cwd.unwrap_or_else(|| self.default_cwd(cx));
+        let (cfg, title) = Self::spawn_config(kind, session.as_deref(), &cwd);
         let config = self.services.terminal.clone();
         let connector = self.services.mux.clone();
         let hook = kind == TabKind::Claude;
@@ -873,7 +804,7 @@ impl Workspace {
         // not a running Claude it reattaches to, says something by exiting
         // at once.
         let resuming = session.is_some();
-        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
+        let tab = TermTab { view, rename, kind, cwd, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -881,11 +812,12 @@ impl Workspace {
     /// A tab for background session `s` that no tab shows. A Claude one
     /// resumes its conversation if it has to start again.
     pub fn adopt_session(&mut self, s: &tern_mux::proto::SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = s.cwd.clone();
         if s.claude {
             // Claude names its tab itself.
-            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), window, cx);
+            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), cwd, window, cx);
         } else {
-            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), window, cx);
+            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), cwd, window, cx);
         }
     }
 
@@ -950,10 +882,6 @@ impl Workspace {
     fn delete_scratch(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.tabs.iter().position(|t| matches!(t, CenterTab::Scratch { view, .. } if view.read(cx).path() == path));
         if let Some(ix) = open {
-            // Closing the last tab would close the workspace.
-            if self.tabs.len() == 1 {
-                self.add_tab(TabKind::Claude, window, cx);
-            }
             self.close_tab(ix, window, cx);
         }
         if let Err(e) = std::fs::remove_file(path)
@@ -1013,7 +941,7 @@ impl Workspace {
             t.view.update(cx, |v, _| v.close());
         }
         if self.tabs.is_empty() {
-            cx.emit(WorkspaceEvent::Close);
+            cx.emit(WorkspaceEvent::TabsChanged);
             return;
         }
         // Its pane shows its next tab (else the one before); a pane left
@@ -1351,8 +1279,10 @@ impl Workspace {
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = self.tabs.get(self.active) {
-            window.focus(&t.focus_handle(cx), cx);
+        match self.tabs.get(self.active) {
+            Some(t) => window.focus(&t.focus_handle(cx), cx),
+            // No tab: keys still reach the workspace through the explorer.
+            None => window.focus(&self.tree.focus_handle(cx), cx),
         }
     }
 
@@ -1360,7 +1290,7 @@ impl Workspace {
     /// to move it into a center tab.
     fn preview_diff(&mut self, path: PathBuf, status: GitStatus, window: &mut Window, cx: &mut Context<Self>) {
         window.close_all_dialogs(cx);
-        let rel = path.strip_prefix(&self.root).unwrap_or(&path).display().to_string();
+        let rel = self.folder_of(&path).and_then(|f| path.strip_prefix(f).ok()).unwrap_or(&path).display().to_string();
         let title: SharedString = format!("{rel}  {}", status.letter()).into();
         let pane = cx.new(|cx| DiffPane::new(path, cx));
         self.preview = Some(pane.downgrade());
@@ -1401,19 +1331,19 @@ impl Workspace {
         }
     }
 
-    /// Reload open files and diffs (tabs and the preview popup) affected by `paths`.
-    fn files_changed(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    /// Reload open files and diffs (tabs and the preview popup) affected by `batch`.
+    fn files_changed(&mut self, batch: &ChangeBatch, window: &mut Window, cx: &mut Context<Self>) {
         let preview = self.preview.as_ref().and_then(|p| p.upgrade());
         let mut diffs = vec![];
         for t in &self.tabs {
             match t {
-                CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(paths, window, cx)),
+                CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(&batch.paths, window, cx)),
                 CenterTab::Diff(d) => diffs.push(d.clone()),
                 CenterTab::Term(_) | CenterTab::Scratch { .. } => {},
             }
         }
         for d in diffs.into_iter().chain(preview) {
-            d.update(cx, |d, cx| d.files_changed(paths, cx));
+            d.update(cx, |d, cx| d.files_changed(batch, cx));
         }
     }
 
@@ -1442,10 +1372,6 @@ impl Workspace {
         if doomed.is_empty() {
             return;
         }
-        // Closing the last tab would close the workspace.
-        if doomed.len() == self.tabs.len() {
-            self.add_tab(TabKind::Claude, window, cx);
-        }
         self.close_where(|_, t| doomed.contains(&t.entity_id()), window, cx);
     }
 
@@ -1465,7 +1391,7 @@ impl Workspace {
             }
             return self.activate(ix, window, cx);
         }
-        let root = self.root.clone();
+        let root = self.link_root(Some(&path));
         let view = cx.new(|cx| {
             let mut v = Viewer::new(root, window, cx);
             v.open(path, window, cx);
@@ -1544,7 +1470,7 @@ impl Workspace {
                     t.token = None;
                     t.session = None;
                     t.resuming = false;
-                    let (cfg, _) = self.spawn_config(TabKind::Shell, None);
+                    let (cfg, _) = Self::spawn_config(TabKind::Shell, None, &t.cwd);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.set_hook(false);
@@ -1560,7 +1486,7 @@ impl Workspace {
                     Some(t) if t.resuming && *quick && code.is_some_and(|c| c != 0) => {
                         t.resuming = false;
                         t.session = None;
-                        Some(t.token.clone())
+                        Some(t.cwd.clone())
                     },
                     Some(t) => {
                         t.resuming = false;
@@ -1568,8 +1494,8 @@ impl Workspace {
                     },
                     None => None,
                 };
-                if restart.is_some() {
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, None);
+                if let Some(cwd) = restart {
+                    let (cfg, _) = Self::spawn_config(TabKind::Claude, None, &cwd);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.start(cx);
@@ -1579,8 +1505,7 @@ impl Workspace {
                     && t.kind == TabKind::Claude
                 {
                     // Enter restarts it: resume the conversation it had.
-                    let session = t.session.clone();
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref());
+                    let (cfg, _) = Self::spawn_config(TabKind::Claude, t.session.as_deref(), &t.cwd);
                     view.update(cx, |v, _| v.set_spawn_config(cfg));
                 }
                 cx.notify();
@@ -1629,7 +1554,7 @@ impl Workspace {
                 cx.notify();
             },
             TerminalEvent::OpenPath { path, line, col } => {
-                if path.is_dir() && !path.starts_with(&self.root) {
+                if path.is_dir() && self.folder_of(path).is_none() {
                     return cx.reveal_path(path);
                 }
                 if path.is_dir() {
@@ -1666,18 +1591,19 @@ impl Workspace {
             // Any later start (Enter, a daemon restart) resumes this one.
             if tab.kind == TabKind::Claude {
                 let view = tab.view.clone();
-                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref());
+                let (cfg, _) = Self::spawn_config(TabKind::Claude, ev.session_id.as_deref(), &tab.cwd);
                 view.update(cx, |v, _| v.set_spawn_config(cfg));
             }
             cx.emit(WorkspaceEvent::TabsChanged);
         }
-        let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| p.starts_with(&self.root)).collect();
+        let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| self.folder_of(p).is_some()).collect();
         if paths.is_empty() {
             return;
         }
         self.tree.update(cx, |t, cx| t.mark_claude_edit(&paths, cx));
-        self.changes.update(cx, |c, cx| c.files_changed(&paths, cx));
-        self.files_changed(&paths, window, cx);
+        let batch = ChangeBatch { paths, git_repos: vec![] };
+        self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
+        self.files_changed(&batch, window, cx);
     }
 
     /// The terminal tabs, in tab order: where a screenshot can go, and the
@@ -1692,6 +1618,7 @@ impl Workspace {
                     id: t.view.entity_id(),
                     title: self.tab_info(i, cx).0,
                     agent: t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude)),
+                    folder: folder_name(self.folder_of(&t.cwd).unwrap_or(&t.cwd)),
                     active: i == self.active,
                     view: t.view.clone(),
                 })
@@ -1796,188 +1723,6 @@ impl Workspace {
         })
     }
 
-    /// Group `g`'s chip, with its tab count when collapsed.
-    fn chip_pill(&self, g: &TabGroup, cx: &App) -> Div {
-        let count = g.collapsed.then(|| self.group_tabs(g.id).map_or(0, |r| r.len()));
-        group_pill(g.name.clone(), group_color(g.color), count, cx)
-    }
-
-    /// Tab `i`'s close button, in `fg` when its tab sets `close_text`.
-    fn close_button(&self, i: usize, fg: Option<Hsla>, cx: &mut Context<Self>) -> Button {
-        style::el("pane_tab_bar.button", cx)
-            .apply(Button::new(("close-tab", i)))
-            .xsmall()
-            .ghost()
-            .icon(IconName::Close)
-            .when_some(fg, |b, c| b.text_color(c))
-            .tooltip(format!("Close ({})", crate::platform::shortcut("⌘W")))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // Don't let the tab's own click activate it.
-                cx.stop_propagation();
-                this.request_close_tab(i, window, cx);
-            }))
-    }
-
-    /// Tab `i` in a horizontal bar: right-click menu, drag to reorder (or
-    /// into a group), close button, its piece of its group's outline.
-    fn bar_tab(&self, i: usize, cx: &mut Context<Self>) -> Tab {
-        let (label, name, badge) = self.tab_info(i, cx);
-        let drop_bg = cx.theme().list_hover;
-        let join = self.group_of(i);
-        let color = join.and_then(|g| self.group(g)).map(|g| group_color(g.color));
-        let active = self.pane_active_ix(self.pane_of(i)) == Some(i);
-        let look = style::el(if active { "pane_tab_bar.tab_active" } else { "pane_tab_bar.tab" }, cx);
-        let mut tab =
-            style::el("pane_tab_bar.tab", cx).apply(tab_label(Tab::new(), &look, label).when(self.is_preview(i, cx), |t| t.italic()));
-        if active {
-            tab = look.apply(tab);
-        }
-        let close_fg = look.is_set("close_text").then(|| look.color("close_text"));
-        let icon = self.tab_icon(i, look.is_set("icon_text").then(|| look.color("icon_text")), cx);
-        let (mut start, mut end) = (None, None);
-        match color {
-            Some(c) if active => {
-                let (s, e) = active_outline(c);
-                (start, end) = (Some(s.into_any_element()), Some(e.into_any_element()));
-            },
-            Some(c) => start = Some(group_edge(GroupEdge::Under, c).into_any_element()),
-            None if active && look.is_set("border") => {
-                let (s, e) = tab_sides(look.color("border"));
-                (start, end) = (Some(s.into_any_element()), Some(e.into_any_element()));
-            },
-            None => {},
-        }
-        let badge = badge.filter(|(b, _)| !b.is_empty());
-        if badge.is_some() || start.is_some() || icon.is_some() {
-            tab = tab.prefix(
-                tab_side()
-                    .children(start)
-                    .when_some(icon, |d, icon| d.child(div().pl_2().child(icon)))
-                    .when_some(badge, |d, (badge, color)| d.child(div().pl_2().text_color(color).child(badge))),
-            );
-        }
-        let drag = DraggedTab { tab: self.tabs[i].entity_id(), name };
-        tab.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_tab = Some(i)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                    if ev.click_count > 1 {
-                        this.pin_tab(i, cx);
-                    }
-                }),
-            )
-            .on_drag(drag, self.start_drag(cx))
-            .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
-            .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab(d.tab, i, join, window, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| this.move_group(d.group, i, cx)))
-            .suffix(tab_side().pr_1().children(end).child(self.close_button(i, close_fg, cx)))
-    }
-
-    /// Group `g`'s chip in a horizontal bar: click to collapse, right-click
-    /// for its menu, drag to move the group; tabs dropped on it join it.
-    fn bar_chip(&self, g: &TabGroup, cx: &mut Context<Self>) -> Tab {
-        let id = g.id;
-        let drop_bg = cx.theme().list_hover;
-        let drag = DraggedGroup { group: id, name: g.name.clone(), color: group_color(g.color) };
-        let open = !g.collapsed && self.group_tabs(id).is_some_and(|r| !r.is_empty());
-        Tab::new()
-            .when(open, |t| t.prefix(tab_side().child(group_edge(GroupEdge::Start, group_color(g.color)))))
-            .child(self.chip_pill(g, cx))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_group = Some(id)))
-            .on_drag(drag, self.start_drag(cx))
-            .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
-            .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab_to_group(d.tab, id, window, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| {
-                if let Some(r) = this.group_tabs(id) {
-                    this.move_group(d.group, r.start, cx);
-                }
-            }))
-    }
-
-    fn new_tab_button(&self, pane: PaneId, cx: &mut Context<Self>) -> impl IntoElement {
-        let ws = cx.entity().downgrade();
-        style::el("pane_tab_bar.button", cx)
-            .apply(Button::new(("new-tab", pane as usize)))
-            .xsmall()
-            .ghost()
-            .icon(IconName::Plus)
-            .dropdown_menu(move |menu, window, cx| {
-                let (ws, ws2, ws3, ws4) = (ws.clone(), ws.clone(), ws.clone(), ws.clone());
-                menu.menu("Open Workspace…", Box::new(crate::OpenFolder))
-                    .separator()
-                    .menu("New Claude Tab", Box::new(NewClaudeTab))
-                    .menu("New Shell Tab", Box::new(NewShellTab))
-                    .submenu("Claude Options", window, cx, move |mut menu, _, _| {
-                        let args = window_state::claude_args();
-                        for (label, flag) in CLAUDE_FLAGS {
-                            menu = menu.item(
-                                PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
-                                    move |_, _, _| {
-                                        window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
-                                    },
-                                ),
-                            );
-                        }
-                        let ws = ws3.clone();
-                        menu.separator()
-                            .item(PopupMenuItem::new("Edit Arguments…").on_click(move |_, window, cx| {
-                                let _ = ws.update(cx, |this, cx| this.edit_claude_args(window, cx));
-                            }))
-                            .item(PopupMenuItem::label("Applies to Claude tabs opened from now on"))
-                    })
-                    .separator()
-                    .menu("New Scratch File", Box::new(NewScratch))
-                    .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
-                        for (label, ext) in scratch::KINDS {
-                            let ws = ws.clone();
-                            menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
-                                let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
-                            }));
-                        }
-                        menu
-                    })
-                    .submenu("Scratches", window, cx, move |mut menu, _, _| {
-                        let files = scratch::list(&scratch::dir());
-                        if files.is_empty() {
-                            return menu.item(PopupMenuItem::new("No scratch files").disabled(true));
-                        }
-                        for path in files.into_iter().take(30) {
-                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            let ws = ws2.clone();
-                            menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                                let _ = ws.update(cx, |this, cx| this.open_scratch(path.clone(), window, cx));
-                            }));
-                        }
-                        menu
-                    })
-                    .menu("Open Scratches Folder", Box::new(OpenScratchesFolder))
-                    .separator()
-                    .submenu("Pane Layout", window, cx, move |menu, _, cx| match ws4.upgrade() {
-                        Some(this) => Self::pane_layout_items(menu, &ws4, this.read(cx)),
-                        None => menu,
-                    })
-                    .submenu("Tab Layout", window, cx, |menu, _, _| tab_layout_items(menu))
-            })
-    }
-
-    fn panel_buttons(&self, cx: &mut Context<Self>) -> Div {
-        let ws = cx.entity().downgrade();
-        div().px_1().flex().items_center().gap_0p5().child(
-            Button::new("pane-layout")
-                .xsmall()
-                .ghost()
-                .icon(Icon::new(AssetIcon::LayoutGrid))
-                .selected(self.layout.panes().len() > 1)
-                .tooltip("Pane Layout")
-                .dropdown_menu(move |menu, _, cx| match ws.upgrade() {
-                    Some(this) => Self::pane_layout_items(menu, &ws, this.read(cx)),
-                    None => menu,
-                }),
-        )
-    }
-
     /// The tool window buttons of one window edge, IntelliJ style: a thin
     /// column with `top` buttons from the top and `bottom` ones from the
     /// bottom. Each toggles its panel, so a hidden panel is one click away.
@@ -2035,250 +1780,395 @@ impl Workspace {
         Self::tool_strip(if side == "left" { "tool_strip.left" } else { "tool_strip.right" }, top, vec![], cx)
     }
 
-    /// Where a dragged tab or group goes to the end of pane `pane`, out of any group.
-    fn end_drop_zone(&self, id: &'static str, pane: PaneId, cx: &mut Context<Self>) -> Stateful<Div> {
-        let drop_bg = cx.theme().list_hover;
-        div()
-            .id((id, pane as usize))
-            .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
-            .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab_to_pane(d.tab, pane, window, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| {
-                this.move_group(d.group, this.tabs.len(), cx);
-                this.set_group_pane(d.group, pane);
-                this.groups_changed(cx);
-            }))
+    /// The values `pane.buttons` reads for pane `pane`, on `scope`.
+    fn pane_vars(&self, pane: PaneId, scope: template::Scope) -> template::Scope {
+        let shortcut = |k| crate::platform::shortcut(k).to_string();
+        scope
+            .var("panes", self.layout.panes().len())
+            .var("zoomed", self.zoomed == Some(pane))
+            // The pane layout menu sits on the top right pane.
+            .var("corner", self.zoomed.unwrap_or_else(|| self.layout.top_right()) == pane)
+            .var("split_key", shortcut("⌘\\"))
+            .var("zoom_key", shortcut("⌘⇧↩"))
+            .var("close_key", shortcut("⌘W"))
     }
 
-    /// The tab or group menu on right-click, picked by what was clicked;
-    /// the tab layouts on empty space.
-    fn with_tab_menu(&self, id: (&'static str, PaneId), child: AnyElement, fill: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let ws = cx.entity().downgrade();
-        div()
-            .id((id.0, id.1 as usize))
-            .when(fill, |d| d.size_full())
+    /// What pane `pane`'s buttons do (`pane.buttons`, `pane.new_tab`,
+    /// `pane.empty`); `f` back when `name` is none of them.
+    #[allow(clippy::result_large_err)] // `Framed` is gpui's builders, which move by value.
+    fn pane_frame(ws: &WeakEntity<Self>, pane: PaneId, name: &str, f: Framed) -> Result<AnyElement, Framed> {
+        type Act = fn(&mut Workspace, PaneId, &mut Window, &mut Context<Workspace>);
+        let Framed::Button(b) = f else { return Err(f) };
+        let on = |act: Act| on_event(ws, move |this, _: &ClickEvent, window, cx| act(this, pane, window, cx));
+        Ok(match name {
+            "split" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane_state(pane);
+                let ix = this.pane_active_ix(pane).unwrap_or(this.active);
+                this.split(ix, Edge::Right, window, cx);
+            })),
+            "zoom" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane(pane, window, cx);
+                this.toggle_zoom(cx);
+            })),
+            "close_pane" => b.on_click(on(|this, pane, window, cx| this.close_pane(pane, window, cx))),
+            "new_claude" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane_state(pane);
+                this.add_tab(TabKind::Claude, window, cx);
+            })),
+            "new_shell" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane_state(pane);
+                this.add_tab(TabKind::Shell, window, cx);
+            })),
+            "pane_layout" => {
+                let ws = ws.clone();
+                return Ok(b
+                    .dropdown_menu(move |menu, _, cx| match ws.upgrade() {
+                        Some(this) => Self::pane_layout_items(menu, &ws, this.read(cx)),
+                        None => menu,
+                    })
+                    .into_any_element());
+            },
+            "new_tab" => return Ok(Self::new_tab_menu(b, ws.clone()).into_any_element()),
+            _ => return Err(Framed::Button(b)),
+        }
+        .into_any_element())
+    }
+
+    /// The new-tab button's menu on `b`.
+    fn new_tab_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
+        b.dropdown_menu(move |menu, window, cx| {
+            let (ws, ws2, ws3, ws4) = (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+            let folders = ws.upgrade().map(|w| w.read(cx).folders.clone()).unwrap_or_default();
+            let ws5 = ws.clone();
+            let menu = menu
+                .menu("Add Folder to Workspace…", Box::new(crate::OpenFolder))
+                .separator()
+                .menu("New Claude Tab", Box::new(NewClaudeTab))
+                .menu("New Shell Tab", Box::new(NewShellTab));
+            // With several folders, a tab can start in any of them.
+            let menu = if folders.len() > 1 {
+                menu.submenu("New Tab in Folder", window, cx, move |mut menu, _, _| {
+                    for (kind, label) in [(TabKind::Claude, "Claude"), (TabKind::Shell, "Shell")] {
+                        if kind == TabKind::Shell {
+                            menu = menu.separator();
+                        }
+                        for f in &folders {
+                            let (ws, f) = (ws5.clone(), f.clone());
+                            menu =
+                                menu.item(PopupMenuItem::new(format!("{label} in {}", folder_name(&f))).on_click(move |_, window, cx| {
+                                    let _ = ws.update(cx, |this, cx| this.add_term(kind, None, None, None, Some(f.clone()), window, cx));
+                                }));
+                        }
+                    }
+                    menu
+                })
+            } else {
+                menu
+            };
+            menu.submenu("Claude Options", window, cx, move |mut menu, _, _| {
+                let args = window_state::claude_args();
+                for (label, flag) in CLAUDE_FLAGS {
+                    menu = menu.item(PopupMenuItem::new(format!("{label}  {flag}")).checked(window_state::has_flag(&args, flag)).on_click(
+                        move |_, _, _| {
+                            window_state::set_claude_args(&window_state::toggle_flag(&window_state::claude_args(), flag));
+                        },
+                    ));
+                }
+                let ws = ws3.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("Edit Arguments…").on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.edit_claude_args(window, cx));
+                    }))
+                    .item(PopupMenuItem::label("Applies to Claude tabs opened from now on"))
+            })
+            .separator()
+            .menu("New Scratch File", Box::new(NewScratch))
+            .submenu("New Scratch File of Type", window, cx, move |mut menu, _, _| {
+                for (label, ext) in scratch::KINDS {
+                    let ws = ws.clone();
+                    menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.new_scratch(ext, window, cx));
+                    }));
+                }
+                menu
+            })
+            .submenu("Scratches", window, cx, move |mut menu, _, _| {
+                let files = scratch::list(&scratch::dir());
+                if files.is_empty() {
+                    return menu.item(PopupMenuItem::new("No scratch files").disabled(true));
+                }
+                for path in files.into_iter().take(30) {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let ws = ws2.clone();
+                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
+                        let _ = ws.update(cx, |this, cx| this.open_scratch(path.clone(), window, cx));
+                    }));
+                }
+                menu
+            })
+            .menu("Open Scratches Folder", Box::new(OpenScratchesFolder))
+            .separator()
+            .submenu("Pane Layout", window, cx, move |menu, _, cx| match ws4.upgrade() {
+                Some(this) => Self::pane_layout_items(menu, &ws4, this.read(cx)),
+                None => menu,
+            })
+            .submenu("Tab Layout", window, cx, |menu, _, _| tab_layout_items(menu))
+        })
+    }
+
+    /// The entries of a tab list for `slots`: what each is, and its values
+    /// for the tab and group templates. `mono` gives a tab's icon color by
+    /// whether it is the shown one.
+    fn tab_entries(&self, slots: &[Slot], mono: impl Fn(bool) -> Option<Hsla>, cx: &App) -> (Vec<TabEntry>, Vec<template::Scope>) {
+        let close_key = crate::platform::shortcut("⌘W").to_string();
+        let mut entries = vec![];
+        let mut scopes = vec![];
+        for slot in slots {
+            match *slot {
+                Slot::Group(g) => {
+                    let Some(group) = self.group(g) else { continue };
+                    let tabs = self.group_tabs(g).map_or(0, |r| r.len());
+                    let count = group.collapsed.then_some(tabs);
+                    let name = group.name.clone();
+                    let text = match count {
+                        Some(n) if name.is_empty() => n.to_string(),
+                        Some(n) => format!("{name}  {n}"),
+                        None => name.to_string(),
+                    };
+                    let color = group_color(group.color);
+                    scopes.push(
+                        template::Scope::new(format!("group-{g}"))
+                            .var("group", true)
+                            .var("name", name.clone())
+                            .var("text", text)
+                            .var("collapsed", group.collapsed)
+                            .var("open", !group.collapsed && tabs > 0)
+                            .var("count", tabs)
+                            .var("group_color", color),
+                    );
+                    entries.push(TabEntry { slot: *slot, name: name.clone(), label: group.title().into(), color, tab: None });
+                },
+                Slot::Tab(i) => {
+                    let (label, name, badge) = self.tab_info(i, cx);
+                    let active = self.pane_active_ix(self.pane_of(i)) == Some(i);
+                    let group = self.group_of(i).and_then(|g| Some((self.group(g)?, self.group_tabs(g)?)));
+                    let mut scope = template::Scope::new(format!("tab-{}", self.tabs[i].entity_id().as_u64()))
+                        .var("label", label.clone())
+                        .var("active", active)
+                        .var("preview", self.is_preview(i, cx))
+                        .var("grouped", group.is_some())
+                        .var("close_key", close_key.clone())
+                        .slot_opt("icon", self.tab_icon(i, mono(active), cx));
+                    if let Some((b, color)) = badge.filter(|(b, _)| !b.is_empty()) {
+                        scope = scope.var("badge", b.trim()).var("badge_color", color);
+                    }
+                    let mut color = Hsla::default();
+                    if let Some((g, r)) = group {
+                        color = group_color(g.color);
+                        scope = scope.var("group_color", color).var("group_first", i == r.start).var("group_last", i + 1 == r.end);
+                    }
+                    scopes.push(scope);
+                    entries.push(TabEntry { slot: *slot, name, label: label.into(), color, tab: Some(self.tabs[i].entity_id()) });
+                },
+            }
+        }
+        (entries, scopes)
+    }
+
+    /// What the boxes of a tab list do (`pane_tab_bar`, `vertical_tabs`):
+    /// tabs and group chips, their close buttons, the space after them, the
+    /// right-click menu on `root`; the pane's buttons. `f` back for others.
+    #[allow(clippy::result_large_err)] // As `pane_frame`.
+    fn tab_list_frame(
+        ws: &WeakEntity<Self>,
+        pane: PaneId,
+        entries: &[TabEntry],
+        (name, ix, f): (&str, Option<usize>, Framed),
+    ) -> Result<AnyElement, Framed> {
+        let drop_bg = |cx: &App| cx.theme().list_hover;
+        let entry = ix.and_then(|ix| entries.get(ix));
+        Ok(match (name, f, entry) {
+            ("root", Framed::Box(d), _) => Self::tab_menu_frame(d, pane, ws).into_any_element(),
+            ("end", Framed::Box(d), _) => d
+                .id(("tabs-end", pane as usize))
+                .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                .drag_over::<DraggedGroup>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                .on_drop(on_event(ws, move |this, d: &DraggedTab, window, cx| this.move_tab_to_pane(d.tab, pane, window, cx)))
+                .on_drop(on_event(ws, move |this, d: &DraggedGroup, _, cx| {
+                    this.move_group(d.group, this.tabs.len(), cx);
+                    this.set_group_pane(d.group, pane);
+                    this.groups_changed(cx);
+                }))
+                .into_any_element(),
+            ("tab", Framed::Box(d), Some(&TabEntry { slot: Slot::Tab(i), ref name, tab: Some(tab), .. })) => {
+                let drag = DraggedTab { tab, name: name.clone() };
+                d.id(("tab", i))
+                    .on_click(on_event(ws, move |this, ev: &ClickEvent, window, cx| {
+                        if ev.click_count() > 1 {
+                            this.pin_tab(i, cx);
+                        }
+                        this.activate(i, window, cx);
+                    }))
+                    .on_mouse_down(MouseButton::Right, on_event(ws, move |this, _: &MouseDownEvent, _, _| this.menu_tab = Some(i)))
+                    .on_drag(drag, Self::drag_start(ws.clone()))
+                    .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                    .drag_over::<DraggedGroup>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                    .on_drop(on_event(ws, move |this, d: &DraggedTab, window, cx| {
+                        let join = this.group_of(i);
+                        this.move_tab(d.tab, i, join, window, cx);
+                    }))
+                    .on_drop(on_event(ws, move |this, d: &DraggedGroup, _, cx| this.move_group(d.group, i, cx)))
+                    .into_any_element()
+            },
+            ("chip" | "group", Framed::Box(d), Some(&TabEntry { slot: Slot::Group(g), ref name, color, .. })) => {
+                let drag = DraggedGroup { group: g, name: name.clone(), color };
+                d.id(("group", g as usize))
+                    .on_click(on_event(ws, move |this, _: &ClickEvent, window, cx| this.toggle_group(g, window, cx)))
+                    .on_mouse_down(MouseButton::Right, on_event(ws, move |this, _: &MouseDownEvent, _, _| this.menu_group = Some(g)))
+                    .on_drag(drag, Self::drag_start(ws.clone()))
+                    .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                    .drag_over::<DraggedGroup>(move |s, _, _, cx| s.bg(drop_bg(cx)))
+                    .on_drop(on_event(ws, move |this, d: &DraggedTab, window, cx| this.move_tab_to_group(d.tab, g, window, cx)))
+                    .on_drop(on_event(ws, move |this, d: &DraggedGroup, _, cx| {
+                        if let Some(r) = this.group_tabs(g) {
+                            this.move_group(d.group, r.start, cx);
+                        }
+                    }))
+                    .into_any_element()
+            },
+            ("close", Framed::Button(b), Some(&TabEntry { slot: Slot::Tab(i), .. })) => b
+                .on_click(on_event(ws, move |this, _: &ClickEvent, window, cx| {
+                    // Don't let the tab's own click activate it.
+                    cx.stop_propagation();
+                    this.request_close_tab(i, window, cx);
+                }))
+                .into_any_element(),
+            (name, f, _) => return Self::pane_frame(ws, pane, name, f),
+        })
+    }
+
+    /// `d` with the tab bar's right-click menu: the tab or group menu, picked
+    /// by what was clicked; the tab layouts on empty space.
+    fn tab_menu_frame(d: Div, pane: PaneId, ws: &WeakEntity<Self>) -> impl IntoElement {
+        let menu_ws = ws.clone();
+        d.id(("tab-menu", pane as usize))
             // Before the tabs' own handlers pick what the menu is for.
-            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, _| {
+            .capture_any_mouse_down(on_event(ws, |this, ev: &MouseDownEvent, _, _| {
                 if ev.button == MouseButton::Right {
                     this.menu_tab = None;
                     this.menu_group = None;
                 }
             }))
-            .child(child)
             .context_menu(move |menu, _, cx| {
+                let ws = &menu_ws;
                 let Some(this) = ws.upgrade() else { return menu };
                 let this = this.read(cx);
                 if let Some(g) = this.menu_group.filter(|&g| this.group(g).is_some()) {
-                    return Self::group_menu(menu, &ws, g, this);
+                    return Self::group_menu(menu, ws, g, this);
                 }
                 match this.menu_tab.filter(|&ix| ix < this.tabs.len()) {
-                    Some(ix) => Self::tab_menu(menu, &ws, ix, this, cx),
+                    Some(ix) => Self::tab_menu(menu, ws, ix, this, cx),
                     None => {
-                        let menu = Self::pane_layout_items(menu.item(PopupMenuItem::label("Pane Layout")), &ws, this);
+                        let menu = Self::pane_layout_items(menu.item(PopupMenuItem::label("Pane Layout")), ws, this);
                         tab_layout_items(menu.separator().item(PopupMenuItem::label("Tab Layout")))
                     },
                 }
             })
     }
 
-    /// Pane `pane`'s horizontal tab bar: one scrolling row, or rows that wrap.
-    fn render_tab_bar(&self, pane: PaneId, cx: &mut Context<Self>) -> impl IntoElement {
-        let look = style::el("pane_tab_bar", cx);
+    /// Pane `pane`'s horizontal tab bar (`pane_tab_bar`): one scrolling row,
+    /// or rows that wrap.
+    fn render_tab_bar(&self, pane: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let slots = self.slots_in(pane);
         let shown = self.pane_active_ix(pane);
         let active_slot = slots.iter().position(|s| Some(*s) == shown.map(Slot::Tab)).unwrap_or(0);
         let scroll = self.ui(pane, |u| u.tab_scroll.clone());
-        let items: Vec<(Slot, Tab)> = slots
-            .iter()
-            .filter_map(|s| match *s {
-                Slot::Group(g) => Some((*s, self.bar_chip(self.group(g)?, cx))),
-                Slot::Tab(i) => Some((*s, self.bar_tab(i, cx))),
-            })
-            .collect();
-        // Right after the last tab, like a browser's new-tab button.
-        let end_space =
-            self.end_drop_zone("term-bar-end", pane, cx).flex_1().px_1().flex().items_center().child(self.new_tab_button(pane, cx));
-        let panels = self.pane_buttons(pane, cx);
-        let bar = if window_state::tab_layout() == TabLayout::Wrap {
+        let wrap = window_state::tab_layout() == TabLayout::Wrap;
+        let mono = |active| {
+            let look = style::el(if active { "pane_tab_bar.tab_active" } else { "pane_tab_bar.tab" }, cx);
+            look.is_set("icon_text").then(|| look.color("icon_text"))
+        };
+        let (entries, items) = self.tab_entries(&slots, mono, cx);
+        if wrap {
             // Reveal the active tab again once tabs scroll.
             self.ui(pane, |u| u.revealed = None);
-            let tabs = items.into_iter().enumerate().map(|(n, (slot, tab))| {
-                div().id(("wrapped-tab", n)).child(match slot {
-                    Slot::Group(g) => tab.on_click(cx.listener(move |this, _, window, cx| this.toggle_group(g, window, cx))),
-                    Slot::Tab(i) => {
-                        tab.selected(Some(i) == shown).on_click(cx.listener(move |this, _, window, cx| this.activate(i, window, cx)))
-                    },
-                })
-            });
-            look.apply(div().flex().items_start())
-                .child(div().flex_1().min_w_0().flex().flex_wrap().children(tabs).child(end_space.h(style::TAB_BAR_H).min_w(px(32.))))
-                .child(panels.h(style::TAB_BAR_H))
-                .into_any_element()
-        } else {
-            if self.ui(pane, |u| u.revealed.replace(active_slot)) != Some(active_slot) {
-                scroll.scroll_to_item(active_slot);
-            }
-            let overflows = scroll.max_offset().x > px(0.);
-            // The bar draws its own bottom line; a border here would be a second.
-            let mut bar = look.apply(TabBar::new(("term-tabs", pane as usize)));
-            bar.style().border_widths = Default::default();
-            let bar = bar
-                .track_scroll(&scroll)
-                // Lists every tab once they don't all fit.
-                .menu(overflows)
-                .when(shown.is_some(), |b| b.selected_index(active_slot))
-                .children(items.into_iter().map(|(_, tab)| tab))
-                .last_empty_space(end_space.h_full())
-                .suffix(panels.h_full())
-                .on_click(cx.listener(move |this, ix: &usize, window, cx| match slots.get(*ix) {
-                    Some(Slot::Group(g)) => this.toggle_group(*g, window, cx),
-                    Some(Slot::Tab(i)) => this.activate(*i, window, cx),
-                    None => {},
-                }));
-            // The strip only takes sideways scrolls; let a mouse wheel move it too.
-            let wheel = scroll.clone();
-            div()
-                .on_scroll_wheel(cx.listener(move |_, ev: &ScrollWheelEvent, window, cx| {
-                    let d = ev.delta.pixel_delta(window.line_height());
-                    if d.y.abs() > d.x.abs() {
-                        let max = wheel.max_offset().x;
-                        let mut offset = wheel.offset();
-                        offset.x = (offset.x + d.y).min(px(0.)).max(-max);
-                        wheel.set_offset(offset);
-                        cx.notify();
-                    }
-                }))
-                .relative()
-                .child(bar)
-                // A thin bar along the strip's bottom edge while hovered, like VS Code's.
-                .when(overflows, |this| {
-                    this.child(Scrollbar::horizontal(&scroll).id(("tab-scrollbar", pane as usize)).mode(ScrollbarMode::Hover).styles(|s| {
-                        s.track(|t| t.width(px(4.)))
-                            .track_hover(|t| t.width(px(4.)))
-                            .track_active(|t| t.width(px(4.)))
-                            .thumb(|t| t.width(px(3.)).inset(px(0.)))
-                            .thumb_hover(|t| t.width(px(4.)).inset(px(0.)))
-                            .thumb_active(|t| t.width(px(4.)).inset(px(0.)))
-                    }))
-                })
-                .into_any_element()
-        };
-        self.with_tab_menu(("tab-bar", pane), bar, false, cx)
-    }
-
-    /// Tab `i` as a row of the vertical list. A grouped tab sits in from a
-    /// line in its group's color that runs down all the group's tabs.
-    fn vertical_tab(&self, i: usize, cx: &mut Context<Self>) -> Stateful<Div> {
-        let (label, name, badge) = self.tab_info(i, cx);
-        let icon = self.tab_icon(i, None, cx);
-        let look = style::el("vertical_tabs.row", cx);
-        let (hover, selected_bg, drop_bg) = (look.color("hover_background"), look.color("selected_background"), cx.theme().list_hover);
-        let selected = self.pane_active_ix(self.pane_of(i)) == Some(i);
-        let join = self.group_of(i);
-        let line = join.and_then(|g| Some((self.group(g)?, self.group_tabs(g)?))).map(|(g, r)| {
-            // Over the gap to the next row, so the rows' pieces meet.
-            let mut piece = div().absolute().left(px(4.)).w(px(3.)).top(px(-1.)).bottom(px(-1.)).bg(group_color(g.color));
-            if i == r.start {
-                piece = piece.top_0().rounded_t_full();
-            }
-            if i + 1 == r.end {
-                piece = piece.bottom_0().rounded_b_full();
-            }
-            piece
+        } else if self.ui(pane, |u| u.revealed.replace(active_slot)) != Some(active_slot) {
+            scroll.scroll_to_item(active_slot);
+        }
+        let overflows = !wrap && scroll.max_offset().x > px(0.);
+        // A thin bar along the strip's bottom edge while hovered, like VS Code's.
+        let scrollbar = overflows.then(|| {
+            Scrollbar::horizontal(&scroll).id(("tab-scrollbar", pane as usize)).mode(ScrollbarMode::Hover).styles(|s| {
+                s.track(|t| t.width(px(4.)))
+                    .track_hover(|t| t.width(px(4.)))
+                    .track_active(|t| t.width(px(4.)))
+                    .thumb(|t| t.width(px(3.)).inset(px(0.)))
+                    .thumb_hover(|t| t.width(px(4.)).inset(px(0.)))
+                    .thumb_active(|t| t.width(px(4.)).inset(px(0.)))
+            })
         });
-        let drag = DraggedTab { tab: self.tabs[i].entity_id(), name };
-        div()
-            .id(("vtab", i))
-            .group("vtab")
-            .relative()
-            .flex_shrink_0()
-            .h(look.len("height"))
-            .flex()
-            .when(join.is_some(), |d| d.pl(look.len("group_indent")))
-            .children(line)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(look.len("gap"))
-                    .pl(look.len("padding_left"))
-                    .pr(look.len("padding_right"))
-                    .rounded(look.len("radius"))
-                    .text_size(look.len("font_size"))
-                    .text_color(look.color("text"))
-                    .map(|d| if selected { d.bg(selected_bg) } else { d.hover(|s| s.bg(hover)) })
-                    .children(icon)
-                    .when_some(badge.filter(|(b, _)| !b.is_empty()), |d, (b, color)| d.child(div().text_color(color).child(b.trim())))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .when(self.is_preview(i, cx), |d| d.italic())
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .when(!selected, |d| d.opacity(0.))
-                            .group_hover("vtab", |s| s.opacity(1.))
-                            .child(self.close_button(i, None, cx)),
-                    ),
-            )
-            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                if ev.click_count() > 1 {
-                    this.pin_tab(i, cx);
-                }
-                this.activate(i, window, cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_tab = Some(i)))
-            .on_drag(drag, self.start_drag(cx))
-            .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
-            .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab(d.tab, i, join, window, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| this.move_group(d.group, i, cx)))
+        let scope = self
+            .pane_vars(pane, template::Scope::new(format!("tab-bar-{pane}")))
+            .var("wrap", wrap)
+            .var("overflows", overflows)
+            .list("items", items)
+            .slot_opt("scrollbar", scrollbar);
+        let ws = cx.entity().downgrade();
+        template::render(
+            "pane_tab_bar",
+            scope,
+            &mut |name, ix, f| match (name, f) {
+                ("bar", Framed::Box(d)) => Self::tab_menu_frame(d, pane, &ws).into_any_element(),
+                ("tabs", Framed::Box(d)) => {
+                    // The strip only takes sideways scrolls; let a mouse wheel move it too.
+                    let wheel = scroll.clone();
+                    d.id(("term-tabs", pane as usize))
+                        .overflow_x_scroll()
+                        .track_scroll(&scroll)
+                        .on_scroll_wheel(on_event(&ws, move |_, ev: &ScrollWheelEvent, window, cx| {
+                            let d = ev.delta.pixel_delta(window.line_height());
+                            if d.y.abs() > d.x.abs() {
+                                let max = wheel.max_offset().x;
+                                let mut offset = wheel.offset();
+                                offset.x = (offset.x + d.y).min(px(0.)).max(-max);
+                                wheel.set_offset(offset);
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
+                },
+                // Lists every tab once they don't all fit.
+                ("more", Framed::Button(b)) => {
+                    let ws = ws.clone();
+                    let menu: Vec<(Slot, SharedString)> = entries.iter().map(|e| (e.slot, e.label.clone())).collect();
+                    b.dropdown_caret(true)
+                        .dropdown_menu(move |mut m, _, _| {
+                            m = m.scrollable(true);
+                            for (slot, label) in &menu {
+                                let (ws, slot) = (ws.clone(), *slot);
+                                m = m.item(PopupMenuItem::new(label.clone()).checked(shown.map(Slot::Tab) == Some(slot)).on_click(
+                                    move |_, window, cx| {
+                                        let _ = ws.update(cx, |this, cx| match slot {
+                                            Slot::Group(g) => this.toggle_group(g, window, cx),
+                                            Slot::Tab(i) => this.activate(i, window, cx),
+                                        });
+                                    },
+                                ));
+                            }
+                            m
+                        })
+                        .anchor(Anchor::TopRight)
+                        .into_any_element()
+                },
+                (name, f) => Self::tab_list_frame(&ws, pane, &entries, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
+            },
+            cx,
+        )
     }
 
-    /// Group `g`'s header row in the vertical list: a bar in its color with
-    /// its name (and tab count when collapsed) and a chevron, like Chrome's.
-    fn vertical_chip(&self, g: &TabGroup, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = g.id;
-        let color = group_color(g.color);
-        let look = style::el("vertical_tabs.group", cx);
-        let (fg, drop_bg) = (look.color("text"), cx.theme().list_hover);
-        let drag = DraggedGroup { group: id, name: g.name.clone(), color };
-        let count = g.collapsed.then(|| self.group_tabs(id).map_or(0, |r| r.len()));
-        let chevron = if g.collapsed { IconName::ChevronDown } else { IconName::ChevronUp };
-        look.apply(div().id(("vgroup", id as usize)))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .bg(color)
-            .hover(|s| s.opacity(0.9))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(g.name.clone()))
-            .children(count.map(|n| div().flex_shrink_0().text_xs().child(n.to_string())))
-            .child(Icon::new(chevron).small().text_color(fg))
-            .on_click(cx.listener(move |this, _, window, cx| this.toggle_group(id, window, cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_group = Some(id)))
-            .on_drag(drag, self.start_drag(cx))
-            .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
-            .drag_over::<DraggedGroup>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| this.move_tab_to_group(d.tab, id, window, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedGroup, _, cx| {
-                if let Some(r) = this.group_tabs(id) {
-                    this.move_group(d.group, r.start, cx);
-                }
-            }))
-    }
-
-    /// Pane `pane`'s tabs as a list down its left, like Edge's or Arc's
-    /// vertical tabs.
-    fn render_vertical_tabs(&self, pane: PaneId, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Pane `pane`'s tabs as a list down its left (`vertical_tabs`), like
+    /// Edge's or Arc's vertical tabs.
+    fn render_vertical_tabs(&self, pane: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let slots = self.slots_in(pane);
         let shown = self.pane_active_ix(pane);
         let active_slot = slots.iter().position(|s| Some(*s) == shown.map(Slot::Tab)).unwrap_or(0);
@@ -2286,26 +2176,18 @@ impl Workspace {
         if self.ui(pane, |u| u.revealed.replace(active_slot)) != Some(active_slot) {
             scroll.scroll_to_item(active_slot);
         }
-        let rows: Vec<AnyElement> = slots
-            .iter()
-            .filter_map(|s| match *s {
-                Slot::Group(g) => Some(self.vertical_chip(self.group(g)?, cx).into_any_element()),
-                Slot::Tab(i) => Some(self.vertical_tab(i, cx).into_any_element()),
-            })
-            .collect();
-        let end = self.end_drop_zone("vtabs-end", pane, cx).flex_1().min_h(px(40.));
-        let list = style::el("vertical_tabs.list", cx)
-            .apply(div().id(("vtabs", pane as usize)).flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).flex().flex_col())
-            .children(rows)
-            .child(end);
-        let header = style::el("vertical_tabs.header", cx)
-            .apply(div().flex_shrink_0().flex().items_center())
-            .child(self.new_tab_button(pane, cx))
-            .child(div().flex_1())
-            .child(self.pane_buttons(pane, cx));
-        let body =
-            style::el("vertical_tabs", cx).container(div().size_full().flex().flex_col()).child(header).child(list).into_any_element();
-        self.with_tab_menu(("vertical-tabs", pane), body, true, cx)
+        let (entries, items) = self.tab_entries(&slots, |_| None, cx);
+        let scope = self.pane_vars(pane, template::Scope::new(format!("vertical-tabs-{pane}"))).list("items", items);
+        let ws = cx.entity().downgrade();
+        template::render(
+            "vertical_tabs",
+            scope,
+            &mut |name, ix, f| match (name, f) {
+                ("list", Framed::Box(d)) => d.id(("vtabs", pane as usize)).overflow_y_scroll().track_scroll(&scroll).into_any_element(),
+                (name, f) => Self::tab_list_frame(&ws, pane, &entries, (name, ix, f)).unwrap_or_else(Framed::into_any_element),
+            },
+            cx,
+        )
     }
 
     /// Right-click menu of tab `ix`.
@@ -2957,11 +2839,7 @@ impl Workspace {
     }
 
     /// A drag's start. While a tab is dragged, the panes show where it can go.
-    fn start_drag<T: Clone + Render>(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<T> + 'static {
-        let ws = cx.entity().downgrade();
+    fn drag_start<T: Clone + Render>(ws: WeakEntity<Self>) -> impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<T> + 'static {
         move |d, _, _, cx| {
             if std::any::TypeId::of::<T>() == std::any::TypeId::of::<DraggedTab>() {
                 let _ = ws.update(cx, |this, cx| {
@@ -2971,60 +2849,6 @@ impl Workspace {
             }
             cx.new(|_| d.clone())
         }
-    }
-
-    /// Pane `pane`'s buttons at the end of its tab strip: split, maximize,
-    /// and, on the top right pane, the pane layout menu.
-    fn pane_buttons(&self, pane: PaneId, cx: &mut Context<Self>) -> Div {
-        let multi = self.layout.panes().len() > 1;
-        let zoomed = self.zoomed == Some(pane);
-        let corner = self.zoomed.unwrap_or_else(|| self.layout.top_right()) == pane;
-        div()
-            .flex()
-            .items_center()
-            .pl_1()
-            .child(
-                style::el("pane_tab_bar.button", cx)
-                    .apply(Button::new(("pane-split", pane as usize)))
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(AssetIcon::Columns2))
-                    .tooltip(format!("Split Right ({})", crate::platform::shortcut("⌘\\")))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_pane_state(pane);
-                        let ix = this.pane_active_ix(pane).unwrap_or(this.active);
-                        this.split(ix, Edge::Right, window, cx);
-                    })),
-            )
-            .when(multi, |d| {
-                d.child(
-                    style::el("pane_tab_bar.button", cx)
-                        .apply(Button::new(("pane-zoom", pane as usize)))
-                        .xsmall()
-                        .ghost()
-                        .icon(Icon::new(if zoomed { AssetIcon::Minimize2 } else { AssetIcon::Maximize2 }))
-                        .selected(zoomed)
-                        .tooltip(if zoomed {
-                            format!("Restore Panes ({})", crate::platform::shortcut("⌘⇧↩"))
-                        } else {
-                            format!("Maximize Pane ({})", crate::platform::shortcut("⌘⇧↩"))
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.focus_pane(pane, window, cx);
-                            this.toggle_zoom(cx);
-                        })),
-                )
-                .child(
-                    style::el("pane_tab_bar.button", cx)
-                        .apply(Button::new(("pane-close", pane as usize)))
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::Close)
-                        .tooltip("Close Pane (its tabs join the pane before it)")
-                        .on_click(cx.listener(move |this, _, window, cx| this.close_pane(pane, window, cx))),
-                )
-            })
-            .when(corner, |d| d.child(self.panel_buttons(cx)))
     }
 
     /// The pane layouts (VS Code's Editor Layout, tmux's tiled), for menus.
@@ -3108,53 +2932,24 @@ impl Workspace {
         template::render(
             "pane",
             scope,
-            &mut |frame, _, d| match (frame, focus.take()) {
-                ("pane", Some(f)) => d.id(("pane", pane as usize)).capture_any_mouse_down(f).into_any_element(),
-                _ => d.into_any_element(),
+            &mut |frame, _, d| match (frame, d, focus.take()) {
+                ("pane", Framed::Box(d), Some(f)) => d.id(("pane", pane as usize)).capture_any_mouse_down(f).into_any_element(),
+                (_, d, _) => d.into_any_element(),
             },
             cx,
         )
     }
 
-    /// What an empty pane (from a layout preset) shows.
-    fn empty_pane(&self, pane: PaneId, cx: &mut Context<Self>) -> Div {
-        let look = style::el("pane.empty", cx);
-        let new = move |kind| {
-            move |this: &mut Self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                this.focus_pane_state(pane);
-                this.add_tab(kind, window, cx);
-            }
-        };
-        look.apply(div().size_full().flex().flex_col().items_center().justify_center().overflow_hidden())
-            .child(div().text_center().child("Drag a tab here, or open one"))
-            .child(
-                // Wraps in a narrow pane rather than spilling into the neighbour.
-                div()
-                    .max_w_full()
-                    .flex()
-                    .flex_wrap()
-                    .justify_center()
-                    .gap_2()
-                    .child(
-                        Button::new(("pane-claude", pane as usize))
-                            .small()
-                            .label("New Claude Tab")
-                            .on_click(cx.listener(new(TabKind::Claude))),
-                    )
-                    .child(
-                        Button::new(("pane-shell", pane as usize))
-                            .small()
-                            .label("New Shell Tab")
-                            .on_click(cx.listener(new(TabKind::Shell))),
-                    )
-                    .child(
-                        Button::new(("pane-close-empty", pane as usize))
-                            .small()
-                            .ghost()
-                            .label("Close Pane")
-                            .on_click(cx.listener(move |this, _, window, cx| this.close_pane(pane, window, cx))),
-                    ),
-            )
+    /// What an empty pane (from a layout preset) shows (`pane.empty`).
+    fn empty_pane(&self, pane: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        let ws = cx.entity().downgrade();
+        let scope = template::Scope::new(format!("empty-{pane}"));
+        template::render(
+            "pane.empty",
+            scope,
+            &mut |name, _, f| Self::pane_frame(&ws, pane, name, f).unwrap_or_else(Framed::into_any_element),
+            cx,
+        )
     }
 
     /// Over pane `pane`'s content while a tab is dragged: the part under
@@ -3438,17 +3233,18 @@ impl Workspace {
                 "ok".into()
             },
             cmd if cmd.starts_with("file-open ") => {
-                let path = self.root.join(cmd["file-open ".len()..].trim());
+                let path = self.link_root(None).join(cmd["file-open ".len()..].trim());
                 self.open_file(path, true, window, cx);
                 "ok".into()
             },
             other => format!("error: unknown command {other:?}"),
         }
     }
+}
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
+/// A folder's name, for titles and labels.
+pub fn folder_name(f: &Path) -> String {
+    f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// Ask before closing `what` while `jobs` run in it; `then` closes it.
@@ -3530,11 +3326,16 @@ impl Render for Workspace {
             });
             scope = scope.docks(a, on_change);
         }
+        if let Some((release, installing)) = crate::update::offered(cx) {
+            let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
+            scope = scope.var("update", label).var("installing", installing);
+        }
         let scope = scope
+            .var("monitor", crate::agent_monitor::window(cx).is_some())
             .var("explorer", self.show_explorer)
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
-            .var("path", self.root.display().to_string())
+            .var("path", crate::dirs::tilde(&self.default_cwd(cx)))
             .var("background", background)
             .var("settings_error", settings_error)
             .slot("left_strip", left_strip)
@@ -3548,7 +3349,22 @@ impl Render for Workspace {
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
             cx.set_global(crate::dock::PinnedParts(pinned));
         }
-        let body = template::render("workspace", scope, &mut |_, _, d| d.into_any_element(), cx);
+        let body = template::render(
+            "workspace",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
+                ("update", Framed::Button(b)) => b
+                    .on_click(|_, _, cx| {
+                        if let Some((release, false)) = crate::update::offered(cx) {
+                            crate::update::offer(release, cx)
+                        }
+                    })
+                    .into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
 
         div()
             .key_context("Workspace")
