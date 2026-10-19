@@ -177,6 +177,80 @@ pub struct Arrangement {
     pub docks: BTreeMap<String, Option<Tree>>,
     /// Stored dock widths, by dock name.
     pub widths: BTreeMap<String, f32>,
+    /// The parts floating over the docks, by name.
+    pub floating: BTreeMap<String, Float>,
+}
+
+/// A part floating over the docks: the dock it came from (its strip button
+/// stays there, and it docks back there), its top-left as fractions of the
+/// area (a smaller window keeps it in view) and its size in pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Float {
+    pub from: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// A rectangle in pixels, from the area's top-left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// The sides of a floating part a resize drags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Float {
+    /// Where it sits in an area of `area` (width, height): no bigger than
+    /// the area, and inside it.
+    pub fn rect(&self, area: (f32, f32)) -> Rect {
+        let (w, h) = (self.w.min(area.0).max(0.), self.h.min(area.1).max(0.));
+        let x = (self.x * area.0).clamp(0., (area.0 - w).max(0.));
+        let y = (self.y * area.1).clamp(0., (area.1 - h).max(0.));
+        Rect { x, y, w, h }
+    }
+
+    /// Floating from dock `from` at `r` in an area of `area`.
+    pub fn at(from: &str, r: Rect, area: (f32, f32)) -> Self {
+        let frac = |v: f32, of: f32| if of > 0. { (v / of).clamp(0., 1.) } else { 0. };
+        Float { from: from.to_string(), x: frac(r.x, area.0), y: frac(r.y, area.1), w: r.w.max(1.), h: r.h.max(1.) }
+    }
+}
+
+/// `r` moved by `(dx, dy)`, kept inside an area of `area`.
+pub fn moved(r: Rect, dx: f32, dy: f32, area: (f32, f32)) -> Rect {
+    let x = (r.x + dx).min(area.0 - r.w).max(0.);
+    let y = (r.y + dy).min(area.1 - r.h).max(0.);
+    Rect { x, y, ..r }
+}
+
+/// `r` with `sides` dragged by `(dx, dy)`: at least `min`, inside an area of `area`.
+pub fn resized(r: Rect, sides: Sides, dx: f32, dy: f32, min: (f32, f32), area: (f32, f32)) -> Rect {
+    let (mut l, mut t, mut rt, mut b) = (r.x, r.y, r.x + r.w, r.y + r.h);
+    if sides.left {
+        l = (l + dx).clamp(0., (rt - min.0).max(0.));
+    }
+    if sides.right {
+        rt = (rt + dx).clamp(l + min.0, area.0.max(l + min.0));
+    }
+    if sides.top {
+        t = (t + dy).clamp(0., (b - min.1).max(0.));
+    }
+    if sides.bottom {
+        b = (b + dy).clamp(t + min.1, area.1.max(t + min.1));
+    }
+    Rect { x: l, y: t, w: rt - l, h: b - t }
 }
 
 /// The key an arrangement is stored under: template name, `/`, the dock names sorted and joined with `+`
@@ -454,11 +528,11 @@ impl Arrangement {
             key: key.to_string(),
             docks: docks.iter().map(|d| (d.name.clone(), prune(&d.defaults, &|_| true))).collect(),
             widths: BTreeMap::new(),
+            floating: BTreeMap::new(),
         }
     }
 
     /// The dock `part` sits in.
-    #[cfg(test)]
     pub fn dock_of(&self, part: &str) -> Option<&str> {
         self.docks.iter().find_map(|(name, tree)| {
             let mut parts = Vec::new();
@@ -485,15 +559,59 @@ impl Arrangement {
             return false;
         }
         let mut next = self.clone();
-        let not_part = |name: &str| name != part;
-        for tree in next.docks.values_mut() {
-            *tree = tree.as_ref().and_then(|t| prune(t, &not_part));
-        }
+        next.take_out(part);
         let root = next.docks.entry(dock.to_string()).or_insert(None);
         if !place(root, info.dir, part, &at) || next == *self {
             return false;
         }
         *self = next;
+        true
+    }
+
+    /// Takes `part` out of every dock and out of the floating parts.
+    fn take_out(&mut self, part: &str) {
+        let not_part = |name: &str| name != part;
+        for tree in self.docks.values_mut() {
+            *tree = tree.as_ref().and_then(|t| prune(t, &not_part));
+        }
+        self.floating.remove(part);
+    }
+
+    /// Floats `part` at `r` in an area of `area`, out of its dock (a floating
+    /// one just moves); false when it is in no dock and doesn't float, or
+    /// nothing changes.
+    pub fn float_part(&mut self, part: &str, r: Rect, area: (f32, f32)) -> bool {
+        let Some(from) = self.floating.get(part).map(|f| f.from.clone()).or_else(|| self.dock_of(part).map(str::to_owned)) else {
+            return false;
+        };
+        let mut next = self.clone();
+        next.take_out(part);
+        next.floating.insert(part.to_string(), Float::at(&from, r, area));
+        if next == *self {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Docks floating `part` again: at the end of the dock it came from, or of
+    /// its default dock when that one is gone or doesn't take it.
+    pub fn dock_part(&mut self, part: &str, kind: &str, docks: &[DockInfo]) -> bool {
+        let Some(f) = self.floating.remove(part) else {
+            return false;
+        };
+        match docks.iter().find(|d| d.name == f.from && d.takes(part, kind)) {
+            Some(info) => {
+                let root = self.docks.entry(info.name.clone()).or_insert(None);
+                place(root, info.dir, part, &Drop::End);
+            },
+            None => {
+                if self.send_to_default(part, Some(kind), docks).is_none() {
+                    self.floating.insert(part.to_string(), f);
+                    return false;
+                }
+            },
+        }
         true
     }
 
@@ -583,6 +701,29 @@ impl Arrangement {
             self.docks.entry(info.name.clone()).or_insert(None);
         }
 
+        // Floating parts keep floating; one whose dock is gone docks back to its default.
+        let floating = std::mem::take(&mut self.floating);
+        for (part, mut f) in floating {
+            let Some(kind) = kind_of(&part) else {
+                problems.push(format!("layout: \"{part}\" is not a part any more"));
+                continue;
+            };
+            if !seen.insert(part.clone()) {
+                problems.push(format!("layout: \"{part}\" is placed twice"));
+                continue;
+            }
+            if !info_of(&f.from).is_some_and(|i| i.takes(&part, kind)) {
+                match default_dock(&part, kind, docks) {
+                    Some(info) => f.from = info.name.clone(),
+                    None => {
+                        problems.push(format!("layout: \"{part}\" has no dock"));
+                        continue;
+                    },
+                }
+            }
+            self.floating.insert(part, f);
+        }
+
         for part in moved_back {
             match self.send_to_default(&part, kind_of(&part), docks) {
                 Some(dock) => problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\"")),
@@ -602,20 +743,14 @@ impl Arrangement {
 
     /// Appends `part` to its default dock (or the first dock that takes its kind); the dock's name.
     fn send_to_default(&mut self, part: &str, kind: Option<&str>, docks: &[DockInfo]) -> Option<String> {
-        let kind = kind?;
-        let takes = |d: &&DockInfo| d.takes(part, kind);
-        let in_defaults = |d: &&DockInfo| {
-            let mut names = Vec::new();
-            collect_parts(&d.defaults, &mut names);
-            names.contains(&part)
-        };
-        let info = docks.iter().find(|d| takes(d) && in_defaults(d)).or_else(|| docks.iter().find(takes))?;
+        let info = default_dock(part, kind?, docks)?;
         let root = self.docks.entry(info.name.clone()).or_insert(None);
         place(root, info.dir, part, &Drop::End);
         Some(info.name.clone())
     }
 
-    /// One line: `name=tree` per dock joined by `;`, then `;w:name=px,...` when widths are stored.
+    /// One line: `name=tree` per dock joined by `;`, then `;f:part=dock@x,y,w,h` per floating part, then
+    /// `;w:name=px,...` when widths are stored.
     pub fn encode(&self) -> String {
         let mut out: Vec<String> = self
             .docks
@@ -628,6 +763,9 @@ impl Arrangement {
                 s
             })
             .collect();
+        for (part, f) in &self.floating {
+            out.push(format!("f:{part}={}@{},{},{},{}", f.from, f.x, f.y, f.w, f.h));
+        }
         if !self.widths.is_empty() {
             let widths: Vec<String> = self.widths.iter().map(|(n, w)| format!("{n}={w}")).collect();
             out.push(format!("w:{}", widths.join(",")));
@@ -639,8 +777,23 @@ impl Arrangement {
     pub fn decode(key: &str, text: &str) -> Option<Self> {
         let mut docks = BTreeMap::new();
         let mut widths = BTreeMap::new();
+        let mut floating = BTreeMap::new();
         let segments: Vec<&str> = text.split(';').collect();
+        // Floating parts come after the docks, before the widths.
+        let mut docks_done = false;
         for (i, seg) in segments.iter().enumerate() {
+            if let Some(entry) = seg.strip_prefix("f:") {
+                docks_done = true;
+                let (part, rest) = entry.split_once('=')?;
+                let (from, rect) = rest.split_once('@')?;
+                let n: Vec<f32> = rect.split(',').map(number).collect::<Option<_>>()?;
+                let [x, y, w, h] = n[..] else { return None };
+                let ok = valid_name(part) && valid_name(from) && w > 0. && h > 0.;
+                if !ok || floating.insert(part.to_string(), Float { from: from.to_string(), x, y, w, h }).is_some() {
+                    return None;
+                }
+                continue;
+            }
             if let Some(list) = seg.strip_prefix("w:") {
                 if i != segments.len() - 1 {
                     return None;
@@ -654,7 +807,7 @@ impl Arrangement {
                 continue;
             }
             let (name, tree) = seg.split_once('=')?;
-            if !valid_name(name) {
+            if !valid_name(name) || docks_done {
                 return None;
             }
             let tree = if tree.is_empty() {
@@ -671,8 +824,15 @@ impl Arrangement {
                 return None;
             }
         }
-        Some(Arrangement { key: key.to_string(), docks, widths })
+        Some(Arrangement { key: key.to_string(), docks, widths, floating })
     }
+}
+
+/// The dock `part` starts in, or else the first that takes its kind.
+fn default_dock<'d>(part: &str, kind: &str, docks: &'d [DockInfo]) -> Option<&'d DockInfo> {
+    let takes = |d: &&DockInfo| d.takes(part, kind);
+    let in_defaults = |d: &&DockInfo| d.defaults.has(part);
+    docks.iter().find(|d| takes(d) && in_defaults(d)).or_else(|| docks.iter().find(takes))
 }
 
 fn valid_name(s: &str) -> bool {
@@ -1254,5 +1414,75 @@ mod tests {
         assert!(kept.saved().is_empty());
         kept.fit("k", &docks(), &PARTS);
         assert_eq!(kept.get("k").unwrap().encode(), DEFAULT);
+    }
+    const AREA: (f32, f32) = (1000., 800.);
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn floating_round_trips() {
+        let d = docks();
+        let mut a = fresh();
+        assert!(a.float_part("scratches", rect(100., 200., 300., 400.), AREA));
+        a.widths.insert("left".into(), 250.);
+        let text = a.encode();
+        assert_eq!(text, "left=explorer;right=changes;f:scratches=left@0.1,0.25,300,400;w:left=250");
+        assert_eq!(Arrangement::decode("k", &text).map(|b| b.encode()), Some(text.clone()));
+        // Docks after the floating parts, a bad rect, a part twice: malformed.
+        assert_eq!(Arrangement::decode("k", "f:a=left@0,0,1,1;left=x"), None);
+        assert_eq!(Arrangement::decode("k", "left=x;f:a=left@0,0,1"), None);
+        assert_eq!(Arrangement::decode("k", "left=x;f:a=left@0,0,0,1"), None);
+        assert_eq!(Arrangement::decode("k", "left=x;f:a=left@0,0,1,1;f:a=left@0,0,1,1"), None);
+        assert!(a.dock_part("scratches", "panel", &d));
+        assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes;w:left=250");
+    }
+
+    #[test]
+    fn floating_moves_and_docks() {
+        let d = docks();
+        let mut a = fresh();
+        // Not a part anywhere: nothing to float.
+        assert!(!a.float_part("ghost", rect(0., 0., 10., 10.), AREA));
+        assert!(a.float_part("changes", rect(0., 0., 300., 400.), AREA));
+        // Moving it keeps the dock it came from.
+        assert!(a.float_part("changes", rect(500., 400., 300., 400.), AREA));
+        assert!(!a.float_part("changes", rect(500., 400., 300., 400.), AREA));
+        assert_eq!(a.floating["changes"].from, "right");
+        // Dropped on a zone: docked there, floating no more.
+        assert!(a.move_part("changes", "panel", "left", Drop::End, &d));
+        assert!(a.floating.is_empty());
+        assert_eq!(a.dock_of("changes"), Some("left"));
+        assert!(!a.dock_part("changes", "panel", &d));
+    }
+
+    #[test]
+    fn reconcile_keeps_floating_parts() {
+        let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
+        let mut a = Arrangement::decode("k", "left=explorer;right=changes;f:scratches=gone@0,0,10,10;f:ghost=left@0,0,10,10").unwrap();
+        let problems = a.reconcile(&docks(), &parts);
+        assert_eq!(a.encode(), "left=explorer;right=changes;f:scratches=left@0,0,10,10");
+        assert!(problems.iter().any(|p| p.contains("\"ghost\" is not a part")));
+        // Floating and docked both: the dock wins.
+        let mut a = Arrangement::decode("k", "left=explorer;right=changes;f:explorer=left@0,0,10,10").unwrap();
+        let problems = a.reconcile(&docks(), &parts);
+        assert!(a.floating.is_empty());
+        assert!(problems.iter().any(|p| p.contains("placed twice")));
+    }
+
+    #[test]
+    fn floating_rects_stay_in_the_area() {
+        let f = Float::at("left", rect(900., 700., 300., 400.), AREA);
+        // A smaller area: no bigger than it, and inside it.
+        assert_eq!(f.rect((200., 300.)), rect(0., 0., 200., 300.));
+        assert_eq!(f.rect(AREA), rect(700., 400., 300., 400.));
+        assert_eq!(moved(rect(10., 10., 100., 100.), -50., 2000., AREA), rect(0., 700., 100., 100.));
+        let r = rect(100., 100., 300., 200.);
+        let left_top = Sides { left: true, top: true, ..Default::default() };
+        assert_eq!(resized(r, left_top, -500., 50., (120., 80.), AREA), rect(0., 150., 400., 150.));
+        let right = Sides { right: true, ..Default::default() };
+        assert_eq!(resized(r, right, -1000., 0., (120., 80.), AREA), rect(100., 100., 120., 200.));
+        assert_eq!(resized(r, right, 1000., 0., (120., 80.), AREA), rect(100., 100., 900., 200.));
     }
 }

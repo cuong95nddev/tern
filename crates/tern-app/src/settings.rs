@@ -1058,9 +1058,18 @@ between them by their headers. In a template:
   `strip`): `zones` `edges` lets a dragged tab split a pane, `stack` lets it
   join one; with `\"accepts\": [\"pane\"]`, a whole pane drags by its tab
   bar's empty space, to another pane's side or onto it (its tabs join).
+- A panel let go outside every drop zone floats over the workspace, where
+  it was let go (its header's right-click menu, `menu.part`, has Float and
+  Dock too). It moves by its header, resizes from its sides and corners, and
+  docks again when dropped on a zone or with Dock (back to the dock it came
+  from, whose tool strip keeps its button). It is drawn as the `floating`
+  element: `width` and `height` are its size when it starts floating,
+  `min_width` and `min_height` the least it resizes to, `grip` how wide its
+  resizing edges are. `\"float\": false` (or a condition) on a `part` keeps it
+  in the docks.
 - `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
-  resizing the panels in docks, and dragging whole panes. Tab drags aren't
-  locked.
+  resizing the panels in docks or floating, and dragging whole panes. Tab
+  drags aren't locked.
 
 Where the panels are is kept per workspace and per template (the `workspace`
 template and the names of its docks), so another theme with other docks has its

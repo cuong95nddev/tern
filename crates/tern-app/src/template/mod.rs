@@ -185,6 +185,10 @@ pub struct Spec {
     /// (default `true`).
     #[schemars(with = "Option<serde_json::Value>")]
     pub drag: Option<serde_json::Value>,
+    /// Whether a part may float over the docks: `true`, `false` or a
+    /// condition (default `true`).
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub float: Option<serde_json::Value>,
     /// The size a part gets when it arrives in this dock from elsewhere.
     #[schemars(with = "Option<serde_json::Value>")]
     pub part_size: Option<serde_json::Value>,
@@ -411,6 +415,12 @@ impl Templates {
     pub fn pinned(&self, scope: &Scope) -> BTreeSet<&'static str> {
         let get = draw::lookup(scope, &[]);
         self.parts.iter().filter(|(_, (_, n))| n.drag.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
+    }
+
+    /// The parts whose `float` doesn't hold with `scope`'s values (read as `pinned` reads `drag`).
+    pub fn grounded(&self, scope: &Scope) -> BTreeSet<&'static str> {
+        let get = draw::lookup(scope, &[]);
+        self.parts.iter().filter(|(_, (_, n))| n.float.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
     }
 
     /// Says which actions the templates name that `known` doesn't have.
@@ -693,6 +703,8 @@ pub struct Node {
     handle: bool,
     /// Whether it can be dragged; None is always.
     drag: Option<Cond>,
+    /// Whether a part may float; None is always.
+    float: Option<Cond>,
     children: Vec<Node>,
 }
 
@@ -1109,6 +1121,9 @@ impl Compiler<'_, '_> {
             if s.drag.is_some() {
                 node.drag = self.flag(&s.drag, &format!("{at}.drag"));
             }
+            if s.float.is_some() {
+                node.float = self.flag(&s.float, &format!("{at}.float"));
+            }
         }
         node.path = at.into();
         node
@@ -1290,6 +1305,7 @@ impl Compiler<'_, '_> {
             pane_dock,
             handle: s.handle,
             drag: self.flag(&s.drag, &format!("{at}.drag")),
+            float: self.flag(&s.float, &format!("{at}.float")),
             kind: s.kind.clone(),
             children,
         }
@@ -1540,6 +1556,17 @@ mod tests {
         assert_eq!(t.pinned(&scope().var("busy", true)), ["explorer"].into());
         // The header's own values (`part`, `title`) don't count.
         assert_eq!(t.pinned(&super::Scope::new("h").var("part", "explorer")), ["explorer"].into());
+    }
+
+    #[test]
+    fn float_reads_the_docks_values() {
+        let (t, problems) = compiled(
+            r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "strip": "left",
+                "children": [{"part": "explorer", "float": "!busy"}, {"part": "changes", "float": false}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(t.grounded(&super::Scope::new("w")), ["changes"].into());
+        assert_eq!(t.grounded(&super::Scope::new("w").var("busy", true)), ["changes", "explorer"].into());
     }
 
     #[test]

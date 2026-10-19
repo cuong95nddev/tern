@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizablePanel;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
@@ -15,7 +15,7 @@ use super::fill_parts as fill;
 use super::menu::Entry;
 use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Edge, Justify, Layout, Node, Panel, Scope, Templates, Value, Variant, What};
 use crate::arrange::{self, Shown, Size};
-use crate::dock::{ActiveDrag, Change, DraggedPart, LayoutLock, OnChange, PinnedParts};
+use crate::dock::{ActiveDrag, Change, DraggedPart, FloatResize, Floats, LayoutLock, OnChange, PinnedParts};
 use crate::style::{self, Val};
 
 /// What a `frame` or a `button` names, for the code to attach behavior to.
@@ -60,7 +60,13 @@ pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyEle
     };
     let mut scope = scope;
     let mut d = Drawer { frames, cx, rem: cx.theme_rem() };
-    d.node(&node, &mut scope, &[]).unwrap_or_else(|| div().into_any_element())
+    let root = d.node(&node, &mut scope, &[]).unwrap_or_else(|| div().into_any_element());
+    if scope.arrangement.is_none() {
+        return root;
+    }
+    // The template that holds the docks: its floating parts over it.
+    let layer = d.floating(&mut scope);
+    div().relative().size_full().child(root).child(layer).into_any_element()
 }
 
 /// Draws template `name` with `scope`, with no behavior attached.
@@ -313,7 +319,8 @@ impl Drawer<'_, '_> {
             return None;
         }
         let title = get("title").map(|t| t.text()).unwrap_or_else(|| part.clone());
-        Some(DraggedPart { part, kind: kind.clone().into(), title })
+        let floating = self.cx.try_global::<Floats>().is_some_and(|f| f.floating.contains(part.as_ref()));
+        Some(DraggedPart { part, kind: kind.clone().into(), title, floating })
     }
 
     /// Whether moving and resizing panels is turned off.
@@ -352,7 +359,7 @@ impl Drawer<'_, '_> {
             return None;
         }
         let (kind, _) = self.cx.try_global::<Templates>()?.parts.get(part)?;
-        Some(DraggedPart { part: part.to_owned().into(), kind: kind.clone().into(), title: crate::dock::part_title(part) })
+        Some(DraggedPart { part: part.to_owned().into(), kind: kind.clone().into(), title: crate::dock::part_title(part), floating: false })
     }
 
     /// Part `name` as its node draws it.
@@ -415,7 +422,9 @@ impl Drawer<'_, '_> {
         // Next to or onto the part shown, or another of its stack when that one is dragged.
         let shown = parts.get(active).or(parts.first());
         let Some(name) = shown.filter(|n| **n != *p.part).or_else(|| parts.iter().find(|n| **n != *p.part)).cloned() else {
-            return body;
+            // Let go on its own place: nothing happens (it doesn't float).
+            let stay = div().absolute().inset_0().on_drop(|_: &DraggedPart, _, _| {});
+            return div().relative().size_full().flex().flex_col().child(body).child(stay).into_any_element();
         };
         let (edges, stack) = (d.zones.contains(&"edges"), d.zones.contains(&"stack"));
         if edges || stack {
@@ -446,6 +455,42 @@ impl Drawer<'_, '_> {
             });
         }
         div().relative().size_full().flex().flex_col().child(body).children(zones).into_any_element()
+    }
+
+    /// The parts floating over the docks, each in a `floating` box where the
+    /// arrangement keeps it (following the pointer while it moves or
+    /// resizes), with grips on its sides and corners to resize it.
+    fn floating(&mut self, scope: &mut Scope) -> AnyElement {
+        let Some(a) = scope.arrangement.clone() else { return div().into_any_element() };
+        let cx = self.cx;
+        let look = style::el("floating", cx);
+        let grip = look.px("grip");
+        let resizing = cx.try_global::<crate::dock::Resizing>().is_some_and(|r| r.0.is_some());
+        let mut boxes = vec![];
+        for (name, f) in &a.floating {
+            let Some(node) = cx.try_global::<Templates>().and_then(|t| t.part(name)) else { continue };
+            if !self.holds(&node.when, scope, &[]) {
+                continue;
+            }
+            let body = self.part_body(name, scope, &[]);
+            let live = crate::dock::live_rect(name, f, cx);
+            let mut b = look.apply(div()).absolute().flex().flex_col().overflow_hidden();
+            b = match live {
+                Some(r) => b.left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)),
+                None => b.left(relative(f.x)).top(relative(f.y)).w(px(f.w)).h(px(f.h)).max_w_full().max_h_full(),
+            };
+            // It keeps clicks from what is under it, but not while it moves:
+            // the zones under it take it then.
+            if live.is_none() || resizing {
+                b = b.occlude();
+            }
+            b = b.child(div().flex().flex_col().size_full().min_h_0().child(body));
+            if !self.locked() {
+                b = b.children(grips(name, grip, &scope.id));
+            }
+            boxes.push(b);
+        }
+        div().absolute().inset_0().overflow_hidden().children(boxes).into_any_element()
     }
 
     fn split(&mut self, n: &Node, axis: Axis, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
@@ -770,13 +815,78 @@ impl Drawer<'_, '_> {
         let e = match (drag, &n.frame) {
             // gpui doesn't say what is dragged: the drag's start keeps it for the docks.
             (Some(p), _) => {
-                d.id(ElementId::Name(format!("handle:{}", p.part).into())).on_drag(p, crate::dock::start_drag).into_any_element()
+                let d = d.id(ElementId::Name(format!("handle:{}", p.part).into())).on_drag(p.clone(), crate::dock::start_drag);
+                let grounded = self.cx.try_global::<Floats>().is_some_and(|f| f.grounded.contains(p.part.as_ref()));
+                if p.kind == "pane" || (grounded && !p.floating) {
+                    d.into_any_element()
+                } else {
+                    d.context_menu(move |menu, window, cx| part_menu(&p, menu, window, cx)).into_any_element()
+                }
             },
             (None, Some(f)) => (self.frames)(f, index, Framed::Box(d)),
             (None, None) => d.into_any_element(),
         };
         if n.overlay { deferred(e).with_priority(n.z.max(0) as usize).into_any_element() } else { e }
     }
+}
+
+/// Grips on the sides and corners of floating part `part`, `g` wide, that resize it.
+fn grips(part: &str, g: Pixels, id: &str) -> Vec<Stateful<Div>> {
+    let side = |left, right, top, bottom| arrange::Sides { left, right, top, bottom };
+    let all = [
+        (side(true, false, false, false), CursorStyle::ResizeLeftRight),
+        (side(false, true, false, false), CursorStyle::ResizeLeftRight),
+        (side(false, false, true, false), CursorStyle::ResizeUpDown),
+        (side(false, false, false, true), CursorStyle::ResizeUpDown),
+        (side(true, false, true, false), CursorStyle::ResizeUpLeftDownRight),
+        (side(false, true, false, true), CursorStyle::ResizeUpLeftDownRight),
+        (side(false, true, true, false), CursorStyle::ResizeUpRightDownLeft),
+        (side(true, false, false, true), CursorStyle::ResizeUpRightDownLeft),
+    ];
+    all.into_iter()
+        .enumerate()
+        .map(|(i, (sides, cursor))| {
+            let mut d = div().absolute().cursor(cursor);
+            d = if sides.left {
+                d.left_0().w(g)
+            } else if sides.right {
+                d.right_0().w(g)
+            } else {
+                d.left(g).right(g)
+            };
+            d = if sides.top {
+                d.top_0().h(g)
+            } else if sides.bottom {
+                d.bottom_0().h(g)
+            } else {
+                d.top(g).bottom(g)
+            };
+            let r = FloatResize { part: part.to_owned().into(), sides };
+            d.id(ElementId::Name(format!("{id}:float_grip:{part}:{i}").into())).on_drag(r, crate::dock::start_resize)
+        })
+        .collect()
+}
+
+/// A part's handle's right-click menu (`menu.part`): Float, or Dock when it floats.
+fn part_menu(p: &DraggedPart, popup: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let part = p.part.clone();
+    let items: MenuItems = Rc::new(move |name, _| {
+        let action: Box<dyn Action> = match name {
+            "float" => Box::new(crate::dock::FloatPart(part.clone())),
+            "dock" => Box::new(crate::dock::DockPart(part.clone())),
+            _ => return None,
+        };
+        let h: MenuHandler = Rc::new(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
+        Some(h)
+    });
+    menu(
+        "menu.part",
+        Scope::new(format!("part-menu:{}", p.part)).var("floating", p.floating).var("part", p.part.clone()),
+        popup,
+        items,
+        window,
+        cx,
+    )
 }
 
 /// Where positioned node `n` sits, its `"{name}"` edges read from `get`.

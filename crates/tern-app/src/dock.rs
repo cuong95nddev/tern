@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::*;
 
@@ -18,6 +19,10 @@ pub enum Change {
     Width { dock: SharedString, width: f32 },
     /// The stack at `path` in `dock` shows `part`.
     Activate { dock: SharedString, path: Vec<usize>, part: SharedString },
+    /// `part` floats at `rect` in an area of `area` (width, height).
+    Float { part: SharedString, rect: arrange::Rect, area: (f32, f32) },
+    /// Floating `part` docks again.
+    Dock { part: SharedString, kind: SharedString },
 }
 
 /// Called with each change.
@@ -29,11 +34,16 @@ pub struct DraggedPart {
     pub part: SharedString,
     pub kind: SharedString,
     pub title: SharedString,
+    /// It floats: it follows the pointer itself, with no chip.
+    pub floating: bool,
 }
 
 impl Render for DraggedPart {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        style::drag_chip(self.title.clone(), None, cx)
+        if self.floating {
+            return div().into_any_element();
+        }
+        style::drag_chip(self.title.clone(), None, cx).into_any_element()
     }
 }
 
@@ -44,10 +54,159 @@ pub struct ActiveDrag(pub Option<DraggedPart>);
 impl Global for ActiveDrag {}
 
 /// What starts dragging part `p`: the docks and panes learn what is dragged.
-pub fn start_drag(p: &DraggedPart, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<DraggedPart> {
+pub fn start_drag(p: &DraggedPart, grab: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<DraggedPart> {
     cx.set_global(ActiveDrag(Some(p.clone())));
+    track_from(grab, window, cx);
     cx.refresh_windows();
     cx.new(|_| p.clone())
+}
+
+/// A floating part's side or corner being dragged to resize it.
+#[derive(Clone)]
+pub struct FloatResize {
+    pub part: SharedString,
+    pub sides: arrange::Sides,
+}
+
+impl Render for FloatResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The floating part being resized, if any.
+#[derive(Default)]
+pub struct Resizing(pub Option<FloatResize>);
+
+impl Global for Resizing {}
+
+/// What starts resizing a floating part.
+pub fn start_resize(r: &FloatResize, grab: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<FloatResize> {
+    cx.set_global(Resizing(Some(r.clone())));
+    track_from(grab, window, cx);
+    cx.new(|_| r.clone())
+}
+
+/// The pointer during a drag, for the floating parts: where the drag started
+/// and where it is now (window coordinates), where the grip was grabbed
+/// (from its top-left), and the area floating parts sit in, once known.
+#[derive(Default, Clone, Copy)]
+pub struct FloatTrack {
+    pub start: Point<Pixels>,
+    pub at: Point<Pixels>,
+    pub grab: Point<Pixels>,
+    pub area: Option<Bounds<Pixels>>,
+}
+
+impl Global for FloatTrack {}
+
+fn track_from(grab: Point<Pixels>, window: &Window, cx: &mut App) {
+    let at = window.mouse_position();
+    let area = cx.try_global::<FloatTrack>().and_then(|t| t.area);
+    cx.set_global(FloatTrack { start: at, at, grab, area });
+}
+
+/// Which parts float, and which may not (`float` doesn't hold): read by the
+/// panels' headers, drawn apart from the docks.
+#[derive(Default, PartialEq)]
+pub struct Floats {
+    pub floating: BTreeSet<String>,
+    pub grounded: BTreeSet<&'static str>,
+}
+
+impl Global for Floats {}
+
+/// Floats a part over the docks (its header's menu).
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct FloatPart(pub SharedString);
+
+/// Docks a floating part again (its header's menu).
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct DockPart(pub SharedString);
+
+pub fn area_size(b: Bounds<Pixels>) -> (f32, f32) {
+    (f32::from(b.size.width), f32::from(b.size.height))
+}
+
+/// How far the pointer went since the drag started.
+fn delta(t: &FloatTrack) -> (f32, f32) {
+    (f32::from(t.at.x - t.start.x), f32::from(t.at.y - t.start.y))
+}
+
+/// Where floating part `part` (stored as `f`) is drawn while it is moved or
+/// resized, in pixels from the area's top-left; None when it isn't.
+pub fn live_rect(part: &str, f: &arrange::Float, cx: &App) -> Option<arrange::Rect> {
+    let t = cx.try_global::<FloatTrack>()?;
+    let area = area_size(t.area?);
+    let (dx, dy) = delta(t);
+    let r = f.rect(area);
+    if let Some(rs) = cx.try_global::<Resizing>().and_then(|r| r.0.as_ref()).filter(|r| r.part == part) {
+        let look = style::el("floating", cx);
+        let min = (f32::from(look.px("min_width")), f32::from(look.px("min_height")));
+        return Some(arrange::resized(r, rs.sides, dx, dy, min, area));
+    }
+    let moving = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| p.floating && p.part == part);
+    moving.then(|| arrange::moved(r, dx, dy, area))
+}
+
+/// Where a part that starts floating at the pointer goes: its size is the
+/// `floating` element's, its top-left where the grip was grabbed.
+/// `at` and `grab` in window coordinates and from the grip's top-left.
+pub fn float_rect(at: Point<Pixels>, grab: Point<Pixels>, area: Bounds<Pixels>, cx: &App) -> arrange::Rect {
+    let look = style::el("floating", cx);
+    let size = area_size(area);
+    let (w, h) = (f32::from(look.px("width")).min(size.0), f32::from(look.px("height")).min(size.1));
+    let at = at - area.origin - grab;
+    arrange::moved(arrange::Rect { x: 0., y: 0., w, h }, f32::from(at.x), f32::from(at.y), size)
+}
+
+/// The workspace's root `d`, where the floating parts are: it follows the
+/// pointer while a floating part moves or resizes, and takes the drops no
+/// zone took: a part let go there floats (`arrangement` says where they are).
+pub fn floats(d: Div, arrangement: Option<Arc<arrange::Arrangement>>, on_change: OnChange) -> Div {
+    fn follow(at: Point<Pixels>, area: Bounds<Pixels>, live: bool, window: &mut Window, cx: &mut App) {
+        let mut t = cx.try_global::<FloatTrack>().copied().unwrap_or_default();
+        let moved = t.at != at;
+        t.at = at;
+        t.area = Some(area);
+        cx.set_global(t);
+        if live && moved {
+            window.refresh();
+        }
+    }
+    let resize_a = arrangement.clone();
+    let resize_change = on_change.clone();
+    d.on_drag_move(|ev: &DragMoveEvent<DraggedPart>, window, cx| {
+        let live = ev.drag(cx).floating;
+        follow(ev.event.position, ev.bounds, live, window, cx);
+    })
+    .on_drag_move(|ev: &DragMoveEvent<FloatResize>, window, cx| follow(ev.event.position, ev.bounds, true, window, cx))
+    .on_drop(move |p: &DraggedPart, window, cx| {
+        let locked = cx.try_global::<LayoutLock>().is_some_and(|l| l.0);
+        let grounded = cx.try_global::<Floats>().is_some_and(|f| f.grounded.contains(p.part.as_ref()));
+        let Some(t) = cx.try_global::<FloatTrack>().copied() else { return };
+        let Some(b) = t.area.filter(|_| p.kind != "pane" && !locked && !grounded) else { return };
+        let area = area_size(b);
+        let rect = match arrangement.as_ref().and_then(|a| a.floating.get(p.part.as_ref())) {
+            Some(f) => {
+                let (dx, dy) = delta(&t);
+                arrange::moved(f.rect(area), dx, dy, area)
+            },
+            None => float_rect(t.at, t.grab, b, cx),
+        };
+        on_change(Change::Float { part: p.part.clone(), rect, area }, window, cx);
+    })
+    .on_drop(move |r: &FloatResize, window, cx| {
+        let f = resize_a.as_ref().and_then(|a| a.floating.get(r.part.as_ref()));
+        let rect = f.and_then(|f| live_rect(&r.part, f, cx));
+        let area = cx.try_global::<FloatTrack>().and_then(|t| t.area);
+        cx.set_global(Resizing(None));
+        if let (Some(rect), Some(b)) = (rect, area) {
+            resize_change(Change::Float { part: r.part.clone(), rect, area: area_size(b) }, window, cx);
+        }
+    })
 }
 
 /// Where a drag would drop now: the area under the pointer and the zone in it.

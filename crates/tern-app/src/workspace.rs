@@ -352,6 +352,8 @@ pub struct Workspace {
     arranged: Option<Arc<Arrangement>>,
     /// What fitting the stored arrangement to the templates found.
     arrange_problems: Vec<String>,
+    /// Where the floating parts sit, as last drawn.
+    float_area: Option<Bounds<Pixels>>,
     _subs: Vec<Subscription>,
 }
 
@@ -499,6 +501,7 @@ impl Workspace {
             arranged_for: None,
             arranged: None,
             arrange_problems: vec![],
+            float_area: None,
             _subs: vec![tree_sub, changes_sub, scratches_sub],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
@@ -1741,8 +1744,13 @@ impl Workspace {
                 .docks("workspace")
                 .iter()
                 .filter(|d| t.dock_strip("workspace", &d.name).as_deref() == Some(side))
-                .filter_map(|d| a.docks.get(&d.name).cloned().flatten())
-                .flat_map(|tree| tree.parts().into_iter().map(str::to_owned).collect::<Vec<_>>())
+                .flat_map(|d| {
+                    let docked = a.docks.get(&d.name).cloned().flatten();
+                    let mut parts: Vec<String> = docked.iter().flat_map(|t| t.parts()).map(str::to_owned).collect();
+                    // A floating part's button stays with the dock it came from.
+                    parts.extend(a.floating.iter().filter(|(_, f)| f.from == *d.name).map(|(p, _)| p.clone()));
+                    parts
+                })
                 .collect(),
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
             _ => vec!["changes".into()],
@@ -2509,9 +2517,43 @@ impl Workspace {
             Change::Width { dock, width } => {
                 a.widths.insert(dock.to_string(), width);
             },
+            Change::Float { part, rect, area } => {
+                let docked = !a.floating.contains_key(&*part);
+                if !a.float_part(&part, rect, area) {
+                    return;
+                }
+                if docked {
+                    self.docks_epoch += 1;
+                }
+            },
+            Change::Dock { part, kind } => {
+                let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
+                if !a.dock_part(&part, &kind, &docks) {
+                    return;
+                }
+                self.docks_epoch += 1;
+            },
         }
         self.arrangements.touch(&key);
         self.panels_changed(cx);
+    }
+
+    /// Floats `part` from its header's menu, under the pointer.
+    fn float_part(&mut self, a: &crate::dock::FloatPart, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(area) = self.float_area else { return };
+        if cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0) {
+            return;
+        }
+        let rect = crate::dock::float_rect(window.mouse_position(), point(px(40.), px(12.)), area, cx);
+        let change = Change::Float { part: a.0.clone(), rect, area: crate::dock::area_size(area) };
+        self.arrangement_changed(change, cx);
+    }
+
+    /// Docks floating `part` again, from its header's menu.
+    fn dock_part(&mut self, a: &crate::dock::DockPart, _: &mut Window, cx: &mut Context<Self>) {
+        let kind = cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| **n == *a.0).map(|(_, k)| k));
+        let Some(kind) = kind else { return };
+        self.arrangement_changed(Change::Dock { part: a.0.clone(), kind: kind.into() }, cx);
     }
 
     /// Puts the side panels back where the templates place them.
@@ -2980,7 +3022,12 @@ impl Workspace {
             return None;
         }
         let title = self.pane_active_ix(pane).map(|ix| self.full_title(ix, cx)).unwrap_or_default();
-        Some(DraggedPart { part: format!("pane:{}:{pane}", cx.entity_id()).into(), kind: "pane".into(), title: title.into() })
+        Some(DraggedPart {
+            part: format!("pane:{}:{pane}", cx.entity_id()).into(),
+            kind: "pane".into(),
+            title: title.into(),
+            floating: false,
+        })
     }
 
     /// The pane of this workspace that `p` drags, if it drags one.
@@ -3270,6 +3317,22 @@ impl Workspace {
                 }
                 "ok".into()
             },
+            // Floats PART at X Y (pixels from the workspace's top-left), W wide and H high.
+            cmd if cmd.starts_with("part-float ") => {
+                let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+                let n: Option<Vec<f32>> = args.iter().skip(1).map(|a| a.parse().ok()).collect();
+                let (Some(part), Some([x, y, w, h]), Some(area)) = (args.first(), n.as_deref(), self.float_area) else {
+                    return "error: part-float PART X Y W H".into();
+                };
+                let rect = arrange::Rect { x: *x, y: *y, w: *w, h: *h };
+                let change = Change::Float { part: (*part).to_owned().into(), rect, area: crate::dock::area_size(area) };
+                self.arrangement_changed(change, cx);
+                "ok".into()
+            },
+            cmd if cmd.starts_with("part-dock ") => {
+                self.dock_part(&crate::dock::DockPart(cmd["part-dock ".len()..].trim().to_owned().into()), window, cx);
+                "ok".into()
+            },
             "layout-reset" => {
                 self.reset_layout(&ResetLayout, window, cx);
                 "ok".into()
@@ -3351,6 +3414,9 @@ impl Render for Workspace {
             if cx.try_global::<DropHint>().is_some_and(|h| h.0.is_some()) {
                 cx.set_global(DropHint(None));
             }
+            if cx.try_global::<crate::dock::Resizing>().is_some_and(|r| r.0.is_some()) {
+                cx.set_global(crate::dock::Resizing(None));
+            }
             if cx.try_global::<ActiveDrag>().is_some_and(|d| d.0.is_some()) {
                 cx.set_global(ActiveDrag(None));
                 // Other windows drew zones for the drag too.
@@ -3383,12 +3449,16 @@ impl Render for Workspace {
         let settings_error = settings_error.join("; ");
         let (left_strip, right_strip) = (self.strip("left", arrangement.as_deref(), cx), self.strip("right", arrangement.as_deref(), cx));
         let mut scope = template::Scope::new(format!("workspace-{}", self.docks_epoch));
-        if let Some(a) = arrangement {
-            let ws = cx.entity().downgrade();
-            let on_change: OnChange = Rc::new(move |change, _, cx| {
-                let _ = ws.update(cx, |this, cx| this.arrangement_changed(change, cx));
-            });
-            scope = scope.docks(a, on_change);
+        let ws = cx.entity().downgrade();
+        let on_change: OnChange = Rc::new(move |change, _, cx| {
+            let _ = ws.update(cx, |this, cx| this.arrangement_changed(change, cx));
+        });
+        let floats = crate::dock::Floats {
+            floating: arrangement.iter().flat_map(|a| a.floating.keys().cloned()).collect(),
+            grounded: Default::default(),
+        };
+        if let Some(a) = arrangement.clone() {
+            scope = scope.docks(a, on_change.clone());
         }
         let scope = scope
             .var("explorer", self.show_explorer)
@@ -3408,11 +3478,29 @@ impl Render for Workspace {
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
             cx.set_global(crate::dock::PinnedParts(pinned));
         }
+        let grounded = cx.try_global::<template::Templates>().map(|t| t.grounded(&scope)).unwrap_or_default();
+        let floats = crate::dock::Floats { grounded, ..floats };
+        if cx.try_global::<crate::dock::Floats>().is_none_or(|f| *f != floats) {
+            cx.set_global(floats);
+        }
         let body = template::render("workspace", scope, &mut |_, _, d| d.into_any_element(), cx);
 
-        div()
+        // Where the floating parts sit, for the header menu's Float.
+        let ws = cx.entity().downgrade();
+        let area = canvas(
+            move |bounds, _, cx| {
+                let _ = ws.update(cx, |this, _| this.float_area = Some(bounds));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        crate::dock::floats(div(), arrangement, on_change)
             .key_context("Workspace")
             .size_full()
+            .relative()
+            .on_action(cx.listener(Self::float_part))
+            .on_action(cx.listener(Self::dock_part))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))
@@ -3465,6 +3553,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Tab7, w, cx| this.activate_nth(6, w, cx)))
             .on_action(cx.listener(|this, _: &Tab8, w, cx| this.activate_nth(7, w, cx)))
             .on_action(cx.listener(|this, _: &Tab9, w, cx| this.activate_nth(usize::MAX, w, cx)))
+            .child(area)
             .child(body)
     }
 }

@@ -1651,6 +1651,12 @@
       { "when": "!on_entry", "action": "file_tree::CollapseAll", "label": "Collapse Folders" }
     ]
   },
+  "menu.part": {
+    "children": [
+      { "button": "float", "label": "Float", "when": "!floating" },
+      { "button": "dock", "label": "Dock", "when": "floating" }
+    ]
+  },
   "menu.scratch": {
     "children": [
       { "button": "open", "label": "Open" },

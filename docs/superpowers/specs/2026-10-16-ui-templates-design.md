@@ -244,7 +244,21 @@ B. **Done (2026-10-19).** Center as a dock: move the pane drop-zone code to the 
      join it, on a side it moves there. `layout.locked` stops pane drags; tab drags stay unlocked.
      Not done: mixing panels into the center or panes into side docks (the center's tree holds only panes).
    - Control commands for checks: `part-move PART DOCK stack|left|right|up|down TARGET`, `pane-move FROM TO ZONE`.
-C. Floating parts in the window (move, resize, dock again, stored).
+C. **Done (2026-10-19).** Floating parts in the window. As built (plan `2026-10-19-layout-phase-c.md`):
+   - A part let go outside every drop zone floats where it was let go (its top-left where its handle was
+     grabbed); the right-click menu of its handle (`menu.part`, buttons `float` / `dock`) floats it under the
+     pointer or docks it again. Dropped on a zone, it docks there. Let go on its own place (alone in its area),
+     nothing happens, so a short drag of a header doesn't float it.
+   - Floating parts are drawn over the root of the template that holds the docks (no new node property), each
+     in a `floating` box (element `floating`: look, `width` / `height` to start with, `min_width` /
+     `min_height`, `grip`). It moves by its handle (it follows the pointer, with no drag chip, and lets the zones
+     under it take the drop) and resizes from its sides and corners; still, it keeps clicks from what is under it.
+   - Stored after the docks as `f:<part>=<dock>@<x>,<y>,<w>,<h>`: the dock it came from (its strip button stays
+     there, Dock sends it back there, or to its default dock when that one is gone), its top-left as fractions of
+     the area (a smaller window keeps it in view), its size in pixels. Hiding it (strip button) keeps it floating.
+   - `float: false` (or a condition) on a part keeps it in the docks; `layout.locked` stops floating, moving and
+     resizing (floating parts stay where they are).
+   - Control commands for checks: `part-float PART X Y W H`, `part-dock PART`.
 D. Pop out to a separate OS window.
 
 ### Left to the builder

@@ -479,6 +479,22 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element { name: "drop_zone.hover", about: "A drop zone under the pointer", groups: &[&[("background", Color, "$primary/30")]] },
     Element {
+        name: "floating",
+        about: "A panel floating over the docks. `width` and `height` are its size when it starts floating,                 `min_width` and `min_height` the least it resizes to, `grip` how wide its resizing edges are",
+        groups: &[&[
+            ("background", Color, "$background"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+            ("radius", Len, "$radius"),
+            ("shadow", Text, "lg"),
+            ("width", Len, "300"),
+            ("height", Len, "400"),
+            ("min_width", Len, "120"),
+            ("min_height", Len, "80"),
+            ("grip", Len, "6"),
+        ]],
+    },
+    Element {
         name: "agent_monitor",
         about: "The agent monitor: the small window listing the agents running in Tern's terminals",
         groups: &[&[
