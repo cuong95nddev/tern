@@ -1006,5 +1006,48 @@
         ]
       }
     ]
+  },
+  "file_header": {
+    "element": "file_header",
+    "layout": "row",
+    "align": "center",
+    "children": [
+      { "grow": 1, "truncate": true, "style": { "text_transform": "$file_header.text_transform" }, "text": "{name}" },
+      { "when": "dirty", "style": { "text": "$file_header.dirty_text" }, "text": "●" },
+      {
+        "when": "markdown && preview",
+        "button": "preview",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "selected": true,
+        "label": "Edit",
+        "tooltip": "Toggle Markdown preview ({preview_key})"
+      },
+      {
+        "when": "markdown && !preview",
+        "button": "preview",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "label": "Preview",
+        "tooltip": "Toggle Markdown preview ({preview_key})"
+      },
+      { "when": "!image && diff && !markdown", "button": "diff", "element": "file_header.button", "size": "xsmall", "selected": true, "label": "Edit" },
+      { "when": "!image && diff && markdown", "button": "diff", "element": "file_header.button", "size": "xsmall", "selected": true, "label": "Diff" },
+      { "when": "!image && !diff", "button": "diff", "element": "file_header.button", "size": "xsmall", "label": "Diff" },
+      {
+        "button": "open_external",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "label": "VS Code",
+        "tooltip": "Open in VS Code ({open_external_key})"
+      }
+    ]
+  },
+  "terminal": {
+    "frame": "terminal",
+    "element": "terminal",
+    "fill": true,
+    "style": { "background": "{background}" },
+    "children": [{ "slot": "grid" }]
   }
 }

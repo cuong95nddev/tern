@@ -433,7 +433,7 @@ pub const ELEMENTS: &[Element] = &[
             ("dirty_text", Color, "$warning.background"),
         ]],
     },
-    simple!("file_header.button", "The Preview / Diff buttons above a file"),
+    simple!("file_header.button", "The Preview / Diff / VS Code buttons above a file"),
     Element {
         name: "terminal",
         about: "A terminal tab. Its colors are `terminal.colors`; a `background_opacity` below 1 lets what's behind \

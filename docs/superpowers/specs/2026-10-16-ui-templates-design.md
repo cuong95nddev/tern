@@ -70,7 +70,12 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    list still scrolls sideways). Pixel-compared on Windows with the old build: rows at several depths,
    selection, cursor, cut, rename and new-entry fields, hover, a collapsed repo, the header buttons and the
    scratches menu. The panels' empty states (`changes.empty`, `scratches.empty`) are still code.
-5. File header of the viewer; terminal padding box.
+5. **Done (2026-10-19):** `file_header` (the viewer's path, unsaved dot, and Preview / Diff / VS Code buttons:
+   their labels are in the template, picked by `when` on `preview`, `diff`, `markdown`, `image`) and `terminal`
+   (the box around the grid: `terminal`'s padding and background image; its background is a value the code
+   gives, the palette's with `background_opacity`; the grid is the `grid` slot). The VS Code button now takes
+   `file_header.button` too. Pixel-identical on Windows with the old build (code, diff, Markdown, preview,
+   image, unsaved, terminal).
 6. Dialog bodies and footers; menus as data (items, separators, submenus) from templates.
 7. Screenshot tool (`shot/`): needs elements first.
 8. What the phases above don't name: the agent monitor (`agent_monitor.rs`), the diff pane header (`diff_pane.rs`),

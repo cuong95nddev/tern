@@ -935,6 +935,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
 | `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
+| `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
+| `terminal` | `background` (the palette's, with `terminal.background_opacity`) | `grid` |
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |

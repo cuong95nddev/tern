@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_mux::client::{Connector, Foreground, Open, RemoteSession};
 use tern_term::keys::{self, Key, KeyEventKind, Mods};
@@ -1490,45 +1489,41 @@ impl Render for TerminalView {
         self.watch_focus(window, cx);
         let look = crate::style::el("terminal", cx);
         let bg = rgb_to_hsla(self.sync_look(cx).background).opacity(look.num("background_opacity").clamp(0., 1.));
-        let backdrop = look.backdrop();
-        let (padding_x, padding_top) = (look.len("padding_x"), look.len("padding_top"));
-        div()
-            .id("terminal")
-            .track_focus(&self.focus)
-            .key_context("Terminal")
-            .on_key_down(cx.listener(Self::key_down))
-            .on_key_up(cx.listener(Self::key_up))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::copy_or_interrupt))
-            .on_action(cx.listener(Self::paste_or_quote))
-            .on_action(cx.listener(Self::clear))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(|v, _: &ScrollPageUp, _, cx| v.scroll_page(true, cx)))
-            .on_action(cx.listener(|v, _: &ScrollPageDown, _, cx| v.scroll_page(false, cx)))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
-            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
-            .on_hover(cx.listener(Self::hover_changed))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
-            .on_drop(cx.listener(Self::drop_paths))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-            .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
-            .size_full()
-            .bg(bg)
-            .px(padding_x)
-            .pt(padding_top)
-            .map(|d| look.apply(d))
-            .relative()
-            .children(backdrop)
-            .child(TerminalElement { view: cx.entity() })
+        let scope = crate::template::Scope::new("terminal").var("background", bg).slot("grid", TerminalElement { view: cx.entity() });
+        let mut frames = |name: &str, _, f: crate::template::Framed| match (name, f) {
+            ("terminal", crate::template::Framed::Box(d)) => d
+                .id("terminal")
+                .track_focus(&self.focus)
+                .key_context("Terminal")
+                .on_key_down(cx.listener(Self::key_down))
+                .on_key_up(cx.listener(Self::key_up))
+                .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::paste))
+                .on_action(cx.listener(Self::copy_or_interrupt))
+                .on_action(cx.listener(Self::paste_or_quote))
+                .on_action(cx.listener(Self::clear))
+                .on_action(cx.listener(Self::select_all))
+                .on_action(cx.listener(|v, _: &ScrollPageUp, _, cx| v.scroll_page(true, cx)))
+                .on_action(cx.listener(|v, _: &ScrollPageDown, _, cx| v.scroll_page(false, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+                .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+                .on_mouse_move(cx.listener(Self::mouse_move))
+                .on_modifiers_changed(cx.listener(Self::modifiers_changed))
+                .on_hover(cx.listener(Self::hover_changed))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+                .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+                .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+                .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
+                .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
+                .on_drop(cx.listener(Self::drop_paths))
+                .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
+                .into_any_element(),
+            (_, f) => f.into_any_element(),
+        };
+        crate::template::render("terminal", scope, &mut frames, cx)
     }
 }
 

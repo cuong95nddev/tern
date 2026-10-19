@@ -650,6 +650,7 @@ const SLOTS: &[&str] = &[
     "extra",
     "qr",
     "field",
+    "grid",
 ];
 
 /// The parts a template may name.
@@ -1511,6 +1512,28 @@ mod tests {
         }
         // The explorer's name is never cut: the list scrolls sideways instead.
         assert!(t.nodes["explorer.row"].children.iter().any(|c| c.nowrap && c.grow.is_some()));
+    }
+
+    #[test]
+    fn file_header_and_terminal_compile() {
+        let (t, problems) = compiled(super::BUILTIN);
+        assert_eq!(problems, Vec::<String>::new());
+        let frames: Vec<&str> = t.nodes["file_header"]
+            .children
+            .iter()
+            .filter_map(|c| match &c.what {
+                super::What::Button(b) => Some(b.frame.as_str()),
+                _ => None,
+            })
+            .collect();
+        for f in ["preview", "diff", "open_external"] {
+            assert!(frames.contains(&f), "{f}");
+        }
+        // The terminal's box takes its background from the code (the palette's, with its opacity).
+        let n = &t.nodes["terminal"];
+        assert_eq!(n.frame.as_deref(), Some("terminal"));
+        assert!(n.holes.iter().any(|h| h.0 == "background"));
+        assert!(matches!(&n.children[0].what, super::What::Slot(s) if *s == "grid"));
     }
 
     #[test]

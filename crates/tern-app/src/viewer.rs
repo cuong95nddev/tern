@@ -4,16 +4,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme, Sizable};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff_pane::{DiffPane, language_for};
 use crate::platform::bind;
+use crate::template::{Framed, on_event};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -452,41 +450,33 @@ impl Render for Viewer {
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
         let is_image = self.image.is_some();
-        let look = crate::style::el("file_header", cx);
-        let button = |b: Button| crate::style::el("file_header.button", cx).apply(b);
-        let header = look
-            .apply(div().flex().items_center())
-            .child(div().flex_1().truncate().child(look.label(name)))
-            .when(self.dirty, |d| d.child(div().text_color(look.color("dirty_text")).child("●")))
-            .when(markdown, |d| {
-                d.child(button(
-                    Button::new("preview")
-                        .xsmall()
-                        .ghost()
-                        .selected(self.mode == Mode::Preview)
-                        .label(if self.mode == Mode::Preview { "Edit" } else { "Preview" })
-                        .tooltip(format!("Toggle Markdown preview ({})", crate::platform::shortcut("⌘⇧V")))
-                        .on_click(cx.listener(|this, _, w, cx| this.toggle_preview(&TogglePreview, w, cx))),
-                ))
-            })
-            .when(!is_image, |d| {
-                d.child(button(
-                    Button::new("diff")
-                        .xsmall()
-                        .ghost()
-                        .selected(diff_mode)
-                        .label(if diff_mode && !markdown { "Edit" } else { "Diff" })
-                        .on_click(cx.listener(|this, _, w, cx| this.toggle_diff(&ToggleDiff, w, cx))),
-                ))
-            })
-            .child(
-                Button::new("vscode")
-                    .xsmall()
-                    .ghost()
-                    .label("VS Code")
-                    .tooltip(format!("Open in VS Code ({})", crate::platform::shortcut("⌘⇧O")))
-                    .on_click(cx.listener(|this, _, w, cx| this.open_external(&OpenExternal, w, cx))),
-            );
+        let me = cx.entity().downgrade();
+        let scope = crate::template::Scope::new("file_header")
+            .var("name", name)
+            .var("dirty", self.dirty)
+            .var("markdown", markdown)
+            .var("image", is_image)
+            .var("preview", self.mode == Mode::Preview)
+            .var("diff", diff_mode)
+            .var("preview_key", crate::platform::shortcut("⌘⇧V"))
+            .var("open_external_key", crate::platform::shortcut("⌘⇧O"));
+        let header = crate::template::render(
+            "file_header",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("preview", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_preview(&TogglePreview, w, cx))).into_any_element()
+                },
+                ("diff", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_diff(&ToggleDiff, w, cx))).into_any_element()
+                },
+                ("open_external", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.open_external(&OpenExternal, w, cx))).into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
 
         let body: AnyElement = if diff_mode && let Some(diff) = &self.diff {
             div().flex_1().min_h_0().child(diff.clone()).into_any_element()
