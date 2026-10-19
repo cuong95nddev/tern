@@ -37,6 +37,8 @@ gpui_kit::assets::icon_assets!(
         FolderPlus,
         GitBranch,
         LayoutGrid,
+        Maximize2,
+        Minimize2,
         StickyNote,
     ]
 );

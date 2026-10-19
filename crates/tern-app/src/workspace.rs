@@ -2578,11 +2578,32 @@ impl Workspace {
     /// as it floats (else the `floating` element's), its top-left near the
     /// pointer.
     fn pop_out(&mut self, a: &crate::dock::PopOutPart, window: &mut Window, cx: &mut Context<Self>) {
+        self.pop_out_near(&a.0, window.mouse_position(), window, cx);
+    }
+
+    /// Moves `part` to a window of its own with its top-left near `at`
+    /// (window coordinates, maybe outside it).
+    fn pop_out_near(&mut self, part: &str, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let frame = window.bounds();
         let chrome = frame.size.height - window.viewport_size().height;
-        let at = frame.origin + point(px(0.), chrome) + window.mouse_position() - point(px(40.), px(12.));
+        let at = frame.origin + point(px(0.), chrome) + at - point(px(40.), px(12.));
         let display = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()).unwrap_or_default();
-        self.pop_out_at(&a.0, display, (f32::from(at.x), f32::from(at.y)), None, cx);
+        self.pop_out_at(part, display, (f32::from(at.x), f32::from(at.y)), None, cx);
+    }
+
+    /// A drag let go outside the window: a part dragged there moves to a
+    /// window of its own where it was let go.
+    fn dropped_outside(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let size = window.viewport_size();
+        let p = ev.position;
+        if p.x >= px(0.) && p.y >= px(0.) && p.x < size.width && p.y < size.height {
+            return;
+        }
+        let Some(d) = cx.try_global::<ActiveDrag>().and_then(|d| d.0.clone()) else { return };
+        if d.kind == "pane" || d.popped {
+            return;
+        }
+        self.pop_out_near(&d.part, p, window, cx);
     }
 
     /// Moves `part` to a window of its own with its top-left at `at` on
@@ -3656,6 +3677,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::float_part))
             .on_action(cx.listener(Self::dock_part))
             .on_action(cx.listener(Self::pop_out))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))

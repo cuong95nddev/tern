@@ -50,7 +50,9 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    `pane_tab_bar.tab_active`, whose defaults reproduce the old look (pixel-compared on Windows, scroll, wrap and
    vertical layouts). The tab's icon is still a code `slot` (file and agent icons carry their own colors).
    Differences: an empty pane's tab bar keeps its 32px height (it used to shrink); the Maximize/Restore Pane icons
-   (`maximize-2`, `minimize-2`) draw nothing, as before (to look into).
+   (`maximize-2`, `minimize-2`) drew nothing, as before: they weren't among the bundled icons, and the check
+   read gpui-kit's list of Lucide names, most of which aren't bundled. Fixed 2026-10-19: they are bundled, and
+   an `icon` is checked against the app's assets, so a name Tern doesn't bundle is a problem.
 3. **Done (2026-10-19):** `workspace_tabs` (+ `.tab`) and `welcome` (+ `.recent`). gpui-component's
    `TabBar`/`Tab` are gone from the app except the screenshot tool's pages. Workspace tabs share the pane tabs'
    element properties (`height`, `text`, `hover_text`, `border`, ...); the defaults reproduce the old look
@@ -266,6 +268,9 @@ D. **Done (2026-10-19).** Parts in OS windows of their own. As built (plan `2026
      in slot `part`) and the workspace's values. In that window the part's menu has Float (back over the main
      window's workspace, centered) and Dock; its handle doesn't drag (gpui drags stay in their window). Closing the
      window docks the part again.
+   - Letting a part's handle go outside the main window (a drag out of it) does the same, the window's top-left
+     near where it was let go (added 2026-10-19; the mouse is captured during a drag, so the main window hears
+     the release).
    - `window: false` (or a condition) on a part keeps it in the main window, in place of the spec's
      `float: "window"` (which would read `"window"` as a condition, and hide the feature from the built-in
      templates). Default `true`. GUI only.

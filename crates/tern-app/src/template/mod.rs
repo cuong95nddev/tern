@@ -1441,13 +1441,11 @@ fn icon_path(name: &str) -> SharedString {
     format!("icons/{name}.svg").into()
 }
 
-/// Whether `name` is a bundled icon (the screenshot tool's included).
+/// Whether `name` is a bundled icon: one the app's assets hold (the Lucide
+/// names gpui-kit knows include many that aren't embedded and draw nothing).
 fn icon_exists(name: &str) -> bool {
-    use gpui_kit::assets::IconName;
-    static PATHS: std::sync::LazyLock<BTreeSet<SharedString>> =
-        std::sync::LazyLock::new(|| IconName::ALL.iter().map(|i| i.path()).collect());
-    let path = icon_path(name);
-    PATHS.contains(&path) || crate::shot_icons::asset(&path).is_some()
+    use gpui_kit::AssetSource;
+    matches!(crate::file_icons::AppAssets.load(&icon_path(name)), Ok(Some(_)))
 }
 
 /// `parts` with the values `get` gives put in.

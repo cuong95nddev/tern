@@ -931,8 +931,8 @@ number the code gives, `\"top\": \"{{bar_top}}\"`; `z`, `overlay`), show only wh
 change while one does (`\"states\": {{\"focused\": {{\"border\": \"$accent\"}}}}`),
 or split into panels you resize (`\"split\": \"row\"`, with `size`, `min`, `max`,
 `fixed` on the panels). Leaves are text (`\"text\": \"{{title}}\"`), another
-template (`\"use\"`), an icon (`\"icon\": \"folder-open\"`, a bundled Lucide
-name, or a screenshot tool's `shot-*`), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
+template (`\"use\"`), an icon (`\"icon\": \"folder-open\"`, a Lucide
+name Tern bundles, or a screenshot tool's `shot-*`; one it doesn't bundle is a problem), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
 `selected`, `disabled`, `loading`), or a piece Tern draws (`\"slot\"`). A list
 the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 `each` come after its entries.
@@ -1069,7 +1069,8 @@ between them by their headers. In a template:
   `min_width` and `min_height` the least it resizes to, `grip` how wide its
   resizing edges are. `\"float\": false` (or a condition) on a `part` keeps it
   in the docks.
-- **Move to New Window** in a panel's header menu puts it in an OS window of
+- **Move to New Window** in a panel's header menu, or letting its header go
+  outside the main window, puts it in an OS window of
   its own (GUI only), drawn with the `part_window` template (the `part`
   slot; element `part_window`). Its window's place and size are kept; closing
   the window, or Dock in its header menu, docks the panel again, Float
