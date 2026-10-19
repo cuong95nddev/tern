@@ -204,6 +204,32 @@ pub fn foreground_cwd(_shell: u32) -> Option<std::path::PathBuf> {
     None
 }
 
+/// A program and the processes below it, held open (so their ids can't go
+/// to new processes) until [`ProcessTree::end`] ends them.
+#[cfg(windows)]
+pub struct ProcessTree(Vec<win::Process>);
+
+#[cfg(windows)]
+impl ProcessTree {
+    /// `root` and what runs below it now; processes already gone are left out.
+    pub fn open(root: u32) -> Self {
+        // 0 is the idle process: a program whose id isn't known.
+        let pids = if root == 0 { Vec::new() } else { win::Tree::scan().walk(root) };
+        Self(pids.into_iter().filter_map(|(pid, _)| win::Process::open(pid)).collect())
+    }
+
+    /// Give the root up to `grace` to end on its own, then terminate it and
+    /// whatever below it is still running.
+    pub fn end(self, grace: std::time::Duration) {
+        if let Some(root) = self.0.first() {
+            root.wait(grace);
+        }
+        for p in &self.0 {
+            p.terminate();
+        }
+    }
+}
+
 /// Programs whose first non-flag argument names the real program.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_interpreter(exe: &str) -> bool {
@@ -222,20 +248,35 @@ fn script_arg(argv: &[String]) -> Option<String> {
 mod win {
     use std::collections::HashMap;
     use std::ffi::c_void;
+    use std::time::Duration;
 
     use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, LocalFree, UNICODE_STRING};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree, UNICODE_STRING};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+    };
     use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
     /// `root` and every process below it with its executable name, breadth first.
     pub fn descendants(root: u32) -> Vec<(u32, String)> {
         static TREE: super::ScanCache<Tree> = super::ScanCache::new();
         let has_root = |t: &Tree| t.exes.contains_key(&root);
-        let tree = TREE.get(has_root, || {
+        TREE.get(has_root, Tree::scan).walk(root)
+    }
+
+    /// Every process's children and executable name.
+    #[derive(Default)]
+    pub struct Tree {
+        children: HashMap<u32, Vec<u32>>,
+        exes: HashMap<u32, String>,
+    }
+
+    impl Tree {
+        /// A fresh scan of every process.
+        pub fn scan() -> Self {
             let mut t = Tree::default();
             for (pid, ppid, exe) in snapshot() {
                 // The idle process is its own parent.
@@ -245,23 +286,47 @@ mod win {
                 t.exes.insert(pid, exe);
             }
             t
-        });
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::from([root]);
-        while let Some(pid) = queue.pop_front() {
-            let Some(exe) = tree.exes.get(&pid).filter(|_| seen.insert(pid)) else { continue };
-            out.push((pid, exe.clone()));
-            queue.extend(tree.children.get(&pid).into_iter().flatten());
         }
-        out
+
+        /// `root` and every process below it with its executable name, breadth first.
+        pub fn walk(&self, root: u32) -> Vec<(u32, String)> {
+            let mut out = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::from([root]);
+            while let Some(pid) = queue.pop_front() {
+                let Some(exe) = self.exes.get(&pid).filter(|_| seen.insert(pid)) else { continue };
+                out.push((pid, exe.clone()));
+                queue.extend(self.children.get(&pid).into_iter().flatten());
+            }
+            out
+        }
     }
 
-    /// Every process's children and executable name.
-    #[derive(Default)]
-    struct Tree {
-        children: HashMap<u32, Vec<u32>>,
-        exes: HashMap<u32, String>,
+    /// A process opened to wait for and end.
+    pub struct Process(HANDLE);
+
+    impl Process {
+        pub fn open(pid: u32) -> Option<Self> {
+            let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+            (!h.is_null()).then_some(Self(h))
+        }
+
+        /// Wait up to `timeout` for it to end.
+        pub fn wait(&self, timeout: Duration) {
+            let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+            unsafe { WaitForSingleObject(self.0, ms) };
+        }
+
+        /// End it, if it still runs.
+        pub fn terminate(&self) {
+            unsafe { TerminateProcess(self.0, 1) };
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
     }
 
     /// Every process: `(pid, parent pid, executable file name)`.

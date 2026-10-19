@@ -179,3 +179,52 @@ fn a_seeded_terminal_starts_below_the_old_screen() {
     let at = history.iter().position(|l| l == "old line one").unwrap_or_else(|| panic!("{history:?}"));
     assert_eq!(history[at + 1], "old line two");
 }
+
+/// Whether a process with `pid` runs.
+fn running(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+}
+
+/// The processes whose parent is `pid`.
+fn children(pid: u32) -> Vec<u32> {
+    let script = format!("Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | ForEach-Object {{ $_.ProcessId }}");
+    let out = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).split_whitespace().filter_map(|s| s.parse().ok()).collect()
+}
+
+/// A program closed while it is still starting up ends: closing the
+/// pseudoconsole alone left PowerShell (and its conhost) running forever.
+#[test]
+fn closing_at_once_ends_the_program() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    let pid = c.list().unwrap().iter().find(|i| i.id == id).unwrap().pid;
+    s.close();
+    wait_until("program ended", || !running(pid));
+}
+
+/// Closing ends the programs the shell runs too.
+#[test]
+fn closing_ends_the_programs_below_the_shell() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: ps("Write-Host started; ping -t 127.0.0.1"), hook: false, seed: None }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    // Any language's ping names the address it pings.
+    wait_until("output", || screen(&s).contains("127.0.0.1"));
+    let id = s.id().unwrap();
+    let pid = c.list().unwrap().iter().find(|i| i.id == id).unwrap().pid;
+    let below = children(pid);
+    assert!(!below.is_empty(), "ping isn't running");
+    s.close();
+    wait_until("shell ended", || !running(pid));
+    for p in below {
+        wait_until("program below ended", || !running(p));
+    }
+}

@@ -62,8 +62,8 @@ const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const JIGGLE: Duration = Duration::from_millis(50);
 /// How often a program that wants color scheme reports has the theme checked.
 const SCHEME_CHECK: Duration = Duration::from_millis(300);
-/// How long a closed program has to exit after SIGHUP before SIGKILL.
-#[cfg(unix)]
+/// How long a closed program has to exit after SIGHUP (on Windows, after
+/// its pseudoconsole is closed) before it is killed.
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// How often an adopted program (not our child) is checked for its end.
 const EXIT_POLL: Duration = Duration::from_millis(500);
@@ -502,6 +502,9 @@ trait HostPty: EventedPty + OnResize + Send + 'static {
     const POLLED: bool;
     #[cfg(unix)]
     fn pid(&self) -> libc::pid_t;
+    /// The program's id (0 if it isn't known).
+    #[cfg(windows)]
+    fn pid(&self) -> u32;
     #[cfg(unix)]
     fn master(&self) -> &File;
     /// How the program ended, once it did (only for `POLLED`).
@@ -519,6 +522,11 @@ impl HostPty for tty::Pty {
     #[cfg(unix)]
     fn pid(&self) -> libc::pid_t {
         self.child().id() as libc::pid_t
+    }
+
+    #[cfg(windows)]
+    fn pid(&self) -> u32 {
+        self.child_watcher().pid().map_or(0, |p| p.get())
     }
 
     #[cfg(unix)]
@@ -703,7 +711,10 @@ impl<P: HostPty> Driver<P> {
     fn run(mut self) {
         match self.drive() {
             Stop::Exited(code) => self.finish(code),
+            #[cfg(unix)]
             Stop::Ended => self.finish(None),
+            #[cfg(windows)]
+            Stop::Ended => self.end(),
             #[cfg(unix)]
             Stop::Abandon => self.abandon(),
             #[cfg(unix)]
@@ -786,8 +797,8 @@ impl<P: HostPty> Driver<P> {
                         self.jiggle = Some((Instant::now() + JIGGLE, size));
                     },
                     Ok(Msg::Shutdown) => {
-                        // On Windows, closing the pseudoconsole (dropping
-                        // the PTY in `finish`) ends the program.
+                        // On Windows, `end` closes the pseudoconsole and
+                        // makes sure the program ends.
                         #[cfg(unix)]
                         if !self.hang_up() {
                             // Dropping the PTY would wait for it forever: leave it.
@@ -1007,6 +1018,16 @@ impl<P: HostPty> Driver<P> {
     /// The program is gone (`code` = its exit status, if known).
     fn finish(mut self, code: Option<i32>) {
         self.report_exit(code);
+    }
+
+    /// End a closed program. Closing its pseudoconsole (dropping the PTY)
+    /// asks it to; one still starting up ignores that and runs on, keeping
+    /// its conhost too, so what's left after a grace period is terminated.
+    #[cfg(windows)]
+    fn end(self) {
+        let tree = tern_term::procs::ProcessTree::open(self.pty.pid());
+        self.finish(None);
+        tree.end(KILL_GRACE);
     }
 
     /// Report the end without dropping the PTY, whose drop would wait for a
