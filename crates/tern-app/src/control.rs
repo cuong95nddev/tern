@@ -25,6 +25,8 @@
 //!   layout-reset                                    put the side panels back (View > Reset Layout)
 //!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
 //!                    (as dragging its header does); `state` ends with `arrange …`
+//!   part-center PART PANE|PART left|right|up|down   drop a side panel beside a pane or a
+//!                    part among the panes (when the center dock takes it)
 //!   windows / ws     list windows / this window's workspaces
 //!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
 //!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window

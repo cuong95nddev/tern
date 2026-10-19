@@ -908,9 +908,11 @@ fn part_menu(p: &DraggedPart, popup: PopupMenu, window: &mut Window, cx: &mut Co
     let floats = cx.try_global::<Floats>();
     let can_float = !floats.is_some_and(|f| f.grounded.contains(p.part.as_ref()));
     let can_window = !floats.is_some_and(|f| f.windowless.contains(p.part.as_ref()));
+    let centered = floats.is_some_and(|f| f.centered.contains(p.part.as_ref()));
     let scope = Scope::new(format!("part-menu:{}", p.part))
         .var("floating", p.floating)
         .var("popped", p.popped)
+        .var("centered", centered)
         .var("can_float", can_float)
         .var("can_window", can_window)
         .var("part", p.part.clone());

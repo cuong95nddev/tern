@@ -342,18 +342,19 @@ fn encode_session(windows: &[SavedWindow]) -> String {
             for (key, encoded) in &ws.arrangements {
                 out.push_str(&format!("\t\tarrange\t{}\t{}\n", field(key), field(encoded)));
             }
-            if ws.tabs.is_empty() {
-                continue;
-            }
-            out.push_str(&format!("\t\tactive\t{}\n", ws.active));
-            let opt = |o: &Option<String>| o.as_deref().map(field).unwrap_or_default();
-            let path = |p: &PathBuf| field(&p.display().to_string());
+            // Also with no tabs: panels among the panes keep their places.
             if !ws.panes.is_empty() {
                 let active: Vec<String> = ws.pane_active.iter().map(|a| a.map_or("-".into(), |a| a.to_string())).collect();
                 let tab_panes: Vec<String> = ws.tab_panes.iter().map(usize::to_string).collect();
                 out.push_str(&format!("\t\tpanes\t{}\t{}\n", field(&ws.panes), active.join(" ")));
                 out.push_str(&format!("\t\ttab-panes\t{}\n", tab_panes.join(" ")));
             }
+            if ws.tabs.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\t\tactive\t{}\n", ws.active));
+            let opt = |o: &Option<String>| o.as_deref().map(field).unwrap_or_default();
+            let path = |p: &PathBuf| field(&p.display().to_string());
             for g in &ws.groups {
                 out.push_str(&format!("\t\tgroup\t{}\t{}\t{}\n", field(&g.color), u8::from(g.collapsed), field(&g.name)));
             }

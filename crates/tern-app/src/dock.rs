@@ -25,6 +25,8 @@ pub enum Change {
     Dock { part: SharedString, kind: SharedString },
     /// `part` is in a window of its own at `rect` (pixels) on display `display`.
     Window { part: SharedString, display: String, rect: arrange::Rect },
+    /// `part` is among the panes, on side `edge` of `target` (a pane or a part there).
+    Center { part: SharedString, target: crate::panes::Layout, edge: Edge },
 }
 
 /// Called with each change.
@@ -110,13 +112,14 @@ fn track_from(grab: Point<Pixels>, window: &Window, cx: &mut App) {
     cx.set_global(FloatTrack { start: at, at, grab, area });
 }
 
-/// Which parts float or are in windows of their own, and which may not
-/// (`float`, `window` don't hold): read by the panels' headers, drawn apart
-/// from the docks.
+/// Which parts float, are in windows of their own or among the panes, and
+/// which may not float or leave the window (`float`, `window` don't hold):
+/// read by the panels' headers, drawn apart from the docks.
 #[derive(Default, PartialEq)]
 pub struct Floats {
     pub floating: BTreeSet<String>,
     pub popped: BTreeSet<String>,
+    pub centered: BTreeSet<String>,
     pub grounded: BTreeSet<&'static str>,
     pub windowless: BTreeSet<&'static str>,
 }

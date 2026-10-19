@@ -590,7 +590,7 @@ impl Workspace {
             .collect();
         let tab_groups = (0..self.tabs.len()).map(|i| self.group_of(i).and_then(|g| self.groups.iter().position(|x| x.id == g))).collect();
         let order = self.layout.panes();
-        let (panes, tab_panes, pane_active) = if order.len() > 1 {
+        let (panes, tab_panes, pane_active) = if order.len() > 1 || !self.layout.parts().is_empty() {
             (
                 self.layout.encode(&order),
                 (0..self.tabs.len()).map(|i| order.iter().position(|p| *p == self.pane_of(i)).unwrap_or(0)).collect(),
@@ -1751,8 +1751,9 @@ impl Workspace {
                 .flat_map(|d| {
                     let docked = a.docks.get(&d.name).cloned().flatten();
                     let mut parts: Vec<String> = docked.iter().flat_map(|t| t.parts()).map(str::to_owned).collect();
-                    // A floating part's button stays with the dock it came from.
+                    // A floating part's button stays with the dock it came from, as does one in the center.
                     parts.extend(a.floating.iter().filter(|(_, f)| f.from == *d.name).map(|(p, _)| p.clone()));
+                    parts.extend(a.center.iter().filter(|(_, from)| **from == *d.name).map(|(p, _)| p.clone()));
                     parts
                 })
                 .collect(),
@@ -2481,7 +2482,8 @@ impl Workspace {
             self.arranged = None;
             let parts = templates.parts();
             let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
-            self.arrange_problems = self.arrangements.fit(&key, &docks, &parts);
+            let center = templates.pane_dock("workspace").parts;
+            self.arrange_problems = self.arrangements.fit(&key, &docks, &parts, &center);
             self.docks_epoch += 1;
         }
         if self.arranged.is_none() {
@@ -2545,6 +2547,25 @@ impl Workspace {
                     return;
                 }
                 self.docks_epoch += 1;
+            },
+            Change::Center { part, target, edge } => {
+                let leaf = Layout::Part(part.to_string());
+                if target == leaf || !self.layout.has(&target) {
+                    return;
+                }
+                if a.center_part(&part) {
+                    self.docks_epoch += 1;
+                }
+                self.layout.remove_part(&part);
+                self.layout.split_leaf(&target, leaf, edge);
+                self.layout_epoch += 1;
+                self.zoomed = None;
+                match &*part {
+                    "explorer" => self.show_explorer = true,
+                    "scratches" => self.show_scratches = true,
+                    "changes" => self.show_changes = true,
+                    _ => {},
+                }
             },
         }
         self.arrangements.touch(&key);
@@ -3089,6 +3110,7 @@ impl Workspace {
     fn render_layout(&self, node: &Layout, path: &str, cx: &mut Context<Self>) -> AnyElement {
         match node {
             Layout::Pane(p) => self.render_pane(*p, cx),
+            Layout::Part(name) => self.render_center_part(name, cx),
             Layout::Split(axis, children) => {
                 let id = SharedString::from(format!("panes-{}-{path}", self.layout_epoch));
                 let group = match axis {
@@ -3171,8 +3193,93 @@ impl Workspace {
     /// takes it somewhere: what it allows.
     fn drops_on_panes(&self, cx: &Context<Self>) -> Option<template::PaneDock> {
         let dock = Self::pane_dock(cx);
-        let pane = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| self.dragged_pane(p, cx.entity_id()).is_some());
-        (cx.has_active_drag() && (self.tab_drag || pane && dock.panes) && (dock.edges || dock.stack)).then_some(dock)
+        let dragged = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref());
+        let pane = dragged.is_some_and(|p| self.dragged_pane(p, cx.entity_id()).is_some());
+        let panel = dragged.is_some_and(|p| dock.takes(&p.part, &p.kind));
+        (cx.has_active_drag() && (self.tab_drag || pane && dock.panes || panel) && (dock.edges || dock.stack)).then_some(dock)
+    }
+
+    /// Whether a panel (not a tab or a pane) is dragged.
+    fn panel_dragged(cx: &App) -> bool {
+        cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| p.kind != "pane")
+    }
+
+    /// Part `name` among the panes, drawn as in a dock, with drop zones on
+    /// its sides while a tab, a pane or a panel the pane dock takes is dragged.
+    fn render_center_part(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
+        let body = template::render_part(name, self.part_scope(), cx);
+        let d = div().relative().size_full().flex().flex_col().min_w_0().min_h_0().child(body);
+        let Some(dock) = self.drops_on_panes(cx).filter(|d| d.edges) else { return d.into_any_element() };
+        let own = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| *p.part == *name);
+        if own {
+            // Let go on its own place: nothing happens (it doesn't float).
+            return d.child(div().absolute().inset_0().on_drop(|_: &DraggedPart, _, _| {})).into_any_element();
+        }
+        let area = format!("{}:part:{name}", cx.entity_id());
+        let overlay = crate::dock::zone_overlay(&area, cx);
+        let ws = cx.entity().downgrade();
+        let target = Layout::Part(name.to_owned());
+        let on_tab = {
+            let (ws, target) = (ws.clone(), target.clone());
+            move |t: &DraggedTab, zone: Zone, window: &mut Window, cx: &mut App| {
+                let Zone::Edge(edge) = zone else { return };
+                let _ = ws.update(cx, |this, cx| {
+                    this.tab_drag = false;
+                    this.tab_beside(t.tab, &target, edge, window, cx);
+                });
+            }
+        };
+        let overlay = crate::dock::on_zones(overlay, area.clone().into(), true, false, on_tab);
+        let overlay = crate::dock::on_zones(overlay, area.into(), true, false, move |p: &DraggedPart, zone, window, cx| {
+            let Zone::Edge(edge) = zone else { return };
+            let _ = ws.update(cx, |this, cx| this.drop_part_beside(p, &target, edge, &dock, window, cx));
+        });
+        d.child(overlay).into_any_element()
+    }
+
+    /// What dropping `p` (a pane or a panel) on side `edge` of `target` among
+    /// the panes does: it moves there.
+    fn drop_part_beside(
+        &mut self,
+        p: &DraggedPart,
+        target: &Layout,
+        edge: Edge,
+        dock: &template::PaneDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(from) = self.dragged_pane(p, cx.entity_id()) {
+            return self.move_pane_beside(from, target, edge, window, cx);
+        }
+        let locked = cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0);
+        if !locked && dock.takes(&p.part, &p.kind) {
+            self.arrangement_changed(Change::Center { part: p.part.clone(), target: target.clone(), edge }, cx);
+        }
+    }
+
+    /// The tab showing `id` in a new pane on side `edge` of `target`.
+    fn tab_beside(&mut self, id: EntityId, target: &Layout, edge: Edge, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tabs.iter().any(|t| t.entity_id() == id) || !self.layout.has(target) {
+            return;
+        }
+        let new = self.new_pane();
+        self.layout.split_leaf(target, Layout::Pane(new), edge);
+        self.zoomed = None;
+        self.move_tab_to_pane(id, new, window, cx);
+    }
+
+    /// Pane `from` (dragged by its tab bar) moved to side `edge` of `target`.
+    fn move_pane_beside(&mut self, from: PaneId, target: &Layout, edge: Edge, window: &mut Window, cx: &mut Context<Self>) {
+        if *target == Layout::Pane(from) || !self.layout.has(target) || !self.layout.remove(from) {
+            return;
+        }
+        self.layout.split_leaf(target, Layout::Pane(from), edge);
+        self.layout_epoch += 1;
+        self.zoomed = None;
+        self.sync_panes();
+        self.focus_active(window, cx);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
     }
 
     /// What dragging pane `pane` by its tab bar's empty space drags, when the
@@ -3214,11 +3321,13 @@ impl Workspace {
             }
         };
         let overlay = crate::dock::on_zones(overlay, area.clone().into(), dock.edges, dock.stack, on_tab);
-        crate::dock::on_zones(overlay, area.into(), dock.edges, dock.stack, move |p: &DraggedPart, zone, window, cx| {
-            let _ = ws.update(cx, |this, cx| {
-                if let Some(from) = this.dragged_pane(p, cx.entity_id()) {
-                    this.drop_pane(from, pane, zone, window, cx);
-                }
+        // A panel goes on a pane's side, never into it.
+        let stack = dock.stack && !Self::panel_dragged(cx);
+        crate::dock::on_zones(overlay, area.into(), dock.edges, stack, move |p: &DraggedPart, zone, window, cx| {
+            let _ = ws.update(cx, |this, cx| match (this.dragged_pane(p, cx.entity_id()), zone) {
+                (Some(from), zone) => this.drop_pane(from, pane, zone, window, cx),
+                (None, Zone::Edge(edge)) => this.drop_part_beside(p, &Layout::Pane(pane), edge, &dock, window, cx),
+                (None, Zone::Center) => {},
             });
         })
     }
@@ -3239,11 +3348,7 @@ impl Workspace {
                 }
                 self.drop_if_empty(from);
             },
-            Zone::Edge(edge) => {
-                self.layout.remove(from);
-                self.layout.split(to, from, edge);
-                self.layout_epoch += 1;
-            },
+            Zone::Edge(edge) => return self.move_pane_beside(from, &Layout::Pane(to), edge, window, cx),
         }
         self.zoomed = None;
         self.sync_panes();
@@ -3531,6 +3636,28 @@ impl Workspace {
                 self.arrangement_changed(change, cx);
                 "ok".into()
             },
+            // What dropping PART on side EDGE of TARGET (a pane's index, or a part among the panes) does.
+            cmd if cmd.starts_with("part-center ") => {
+                let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+                let order = self.layout.panes();
+                let target = match args.get(1) {
+                    Some(t) if t.chars().all(|c| c.is_ascii_digit()) => {
+                        t.parse::<usize>().ok().and_then(|k| order.get(k)).map(|p| Layout::Pane(*p))
+                    },
+                    Some(t) => Some(Layout::Part((*t).to_owned())),
+                    None => None,
+                };
+                let (Some(part), Some(target), Some(edge)) = (args.first(), target, args.get(2).and_then(|e| Edge::parse(e))) else {
+                    return "error: part-center PART PANE|PART left|right|up|down".into();
+                };
+                let kind =
+                    cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| n == part).map(|(_, k)| k));
+                let Some(kind) = kind else { return format!("error: no part {part:?}") };
+                let p =
+                    DraggedPart { part: (*part).to_owned().into(), kind: kind.into(), title: "".into(), floating: false, popped: false };
+                self.drop_part_beside(&p, &target, edge, &Self::pane_dock(cx), window, cx);
+                "ok".into()
+            },
             cmd if cmd.starts_with("file-open ") => {
                 let path = self.root.join(cmd["file-open ".len()..].trim());
                 self.open_file(path, true, window, cx);
@@ -3597,10 +3724,16 @@ impl Render for Workspace {
             }
         }
         self.sync_panes();
+        let arrangement = self.arrangement(cx);
+        // The parts the arrangement puts among the panes, and no others.
+        let centered: Vec<&str> = arrangement.iter().flat_map(|a| a.center.keys().map(String::as_str)).collect();
+        if self.layout.fit_parts(&centered) {
+            self.layout_epoch += 1;
+        }
         let center = match self.zoomed.filter(|z| self.layout.contains(*z)) {
             Some(z) => self.render_pane(z, cx),
             None => {
-                let layout = self.layout.clone();
+                let layout = self.layout.shown(&|p| self.part_shown(p)).unwrap_or_else(|| self.layout.clone());
                 self.render_layout(&layout, "0", cx)
             },
         };
@@ -3615,7 +3748,6 @@ impl Render for Workspace {
             Some(_) => "background: ✓".to_owned(),
             None => "background: unavailable".to_owned(),
         };
-        let arrangement = self.arrangement(cx);
         let mut settings_error: Vec<String> =
             cx.try_global::<crate::settings::SettingsStatus>().and_then(|s| s.error.as_ref().map(|e| e.to_string())).into_iter().collect();
         settings_error.extend(self.arrange_problems.iter().cloned());
@@ -3635,6 +3767,7 @@ impl Render for Workspace {
                 .iter()
                 .flat_map(|a| a.floating.iter().filter(|(_, f)| f.window.is_some()).map(|(p, _)| p.clone()))
                 .collect(),
+            centered: arrangement.iter().flat_map(|a| a.center.keys().cloned()).collect(),
             ..Default::default()
         };
         if let Some(a) = arrangement.clone() {

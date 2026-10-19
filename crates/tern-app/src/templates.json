@@ -1655,7 +1655,7 @@
     "children": [
       { "button": "float", "label": "Float", "when": "!floating && can_float" },
       { "button": "window", "label": "Move to New Window", "when": "!popped && can_window" },
-      { "button": "dock", "label": "Dock", "when": "floating || popped" }
+      { "button": "dock", "label": "Dock", "when": "floating || popped || centered" }
     ]
   },
   "part_window": {

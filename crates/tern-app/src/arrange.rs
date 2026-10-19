@@ -179,6 +179,10 @@ pub struct Arrangement {
     pub widths: BTreeMap<String, f32>,
     /// The parts floating over the docks, by name.
     pub floating: BTreeMap<String, Float>,
+    /// The parts among the panes (the center dock takes them), by name, with
+    /// the dock each came from (its strip button stays there, and it docks
+    /// back there). Where they sit among the panes is the pane layout's.
+    pub center: BTreeMap<String, String>,
 }
 
 /// A part floating over the docks: the dock it came from (its strip button
@@ -542,6 +546,7 @@ impl Arrangement {
             docks: docks.iter().map(|d| (d.name.clone(), prune(&d.defaults, &|_| true))).collect(),
             widths: BTreeMap::new(),
             floating: BTreeMap::new(),
+            center: BTreeMap::new(),
         }
     }
 
@@ -581,20 +586,41 @@ impl Arrangement {
         true
     }
 
-    /// Takes `part` out of every dock and out of the floating parts.
+    /// Takes `part` out of every dock, the floating parts and the center.
     fn take_out(&mut self, part: &str) {
         let not_part = |name: &str| name != part;
         for tree in self.docks.values_mut() {
             *tree = tree.as_ref().and_then(|t| prune(t, &not_part));
         }
         self.floating.remove(part);
+        self.center.remove(part);
+    }
+
+    /// The dock `part` sits in, or came from when it floats or is in the center.
+    fn home_of(&self, part: &str) -> Option<String> {
+        let away = self.floating.get(part).map(|f| &f.from).or_else(|| self.center.get(part));
+        away.cloned().or_else(|| self.dock_of(part).map(str::to_owned))
+    }
+
+    /// Moves `part` among the panes (the pane layout says where); false when
+    /// it is in no dock, or already there.
+    pub fn center_part(&mut self, part: &str) -> bool {
+        if self.center.contains_key(part) {
+            return false;
+        }
+        let Some(from) = self.home_of(part) else {
+            return false;
+        };
+        self.take_out(part);
+        self.center.insert(part.to_string(), from);
+        true
     }
 
     /// Floats `part` at `r` in an area of `area`, out of its dock (a floating
     /// one just moves); false when it is in no dock and doesn't float, or
     /// nothing changes.
     pub fn float_part(&mut self, part: &str, r: Rect, area: (f32, f32)) -> bool {
-        let Some(from) = self.floating.get(part).map(|f| f.from.clone()).or_else(|| self.dock_of(part).map(str::to_owned)) else {
+        let Some(from) = self.home_of(part) else {
             return false;
         };
         let mut next = self.clone();
@@ -611,7 +637,7 @@ impl Arrangement {
     /// popped one just moves); false when it is in no dock and doesn't float,
     /// or nothing changes.
     pub fn pop_out(&mut self, part: &str, display: &str, r: Rect) -> bool {
-        let Some(from) = self.floating.get(part).map(|f| f.from.clone()).or_else(|| self.dock_of(part).map(str::to_owned)) else {
+        let Some(from) = self.home_of(part) else {
             return false;
         };
         let display = if valid_name(display) { display } else { "-" };
@@ -625,25 +651,33 @@ impl Arrangement {
         true
     }
 
-    /// Docks floating `part` again: at the end of the dock it came from, or of
-    /// its default dock when that one is gone or doesn't take it.
+    /// Docks `part`, floating or in the center, again: at the end of the dock
+    /// it came from, or of its default dock when that one is gone or doesn't
+    /// take it.
     pub fn dock_part(&mut self, part: &str, kind: &str, docks: &[DockInfo]) -> bool {
-        let Some(f) = self.floating.remove(part) else {
+        let Some(from) = self.floating.get(part).map(|f| f.from.clone()).or_else(|| self.center.get(part).cloned()) else {
             return false;
         };
-        match docks.iter().find(|d| d.name == f.from && d.takes(part, kind)) {
+        let mut next = self.clone();
+        next.take_out(part);
+        if next.dock_back(part, kind, &from, docks).is_none() {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Appends `part` to dock `from`, or to its default dock when that one is
+    /// gone or doesn't take it; the dock's name.
+    fn dock_back(&mut self, part: &str, kind: &str, from: &str, docks: &[DockInfo]) -> Option<String> {
+        match docks.iter().find(|d| d.name == from && d.takes(part, kind)) {
             Some(info) => {
                 let root = self.docks.entry(info.name.clone()).or_insert(None);
                 place(root, info.dir, part, &Drop::End);
+                Some(info.name.clone())
             },
-            None => {
-                if self.send_to_default(part, Some(kind), docks).is_none() {
-                    self.floating.insert(part.to_string(), f);
-                    return false;
-                }
-            },
+            None => self.send_to_default(part, Some(kind), docks),
         }
-        true
     }
 
     /// Sets the sizes of the split at `path` (child indices from the dock's root) in `dock`.
@@ -695,8 +729,9 @@ impl Arrangement {
         }
     }
 
-    /// Fits a stored arrangement to the templates in effect; returns the problems.
-    pub fn reconcile(&mut self, docks: &[DockInfo], parts: &[(&str, &str)]) -> Vec<String> {
+    /// Fits a stored arrangement to the templates in effect (`center`: the
+    /// part names and kinds the center dock takes); returns the problems.
+    pub fn reconcile(&mut self, docks: &[DockInfo], parts: &[(&str, &str)], center: &[String]) -> Vec<String> {
         let kind_of = |part: &str| parts.iter().find(|(n, _)| *n == part).map(|(_, k)| *k);
         let info_of = |name: &str| docks.iter().find(|d| d.name == name);
         let mut problems = Vec::new();
@@ -755,6 +790,35 @@ impl Arrangement {
             self.floating.insert(part, f);
         }
 
+        // Parts in the center stay while it takes them; else they dock back.
+        let in_center = std::mem::take(&mut self.center);
+        for (part, mut from) in in_center {
+            let Some(kind) = kind_of(&part) else {
+                problems.push(format!("layout: \"{part}\" is not a part any more"));
+                continue;
+            };
+            if !seen.insert(part.clone()) {
+                problems.push(format!("layout: \"{part}\" is placed twice"));
+                continue;
+            }
+            let home = info_of(&from).filter(|i| i.takes(&part, kind)).or_else(|| default_dock(&part, kind, docks));
+            if !center.iter().any(|a| *a == part || a == kind) {
+                match self.dock_back(&part, kind, &from, docks) {
+                    Some(dock) => problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\"")),
+                    None => problems.push(format!("layout: \"{part}\" has no dock")),
+                }
+                continue;
+            }
+            match home {
+                Some(info) => from = info.name.clone(),
+                None => {
+                    problems.push(format!("layout: \"{part}\" has no dock"));
+                    continue;
+                },
+            }
+            self.center.insert(part, from);
+        }
+
         for part in moved_back {
             match self.send_to_default(&part, kind_of(&part), docks) {
                 Some(dock) => problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\"")),
@@ -781,8 +845,8 @@ impl Arrangement {
     }
 
     /// One line: `name=tree` per dock joined by `;`, then `;f:part=dock@x,y,w,h` per floating part
-    /// (`;p:part=dock@display@x,y,w,h` for one in its own window), then `;w:name=px,...` when widths
-    /// are stored.
+    /// (`;p:part=dock@display@x,y,w,h` for one in its own window), `;c:part=dock` per part in the
+    /// center, then `;w:name=px,...` when widths are stored.
     pub fn encode(&self) -> String {
         let mut out: Vec<String> = self
             .docks
@@ -801,6 +865,7 @@ impl Arrangement {
                 None => out.push(format!("f:{part}={}@{},{},{},{}", f.from, f.x, f.y, f.w, f.h)),
             }
         }
+        out.extend(self.center.iter().map(|(part, from)| format!("c:{part}={from}")));
         if !self.widths.is_empty() {
             let widths: Vec<String> = self.widths.iter().map(|(n, w)| format!("{n}={w}")).collect();
             out.push(format!("w:{}", widths.join(",")));
@@ -813,10 +878,19 @@ impl Arrangement {
         let mut docks = BTreeMap::new();
         let mut widths = BTreeMap::new();
         let mut floating = BTreeMap::new();
+        let mut center = BTreeMap::new();
         let segments: Vec<&str> = text.split(';').collect();
-        // Floating parts come after the docks, before the widths.
+        // Floating parts and those in the center come after the docks, before the widths.
         let mut docks_done = false;
         for (i, seg) in segments.iter().enumerate() {
+            if let Some(entry) = seg.strip_prefix("c:") {
+                docks_done = true;
+                let (part, from) = entry.split_once('=')?;
+                if !valid_name(part) || !valid_name(from) || center.insert(part.to_string(), from.to_string()).is_some() {
+                    return None;
+                }
+                continue;
+            }
             let float = seg.strip_prefix("f:").map(|e| (e, false)).or_else(|| seg.strip_prefix("p:").map(|e| (e, true)));
             if let Some((entry, popped)) = float {
                 docks_done = true;
@@ -869,7 +943,7 @@ impl Arrangement {
                 return None;
             }
         }
-        Some(Arrangement { key: key.to_string(), docks, widths, floating })
+        Some(Arrangement { key: key.to_string(), docks, widths, floating, center })
     }
 }
 
@@ -1058,11 +1132,11 @@ impl Kept {
     /// Fits `key`'s arrangement to the templates now in effect: a touched one is
     /// reconciled, any other is rebuilt from the defaults. A kept arrangement that
     /// ends up equal to the defaults is no longer the user's, so start sizes apply.
-    pub fn fit(&mut self, key: &str, docks: &[DockInfo], parts: &[(&str, &str)]) -> Vec<String> {
+    pub fn fit(&mut self, key: &str, docks: &[DockInfo], parts: &[(&str, &str)], center: &[String]) -> Vec<String> {
         if self.touched.contains(key)
             && let Some(a) = self.arrangements.get_mut(key)
         {
-            let problems = a.reconcile(docks, parts);
+            let problems = a.reconcile(docks, parts, center);
             if *a == Arrangement::defaults(key, docks) {
                 self.touched.remove(key);
             }
@@ -1211,13 +1285,13 @@ mod tests {
     fn reconcile_drops_and_adds_parts() {
         let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
         let mut a = Arrangement::decode("k", "left=[c explorer@- ghost@-];right=changes").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("ghost"));
 
         let mut a = Arrangement::decode("k", "left=[c explorer@- scratches@-];right=[c changes@- explorer@-]").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes");
         assert_eq!(problems, vec!["layout: \"explorer\" is placed twice".to_string()]);
     }
@@ -1226,7 +1300,7 @@ mod tests {
     fn reconcile_keeps_a_part_once_within_a_dock() {
         let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
         let mut a = Arrangement::decode("k", "left=[c explorer@- explorer@-];right=changes").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert_eq!(a.encode(), "left=[c explorer@- scratches@-];right=changes");
         assert_eq!(problems, vec!["layout: \"explorer\" is placed twice".to_string()]);
     }
@@ -1235,7 +1309,7 @@ mod tests {
     fn reconcile_reports_parts_no_dock_takes() {
         let parts = [("explorer", "panel"), ("odd", "weird")];
         let mut a = Arrangement::decode("k", "left=explorer;right=odd").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert_eq!(a.encode(), "left=explorer;right=");
         assert_eq!(problems, vec!["layout: \"odd\" has no dock".to_string()]);
     }
@@ -1254,7 +1328,7 @@ mod tests {
         let mut d = docks();
         d[1].accepts = vec!["other".into()];
         d[1].defaults = part("changes");
-        let problems = a.reconcile(&d, &parts);
+        let problems = a.reconcile(&d, &parts, &[]);
         assert_eq!(a.encode(), "left=[c scratches@- explorer@-];right=");
         assert!(problems.iter().any(|p| p.contains("\"explorer\" moved back to dock \"left\"")));
     }
@@ -1295,13 +1369,13 @@ mod tests {
     #[test]
     fn untouched_keys_follow_the_defaults() {
         let mut kept = Kept::default();
-        assert!(kept.fit("k", &docks(), &PARTS).is_empty());
+        assert!(kept.fit("k", &docks(), &PARTS, &[]).is_empty());
         assert_eq!(kept.get("k").unwrap().encode(), DEFAULT);
         // The templates change: an untouched key is rebuilt from the new defaults.
         let mut d = docks();
         d[0].defaults = part("explorer");
         d[1].defaults = Tree::Split(Dir::Column, vec![(part("changes"), Size::Auto), (part("scratches"), Size::Auto)]);
-        kept.fit("k", &d, &PARTS);
+        kept.fit("k", &d, &PARTS, &[]);
         assert_eq!(kept.get("k").unwrap().encode(), "left=explorer;right=[c changes@- scratches@-]");
         assert!(kept.saved().is_empty());
     }
@@ -1309,7 +1383,7 @@ mod tests {
     #[test]
     fn touched_keys_reconcile_and_are_saved() {
         let mut kept = Kept::new([("k", "left=[c explorer@- ghost@-];right=changes")]);
-        let problems = kept.fit("k", &docks(), &PARTS);
+        let problems = kept.fit("k", &docks(), &PARTS, &[]);
         assert_eq!(problems.len(), 1);
         assert_eq!(kept.get("k").unwrap().encode(), "left=[c explorer@- scratches@-];right=changes");
         assert_eq!(kept.saved(), vec![("k".to_string(), "left=[c explorer@- scratches@-];right=changes".to_string())]);
@@ -1318,8 +1392,8 @@ mod tests {
     #[test]
     fn only_touched_keys_are_saved() {
         let mut kept = Kept::default();
-        kept.fit("a", &docks(), &PARTS);
-        kept.fit("b", &docks(), &PARTS);
+        kept.fit("a", &docks(), &PARTS, &[]);
+        kept.fit("b", &docks(), &PARTS, &[]);
         kept.touch("b");
         let saved = kept.saved();
         assert_eq!(saved.len(), 1);
@@ -1330,7 +1404,7 @@ mod tests {
     fn restored_defaults_are_untouched() {
         let mut kept = Kept::new([("k", DEFAULT)]);
         assert_eq!(kept.saved().len(), 1);
-        kept.fit("k", &docks(), &PARTS);
+        kept.fit("k", &docks(), &PARTS, &[]);
         assert!(kept.saved().is_empty());
     }
 
@@ -1364,12 +1438,12 @@ mod tests {
         let d = docks();
         let other = &d[..1];
         let mut kept = Kept::default();
-        kept.fit("a", &d, &PARTS);
+        kept.fit("a", &d, &PARTS, &[]);
         assert!(kept.get_mut("a").unwrap().move_part("changes", "panel", "left", Drop::End, &d));
         kept.touch("a");
         let moved = kept.get("a").unwrap().encode();
-        kept.fit("b", other, &PARTS);
-        kept.fit("a", &d, &PARTS);
+        kept.fit("b", other, &PARTS, &[]);
+        kept.fit("a", &d, &PARTS, &[]);
         assert_eq!(kept.get("a").unwrap().encode(), moved);
         assert_eq!(kept.saved(), vec![("a".to_string(), moved)]);
     }
@@ -1453,11 +1527,11 @@ mod tests {
     #[test]
     fn reset_clears_touched_and_rebuilds() {
         let mut kept = Kept::new([("k", "left=explorer;right=[c changes@- scratches@-]")]);
-        kept.fit("k", &docks(), &PARTS);
+        kept.fit("k", &docks(), &PARTS, &[]);
         kept.reset("k");
         assert!(kept.get("k").is_none());
         assert!(kept.saved().is_empty());
-        kept.fit("k", &docks(), &PARTS);
+        kept.fit("k", &docks(), &PARTS, &[]);
         assert_eq!(kept.get("k").unwrap().encode(), DEFAULT);
     }
     const AREA: (f32, f32) = (1000., 800.);
@@ -1506,14 +1580,54 @@ mod tests {
     fn reconcile_keeps_floating_parts() {
         let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
         let mut a = Arrangement::decode("k", "left=explorer;right=changes;f:scratches=gone@0,0,10,10;f:ghost=left@0,0,10,10").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert_eq!(a.encode(), "left=explorer;right=changes;f:scratches=left@0,0,10,10");
         assert!(problems.iter().any(|p| p.contains("\"ghost\" is not a part")));
         // Floating and docked both: the dock wins.
         let mut a = Arrangement::decode("k", "left=explorer;right=changes;f:explorer=left@0,0,10,10").unwrap();
-        let problems = a.reconcile(&docks(), &parts);
+        let problems = a.reconcile(&docks(), &parts, &[]);
         assert!(a.floating.is_empty());
         assert!(problems.iter().any(|p| p.contains("placed twice")));
+    }
+
+    #[test]
+    fn parts_in_the_center() {
+        let d = docks();
+        let parts = [("explorer", "panel"), ("scratches", "panel"), ("changes", "panel")];
+        let mut a = fresh();
+        // From a dock: its button stays with the dock.
+        assert!(a.center_part("changes"));
+        assert!(!a.center_part("changes"));
+        assert!(!a.center_part("ghost"));
+        assert_eq!(a.center["changes"], "right");
+        assert_eq!(a.dock_of("changes"), None);
+        let s = a.encode();
+        assert!(s.ends_with(";c:changes=right"), "{s}");
+        assert_eq!(Arrangement::decode("k", &s), Some(Arrangement { key: "k".into(), ..a.clone() }));
+        assert_eq!(Arrangement::decode("k", "left=;c:changes=right;c:changes=left"), None);
+        assert_eq!(Arrangement::decode("k", "c:changes=right;left="), None);
+        // Floated from there, it still came from its dock; Dock sends it back.
+        assert!(a.float_part("changes", rect(0., 0., 100., 100.), AREA));
+        assert!(a.center.is_empty());
+        assert_eq!(a.floating["changes"].from, "right");
+        assert!(a.center_part("changes"));
+        assert!(a.floating.is_empty());
+        assert!(a.dock_part("changes", "panel", &d));
+        assert!(a.center.is_empty());
+        assert_eq!(a.dock_of("changes"), Some("right"));
+        // Moved to a dock from the center.
+        assert!(a.center_part("explorer"));
+        assert!(a.move_part("explorer", "panel", "right", Drop::End, &d));
+        assert!(a.center.is_empty());
+        // Kept while the center takes it; else it docks back where it came from.
+        assert!(a.center_part("explorer"));
+        let mut kept = a.clone();
+        assert_eq!(kept.reconcile(&d, &parts, &["panel".into()]), Vec::<String>::new());
+        assert_eq!(kept.center["explorer"], "right");
+        let problems = a.reconcile(&d, &parts, &[]);
+        assert!(a.center.is_empty());
+        assert_eq!(a.dock_of("explorer"), Some("right"));
+        assert!(problems.iter().any(|p| p.contains("moved back")), "{problems:?}");
     }
 
     #[test]

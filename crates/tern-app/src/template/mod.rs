@@ -399,7 +399,7 @@ impl Templates {
     /// What `template`'s pane dock allows.
     pub fn pane_dock(&self, template: &str) -> PaneDock {
         fn find(n: &Node) -> Option<PaneDock> {
-            n.pane_dock.or_else(|| n.children.iter().find_map(find))
+            n.pane_dock.clone().or_else(|| n.children.iter().find_map(find))
         }
         self.nodes.get(template).and_then(|n| find(n)).unwrap_or_default()
     }
@@ -769,7 +769,7 @@ const ZONES: &[&str] = &["before", "after", "edges", "stack"];
 const PANE_DOCK: &str = "center";
 
 /// What the pane dock (`"dock": "center"`) lets the user do with tabs and panes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneDock {
     /// A whole pane may be dragged (it accepts `pane`).
     pub panes: bool,
@@ -777,12 +777,22 @@ pub struct PaneDock {
     pub edges: bool,
     /// Dropping onto a pane joins it.
     pub stack: bool,
+    /// The part names and kinds it takes among the panes, besides `pane`.
+    pub parts: Arc<[String]>,
+}
+
+impl PaneDock {
+    /// True when it takes part `part` of kind `kind` among the panes (on a
+    /// pane's side: `edges`).
+    pub fn takes(&self, part: &str, kind: &str) -> bool {
+        self.edges && kind != "pane" && self.parts.iter().any(|a| a == part || a == kind)
+    }
 }
 
 impl Default for PaneDock {
     /// Without a pane dock, tabs split and join panes, and panes stay.
     fn default() -> Self {
-        PaneDock { panes: false, edges: true, stack: true }
+        PaneDock { panes: false, edges: true, stack: true, parts: Arc::new([]) }
     }
 }
 
@@ -1336,16 +1346,14 @@ impl Compiler<'_, '_> {
         if !s.children.is_empty() || s.split.is_some() || s.strip.is_some() || s.slot.is_some() {
             self.problems.push(format!("{at}: the \"{PANE_DOCK}\" dock holds the panes: no children, split, strip or slot"));
         }
-        let mut dock = PaneDock { panes: s.accepts.iter().any(|a| a == "pane"), edges: false, stack: false };
+        let parts: Vec<String> = s.accepts.iter().filter(|a| *a != "pane").cloned().collect();
+        let mut dock = PaneDock { panes: s.accepts.iter().any(|a| a == "pane"), edges: false, stack: false, parts: parts.into() };
         for z in &s.zones {
             match z.as_str() {
                 "edges" => dock.edges = true,
                 "stack" => dock.stack = true,
                 _ => self.problems.push(format!("{at}.zones: \"{z}\" is not one of edges, stack")),
             }
-        }
-        if s.accepts.iter().any(|a| a != "pane") {
-            self.problems.push(format!("{at}.accepts: the \"{PANE_DOCK}\" dock takes only \"pane\""));
         }
         Some(dock)
     }
@@ -1633,7 +1641,7 @@ mod tests {
                 {"dock": "center", "accepts": ["pane"], "zones": ["edges"]}]}}"#,
         );
         assert_eq!(problems, Vec::<String>::new());
-        assert_eq!(t.pane_dock("w"), super::PaneDock { panes: true, edges: true, stack: false });
+        assert_eq!(t.pane_dock("w"), super::PaneDock { panes: true, edges: true, stack: false, parts: std::sync::Arc::new([]) });
         // Not one of the arrangement's docks: stored arrangements keep their key.
         assert_eq!(t.docks("w").iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["left"]);
         assert!(t.nodes["w"].children[1].is_bare());
@@ -1641,7 +1649,12 @@ mod tests {
         assert_eq!(t.pane_dock("nope"), super::PaneDock::default());
 
         let (_, problems) = compiled(r#"{"w": {"dock": "center", "accepts": ["panel"], "zones": ["before"], "split": "row"}}"#);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        // Panels among the panes: on a pane's side only.
+        let (t, problems) = compiled(r#"{"w": {"dock": "center", "accepts": ["pane", "explorer"], "zones": ["edges", "stack"]}}"#);
+        assert_eq!(problems, Vec::<String>::new());
+        let dock = t.pane_dock("w");
+        assert!(dock.takes("explorer", "panel") && !dock.takes("changes", "panel") && !dock.takes("pane:1", "pane"));
     }
 
     #[test]

@@ -245,7 +245,7 @@ B. **Done (2026-10-19).** Center as a dock: move the pane drop-zone code to the 
      their key). Its `zones` decide whether a tab may split (`edges`) or join (`stack`) a pane. With `accepts`
      `pane`, a whole pane drags by its tab bar's empty space (a `DraggedPart` of kind `pane`): onto a pane its tabs
      join it, on a side it moves there. `layout.locked` stops pane drags; tab drags stay unlocked.
-     Not done: mixing panels into the center or panes into side docks (the center's tree holds only panes).
+     Panels into the center: phase E. Panes into side docks: not done.
    - Control commands for checks: `part-move PART DOCK stack|left|right|up|down TARGET`, `pane-move FROM TO ZONE`.
 C. **Done (2026-10-19).** Floating parts in the window. As built (plan `2026-10-19-layout-phase-c.md`):
    - A part let go outside every drop zone floats where it was let go (its top-left where its handle was
@@ -289,6 +289,28 @@ D. **Done (2026-10-19).** Parts in OS windows of their own. As built (plan `2026
    - Checked on Windows: pop out by command and by menu (explorer, changes), move the window and restart (same
      place), hide and show, Float and Dock from its menu, close docks it (kept after restart); the default look is
      pixel-identical with the previous build.
+
+E. **Done (2026-10-19).** Panels among the panes, when the template lets the center take them.
+   - The center dock's `accepts` may name parts or kinds besides `pane` (`["pane", "panel"]`); it used to be a
+     problem. The built-in center still takes only `pane`, so the default look is unchanged (pixel-identical on
+     Windows with the previous build).
+   - A panel the center takes, dropped on a pane's side (`edges`; never onto a pane: `stack` is for tabs), splits
+     the pane. The pane layout (`panes::Layout`) gains `Part` leaves, so the center's tree is the pane layout with
+     panels in it, and the session keeps it as before (`h(explorer,v(0,1))`); that line is now written for a
+     workspace with no tabs too. A panel there is drawn as in a dock (`render_part`), with drop zones on its
+     sides: a tab dropped there gets a new pane, a pane moves there, another panel goes there.
+   - The arrangement keeps which panels are in the center and the dock each came from (`c:<part>=<dock>`), like
+     a floating part's `from`: its strip button stays with that dock, and Dock (in its header menu now) or a drag
+     onto a dock sends it back. Float and Move to New Window work from there too. A template whose center doesn't
+     take it any more docks it back where it came from (a problem in the status bar, like other moves back).
+   - Hidden (strip button, its key), it leaves no room among the panes and comes back to the same spot.
+   - A pane layout preset (Grid, Two Columns, ...) rebuilds the panes; panels in the center go to its right.
+   - Control command for checks: `part-center PART PANE|PART left|right|up|down`.
+   - Checked on Windows with a `settings.json` whose `workspace` center takes `panel`: by command and by real
+     drags (panel onto a pane's side, a tab onto a panel's side, a panel back onto a dock, a panel let go on its
+     own place), hide and show by its strip button, the menu's Dock, and a restart (same places).
+   - Also from this round: a part's handle let go outside the main window moves it to a window of its own
+     (phase D), and the pane zoom icons draw (phase 2).
 
 ### Left to the builder
 

@@ -1060,6 +1060,11 @@ between them by their headers. In a template:
   `strip`): `zones` `edges` lets a dragged tab split a pane, `stack` lets it
   join one; with `\"accepts\": [\"pane\"]`, a whole pane drags by its tab
   bar's empty space, to another pane's side or onto it (its tabs join).
+  Part names or kinds in its `accepts` (`[\"pane\", \"panel\"]`) put those
+  panels among the panes: dropped on a pane's side (with `edges`) a panel
+  splits it, and tabs, panes and panels go on its own sides. Its strip
+  button stays with the dock it came from; Dock in its header menu, or
+  dragging it onto a dock, sends it back.
 - A panel let go outside every drop zone floats over the workspace, where
   it was let go (its header's right-click menu, `menu.part`, has Float and
   Dock too). It moves by its header, resizes from its sides and corners, and
