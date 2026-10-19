@@ -569,6 +569,11 @@ impl Drawer<'_, '_> {
         if n.truncate {
             d = d.min_w_0().whitespace_nowrap().text_ellipsis();
         }
+        if n.nowrap {
+            // At least as wide as its text, even when it grows from nothing.
+            d = d.whitespace_nowrap();
+            d.style().min_size.width = Some(Length::Auto);
+        }
         d = look.apply(d);
         if let Some(g) = &n.group {
             d = d.group(g.clone());
@@ -644,7 +649,7 @@ impl Node {
     }
 
     /// A slot with nothing of its own: drawn as the code gives it.
-    fn is_bare(&self) -> bool {
+    pub(super) fn is_bare(&self) -> bool {
         self.element.is_empty()
             && self.style.is_empty()
             && self.states.is_empty()
@@ -656,6 +661,7 @@ impl Node {
             && self.position.is_none()
             && !self.overlay
             && !self.truncate
+            && !self.nowrap
             && !self.clip
             && self.frame.is_none()
             && self.align.is_none()

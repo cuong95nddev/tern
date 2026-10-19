@@ -5,13 +5,14 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_fs::{ChangeBatch, FsWatcher};
 
 use crate::file_icons;
+use crate::template::{self, Framed, on_event};
 use crate::{scratch, style};
 
 /// The element a row is drawn as ([`style`]).
@@ -106,39 +107,33 @@ impl ScratchesView {
 
     fn render_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let look = style::el(ROW, cx);
-        let (fg, muted, hover, active) =
-            (look.color("text"), look.color("detail_text"), look.color("hover_background"), look.color("selected_background"));
-        let detail_size = look.len("detail_font_size");
-        let selected_text = look.is_set("selected_text").then(|| look.color("selected_text"));
+        let indent = style::row_indent(ROW, 0, cx);
         let now = SystemTime::now();
         range
             .filter_map(|ix| {
                 let (path, modified) = self.files.get(ix)?;
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let (icon, icon_color) = file_icons::file_icon(&name, theme);
-                let selected = self.selected.as_deref() == Some(path.as_path());
                 let age = modified.map(|m| ago(now.duration_since(m).unwrap_or_default()));
-                Some(
-                    style::list_row(ROW, ix, 0, cx)
-                        .when(selected, |d| d.bg(active))
-                        .when_some(selected_text.filter(|_| selected), |d, c| d.text_color(c))
-                        .hover(|d| d.bg(hover))
-                        .on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx)))
-                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(ix)))
-                        .child(style::chevron_space(ROW, cx))
-                        .child(style::row_icon(ROW, icon, icon_color, cx))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .when(!selected || selected_text.is_none(), |d| d.text_color(fg))
-                                .child(name),
-                        )
-                        .when_some(age, |d, a| d.child(div().flex_shrink_0().text_size(detail_size).text_color(muted).child(a)))
-                        .into_any_element(),
-                )
+                let scope = template::Scope::new(ROW)
+                    .var("indent", indent)
+                    .var("selected", self.selected.as_deref() == Some(path.as_path()))
+                    .var("name", name)
+                    .var("age", age.unwrap_or_default())
+                    .slot("icon", style::row_icon(ROW, icon, icon_color, cx));
+                Some(template::render(
+                    ROW,
+                    scope,
+                    &mut |name, _, f| match (name, f) {
+                        ("row", Framed::Box(d)) => d
+                            .id(ix)
+                            .on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx)))
+                            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.menu_ix = Some(ix)))
+                            .into_any_element(),
+                        (_, f) => f.into_any_element(),
+                    },
+                    cx,
+                ))
             })
             .collect()
     }
@@ -159,12 +154,17 @@ fn ago(d: Duration) -> String {
 impl Render for ScratchesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity().downgrade();
-        let buttons = [
-            {
-                let me = me.clone();
-                style::header_button("scratches.header.button", "new-scratch", IconName::Plus, cx)
-                    .tooltip("New Scratch File")
-                    .dropdown_menu(move |mut menu, _, _| {
+        let buttons = template::Scope::new("scratches.header.buttons").var("hide_key", crate::platform::shortcut("⌘⇧S"));
+        let header = crate::dock::panel_header(
+            "scratches",
+            "scratches.header",
+            "Scratches",
+            Some(self.files.len()),
+            buttons,
+            &mut |name, _, f| match (name, f) {
+                ("new", Framed::Button(b)) => {
+                    let me = me.clone();
+                    b.dropdown_menu(move |mut menu, _, _| {
                         for (label, ext) in scratch::KINDS {
                             let me = me.clone();
                             menu = menu.item(PopupMenuItem::new(format!("{label}  .{ext}")).on_click(move |_, _, cx| {
@@ -174,17 +174,17 @@ impl Render for ScratchesView {
                         menu
                     })
                     .into_any_element()
+                },
+                ("open_folder", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| cx.open_with_system(&this.dir))).into_any_element()
+                },
+                ("hide", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(ScratchesEvent::Hide))).into_any_element()
+                },
+                (_, f) => f.into_any_element(),
             },
-            style::header_button("scratches.header.button", "open-scratches-folder", Icon::new(gpui_kit::assets::IconName::FolderOpen), cx)
-                .tooltip("Open Scratches Folder")
-                .on_click(cx.listener(|this, _, _, cx| cx.open_with_system(&this.dir)))
-                .into_any_element(),
-            style::header_button("scratches.header.button", "hide-scratches", IconName::Close, cx)
-                .tooltip(format!("Hide Scratches ({})", crate::platform::shortcut("⌘⇧S")))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ScratchesEvent::Hide)))
-                .into_any_element(),
-        ];
-        let header = crate::dock::panel_header("scratches", "scratches.header", "Scratches", Some(self.files.len()), buttons, cx);
+            cx,
+        );
         let body: AnyElement = if self.files.is_empty() {
             style::el("scratches.empty", cx)
                 .apply(div().flex_1().flex().flex_col().items_center().justify_center())

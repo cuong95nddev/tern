@@ -123,6 +123,9 @@ pub struct Spec {
     pub when: Option<String>,
     /// One line, cut with an ellipsis when it doesn't fit.
     pub truncate: bool,
+    /// One line that is never cut: its text spills over (or widens a list
+    /// that scrolls sideways) rather than wraps.
+    pub nowrap: bool,
     /// Hides what spills out of it.
     pub clip: bool,
     /// Paints its border under its children, so a child can sit on it (a
@@ -262,6 +265,12 @@ impl From<bool> for Value {
 impl From<usize> for Value {
     fn from(n: usize) -> Self {
         Value::Num(n as f64)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(n: f64) -> Self {
+        Value::Num(n)
     }
 }
 
@@ -602,6 +611,7 @@ pub struct Node {
     overlay: bool,
     when: Option<Cond>,
     truncate: bool,
+    nowrap: bool,
     clip: bool,
     border_under: bool,
     split: Option<Axis>,
@@ -639,6 +649,7 @@ const SLOTS: &[&str] = &[
     "scrollbar",
     "extra",
     "qr",
+    "field",
 ];
 
 /// The parts a template may name.
@@ -1135,6 +1146,7 @@ impl Compiler<'_, '_> {
             overlay: s.overlay,
             when,
             truncate: s.truncate,
+            nowrap: s.nowrap,
             clip: s.clip,
             border_under: s.border_under,
             split,
@@ -1482,6 +1494,31 @@ mod tests {
         assert!(b.loading.is_some());
         // A button's size is no panel size.
         assert!(kids[2].panel.size.is_none());
+    }
+
+    #[test]
+    fn side_panel_buttons_and_rows_compile() {
+        let (t, problems) = compiled(super::BUILTIN);
+        assert_eq!(problems, Vec::<String>::new());
+        for name in ["explorer", "changes", "scratches"] {
+            let n = &t.nodes[&format!("{name}.header.buttons")];
+            assert!(n.children.iter().all(|c| matches!(c.what, super::What::Button(_))), "{name}");
+        }
+        for name in ["explorer.row", "changes.repo", "changes.file", "scratches.row"] {
+            let n = &t.nodes[name];
+            assert_eq!(n.frame.as_deref(), Some("row"), "{name}");
+            assert!(n.holes.iter().any(|h| h.0 == "padding_left"), "{name}");
+        }
+        // The explorer's name is never cut: the list scrolls sideways instead.
+        assert!(t.nodes["explorer.row"].children.iter().any(|c| c.nowrap && c.grow.is_some()));
+    }
+
+    #[test]
+    fn nowrap_is_no_bare_slot() {
+        let (t, problems) = compiled(r#"{"w": {"children": [{"slot": "icon", "nowrap": true}, {"slot": "icon"}]}}"#);
+        assert_eq!(problems, Vec::<String>::new());
+        let kids = &t.nodes["w"].children;
+        assert!(!kids[0].is_bare() && kids[1].is_bare());
     }
 
     #[test]

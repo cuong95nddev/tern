@@ -930,6 +930,11 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
 | `explorer.header`, `changes.header`, `scratches.header` | as `panel_header` | as `panel_header` |
+| `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
+| `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
+| `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
+| `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
+| `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
@@ -945,6 +950,13 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
 headers are `panel_header` used with their own element (see Moving panels).
+
+The side panels draw each row they show with a row template (`explorer.row`,
+`changes.repo`, `changes.file`, `scratches.row`). A row's `indent` is its
+element's `padding_left` plus its `indent` for each level it is nested; its
+`name_color` is the git status color (unset in the explorer for a file git
+doesn't report, so the row's text color shows). A header's buttons are the
+`<header>.buttons` template, put in the header's `buttons` slot.
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 

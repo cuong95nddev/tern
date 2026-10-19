@@ -90,6 +90,183 @@
   "explorer.header": { "use": "panel_header", "element": "explorer.header" },
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
+  "explorer.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$explorer.header.gap" },
+    "children": [
+      {
+        "button": "new_file",
+        "element": "explorer.header.button",
+        "size": "xsmall",
+        "icon": "file-plus",
+        "tooltip": "New File…"
+      },
+      {
+        "button": "new_folder",
+        "element": "explorer.header.button",
+        "size": "xsmall",
+        "icon": "folder-plus",
+        "tooltip": "New Folder…"
+      },
+      {
+        "button": "refresh",
+        "element": "explorer.header.button",
+        "size": "xsmall",
+        "icon": "refresh-cw",
+        "tooltip": "Refresh Explorer"
+      },
+      {
+        "button": "collapse_all",
+        "element": "explorer.header.button",
+        "size": "xsmall",
+        "icon": "chevrons-down-up",
+        "tooltip": "Collapse Folders in Explorer"
+      },
+      {
+        "button": "hide",
+        "element": "explorer.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Explorer ({hide_key})"
+      }
+    ]
+  },
+  "changes.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$changes.header.gap" },
+    "children": [
+      {
+        "button": "refresh",
+        "element": "changes.header.button",
+        "size": "xsmall",
+        "icon": "refresh-cw",
+        "loading": "refreshing",
+        "tooltip": "Refresh"
+      },
+      {
+        "button": "hide",
+        "element": "changes.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Changes ({hide_key})"
+      }
+    ]
+  },
+  "scratches.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$scratches.header.gap" },
+    "children": [
+      {
+        "button": "new",
+        "element": "scratches.header.button",
+        "size": "xsmall",
+        "icon": "plus",
+        "tooltip": "New Scratch File"
+      },
+      {
+        "button": "open_folder",
+        "element": "scratches.header.button",
+        "size": "xsmall",
+        "icon": "folder-open",
+        "tooltip": "Open Scratches Folder"
+      },
+      {
+        "button": "hide",
+        "element": "scratches.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Scratches ({hide_key})"
+      }
+    ]
+  },
+  "explorer.row": {
+    "frame": "row",
+    "element": "explorer.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "selected": { "background": "$explorer.row.selected_background", "text": "$explorer.row.selected_text" },
+      "cursor && !selected": { "border_width": 1, "border": "$explorer.row.focus_border" },
+      "cut": { "opacity": 0.5 },
+      "hover": { "background": "$explorer.row.hover_background" }
+    },
+    "children": [
+      { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$explorer.row.chevron_size", "height": "$explorer.row.chevron_size", "text": "$explorer.row.chevron_color" } },
+      { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$explorer.row.chevron_size", "height": "$explorer.row.chevron_size", "text": "$explorer.row.chevron_color" } },
+      { "when": "!folder", "shrink": 0, "style": { "width": "$explorer.row.chevron_size", "height": "$explorer.row.chevron_size" } },
+      { "slot": "icon" },
+      { "when": "editing", "slot": "field" },
+      { "when": "!editing", "grow": 1, "nowrap": true, "text": "{name}", "style": { "text": "{name_color}" } },
+      { "when": "!editing && claude", "text": "✦", "style": { "font_size": "$explorer.row.detail_font_size", "text": "$accent.foreground" } },
+      { "when": "!editing && git && !folder", "text": "{git}", "style": { "font_size": "$explorer.row.detail_font_size", "text": "{name_color}" } }
+    ]
+  },
+  "changes.repo": {
+    "frame": "row",
+    "element": "changes.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}", "font_weight": 600 },
+    "states": {
+      "hover": { "background": "$changes.row.hover_background" }
+    },
+    "children": [
+      { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
+      { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
+      { "when": "!folder", "shrink": 0, "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size" } },
+      { "shrink": 0, "text": "{name}" },
+      { "when": "branch", "grow": 1, "truncate": true, "text": "{branch}", "style": { "font_size": "$changes.row.detail_font_size", "text": "$changes.row.detail_text" } },
+      { "when": "!branch", "grow": 1 },
+      { "shrink": 0, "text": "{detail}", "style": { "font_size": "$changes.row.detail_font_size", "text": "$changes.row.detail_text" }, "states": { "error": { "text": "$danger.background" } } }
+    ]
+  },
+  "changes.file": {
+    "frame": "row",
+    "element": "changes.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "selected": { "background": "$changes.row.selected_background", "text": "$changes.row.selected_text" },
+      "hover": { "background": "$changes.row.hover_background" }
+    },
+    "children": [
+      { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
+      { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
+      { "when": "!folder", "shrink": 0, "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size" } },
+      { "slot": "icon" },
+      { "shrink": 0, "text": "{name}", "style": { "text": "{name_color}" } },
+      { "grow": 1, "truncate": true, "text": "{dir}", "style": { "font_size": "$changes.row.detail_font_size", "text": "$changes.row.detail_text" } },
+      { "shrink": 0, "text": "{status}", "style": { "font_size": "$changes.row.detail_font_size", "text": "{name_color}" } }
+    ]
+  },
+  "scratches.row": {
+    "frame": "row",
+    "element": "scratches.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "selected": { "background": "$scratches.row.selected_background", "text": "$scratches.row.selected_text" },
+      "hover": { "background": "$scratches.row.hover_background" }
+    },
+    "children": [
+      { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$scratches.row.chevron_size", "height": "$scratches.row.chevron_size", "text": "$scratches.row.chevron_color" } },
+      { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$scratches.row.chevron_size", "height": "$scratches.row.chevron_size", "text": "$scratches.row.chevron_color" } },
+      { "when": "!folder", "shrink": 0, "style": { "width": "$scratches.row.chevron_size", "height": "$scratches.row.chevron_size" } },
+      { "slot": "icon" },
+      { "grow": 1, "truncate": true, "text": "{name}" },
+      { "when": "age", "shrink": 0, "text": "{age}", "style": { "font_size": "$scratches.row.detail_font_size", "text": "$scratches.row.detail_text" } }
+    ]
+  },
   "status_bar": {
     "element": "workspace.status_bar",
     "layout": "row",

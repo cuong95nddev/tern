@@ -61,8 +61,15 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    The Settings window (2026-10-19, `settings_window.rs`) was built on templates from the start: `settings`
    (side list + page), `settings.nav_item`, `settings.row` (a setting with a switch, a stepper, a button or a
    value, picked by values the code gives) and `settings.remote` (Connections' link and QR code, a `qr` slot).
-4. Side panels: headers (`panel_header`, `header_button`) and rows (`list_row`) as templates; the lists stay
-   `uniform_list` slots that draw each row from a row template.
+4. **Done (2026-10-19):** side panel headers' buttons (`explorer.header.buttons`, `changes.header.buttons`,
+   `scratches.header.buttons`, in `panel_header`'s `buttons` slot) and rows (`explorer.row`, `changes.repo`,
+   `changes.file`, `scratches.row`). The lists stay `uniform_list`s that draw each row from its template;
+   `style::header_button`, `list_row`, `chevron` and `chevron_space` are gone. The file icon is still a code
+   `slot` (it carries its own color), and so is the explorer's name field (`field`). New node property
+   `nowrap`: one line never cut, at least as wide as its text even when it grows (the explorer's names, so its
+   list still scrolls sideways). Pixel-compared on Windows with the old build: rows at several depths,
+   selection, cursor, cut, rename and new-entry fields, hover, a collapsed repo, the header buttons and the
+   scratches menu. The panels' empty states (`changes.empty`, `scratches.empty`) are still code.
 5. File header of the viewer; terminal padding box.
 6. Dialog bodies and footers; menus as data (items, separators, submenus) from templates.
 7. Screenshot tool (`shot/`): needs elements first.

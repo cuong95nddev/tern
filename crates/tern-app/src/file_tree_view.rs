@@ -9,12 +9,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::scroll::Scrollbar;
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, WindowExt};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tern_fs::{ChangeBatch, FileTree, FsWatcher, GitStatus, ops};
@@ -22,6 +21,7 @@ use tern_fs::{ChangeBatch, FileTree, FsWatcher, GitStatus, ops};
 use crate::file_icons;
 use crate::platform::bind;
 use crate::style;
+use crate::template::{self, Framed, on_event};
 
 const CONTEXT: &str = "FileTree";
 /// The element a row is drawn as ([`style`]).
@@ -765,10 +765,6 @@ impl FileTreeView {
             .collect()
     }
 
-    fn row_div(ix: usize, depth: usize, cx: &App) -> Stateful<Div> {
-        style::list_row(ROW, ix, depth, cx)
-    }
-
     /// The name field, filling the rest of a row.
     fn name_field(input: &Entity<InputState>) -> impl IntoElement {
         div()
@@ -785,35 +781,32 @@ impl FileTreeView {
         let (_, depth) = self.new_row()?;
         let theme = cx.theme();
         let (icon, color) = if dir { file_icons::dir_icon("", false, theme) } else { file_icons::file_icon("", theme) };
-        Some(
-            Self::row_div(ix, depth, cx)
-                .child(style::chevron_space(ROW, cx))
-                .child(style::row_icon(ROW, icon, color, cx))
-                .child(Self::name_field(&edit.input))
-                .into_any_element(),
-        )
+        let scope = template::Scope::new(ROW)
+            .var("indent", style::row_indent(ROW, depth, cx))
+            .var("editing", true)
+            .slot("icon", style::row_icon(ROW, icon, color, cx))
+            .slot("field", Self::name_field(&edit.input));
+        Some(template::render(
+            ROW,
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("row", Framed::Box(d)) => d.id(ix).into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        ))
     }
 
     fn render_row(&self, ix: usize, real: usize, focused: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
-        let look = style::el(ROW, cx);
-        let (fg, hover, active) = (look.color("text"), look.color("hover_background"), look.color("selected_background"));
-        let (detail_size, focus_border) = (look.len("detail_font_size"), look.color("focus_border"));
-        let selected_text = look.is_set("selected_text").then(|| look.color("selected_text"));
-        let (accent, drop_bg) = (theme.accent_foreground, theme.drop_target);
+        let drop_bg = theme.drop_target;
         let row = self.tree.rows().get(real)?;
         let path: &Path = &row.entry.path;
         let selected = self.selected.iter().any(|p| p == path);
-        let is_cursor = self.cursor.as_deref() == Some(path) && focused;
-        let cut = self.clip.as_ref().is_some_and(|c| c.cut && c.paths.iter().any(|p| path.starts_with(p)));
         let git = self.git.get(path).copied();
-        let claude = self.claude_touched.contains(path);
-        let fg = if selected { selected_text.unwrap_or(fg) } else { fg };
-        let name_color = git.map_or(fg, |g| style::git_color(g, cx));
         let name = &*row.entry.name;
         let is_dir = row.entry.is_dir;
         let (icon, icon_color) = if is_dir { file_icons::dir_icon(name, row.expanded, theme) } else { file_icons::file_icon(name, theme) };
-        let chevron = is_dir.then(|| style::chevron(ROW, row.expanded, cx));
         let renaming = self.edit.as_ref().filter(|e| e.kind == EditKind::Rename(path.to_path_buf()));
 
         let drag_paths = if selected && self.selected.len() > 1 { self.selected.clone() } else { vec![path.to_path_buf()] };
@@ -823,31 +816,42 @@ impl FileTreeView {
         };
         let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(self.root()).to_path_buf() };
 
-        let el = Self::row_div(ix, row.depth, cx)
-            .when(selected, |d| d.bg(active).when_some(selected_text, |d, c| d.text_color(c)))
-            .when(is_cursor && !selected, |d| d.border_1().border_color(focus_border))
-            .when(cut, |d| d.opacity(0.5))
-            .hover(|d| d.bg(hover))
-            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(real, ev, window, cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, window, cx| this.right_click(Some(real), window, cx)))
-            .when(renaming.is_none(), |d| d.on_drag(DraggedEntries { paths: drag_paths, label }, |d, _, _, cx| cx.new(|_| d.clone())))
-            .drag_over::<DraggedEntries>(move |s, _, _, _| s.bg(drop_bg))
-            .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(drop_dir.clone(), &d.paths, window, cx)))
-            .child(match chevron {
-                Some(c) => c.into_any_element(),
-                None => style::chevron_space(ROW, cx).into_any_element(),
-            })
-            .child(style::row_icon(ROW, icon, icon_color, cx));
-        let el = match renaming {
-            Some(edit) => el.child(Self::name_field(&edit.input)),
-            None => el
-                .child(div().flex_grow(1.).whitespace_nowrap().text_color(name_color).child(row.entry.name.to_string()))
-                .when(claude, |d| d.child(div().text_size(detail_size).text_color(accent).child("✦")))
-                .when_some(git.filter(|_| !is_dir), |d, g| {
-                    d.child(div().text_size(detail_size).text_color(name_color).child(g.letter().to_string()))
-                }),
-        };
-        Some(el.into_any_element())
+        let mut scope = template::Scope::new(ROW)
+            .var("indent", style::row_indent(ROW, row.depth, cx))
+            .var("folder", is_dir)
+            .var("open", row.expanded)
+            .var("selected", selected)
+            .var("cursor", self.cursor.as_deref() == Some(path) && focused)
+            .var("cut", self.clip.as_ref().is_some_and(|c| c.cut && c.paths.iter().any(|p| path.starts_with(p))))
+            .var("editing", renaming.is_some())
+            .var("name", name)
+            .var("claude", self.claude_touched.contains(path))
+            .var("git", git.map(|g| g.letter().to_string()).unwrap_or_default())
+            .slot("icon", style::row_icon(ROW, icon, icon_color, cx))
+            .slot_opt("field", renaming.map(|e| Self::name_field(&e.input)));
+        if let Some(g) = git {
+            scope = scope.var("name_color", style::git_color(g, cx));
+        }
+        let mut drag = renaming.is_none().then_some(DraggedEntries { paths: drag_paths, label });
+        Some(template::render(
+            ROW,
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("row", Framed::Box(d)) => d
+                    .id(ix)
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(real, ev, window, cx)))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, window, cx| this.right_click(Some(real), window, cx)))
+                    .when_some(drag.take(), |d, drag| d.on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone())))
+                    .drag_over::<DraggedEntries>(move |s, _, _, _| s.bg(drop_bg))
+                    .on_drop(cx.listener({
+                        let drop_dir = drop_dir.clone();
+                        move |this, d: &DraggedEntries, window, cx| this.drop_on(drop_dir.clone(), &d.paths, window, cx)
+                    }))
+                    .into_any_element(),
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        ))
     }
 }
 
@@ -857,8 +861,6 @@ impl Render for FileTreeView {
         let root_name = self.tree.root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let me = cx.entity().downgrade();
         let root = self.root().to_path_buf();
-        let header_button =
-            |id: &'static str, icon: Icon, tip: SharedString| style::header_button("explorer.header.button", id, icon, cx).tooltip(tip);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -891,33 +893,27 @@ impl Render for FileTreeView {
                 "explorer.header",
                 root_name,
                 None,
-                [
-                    header_button("new-file", Icon::new(AssetIcon::FilePlus), "New File…".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
+                template::Scope::new("explorer.header.buttons").var("hide_key", crate::platform::shortcut("⌘B")),
+                &mut |name, _, f| {
+                    let Framed::Button(b) = f else { return f.into_any_element() };
+                    let b = match name {
+                        "new_file" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(false, window, cx);
-                        }))
-                        .into_any_element(),
-                    header_button("new-folder", Icon::new(AssetIcon::FolderPlus), "New Folder…".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
+                        })),
+                        "new_folder" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| {
                             window.focus(&this.focus, cx);
                             this.new_entry(true, window, cx);
-                        }))
-                        .into_any_element(),
-                    header_button("refresh-explorer", Icon::new(IconName::RefreshCw), "Refresh Explorer".into())
-                        .on_click(cx.listener(|this, _, window, cx| this.on_refresh(&Refresh, window, cx)))
-                        .into_any_element(),
-                    header_button("collapse-all", Icon::new(AssetIcon::ChevronsDownUp), "Collapse Folders in Explorer".into())
-                        .on_click(cx.listener(|this, _, window, cx| this.on_collapse_all(&CollapseAll, window, cx)))
-                        .into_any_element(),
-                    header_button(
-                        "hide-explorer",
-                        Icon::new(IconName::Close),
-                        format!("Hide Explorer ({})", crate::platform::shortcut("⌘B")).into(),
-                    )
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Hide)))
-                    .into_any_element(),
-                ],
+                        })),
+                        "refresh" => b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_refresh(&Refresh, window, cx))),
+                        "collapse_all" => {
+                            b.on_click(on_event(&me, |this, _: &ClickEvent, window, cx| this.on_collapse_all(&CollapseAll, window, cx)))
+                        },
+                        "hide" => b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(FileTreeEvent::Hide))),
+                        _ => b,
+                    };
+                    b.into_any_element()
+                },
                 cx,
             ))
             .child(

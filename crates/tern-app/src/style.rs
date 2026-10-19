@@ -15,8 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, ThemeColor, try_parse_color};
+use gpui_kit::component::{ActiveTheme, Icon, ThemeColor, try_parse_color};
 use gpui_kit::*;
 use tern_fs::GitStatus;
 
@@ -1260,31 +1259,11 @@ fn set<T>(slot: &mut Option<T>, v: Option<T>) {
     }
 }
 
-/// An icon button in a bar, drawn as element `name`.
-pub fn header_button(name: &'static str, id: impl Into<ElementId>, icon: impl Into<Icon>, cx: &App) -> Button {
-    el(name, cx).apply(Button::new(id).xsmall().ghost().icon(icon))
-}
-
-/// A list row, drawn as element `name` (`explorer.row`, …): children in a
-/// line, indented for `depth`. Rows with children put a [`chevron`] first
-/// and the rest [`chevron_space`], so icons line up at every level and
-/// across panels.
-pub fn list_row(name: &'static str, id: impl Into<ElementId>, depth: usize, cx: &App) -> Stateful<Div> {
+/// How far a list row of element `name` (`explorer.row`, …) at `depth`
+/// starts its content: the row templates' `indent`.
+pub fn row_indent(name: &'static str, depth: usize, cx: &App) -> f64 {
     let e = el(name, cx);
-    let indent = e.px("padding_left") + e.px("indent") * depth as f32;
-    e.apply(div().id(id).w_full().flex().items_center()).pl(indent)
-}
-
-/// A row's chevron, open or closed.
-pub fn chevron(name: &'static str, open: bool, cx: &App) -> Icon {
-    let e = el(name, cx);
-    let icon = if open { gpui_kit::component::IconName::ChevronDown } else { gpui_kit::component::IconName::ChevronRight };
-    Icon::new(icon).size(e.px("chevron_size")).text_color(e.color("chevron_color"))
-}
-
-/// The blank where a row without children would have its chevron.
-pub fn chevron_space(name: &'static str, cx: &App) -> Div {
-    div().size(el(name, cx).px("chevron_size")).flex_shrink_0()
+    f64::from(f32::from(e.px("padding_left") + e.px("indent") * depth as f32))
 }
 
 /// A row's file icon.

@@ -7,12 +7,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::{ActiveTheme, IconName};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use tern_fs::git::RepoChanges;
 use tern_fs::{ChangeBatch, GitStatus};
 
+use crate::template::{self, Framed, on_event};
 use crate::{file_icons, style};
 
 /// The element a row is drawn as ([`style`]).
@@ -309,65 +309,56 @@ impl ChangesView {
 
     fn render_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let look = style::el(ROW, cx);
-        let (fg, muted, hover, active) =
-            (look.color("text"), look.color("detail_text"), look.color("hover_background"), look.color("selected_background"));
-        let detail_size = look.len("detail_font_size");
-        let selected_text = look.is_set("selected_text").then(|| look.color("selected_text"));
-        let danger = theme.danger;
         range
             .filter_map(|ix| {
-                let row = |depth| {
-                    style::list_row(ROW, ix, depth, cx)
-                        .hover(|d| d.bg(hover))
-                        .on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx)))
-                };
-                Some(match *self.rows.get(ix)? {
+                let (name, scope) = match *self.rows.get(ix)? {
                     RowKind::Repo(ri) => {
                         let repo = &self.repos[ri];
-                        let open = !self.collapsed.contains(&repo.root);
                         let branch = repo.branch.as_deref().map(|b| b.split("...").next().unwrap_or(b).to_owned());
                         let detail: SharedString = match (&repo.error, repo.files.len()) {
                             (Some(e), _) => e.clone().into(),
                             (None, 0) => "clean".into(),
                             (None, n) => n.to_string().into(),
                         };
-                        row(0)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(style::chevron(ROW, open, cx))
-                            .child(div().flex_shrink_0().text_color(fg).child(self.repo_label(&repo.root)))
-                            .when_some(branch, |d, b| {
-                                d.child(div().flex_1().min_w_0().truncate().text_size(detail_size).text_color(muted).child(b))
-                            })
-                            .when(repo.branch.is_none(), |d| d.child(div().flex_1()))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(detail_size)
-                                    .text_color(if repo.error.is_some() { danger } else { muted })
-                                    .child(detail),
-                            )
-                            .into_any_element()
+                        let scope = template::Scope::new("changes.repo")
+                            .var("indent", style::row_indent(ROW, 0, cx))
+                            .var("folder", true)
+                            .var("open", !self.collapsed.contains(&repo.root))
+                            .var("name", self.repo_label(&repo.root))
+                            .var("branch", branch.unwrap_or_default())
+                            .var("detail", detail)
+                            .var("error", repo.error.is_some());
+                        ("changes.repo", scope)
                     },
                     RowKind::File(ri, fi) => {
                         let repo = &self.repos[ri];
                         let (path, st) = &repo.files[fi];
-                        let color = style::git_color(*st, cx);
                         let rel = path.strip_prefix(&repo.root).unwrap_or(path);
                         let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         let dir = rel.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                        let selected = self.selected.as_deref() == Some(path.as_path());
                         let (icon, icon_color) = file_icons::file_icon(&name, theme);
-                        row(1)
-                            .when(selected, |d| d.bg(active).when_some(selected_text, |d, c| d.text_color(c)))
-                            .child(style::chevron_space(ROW, cx))
-                            .child(style::row_icon(ROW, icon, icon_color, cx))
-                            .child(div().flex_shrink_0().text_color(color).child(name))
-                            .child(div().flex_1().min_w_0().truncate().text_size(detail_size).text_color(muted).child(dir))
-                            .child(div().flex_shrink_0().text_size(detail_size).text_color(color).child(st.letter().to_string()))
-                            .into_any_element()
+                        let scope = template::Scope::new("changes.file")
+                            .var("indent", style::row_indent(ROW, 1, cx))
+                            .var("selected", self.selected.as_deref() == Some(path.as_path()))
+                            .var("name", name)
+                            .var("name_color", style::git_color(*st, cx))
+                            .var("dir", dir)
+                            .var("status", st.letter().to_string())
+                            .slot("icon", style::row_icon(ROW, icon, icon_color, cx));
+                        ("changes.file", scope)
                     },
-                })
+                };
+                Some(template::render(
+                    name,
+                    scope,
+                    &mut |name, _, f| match (name, f) {
+                        ("row", Framed::Box(d)) => {
+                            d.id(ix).on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx))).into_any_element()
+                        },
+                        (_, f) => f.into_any_element(),
+                    },
+                    cx,
+                ))
             })
             .collect()
     }
@@ -389,18 +380,27 @@ fn merge(old: &[RepoChanges], list: Option<Vec<PathBuf>>, mut fresh: Vec<RepoCha
 impl Render for ChangesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.total();
-        let buttons = [
-            style::header_button("changes.header.button", "refresh", IconName::RefreshCw, cx)
-                .loading(self.refreshing)
-                .tooltip("Refresh")
-                .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx)))
-                .into_any_element(),
-            style::header_button("changes.header.button", "hide-changes", IconName::Close, cx)
-                .tooltip(format!("Hide Changes ({})", crate::platform::shortcut("⌘⇧G")))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Hide)))
-                .into_any_element(),
-        ];
-        let header = crate::dock::panel_header("changes", "changes.header", "Changes", Some(total), buttons, cx);
+        let buttons = template::Scope::new("changes.header.buttons")
+            .var("refreshing", self.refreshing)
+            .var("hide_key", crate::platform::shortcut("⌘⇧G"));
+        let me = cx.entity().downgrade();
+        let header = crate::dock::panel_header(
+            "changes",
+            "changes.header",
+            "Changes",
+            Some(total),
+            buttons,
+            &mut |name, _, f| match (name, f) {
+                ("refresh", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.refresh(true, cx))).into_any_element()
+                },
+                ("hide", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(ChangesEvent::Hide))).into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        );
         let body: AnyElement = if self.repos.is_empty() {
             style::el("changes.empty", cx)
                 .apply(div().flex_1().flex().items_center().justify_center())

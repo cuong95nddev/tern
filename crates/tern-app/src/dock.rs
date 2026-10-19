@@ -55,21 +55,23 @@ impl Global for PinnedParts {}
 
 /// A side panel's title bar, drawn with the template named after its element
 /// (`explorer.header`, …): its title (or the element's `title`), a count
-/// when it has one, and its `buttons`. Dragging it drags `part`.
+/// when it has one, and its buttons (template `<element>.buttons`, drawn
+/// with `buttons` and `frames`). Dragging it drags `part`.
 pub fn panel_header(
     part: &'static str,
     element: &'static str,
     title: impl Into<SharedString>,
     count: Option<usize>,
-    buttons: impl IntoIterator<Item = AnyElement>,
+    buttons: template::Scope,
+    frames: &mut template::Frames,
     cx: &App,
 ) -> AnyElement {
     let e = style::el(element, cx);
     let own = e.text("title");
     let title = e.label(if own.is_empty() { title.into() } else { own });
+    let buttons = template::render(&format!("{element}.buttons"), buttons, frames, cx);
     // A press on a button is the button's, not the start of a panel drag.
-    let buttons =
-        div().flex().items_center().gap(e.len("gap")).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).children(buttons);
+    let buttons = div().flex().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(buttons);
     let mut scope = template::Scope::new(element).var("part", part).var("title", title).slot("buttons", buttons);
     if let Some(n) = count {
         scope = scope.var("count", n);
