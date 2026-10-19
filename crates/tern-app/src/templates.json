@@ -1653,9 +1653,16 @@
   },
   "menu.part": {
     "children": [
-      { "button": "float", "label": "Float", "when": "!floating" },
-      { "button": "dock", "label": "Dock", "when": "floating" }
+      { "button": "float", "label": "Float", "when": "!floating && can_float" },
+      { "button": "window", "label": "Move to New Window", "when": "!popped && can_window" },
+      { "button": "dock", "label": "Dock", "when": "floating || popped" }
     ]
+  },
+  "part_window": {
+    "element": "part_window",
+    "layout": "column",
+    "fill": true,
+    "children": [{ "slot": "part", "grow": 1 }]
   },
   "menu.scratch": {
     "children": [

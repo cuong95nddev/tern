@@ -33,7 +33,7 @@ mod draw;
 mod menu;
 
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, on_event, render, render_plain};
+pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, on_event, render, render_part, render_plain};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -189,6 +189,10 @@ pub struct Spec {
     /// condition (default `true`).
     #[schemars(with = "Option<serde_json::Value>")]
     pub float: Option<serde_json::Value>,
+    /// Whether a part may move to a window of its own: `true`, `false` or a
+    /// condition (default `true`). GUI only.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub window: Option<serde_json::Value>,
     /// The size a part gets when it arrives in this dock from elsewhere.
     #[schemars(with = "Option<serde_json::Value>")]
     pub part_size: Option<serde_json::Value>,
@@ -421,6 +425,12 @@ impl Templates {
     pub fn grounded(&self, scope: &Scope) -> BTreeSet<&'static str> {
         let get = draw::lookup(scope, &[]);
         self.parts.iter().filter(|(_, (_, n))| n.float.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
+    }
+
+    /// The parts whose `window` doesn't hold with `scope`'s values (read as `pinned` reads `drag`).
+    pub fn windowless(&self, scope: &Scope) -> BTreeSet<&'static str> {
+        let get = draw::lookup(scope, &[]);
+        self.parts.iter().filter(|(_, (_, n))| n.window.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
     }
 
     /// Says which actions the templates name that `known` doesn't have.
@@ -705,6 +715,8 @@ pub struct Node {
     drag: Option<Cond>,
     /// Whether a part may float; None is always.
     float: Option<Cond>,
+    /// Whether a part may move to a window of its own; None is always.
+    window: Option<Cond>,
     children: Vec<Node>,
 }
 
@@ -744,6 +756,7 @@ const SLOTS: &[&str] = &[
     "input",
     "thumb",
     "prompt",
+    "part",
 ];
 
 /// The parts a template may name.
@@ -1124,6 +1137,9 @@ impl Compiler<'_, '_> {
             if s.float.is_some() {
                 node.float = self.flag(&s.float, &format!("{at}.float"));
             }
+            if s.window.is_some() {
+                node.window = self.flag(&s.window, &format!("{at}.window"));
+            }
         }
         node.path = at.into();
         node
@@ -1306,6 +1322,7 @@ impl Compiler<'_, '_> {
             handle: s.handle,
             drag: self.flag(&s.drag, &format!("{at}.drag")),
             float: self.flag(&s.float, &format!("{at}.float")),
+            window: self.flag(&s.window, &format!("{at}.window")),
             kind: s.kind.clone(),
             children,
         }
@@ -1567,6 +1584,21 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         assert_eq!(t.grounded(&super::Scope::new("w")), ["changes"].into());
         assert_eq!(t.grounded(&super::Scope::new("w").var("busy", true)), ["changes", "explorer"].into());
+    }
+
+    #[test]
+    fn window_reads_the_docks_values() {
+        let (t, problems) = compiled(
+            r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "strip": "left",
+                "children": [{"part": "explorer", "window": "!busy"}, {"part": "changes", "window": false}, {"part": "scratches"}]}}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(t.windowless(&super::Scope::new("w")), ["changes"].into());
+        assert_eq!(t.windowless(&super::Scope::new("w").var("busy", true)), ["changes", "explorer"].into());
+        let (_, problems) = compiled(
+            r#"{"w": {"dock": "d", "split": "row", "accepts": ["panel"], "strip": "left", "children": [{"part": "explorer", "window": 3}]}}"#,
+        );
+        assert_eq!(problems, ["templates.w.children.0.window: true, false or a condition".to_string()]);
     }
 
     #[test]

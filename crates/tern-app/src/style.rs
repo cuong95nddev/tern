@@ -495,6 +495,11 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element {
+        name: "part_window",
+        about: "A panel in a window of its own (GUI only): the window's background around it",
+        groups: &[&[("background", Color, "$background")]],
+    },
+    Element {
         name: "agent_monitor",
         about: "The agent monitor: the small window listing the agents running in Tern's terminals",
         groups: &[&[

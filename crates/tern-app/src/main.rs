@@ -18,6 +18,7 @@ mod links;
 mod main_window;
 mod menus;
 mod panes;
+mod part_window;
 mod platform;
 mod restart;
 mod scratch;
@@ -253,9 +254,9 @@ fn main() {
             .detach();
         }
         cx.on_window_closed(|cx, _| {
-            // The agent monitor doesn't keep Tern open by itself.
+            // The agent monitor and the parts' own windows don't keep Tern open by themselves.
             let monitor = agent_monitor::window(cx);
-            if cx.windows().iter().all(|w| Some(*w) == monitor) {
+            if cx.windows().iter().all(|w| Some(*w) == monitor || part_window::is_part_window(*w, cx)) {
                 agent_monitor::hide(cx);
                 // Approved up front: `cx.quit()` terminates from a main-queue
                 // block, where a "later" answer could never come.

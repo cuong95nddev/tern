@@ -175,7 +175,8 @@ the template puts them.
   and size the user sets (drag its handle to move, its edges to resize; `min`/`max` still apply), above the
   docks, clipped to the window. "Dock" in its menu (or dragging it back onto a zone) docks it again. Floating
   parts are styled by a `floating` element (background, border, radius, shadow).
-- **Separate OS window (later phase).** "Move to New Window" pops a floating part out into its own OS window
+- **Separate OS window (later phase; built in phase D, with `window` on the part in place of
+  `float: "window"`).** "Move to New Window" pops a floating part out into its own OS window
   (`float: "window"` allows it). This needs the view moved to another gpui window, the way workspace tabs move
   between windows today; it comes after in-window floating works.
 - **Panes are a dock.** The center is `{ "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] }` and
@@ -259,7 +260,30 @@ C. **Done (2026-10-19).** Floating parts in the window. As built (plan `2026-10-
    - `float: false` (or a condition) on a part keeps it in the docks; `layout.locked` stops floating, moving and
      resizing (floating parts stay where they are).
    - Control commands for checks: `part-float PART X Y W H`, `part-dock PART`.
-D. Pop out to a separate OS window.
+D. **Done (2026-10-19).** Parts in OS windows of their own. As built (plan `2026-10-19-layout-phase-d.md`):
+   - "Move to New Window" in a part's handle menu (`menu.part`, button `window`) opens it in a normal OS window
+     (system title bar, `Explorer — <folder>`), drawn with template `part_window` (element `part_window`, the part
+     in slot `part`) and the workspace's values. In that window the part's menu has Float (back over the main
+     window's workspace, centered) and Dock; its handle doesn't drag (gpui drags stay in their window). Closing the
+     window docks the part again.
+   - `window: false` (or a condition) on a part keeps it in the main window, in place of the spec's
+     `float: "window"` (which would read `"window"` as a condition, and hide the feature from the built-in
+     templates). Default `true`. GUI only.
+   - Stored among the floating parts as `p:<part>=<dock>@<display>@<x>,<y>,<w>,<h>`: the display's uuid (`-`
+     unknown) and the window's content bounds there, as `window_state` keeps main windows. A display that is gone,
+     or bounds off it, open it centered on the main display. The window's moves and resizes are kept 400 ms after
+     they stop. Its strip button stays with the dock it came from.
+   - The workspace opens and closes the windows to match its arrangement as it draws: hiding the part (strip button,
+     its key) closes the window and showing it opens it at the same place; the windows come back with the session
+     (also for a workspace whose tab isn't shown). Closing the workspace or its main window closes them and keeps
+     them stored. Part windows (like the agent monitor) don't keep Tern running.
+   - Keys the workspace handles (toggle panels, new tabs, ...) work from its main window only; the part's own keys
+     work in its window.
+   - Control commands for checks: `part-window PART X Y W H` (pixels on the main window's display; a part already
+     in a window is moved by its title bar only), `part-dock PART`.
+   - Checked on Windows: pop out by command and by menu (explorer, changes), move the window and restart (same
+     place), hide and show, Float and Dock from its menu, close docks it (kept after restart); the default look is
+     pixel-identical with the previous build.
 
 ### Left to the builder
 

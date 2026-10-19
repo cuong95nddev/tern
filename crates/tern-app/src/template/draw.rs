@@ -74,6 +74,15 @@ pub fn render_plain(name: &str, scope: Scope, cx: &App) -> AnyElement {
     render(name, scope, &mut |_, _, f| f.into_any_element(), cx)
 }
 
+/// Draws part `name` by itself, as its node draws it in a dock, with
+/// `scope`'s values and slots (a part in a window of its own).
+pub fn render_part(name: &str, scope: Scope, cx: &App) -> AnyElement {
+    let mut scope = scope;
+    let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
+    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem() };
+    d.part_body(name, &mut scope, &[])
+}
+
 /// What clicking a menu item does.
 pub type MenuHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -319,8 +328,10 @@ impl Drawer<'_, '_> {
             return None;
         }
         let title = get("title").map(|t| t.text()).unwrap_or_else(|| part.clone());
-        let floating = self.cx.try_global::<Floats>().is_some_and(|f| f.floating.contains(part.as_ref()));
-        Some(DraggedPart { part, kind: kind.clone().into(), title, floating })
+        let floats = self.cx.try_global::<Floats>();
+        let floating = floats.is_some_and(|f| f.floating.contains(part.as_ref()));
+        let popped = floats.is_some_and(|f| f.popped.contains(part.as_ref()));
+        Some(DraggedPart { part, kind: kind.clone().into(), title, floating, popped })
     }
 
     /// Whether moving and resizing panels is turned off.
@@ -359,7 +370,13 @@ impl Drawer<'_, '_> {
             return None;
         }
         let (kind, _) = self.cx.try_global::<Templates>()?.parts.get(part)?;
-        Some(DraggedPart { part: part.to_owned().into(), kind: kind.clone().into(), title: crate::dock::part_title(part), floating: false })
+        Some(DraggedPart {
+            part: part.to_owned().into(),
+            kind: kind.clone().into(),
+            title: crate::dock::part_title(part),
+            floating: false,
+            popped: false,
+        })
     }
 
     /// Part `name` as its node draws it.
@@ -467,7 +484,8 @@ impl Drawer<'_, '_> {
         let grip = look.px("grip");
         let resizing = cx.try_global::<crate::dock::Resizing>().is_some_and(|r| r.0.is_some());
         let mut boxes = vec![];
-        for (name, f) in &a.floating {
+        // Those in windows of their own are drawn there.
+        for (name, f) in a.floating.iter().filter(|(_, f)| f.window.is_none()) {
             let Some(node) = cx.try_global::<Templates>().and_then(|t| t.part(name)) else { continue };
             if !self.holds(&node.when, scope, &[]) {
                 continue;
@@ -815,9 +833,15 @@ impl Drawer<'_, '_> {
         let e = match (drag, &n.frame) {
             // gpui doesn't say what is dragged: the drag's start keeps it for the docks.
             (Some(p), _) => {
-                let d = d.id(ElementId::Name(format!("handle:{}", p.part).into())).on_drag(p.clone(), crate::dock::start_drag);
-                let grounded = self.cx.try_global::<Floats>().is_some_and(|f| f.grounded.contains(p.part.as_ref()));
-                if p.kind == "pane" || (grounded && !p.floating) {
+                let mut d = d.id(ElementId::Name(format!("handle:{}", p.part).into()));
+                // gpui's drags stay in their window: one in a window of its own doesn't drag.
+                if !p.popped {
+                    d = d.on_drag(p.clone(), crate::dock::start_drag);
+                }
+                let floats = self.cx.try_global::<Floats>();
+                let grounded = floats.is_some_and(|f| f.grounded.contains(p.part.as_ref()));
+                let windowless = floats.is_some_and(|f| f.windowless.contains(p.part.as_ref()));
+                if p.kind == "pane" || (grounded && windowless && !p.floating && !p.popped) {
                     d.into_any_element()
                 } else {
                     d.context_menu(move |menu, window, cx| part_menu(&p, menu, window, cx)).into_any_element()
@@ -867,26 +891,30 @@ fn grips(part: &str, g: Pixels, id: &str) -> Vec<Stateful<Div>> {
         .collect()
 }
 
-/// A part's handle's right-click menu (`menu.part`): Float, or Dock when it floats.
+/// A part's handle's right-click menu (`menu.part`): Float, Move to New
+/// Window, or Dock when it floats or is in a window of its own.
 fn part_menu(p: &DraggedPart, popup: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let part = p.part.clone();
     let items: MenuItems = Rc::new(move |name, _| {
         let action: Box<dyn Action> = match name {
             "float" => Box::new(crate::dock::FloatPart(part.clone())),
+            "window" => Box::new(crate::dock::PopOutPart(part.clone())),
             "dock" => Box::new(crate::dock::DockPart(part.clone())),
             _ => return None,
         };
         let h: MenuHandler = Rc::new(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
         Some(h)
     });
-    menu(
-        "menu.part",
-        Scope::new(format!("part-menu:{}", p.part)).var("floating", p.floating).var("part", p.part.clone()),
-        popup,
-        items,
-        window,
-        cx,
-    )
+    let floats = cx.try_global::<Floats>();
+    let can_float = !floats.is_some_and(|f| f.grounded.contains(p.part.as_ref()));
+    let can_window = !floats.is_some_and(|f| f.windowless.contains(p.part.as_ref()));
+    let scope = Scope::new(format!("part-menu:{}", p.part))
+        .var("floating", p.floating)
+        .var("popped", p.popped)
+        .var("can_float", can_float)
+        .var("can_window", can_window)
+        .var("part", p.part.clone());
+    menu("menu.part", scope, popup, items, window, cx)
 }
 
 /// Where positioned node `n` sits, its `"{name}"` edges read from `get`.

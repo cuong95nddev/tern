@@ -354,6 +354,9 @@ pub struct Workspace {
     arrange_problems: Vec<String>,
     /// Where the floating parts sit, as last drawn.
     float_area: Option<Bounds<Pixels>>,
+    /// The windows of the parts in windows of their own, by part (None
+    /// while one opens).
+    part_windows: HashMap<String, Option<AnyWindowHandle>>,
     _subs: Vec<Subscription>,
 }
 
@@ -502,6 +505,7 @@ impl Workspace {
             arranged: None,
             arrange_problems: vec![],
             float_area: None,
+            part_windows: HashMap::new(),
             _subs: vec![tree_sub, changes_sub, scratches_sub],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
@@ -2526,6 +2530,15 @@ impl Workspace {
                     self.docks_epoch += 1;
                 }
             },
+            Change::Window { part, display, rect } => {
+                let docked = !a.floating.contains_key(&*part);
+                if !a.pop_out(&part, &display, rect) {
+                    return;
+                }
+                if docked {
+                    self.docks_epoch += 1;
+                }
+            },
             Change::Dock { part, kind } => {
                 let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
                 if !a.dock_part(&part, &kind, &docks) {
@@ -2551,9 +2564,136 @@ impl Workspace {
 
     /// Docks floating `part` again, from its header's menu.
     fn dock_part(&mut self, a: &crate::dock::DockPart, _: &mut Window, cx: &mut Context<Self>) {
-        let kind = cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| **n == *a.0).map(|(_, k)| k));
+        self.dock_named(&a.0, cx);
+    }
+
+    /// Docks `part` again, floating or in a window of its own.
+    pub fn dock_named(&mut self, part: &str, cx: &mut Context<Self>) {
+        let kind = cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| *n == part).map(|(_, k)| k));
         let Some(kind) = kind else { return };
-        self.arrangement_changed(Change::Dock { part: a.0.clone(), kind: kind.into() }, cx);
+        self.arrangement_changed(Change::Dock { part: part.to_owned().into(), kind: kind.into() }, cx);
+    }
+
+    /// Moves `part` to a window of its own, from its header's menu: its size
+    /// as it floats (else the `floating` element's), its top-left near the
+    /// pointer.
+    fn pop_out(&mut self, a: &crate::dock::PopOutPart, window: &mut Window, cx: &mut Context<Self>) {
+        let frame = window.bounds();
+        let chrome = frame.size.height - window.viewport_size().height;
+        let at = frame.origin + point(px(0.), chrome) + window.mouse_position() - point(px(40.), px(12.));
+        let display = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()).unwrap_or_default();
+        self.pop_out_at(&a.0, display, (f32::from(at.x), f32::from(at.y)), None, cx);
+    }
+
+    /// Moves `part` to a window of its own with its top-left at `at` on
+    /// display `display`, `size` big (else as it floats, or the `floating`
+    /// element's size).
+    fn pop_out_at(&mut self, part: &str, display: String, at: (f32, f32), size: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        let locked = cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0);
+        let windowless = cx.try_global::<crate::dock::Floats>().is_some_and(|f| f.windowless.contains(part));
+        if locked || windowless {
+            return;
+        }
+        let float = self.arranged.as_ref().and_then(|a| a.floating.get(part));
+        // Its window moves with the system's title bar, which says where it is.
+        if float.is_some_and(|f| f.window.is_some()) {
+            return;
+        }
+        let floating = float.map(|f| (f.w, f.h));
+        let look = style::el("floating", cx);
+        let (w, h) = size.or(floating).unwrap_or((f32::from(look.px("width")), f32::from(look.px("height"))));
+        let rect = arrange::Rect { x: at.0, y: at.1, w, h };
+        self.arrangement_changed(Change::Window { part: part.to_owned().into(), display, rect }, cx);
+    }
+
+    /// Part `part`'s own window moved or resized: keep where it is.
+    pub fn part_window_moved(&mut self, part: &str, display: &str, rect: arrange::Rect, cx: &mut Context<Self>) {
+        let popped = self.arranged.as_ref().and_then(|a| a.floating.get(part)).is_some_and(|f| f.window.is_some());
+        if popped {
+            self.arrangement_changed(Change::Window { part: part.to_owned().into(), display: display.to_owned(), rect }, cx);
+        }
+    }
+
+    /// Floats `part`, in a window of its own, over the docks again: in the
+    /// middle of the workspace.
+    pub fn float_from_window(&mut self, part: &str, cx: &mut Context<Self>) {
+        let Some(area) = self.float_area else { return };
+        if cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0) {
+            return;
+        }
+        let (aw, ah) = crate::dock::area_size(area);
+        let look = style::el("floating", cx);
+        let (w, h) = (f32::from(look.px("width")).min(aw), f32::from(look.px("height")).min(ah));
+        let rect = arrange::Rect { x: (aw - w) / 2., y: (ah - h) / 2., w, h };
+        self.arrangement_changed(Change::Float { part: part.to_owned().into(), rect, area: (aw, ah) }, cx);
+    }
+
+    /// Opens a window for each part the arrangement puts in one and that
+    /// shows, and closes the others.
+    fn sync_part_windows(&mut self, arrangement: Option<&Arrangement>, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, arrange::Float)> = arrangement
+            .iter()
+            .flat_map(|a| a.floating.iter())
+            .filter(|(p, f)| f.window.is_some() && self.part_shown(p))
+            .map(|(p, f)| (p.clone(), f.clone()))
+            .collect();
+        let open = cx.windows();
+        // Closed from outside (its close button docks it; this is anything else).
+        self.part_windows.retain(|_, h| h.is_none_or(|h| open.contains(&h)));
+        let stale: Vec<String> = self.part_windows.keys().filter(|p| !wanted.iter().any(|(w, _)| w == *p)).cloned().collect();
+        for p in stale {
+            if let Some(Some(h)) = self.part_windows.remove(&p) {
+                crate::part_window::close(h, cx);
+            }
+        }
+        for (part, f) in wanted {
+            if self.part_windows.contains_key(&part) {
+                continue;
+            }
+            let Some(r) = f.window_rect() else { continue };
+            self.part_windows.insert(part.clone(), None);
+            let bounds = Bounds::new(point(px(r.x), px(r.y)), size(px(r.w), px(r.h)));
+            let display = f.window.clone().unwrap_or_default();
+            let ws = cx.entity();
+            cx.defer(move |cx| {
+                let (display, bounds) = match window_state::resolve(&display, WindowBounds::Windowed(bounds), cx) {
+                    Some((d, _)) => (Some(d), bounds),
+                    // Its display is gone, or it would be off it.
+                    None => (None, Bounds::centered(None, bounds.size, cx)),
+                };
+                let handle = crate::part_window::open(ws.clone(), part.clone().into(), display, bounds, cx);
+                ws.update(cx, |this, cx| {
+                    if let Some(slot) = this.part_windows.get_mut(&part) {
+                        *slot = handle;
+                    } else if let Some(h) = handle {
+                        // No longer wanted meanwhile.
+                        crate::part_window::close(h, cx);
+                    }
+                });
+            });
+        }
+    }
+
+    /// Whether `part` shows (its strip button is on).
+    fn part_shown(&self, part: &str) -> bool {
+        match part {
+            "explorer" => self.show_explorer,
+            "scratches" => self.show_scratches,
+            "changes" => self.show_changes,
+            _ => true,
+        }
+    }
+
+    /// The values and slots the parts are drawn with, here or in windows of their own.
+    pub fn part_scope(&self) -> template::Scope {
+        template::Scope::new(format!("workspace-{}", self.docks_epoch))
+            .var("explorer", self.show_explorer)
+            .var("scratches", self.show_scratches)
+            .var("changes", self.show_changes)
+            .var("path", self.root.display().to_string())
+            .slot("explorer", self.tree.clone().cached(cache_layout()))
+            .slot("scratches", self.scratches.clone().cached(cache_layout()))
+            .slot("changes", self.changes.clone().cached(cache_layout()))
     }
 
     /// Puts the side panels back where the templates place them.
@@ -3027,6 +3167,7 @@ impl Workspace {
             kind: "pane".into(),
             title: title.into(),
             floating: false,
+            popped: false,
         })
     }
 
@@ -3329,6 +3470,17 @@ impl Workspace {
                 self.arrangement_changed(change, cx);
                 "ok".into()
             },
+            // Moves PART to a window of its own at X Y (pixels on this window's display), W wide and H high.
+            cmd if cmd.starts_with("part-window ") => {
+                let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+                let n: Option<Vec<f32>> = args.iter().skip(1).map(|a| a.parse().ok()).collect();
+                let (Some(part), Some([x, y, w, h])) = (args.first(), n.as_deref()) else {
+                    return "error: part-window PART X Y W H".into();
+                };
+                let display = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()).unwrap_or_default();
+                self.pop_out_at(part, display, (*x, *y), Some((*w, *h)), cx);
+                "ok".into()
+            },
             cmd if cmd.starts_with("part-dock ") => {
                 self.dock_part(&crate::dock::DockPart(cmd["part-dock ".len()..].trim().to_owned().into()), window, cx);
                 "ok".into()
@@ -3448,30 +3600,30 @@ impl Render for Workspace {
         settings_error.extend(self.arrange_problems.iter().cloned());
         let settings_error = settings_error.join("; ");
         let (left_strip, right_strip) = (self.strip("left", arrangement.as_deref(), cx), self.strip("right", arrangement.as_deref(), cx));
-        let mut scope = template::Scope::new(format!("workspace-{}", self.docks_epoch));
+        let mut scope = self.part_scope();
         let ws = cx.entity().downgrade();
         let on_change: OnChange = Rc::new(move |change, _, cx| {
             let _ = ws.update(cx, |this, cx| this.arrangement_changed(change, cx));
         });
         let floats = crate::dock::Floats {
-            floating: arrangement.iter().flat_map(|a| a.floating.keys().cloned()).collect(),
-            grounded: Default::default(),
+            floating: arrangement
+                .iter()
+                .flat_map(|a| a.floating.iter().filter(|(_, f)| f.window.is_none()).map(|(p, _)| p.clone()))
+                .collect(),
+            popped: arrangement
+                .iter()
+                .flat_map(|a| a.floating.iter().filter(|(_, f)| f.window.is_some()).map(|(p, _)| p.clone()))
+                .collect(),
+            ..Default::default()
         };
         if let Some(a) = arrangement.clone() {
             scope = scope.docks(a, on_change.clone());
         }
         let scope = scope
-            .var("explorer", self.show_explorer)
-            .var("scratches", self.show_scratches)
-            .var("changes", self.show_changes)
-            .var("path", self.root.display().to_string())
             .var("background", background)
             .var("settings_error", settings_error)
             .slot("left_strip", left_strip)
             .slot("right_strip", right_strip)
-            .slot("explorer", self.tree.clone().cached(cache_layout()))
-            .slot("scratches", self.scratches.clone().cached(cache_layout()))
-            .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("center", center);
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
@@ -3479,10 +3631,12 @@ impl Render for Workspace {
             cx.set_global(crate::dock::PinnedParts(pinned));
         }
         let grounded = cx.try_global::<template::Templates>().map(|t| t.grounded(&scope)).unwrap_or_default();
-        let floats = crate::dock::Floats { grounded, ..floats };
+        let windowless = cx.try_global::<template::Templates>().map(|t| t.windowless(&scope)).unwrap_or_default();
+        let floats = crate::dock::Floats { grounded, windowless, ..floats };
         if cx.try_global::<crate::dock::Floats>().is_none_or(|f| *f != floats) {
             cx.set_global(floats);
         }
+        self.sync_part_windows(arrangement.as_deref(), cx);
         let body = template::render("workspace", scope, &mut |_, _, d| d.into_any_element(), cx);
 
         // Where the floating parts sit, for the header menu's Float.
@@ -3501,6 +3655,7 @@ impl Render for Workspace {
             .relative()
             .on_action(cx.listener(Self::float_part))
             .on_action(cx.listener(Self::dock_part))
+            .on_action(cx.listener(Self::pop_out))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))

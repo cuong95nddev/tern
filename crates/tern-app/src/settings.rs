@@ -994,6 +994,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.tab_group` | `collapsed`, `all`; list `colors` (`label`, `color`, `on`) | |
 | `menu.tab_bar` | as `menu.pane_layout` and `menu.tab_layout` | |
 | `menu.tabs` | list `tabs` (`label`, `on`) | |
+| `menu.part` | `part`, `floating`, `popped`, `can_float`, `can_window` | |
+| `part_window` | | `part` |
 | `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |
 | `shot_overlay.toolbar` | `can_undo`, `can_redo`, `undo_key`, `redo_key`, `copy_key`, `save_key`; list `tools` (`icon`, `tooltip`, `selected`) | |
 | `shot_overlay.style_bar` | lists `sizes` (`dot`, `selected`), `colors` (`color`, `selected`) | |
@@ -1067,8 +1069,15 @@ between them by their headers. In a template:
   `min_width` and `min_height` the least it resizes to, `grip` how wide its
   resizing edges are. `\"float\": false` (or a condition) on a `part` keeps it
   in the docks.
+- **Move to New Window** in a panel's header menu puts it in an OS window of
+  its own (GUI only), drawn with the `part_window` template (the `part`
+  slot; element `part_window`). Its window's place and size are kept; closing
+  the window, or Dock in its header menu, docks the panel again, Float
+  floats it over the workspace again. Hiding the panel (its strip button)
+  closes the window until it shows again. `\"window\": false` (or a
+  condition) on a `part` keeps it in the main window.
 - `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
-  resizing the panels in docks or floating, and dragging whole panes. Tab
+  resizing the panels in docks, floating or in their own windows, and dragging whole panes. Tab
   drags aren't locked.
 
 Where the panels are is kept per workspace and per template (the `workspace`

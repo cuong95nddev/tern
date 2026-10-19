@@ -23,6 +23,8 @@ pub enum Change {
     Float { part: SharedString, rect: arrange::Rect, area: (f32, f32) },
     /// Floating `part` docks again.
     Dock { part: SharedString, kind: SharedString },
+    /// `part` is in a window of its own at `rect` (pixels) on display `display`.
+    Window { part: SharedString, display: String, rect: arrange::Rect },
 }
 
 /// Called with each change.
@@ -36,6 +38,8 @@ pub struct DraggedPart {
     pub title: SharedString,
     /// It floats: it follows the pointer itself, with no chip.
     pub floating: bool,
+    /// It is in a window of its own: its handle gives its menu, no drag.
+    pub popped: bool,
 }
 
 impl Render for DraggedPart {
@@ -106,12 +110,15 @@ fn track_from(grab: Point<Pixels>, window: &Window, cx: &mut App) {
     cx.set_global(FloatTrack { start: at, at, grab, area });
 }
 
-/// Which parts float, and which may not (`float` doesn't hold): read by the
-/// panels' headers, drawn apart from the docks.
+/// Which parts float or are in windows of their own, and which may not
+/// (`float`, `window` don't hold): read by the panels' headers, drawn apart
+/// from the docks.
 #[derive(Default, PartialEq)]
 pub struct Floats {
     pub floating: BTreeSet<String>,
+    pub popped: BTreeSet<String>,
     pub grounded: BTreeSet<&'static str>,
+    pub windowless: BTreeSet<&'static str>,
 }
 
 impl Global for Floats {}
@@ -120,6 +127,11 @@ impl Global for Floats {}
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = workspace, no_json)]
 pub struct FloatPart(pub SharedString);
+
+/// Moves a part to a window of its own (its header's menu).
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct PopOutPart(pub SharedString);
 
 /// Docks a floating part again (its header's menu).
 #[derive(Clone, PartialEq, Action)]

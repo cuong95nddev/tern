@@ -184,6 +184,8 @@ pub struct Arrangement {
 /// A part floating over the docks: the dock it came from (its strip button
 /// stays there, and it docks back there), its top-left as fractions of the
 /// area (a smaller window keeps it in view) and its size in pixels.
+/// In a window of its own (`window`, its display's uuid or `-`), `x` and `y`
+/// are the window's top-left in pixels on that display instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Float {
     pub from: String,
@@ -191,6 +193,7 @@ pub struct Float {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    pub window: Option<String>,
 }
 
 /// A rectangle in pixels, from the area's top-left.
@@ -224,7 +227,17 @@ impl Float {
     /// Floating from dock `from` at `r` in an area of `area`.
     pub fn at(from: &str, r: Rect, area: (f32, f32)) -> Self {
         let frac = |v: f32, of: f32| if of > 0. { (v / of).clamp(0., 1.) } else { 0. };
-        Float { from: from.to_string(), x: frac(r.x, area.0), y: frac(r.y, area.1), w: r.w.max(1.), h: r.h.max(1.) }
+        Float { from: from.to_string(), x: frac(r.x, area.0), y: frac(r.y, area.1), w: r.w.max(1.), h: r.h.max(1.), window: None }
+    }
+
+    /// In a window of its own at `r` (pixels) on display `display`.
+    pub fn popped(from: &str, display: &str, r: Rect) -> Self {
+        Float { from: from.to_string(), x: r.x, y: r.y, w: r.w.max(1.), h: r.h.max(1.), window: Some(display.to_string()) }
+    }
+
+    /// Its window's bounds, when it is in one.
+    pub fn window_rect(&self) -> Option<Rect> {
+        self.window.as_ref().map(|_| Rect { x: self.x, y: self.y, w: self.w, h: self.h })
     }
 }
 
@@ -594,6 +607,24 @@ impl Arrangement {
         true
     }
 
+    /// Moves `part` to a window of its own at `r` on display `display` (a
+    /// popped one just moves); false when it is in no dock and doesn't float,
+    /// or nothing changes.
+    pub fn pop_out(&mut self, part: &str, display: &str, r: Rect) -> bool {
+        let Some(from) = self.floating.get(part).map(|f| f.from.clone()).or_else(|| self.dock_of(part).map(str::to_owned)) else {
+            return false;
+        };
+        let display = if valid_name(display) { display } else { "-" };
+        let mut next = self.clone();
+        next.take_out(part);
+        next.floating.insert(part.to_string(), Float::popped(&from, display, r));
+        if next == *self {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
     /// Docks floating `part` again: at the end of the dock it came from, or of
     /// its default dock when that one is gone or doesn't take it.
     pub fn dock_part(&mut self, part: &str, kind: &str, docks: &[DockInfo]) -> bool {
@@ -749,8 +780,9 @@ impl Arrangement {
         Some(info.name.clone())
     }
 
-    /// One line: `name=tree` per dock joined by `;`, then `;f:part=dock@x,y,w,h` per floating part, then
-    /// `;w:name=px,...` when widths are stored.
+    /// One line: `name=tree` per dock joined by `;`, then `;f:part=dock@x,y,w,h` per floating part
+    /// (`;p:part=dock@display@x,y,w,h` for one in its own window), then `;w:name=px,...` when widths
+    /// are stored.
     pub fn encode(&self) -> String {
         let mut out: Vec<String> = self
             .docks
@@ -764,7 +796,10 @@ impl Arrangement {
             })
             .collect();
         for (part, f) in &self.floating {
-            out.push(format!("f:{part}={}@{},{},{},{}", f.from, f.x, f.y, f.w, f.h));
+            match &f.window {
+                Some(d) => out.push(format!("p:{part}={}@{d}@{},{},{},{}", f.from, f.x, f.y, f.w, f.h)),
+                None => out.push(format!("f:{part}={}@{},{},{},{}", f.from, f.x, f.y, f.w, f.h)),
+            }
         }
         if !self.widths.is_empty() {
             let widths: Vec<String> = self.widths.iter().map(|(n, w)| format!("{n}={w}")).collect();
@@ -782,14 +817,24 @@ impl Arrangement {
         // Floating parts come after the docks, before the widths.
         let mut docks_done = false;
         for (i, seg) in segments.iter().enumerate() {
-            if let Some(entry) = seg.strip_prefix("f:") {
+            let float = seg.strip_prefix("f:").map(|e| (e, false)).or_else(|| seg.strip_prefix("p:").map(|e| (e, true)));
+            if let Some((entry, popped)) = float {
                 docks_done = true;
                 let (part, rest) = entry.split_once('=')?;
-                let (from, rect) = rest.split_once('@')?;
+                let (from, rest) = rest.split_once('@')?;
+                let (window, rect) = if popped {
+                    let (display, rect) = rest.split_once('@')?;
+                    if !valid_name(display) {
+                        return None;
+                    }
+                    (Some(display.to_string()), rect)
+                } else {
+                    (None, rest)
+                };
                 let n: Vec<f32> = rect.split(',').map(number).collect::<Option<_>>()?;
                 let [x, y, w, h] = n[..] else { return None };
                 let ok = valid_name(part) && valid_name(from) && w > 0. && h > 0.;
-                if !ok || floating.insert(part.to_string(), Float { from: from.to_string(), x, y, w, h }).is_some() {
+                if !ok || floating.insert(part.to_string(), Float { from: from.to_string(), x, y, w, h, window }).is_some() {
                     return None;
                 }
                 continue;
@@ -1469,6 +1514,36 @@ mod tests {
         let problems = a.reconcile(&docks(), &parts);
         assert!(a.floating.is_empty());
         assert!(problems.iter().any(|p| p.contains("placed twice")));
+    }
+
+    #[test]
+    fn popped_parts_round_trip_and_come_back() {
+        let d = docks();
+        let mut a = fresh();
+        // From a dock: its window at those bounds, its button with the dock.
+        assert!(a.pop_out("changes", "ab-12", rect(-20., 40., 300., 500.)));
+        assert!(!a.pop_out("changes", "ab-12", rect(-20., 40., 300., 500.)));
+        assert!(!a.pop_out("ghost", "ab-12", rect(0., 0., 10., 10.)));
+        assert_eq!(a.floating["changes"].from, "right");
+        assert_eq!(a.floating["changes"].window_rect(), Some(rect(-20., 40., 300., 500.)));
+        let text = a.encode();
+        assert_eq!(text, "left=[c explorer@- scratches@0.3];right=;p:changes=right@ab-12@-20,40,300,500");
+        assert_eq!(Arrangement::decode("k", &text).map(|b| b.encode()), Some(text.clone()));
+        // A bad display, a missing rect, a window between the docks: malformed.
+        assert_eq!(Arrangement::decode("k", "left=x;p:a=left@a b@0,0,1,1"), None);
+        assert_eq!(Arrangement::decode("k", "left=x;p:a=left@0,0,1,1"), None);
+        assert_eq!(Arrangement::decode("k", "p:a=left@d@0,0,1,1;left=x"), None);
+        // An unknown display is stored as `-`.
+        assert!(a.pop_out("changes", "", rect(0., 0., 300., 500.)));
+        assert_eq!(a.floating["changes"].window.as_deref(), Some("-"));
+        // Floated back into the main window: same dock to go back to.
+        assert!(a.float_part("changes", rect(100., 200., 300., 400.), AREA));
+        assert_eq!(a.floating["changes"].window, None);
+        assert_eq!(a.floating["changes"].from, "right");
+        // From floating to a window, and docked from there.
+        assert!(a.pop_out("changes", "ab-12", rect(0., 0., 300., 500.)));
+        assert!(a.dock_part("changes", "panel", &d));
+        assert_eq!(a.encode(), DEFAULT);
     }
 
     #[test]
