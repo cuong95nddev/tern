@@ -40,6 +40,7 @@ use std::path::PathBuf;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
+use main_window::Content;
 use terminal_view::TerminalConfig;
 
 actions!(tern, [Quit, OpenFolder, ToggleMenuBarIcon]);
@@ -88,10 +89,7 @@ fn main() {
         std::env::args_os().nth(1).map(PathBuf::from).map(|p| std::path::absolute(&p).unwrap_or(p))
     };
     // `--open-session` shows a session, not the folder it was started in.
-    // Started from the Start menu or a shortcut, the cwd is Tern's own
-    // folder: not one to add to the workspace.
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf));
-    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some() && open_session.is_none() && Some(d) != exe_dir.as_ref());
+    let shell_cwd = std::env::current_dir().ok().filter(|d| d.parent().is_some() && open_session.is_none());
     // One Tern at a time shares the saved session: a second one hands its
     // folder to the first and exits.
     let Ok(_lock) = lock_instance() else {
@@ -150,6 +148,7 @@ fn main() {
         shot::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
+        cx.on_action(|_: &main_window::NewWindow, cx| main_window::open_window(Content::Welcome, None, cx));
         let services = workspace::services(TerminalConfig::from_look(cx));
 
         // One receiver for hook events, fanned out to every workspace.
@@ -188,16 +187,23 @@ fn main() {
             .detach();
         }
 
-        // The workspace comes back; a folder given (or the shell's) joins it.
-        let restored = !scripted && main_window::restore_session(cx);
-        match arg.or(shell_cwd).or_else(|| (!restored).then(window_state::last_folder).flatten()) {
-            Some(root) => main_window::open_folder(root, cx),
-            None if !restored => main_window::open_window(Default::default(), None, cx),
-            None => {},
-        }
-        // Without a saved session, running terminals still show.
-        if !restored && !scripted {
-            main_window::adopt_orphans(Default::default(), cx);
+        match arg {
+            Some(root) => {
+                main_window::open_folder(root, cx);
+                // The last session's windows don't come back: their
+                // terminals join this one rather than run unseen.
+                if !scripted {
+                    main_window::adopt_orphans(Default::default(), cx);
+                }
+            },
+            None => {
+                let restored = !scripted && main_window::restore_session(cx);
+                match shell_cwd.or_else(|| (!restored).then(window_state::last_folder).flatten()) {
+                    Some(root) => main_window::open_folder(root, cx),
+                    None if !restored => main_window::open_window(Content::Welcome, None, cx),
+                    None => {},
+                }
+            },
         }
         if let Some(id) = open_session {
             main_window::reveal_session(id, cx);

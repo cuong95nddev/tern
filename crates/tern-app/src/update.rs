@@ -1,5 +1,5 @@
 //! Updates from GitHub releases: Tern checks the latest release at launch and
-//! every few hours, and the status bar then shows an update button (also
+//! every few hours, and the workspace bar then shows an update button (also
 //! Tern ▸ Check for Updates…).
 //!
 //! On macOS installing downloads the release's DMG, copies its Tern.app next

@@ -78,7 +78,7 @@ fn show(cx: &mut App) {
             #[cfg(windows)]
             let _ = handle.update(cx, |_, window, _| see_through(window));
             cx.default_global::<MonitorData>().window = Some(handle);
-            // The status bar shows it open.
+            // The workspace bars show it open.
             cx.refresh_windows();
         },
         Err(e) => log::error!("failed to open the agent monitor: {e}"),
@@ -128,8 +128,7 @@ pub fn hide(cx: &mut App) -> bool {
 struct Entry {
     handle: AnyWindowHandle,
     ws: Entity<Workspace>,
-    /// The folder it runs in.
-    folder: String,
+    workspace: String,
     tab: EntityId,
     title: String,
     agent: Agent,
@@ -138,21 +137,17 @@ struct Entry {
     since: Option<Instant>,
 }
 
-/// Every agent, by folder (in the workspace's order, others after) and tab
-/// order (so rows stay put).
+/// Every agent, by window, workspace and tab order (so rows stay put).
 fn entries(cx: &mut App) -> Vec<Entry> {
     let mut out = Vec::new();
     for (handle, ws) in main_window::all_workspaces(cx) {
-        let order: Vec<String> = ws.read(cx).folders().iter().map(|f| crate::workspace::folder_name(f)).collect();
-        let mut agents = Vec::new();
+        let workspace = ws.read(cx).name();
         for t in ws.read(cx).term_tabs(cx) {
             let Some(agent) = t.agent else { continue };
             let view = t.view.read(cx);
             let (status, since) = (view.status(), Some(view.status_since()));
-            agents.push(Entry { handle, ws: ws.clone(), folder: t.folder, tab: t.id, title: t.title, agent, status, since });
+            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status, since });
         }
-        agents.sort_by_key(|e| order.iter().position(|f| *f == e.folder).unwrap_or(usize::MAX));
-        out.extend(agents);
     }
     out
 }
@@ -220,7 +215,7 @@ fn status_color(status: ActivityStatus, cx: &App) -> Hsla {
     }
 }
 
-/// Which status a folder shows for its agents: the one that most wants
+/// Which status a workspace shows for its agents: the one that most wants
 /// you.
 fn priority(status: ActivityStatus) -> u8 {
     match status {
@@ -323,18 +318,18 @@ impl Render for Monitor {
             .child(Button::new("close").icon(IconName::Close).ghost().xsmall().on_click(|_, _, cx| {
                 hide(cx);
             }));
-        // Grouped by folder: a label (which shows the window) over its agents.
+        // Grouped by workspace: a label (which shows it) over its agents.
         let mut rows = Vec::new();
         let mut group = None;
         for (i, e) in entries.iter().enumerate() {
-            if group != Some(&e.folder) {
-                group = Some(&e.folder);
+            if group != Some(e.ws.entity_id()) {
+                group = Some(e.ws.entity_id());
                 let (handle, ws) = (e.handle, e.ws.clone());
-                let top = entries.iter().filter(|o| o.folder == e.folder).map(|o| o.status).max_by_key(|s| priority(*s));
+                let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| priority(*s));
                 let top = top.filter(|s| *s != ActivityStatus::None);
                 rows.push(
                     div()
-                        .id(("folder", i))
+                        .id(("workspace", i))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -346,7 +341,7 @@ impl Render for Monitor {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.list_hover))
                         .child(Icon::new(AssetIcon::FolderOpen).xsmall())
-                        .child(div().flex_1().min_w_0().truncate().child(e.folder.clone()))
+                        .child(div().flex_1().min_w_0().truncate().child(e.workspace.clone()))
                         .when_some(top, |d, s| d.child(status_dot(s, phase, status_color(s, cx))))
                         .on_click(move |_, _, cx| main_window::reveal(handle, &ws, cx))
                         .into_any_element(),

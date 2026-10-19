@@ -12,6 +12,7 @@
         "children": [{ "slot": "menu_bar" }]
       },
       { "when": "!workspace", "grow": 1, "children": [{ "slot": "welcome" }] },
+      { "when": "workspace", "slot": "workspace_tabs" },
       { "when": "workspace", "grow": 1, "children": [{ "slot": "workspace" }] }
     ]
   },
@@ -89,23 +90,6 @@
   "explorer.header": { "use": "panel_header", "element": "explorer.header" },
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
-  "explorer.empty": {
-    "element": "explorer.empty",
-    "position": { "top": 0, "left": 0, "right": 0, "bottom": 0 },
-    "align": "center",
-    "justify": "center",
-    "children": [
-      { "text": "No folders in the workspace" },
-      {
-        "button": "add_folder",
-        "variant": "primary",
-        "size": "small",
-        "icon": "folder-open",
-        "label": "Add Folder…",
-        "tooltip": "Add Folder to Workspace ({add_key})"
-      }
-    ]
-  },
   "status_bar": {
     "element": "workspace.status_bar",
     "layout": "row",
@@ -114,22 +98,13 @@
       { "text": "{path}" },
       { "text": "{background}" },
       {
+        "when": "settings_error",
         "grow": 1,
         "layout": "row",
         "justify": "end",
         "style": { "text": "$workspace.status_bar.error_text" },
-        "children": [{ "when": "settings_error", "truncate": true, "text": "Settings: {settings_error}" }]
-      },
-      {
-        "when": "update",
-        "button": "update",
-        "size": "xsmall",
-        "icon": "circle-arrow-down",
-        "label": "{update}",
-        "loading": "installing",
-        "tooltip": "A new version of Tern is available"
-      },
-      { "button": "agent_monitor", "size": "xsmall", "icon": "bot", "selected": "monitor", "tooltip": "Agent Monitor" }
+        "children": [{ "truncate": true, "text": "Settings: {settings_error}" }]
+      }
     ]
   },
   "pane": {
@@ -533,6 +508,120 @@
       }
     ]
   },
+  "workspace_tabs": {
+    "frame": "bar",
+    "element": "workspace_tabs",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "children": [
+      {
+        "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+        "style": { "border_bottom_width": 1, "border": "$border" }
+      },
+      {
+        "each": "items",
+        "frame": "tabs",
+        "grow": 1,
+        "layout": "row",
+        "align": "center",
+        "item": { "use": "workspace_tabs.tab" },
+        "children": [
+          {
+            "frame": "end",
+            "layout": "row",
+            "align": "center",
+            "shrink": 0,
+            "style": { "padding_left": 4, "height": "$workspace_tabs.tab.height" },
+            "children": [
+              {
+                "button": "open",
+                "element": "workspace_tabs.button",
+                "size": "xsmall",
+                "icon": "folder-plus",
+                "tooltip": "Open Workspace… ({open_key})"
+              }
+            ]
+          },
+          { "frame": "end", "grow": 1, "style": { "height": "$workspace_tabs.tab.height" } },
+          {
+            "frame": "end",
+            "layout": "row",
+            "align": "center",
+            "shrink": 0,
+            "style": { "padding_right": 4, "height": "$workspace_tabs.tab.height" },
+            "children": [
+              {
+                "button": "agent_monitor",
+                "element": "workspace_tabs.button",
+                "size": "xsmall",
+                "icon": "bot",
+                "selected": "monitor",
+                "tooltip": "Agent Monitor"
+              },
+              {
+                "when": "update",
+                "button": "update",
+                "element": "workspace_tabs.button",
+                "size": "xsmall",
+                "icon": "circle-arrow-down",
+                "label": "{update}",
+                "loading": "installing",
+                "tooltip": "A new version of Tern is available"
+              }
+            ]
+          }
+        ]
+      },
+      { "shrink": 0, "style": { "width": 4 } }
+    ]
+  },
+  "workspace_tabs.tab": {
+    "frame": "tab",
+    "element": "workspace_tabs.tab",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "clip": true,
+    "states": {
+      "active": { "element": "workspace_tabs.tab_active" },
+      "hover && !active": { "text": "$workspace_tabs.tab.hover_text" }
+    },
+    "children": [
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_left": 8, "gap": 4, "text": "$workspace_tabs.tab.icon_text" },
+        "states": { "active": { "text": "$workspace_tabs.tab_active.icon_text" } },
+        "children": [
+          { "icon": "folder-open", "style": { "width": 12, "height": 12 } },
+          { "when": "busy", "text": "●", "style": { "text": "$warning" } }
+        ]
+      },
+      {
+        "truncate": true,
+        "text": "{name}",
+        "style": { "padding_x": 12, "text_transform": "$workspace_tabs.tab.text_transform" },
+        "states": { "active": { "text_transform": "$workspace_tabs.tab_active.text_transform" } }
+      },
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_right": 4 },
+        "children": [
+          {
+            "button": "close",
+            "element": "workspace_tabs.button",
+            "size": "xsmall",
+            "icon": "close",
+            "tooltip": "Close Workspace ({close_key})",
+            "style": { "text": "$workspace_tabs.tab.close_text" },
+            "states": { "active": { "text": "$workspace_tabs.tab_active.close_text" } }
+          }
+        ]
+      }
+    ]
+  },
   "welcome": {
     "fill": true,
     "align": "center",
@@ -551,14 +640,14 @@
             "style": { "gap": 4 },
             "children": [
               { "element": "welcome.title", "text": "Tern" },
-              { "element": "welcome.subtitle", "text": "Terminals, files and git changes of the folders you add." }
+              { "element": "welcome.subtitle", "text": "Terminals, files and git changes of one folder per workspace." }
             ]
           },
           {
             "layout": "row",
             "style": { "gap": 8 },
             "children": [
-              { "button": "open", "variant": "primary", "size": "medium", "icon": "folder-plus", "label": "Add Folder…" }
+              { "button": "open", "variant": "primary", "size": "medium", "icon": "folder-plus", "label": "Open Workspace…" }
             ]
           },
           {
@@ -576,7 +665,25 @@
                 "layout": "row",
                 "justify": "between",
                 "style": { "gap": 32 },
-                "children": [{ "text": "Add folder", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{open_key}" }]
+                "children": [{ "text": "Open workspace", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{open_key}" }]
+              },
+              {
+                "layout": "row",
+                "justify": "between",
+                "style": { "gap": 32 },
+                "children": [{ "text": "New window", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{new_window_key}" }]
+              },
+              {
+                "layout": "row",
+                "justify": "between",
+                "style": { "gap": 32 },
+                "children": [{ "text": "Close workspace", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{close_key}" }]
+              },
+              {
+                "layout": "row",
+                "justify": "between",
+                "style": { "gap": 32 },
+                "children": [{ "text": "Switch workspace", "style": { "text": "$welcome.keys.detail_text" } }, { "text": "{switch_key}" }]
               }
             ]
           }

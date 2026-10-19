@@ -12,7 +12,7 @@
 //!   scratch-new EXT  create and open a scratch file (as the + menu does)
 //!   scratch-open NAME   open an existing scratch file by file name
 //!   scratch-text T   replace the active scratch tab's text (`\n` = newline)
-//!   file-open PATH   open a file (relative to the first folder) in a tab
+//!   file-open PATH   open a file (relative to the workspace root) in a tab
 //!   tab-move FROM TO move center tab FROM to slot TO (as a drag does)
 //!   tab-layout scroll|wrap|vertical   how tabs are laid out
 //!   group-new TAB, group-add TAB GROUP, group-remove TAB, group-move GROUP TAB,
@@ -25,13 +25,15 @@
 //!   layout-reset                                    put the side panels back (View > Reset Layout)
 //!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
 //!                    (as dragging its header does); `state` ends with `arrange …`
-//!   ws               the workspace's folders
-//!   ws-open PATH, ws-remove PATH   add a folder to the workspace / take it out
+//!   windows / ws     list windows / this window's workspaces
+//!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
+//!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window
 //!   restart-background   end the daemon now (Restart Background Terminals, no dialog)
 //!   term-type TEXT   type into the active terminal (`\n` Enter, `\e` Esc, `\a` BEL)
 //!   term-screen      the active terminal's visible text
 //!   term-info        its size, focus reporting, exit; tabs that rang; what runs
 //!   term-paste-path P1|P2   paste paths as a file drop does
+//!   @N CMD           send CMD to window N instead of the active one
 
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]

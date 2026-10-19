@@ -622,6 +622,7 @@ pub struct Node {
 const SLOTS: &[&str] = &[
     "menu_bar",
     "welcome",
+    "workspace_tabs",
     "workspace",
     "left_strip",
     "right_strip",

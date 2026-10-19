@@ -23,8 +23,7 @@ pub struct Row {
 
 #[derive(Debug)]
 pub struct FileTree {
-    /// The folders shown, each as a top-level row.
-    roots: Vec<PathBuf>,
+    root: PathBuf,
     show_hidden: bool,
     children: HashMap<PathBuf, Vec<Entry>>,
     expanded: HashSet<PathBuf>,
@@ -32,51 +31,17 @@ pub struct FileTree {
 }
 
 impl FileTree {
-    /// A tree over `roots`, each one open.
-    pub fn new(roots: Vec<PathBuf>) -> Self {
-        let mut t = Self { roots: vec![], show_hidden: true, children: HashMap::new(), expanded: HashSet::new(), rows: vec![] };
-        for root in roots {
-            t.add_root(root);
-        }
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let mut t =
+            Self { root: root.clone(), show_hidden: true, children: HashMap::new(), expanded: HashSet::from([root.clone()]), rows: vec![] };
+        t.load_dir(&root);
         t.rebuild_rows();
         t
     }
 
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
-    }
-
-    pub fn is_root(&self, path: &Path) -> bool {
-        self.roots.iter().any(|r| r == path)
-    }
-
-    /// The root `path` is in (the innermost, when roots nest).
-    pub fn root_of(&self, path: &Path) -> Option<&Path> {
-        self.roots.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.components().count()).map(PathBuf::as_path)
-    }
-
-    /// Show `root` too, open, after the others.
-    pub fn add_root(&mut self, root: PathBuf) {
-        if self.is_root(&root) {
-            return;
-        }
-        self.load_dir(&root);
-        self.expanded.insert(root.clone());
-        self.roots.push(root);
-        self.rebuild_rows();
-    }
-
-    /// Stop showing `root`.
-    pub fn remove_root(&mut self, root: &Path) {
-        self.roots.retain(|r| r != root);
-        // What another root still shows stays loaded.
-        let kept = |p: &Path| self.roots.iter().any(|r| p.starts_with(r));
-        let gone: Vec<PathBuf> = self.children.keys().filter(|p| p.starts_with(root) && !kept(p)).cloned().collect();
-        for p in gone {
-            self.children.remove(&p);
-            self.expanded.remove(&p);
-        }
-        self.rebuild_rows();
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -107,24 +72,16 @@ impl FileTree {
     }
 
     pub fn collapse(&mut self, path: &Path) {
-        if self.expanded.remove(path) {
+        if path != self.root && self.expanded.remove(path) {
             self.rebuild_rows();
         }
     }
 
-    /// Expand its root and every ancestor of `path` so it becomes visible;
-    /// returns its row index.
+    /// Expand every ancestor of `path` so it becomes visible; returns its row index.
     pub fn reveal(&mut self, path: &Path) -> Option<usize> {
-        let root = self.root_of(path)?.to_path_buf();
-        let rel = path.strip_prefix(&root).ok()?;
-        let mut cur = root;
+        let rel = path.strip_prefix(&self.root).ok()?;
+        let mut cur = self.root.clone();
         let comps: Vec<_> = rel.components().collect();
-        if !comps.is_empty() {
-            if !self.children.contains_key(&cur) {
-                self.load_dir(&cur);
-            }
-            self.expanded.insert(cur.clone());
-        }
         for c in comps.iter().take(comps.len().saturating_sub(1)) {
             cur.push(c);
             if !self.children.contains_key(&cur) {
@@ -170,9 +127,9 @@ impl FileTree {
         before != self.rows
     }
 
-    /// Fold every folder back to the roots' children.
+    /// Fold every folder back to the root's children.
     pub fn collapse_all(&mut self) {
-        self.expanded = self.roots.iter().cloned().collect();
+        self.expanded = HashSet::from([self.root.clone()]);
         self.rebuild_rows();
     }
 
@@ -222,14 +179,7 @@ impl FileTree {
 
     fn rebuild_rows(&mut self) {
         let mut rows = Vec::with_capacity(self.rows.len().max(64));
-        for root in &self.roots {
-            let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
-            let expanded = self.expanded.contains(root);
-            rows.push(Row { entry: Entry { path: root.as_path().into(), name: name.into(), is_dir: true }, depth: 0, expanded });
-            if expanded {
-                self.push_children(root, 1, &mut rows);
-            }
-        }
+        self.push_children(&self.root.clone(), 0, &mut rows);
         self.rows = rows;
     }
 
@@ -291,37 +241,34 @@ mod tests {
         d
     }
 
-    /// The rows under the root row of a one-root tree.
     fn names(t: &FileTree) -> Vec<String> {
-        t.rows().iter().skip(1).map(|r| format!("{}{}", "  ".repeat(r.depth - 1), r.entry.name)).collect()
+        t.rows().iter().map(|r| format!("{}{}", "  ".repeat(r.depth), r.entry.name)).collect()
     }
 
     #[test]
     fn lists_root_dirs_first_and_respects_gitignore() {
         let d = fixture();
-        let t = FileTree::new(vec![d.path().to_path_buf()]);
+        let t = FileTree::new(d.path());
         assert_eq!(names(&t), vec!["src", ".gitignore", "b.txt", "README.md"]);
     }
 
     #[test]
     fn expand_collapse_and_reveal() {
         let d = fixture();
-        let mut t = FileTree::new(vec![d.path().to_path_buf()]);
+        let mut t = FileTree::new(d.path());
         t.expand(&d.path().join("src"));
         assert_eq!(names(&t), vec!["src", "  nested", "  main.rs", ".gitignore", "b.txt", "README.md"]);
         t.collapse(&d.path().join("src"));
-        assert_eq!(t.rows().len(), 5);
-        t.collapse(d.path());
-        assert_eq!(t.rows().len(), 1);
+        assert_eq!(t.rows().len(), 4);
         let idx = t.reveal(&d.path().join("src/nested/x.rs")).unwrap();
         assert_eq!(&*t.rows()[idx].entry.name, "x.rs");
-        assert_eq!(t.rows()[idx].depth, 3);
+        assert_eq!(t.rows()[idx].depth, 2);
     }
 
     #[test]
     fn apply_changes_reloads_parent() {
         let d = fixture();
-        let mut t = FileTree::new(vec![d.path().to_path_buf()]);
+        let mut t = FileTree::new(d.path());
         let new = d.path().join("new.rs");
         fs::write(&new, "").unwrap();
         assert!(t.apply_changes([new.as_path()]));
@@ -336,31 +283,12 @@ mod tests {
     #[test]
     fn moved_keeps_expanded_folders() {
         let d = fixture();
-        let mut t = FileTree::new(vec![d.path().to_path_buf()]);
+        let mut t = FileTree::new(d.path());
         t.reveal(&d.path().join("src/nested/x.rs"));
         fs::rename(d.path().join("src"), d.path().join("lib")).unwrap();
         t.moved(&d.path().join("src"), &d.path().join("lib"));
         assert_eq!(names(&t), vec!["lib", "  nested", "    x.rs", "  main.rs", ".gitignore", "b.txt", "README.md"]);
         t.collapse_all();
         assert_eq!(names(&t), vec!["lib", ".gitignore", "b.txt", "README.md"]);
-    }
-
-    #[test]
-    fn roots_come_and_go() {
-        let (a, b) = (fixture(), fixture());
-        let mut t = FileTree::new(vec![a.path().to_path_buf()]);
-        t.add_root(b.path().to_path_buf());
-        t.add_root(b.path().to_path_buf());
-        assert_eq!(t.roots(), [a.path().to_path_buf(), b.path().to_path_buf()]);
-        let tops: Vec<&Path> = t.rows().iter().filter(|r| r.depth == 0).map(|r| &*r.entry.path).collect();
-        assert_eq!(tops, [a.path(), b.path()]);
-        assert_eq!(t.root_of(&b.path().join("src/main.rs")), Some(b.path()));
-        assert_eq!(t.root_of(Path::new("/elsewhere")), None);
-        assert!(t.reveal(&b.path().join("src/nested/x.rs")).is_some());
-        t.remove_root(a.path());
-        assert_eq!(t.rows()[0].entry.path.as_ref(), b.path());
-        assert!(t.rows().iter().all(|r| r.entry.path.starts_with(b.path())));
-        t.collapse_all();
-        assert_eq!(t.rows().len(), 5);
     }
 }

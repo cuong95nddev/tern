@@ -1,7 +1,8 @@
 //! Remembers where the window was: display, position, size and whether it was
 //! maximized or fullscreen, so the next launch opens in the same place
-//! instead of on whichever screen is active. Also the session (the
-//! workspace's folders and tabs, reopened at launch) and the recent folders.
+//! instead of on whichever screen is active. Also the session (every window
+//! with its workspaces and their tabs, reopened at launch) and the recent
+//! folders.
 
 use std::path::PathBuf;
 
@@ -243,12 +244,11 @@ pub fn toggle_flag(args: &str, flag: &str) -> String {
 
 /// One center tab of a saved workspace. Terminals reattach to their
 /// background session (`mux`) when it still runs; otherwise they come back
-/// as new processes in their folder (`cwd`), and a Claude tab resumes its
-/// conversation.
+/// as new processes, and a Claude tab resumes its conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SavedTab {
-    Claude { name: Option<String>, session: Option<String>, mux: Option<u64>, cwd: Option<PathBuf> },
-    Shell { name: Option<String>, mux: Option<u64>, cwd: Option<PathBuf> },
+    Claude { name: Option<String>, session: Option<String>, mux: Option<u64> },
+    Shell { name: Option<String>, mux: Option<u64> },
     File(PathBuf),
     Diff(PathBuf),
     Scratch(PathBuf),
@@ -263,10 +263,10 @@ pub struct SavedGroup {
     pub collapsed: bool,
 }
 
-/// The saved workspace: its folders, tabs and active tab.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// One workspace of a saved window: its folder, tabs and active tab.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedWorkspace {
-    pub folders: Vec<PathBuf>,
+    pub folder: PathBuf,
     pub tabs: Vec<SavedTab>,
     /// Per tab, its index in `groups`, if it is in one.
     pub tab_groups: Vec<Option<usize>>,
@@ -285,59 +285,29 @@ pub struct SavedWorkspace {
 }
 
 impl SavedWorkspace {
-    /// A workspace of just `folder`, with the default tabs.
+    /// A folder opened fresh, with the default tabs.
     pub fn fresh(folder: PathBuf) -> Self {
-        Self { folders: vec![folder], ..Default::default() }
-    }
-
-    /// One workspace from the several of an older build's session (each
-    /// one folder), in order: their folders and tabs, each terminal in its
-    /// workspace's folder. Panes, panels and the active tab come from
-    /// `active`'s (the others' tabs join its first pane).
-    pub fn merge(list: Vec<SavedWorkspace>, active: usize) -> SavedWorkspace {
-        let mut out = SavedWorkspace::default();
-        let main = list.get(active).or(list.first()).cloned().unwrap_or_default();
-        out.panes = main.panes.clone();
-        out.pane_active = vec![];
-        out.hidden = main.hidden.clone();
-        out.arrangements = main.arrangements.clone();
-        for (i, ws) in list.into_iter().enumerate() {
-            let (tab_offset, group_offset) = (out.tabs.len(), out.groups.len());
-            let home = ws.folders.first().cloned();
-            for f in ws.folders {
-                if !out.folders.contains(&f) {
-                    out.folders.push(f);
-                }
-            }
-            let is_main = i == active;
-            if is_main {
-                out.active = tab_offset + ws.active;
-                out.pane_active = ws.pane_active.iter().map(|a| a.map(|a| a + tab_offset)).collect();
-            }
-            let n = ws.tabs.len();
-            out.tabs.extend(ws.tabs.into_iter().map(|t| match t {
-                SavedTab::Claude { name, session, mux, cwd } => SavedTab::Claude { name, session, mux, cwd: cwd.or_else(|| home.clone()) },
-                SavedTab::Shell { name, mux, cwd } => SavedTab::Shell { name, mux, cwd: cwd.or_else(|| home.clone()) },
-                other => other,
-            }));
-            out.tab_groups.extend((0..n).map(|t| ws.tab_groups.get(t).copied().flatten().map(|g| g + group_offset)));
-            out.groups.extend(ws.groups);
-            if !out.panes.is_empty() {
-                out.tab_panes.extend((0..n).map(|t| if is_main { ws.tab_panes.get(t).copied().unwrap_or(0) } else { 0 }));
-            }
+        Self {
+            folder,
+            tabs: vec![],
+            tab_groups: vec![],
+            groups: vec![],
+            active: 0,
+            panes: String::new(),
+            tab_panes: vec![],
+            pane_active: vec![],
+            hidden: vec![],
+            arrangements: vec![],
         }
-        if out.active >= out.tabs.len() {
-            out.active = 0;
-        }
-        out
     }
 }
 
-/// The session: where the window was and its workspace.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// One window of the session.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedWindow {
     pub placement: Option<(String, WindowBounds)>,
-    pub workspace: SavedWorkspace,
+    pub workspaces: Vec<SavedWorkspace>,
+    pub active: usize,
 }
 
 fn session_file() -> PathBuf {
@@ -350,60 +320,57 @@ fn field(s: &str) -> String {
 }
 
 /// `window <active> [<placement as in the window file>]`, then per workspace
-/// a tab-indented line with its first folder (empty without one) followed by
-/// two-tab-indented lines: `folder` for each further folder, `active N`,
+/// a tab-indented folder line followed by two-tab-indented lines: `active N`,
 /// one per tab group (`group`, color, collapsed, name) and one per tab, its
 /// kind and fields separated by tabs, after `@N` when it is in group N.
 /// A split center adds `panes`, its layout and each pane's tab (`-` for none),
 /// and `tab-panes`, each tab's pane; older builds skip both lines. `hidden`
 /// lists the side panels the user hid; `arrange` is one line per panel
-/// arrangement, its key and encoded text (older builds skip it). Builds
-/// before the single workspace wrote several windows and workspaces.
-fn encode_session(w: &SavedWindow) -> String {
-    let mut out = match &w.placement {
-        Some((display, bounds)) => format!("window 0 {}", encode(display, *bounds)),
-        None => "window 0\n".to_owned(),
-    };
-    let ws = &w.workspace;
-    let path = |p: &PathBuf| field(&p.display().to_string());
-    out.push_str(&format!("\t{}\n", ws.folders.first().map(path).unwrap_or_default()));
-    for f in ws.folders.iter().skip(1) {
-        out.push_str(&format!("\t\tfolder\t{}\n", path(f)));
-    }
-    if !ws.hidden.is_empty() {
-        out.push_str(&format!("\t\thidden\t{}\n", field(&ws.hidden.join(" "))));
-    }
-    for (key, encoded) in &ws.arrangements {
-        out.push_str(&format!("\t\tarrange\t{}\t{}\n", field(key), field(encoded)));
-    }
-    if ws.tabs.is_empty() {
-        return out;
-    }
-    out.push_str(&format!("\t\tactive\t{}\n", ws.active));
-    let opt = |o: &Option<String>| o.as_deref().map(field).unwrap_or_default();
-    let mux = |m: &Option<u64>| m.map(|m| m.to_string()).unwrap_or_default();
-    let cwd = |c: &Option<PathBuf>| c.as_ref().map(path).unwrap_or_default();
-    if !ws.panes.is_empty() {
-        let active: Vec<String> = ws.pane_active.iter().map(|a| a.map_or("-".into(), |a| a.to_string())).collect();
-        let tab_panes: Vec<String> = ws.tab_panes.iter().map(usize::to_string).collect();
-        out.push_str(&format!("\t\tpanes\t{}\t{}\n", field(&ws.panes), active.join(" ")));
-        out.push_str(&format!("\t\ttab-panes\t{}\n", tab_panes.join(" ")));
-    }
-    for g in &ws.groups {
-        out.push_str(&format!("\t\tgroup\t{}\t{}\t{}\n", field(&g.color), u8::from(g.collapsed), field(&g.name)));
-    }
-    for (i, tab) in ws.tabs.iter().enumerate() {
-        let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
-        let line = match tab {
-            SavedTab::Claude { name, session, mux: m, cwd: c } => {
-                format!("claude\t{}\t{}\t{}\t{}", opt(session), opt(name), mux(m), cwd(c))
-            },
-            SavedTab::Shell { name, mux: m, cwd: c } => format!("shell\t{}\t{}\t{}", opt(name), mux(m), cwd(c)),
-            SavedTab::File(p) => format!("file\t{}", path(p)),
-            SavedTab::Diff(p) => format!("diff\t{}", path(p)),
-            SavedTab::Scratch(p) => format!("scratch\t{}", path(p)),
-        };
-        out.push_str(&format!("\t\t{group}{line}\n"));
+/// arrangement, its key and encoded text (older builds skip it).
+fn encode_session(windows: &[SavedWindow]) -> String {
+    let mut out = String::new();
+    for w in windows {
+        match &w.placement {
+            Some((display, bounds)) => out.push_str(&format!("window {} {}", w.active, encode(display, *bounds))),
+            None => out.push_str(&format!("window {}\n", w.active)),
+        }
+        for ws in &w.workspaces {
+            out.push_str(&format!("\t{}\n", field(&ws.folder.display().to_string())));
+            if !ws.hidden.is_empty() {
+                out.push_str(&format!("\t\thidden\t{}\n", field(&ws.hidden.join(" "))));
+            }
+            for (key, encoded) in &ws.arrangements {
+                out.push_str(&format!("\t\tarrange\t{}\t{}\n", field(key), field(encoded)));
+            }
+            if ws.tabs.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\t\tactive\t{}\n", ws.active));
+            let opt = |o: &Option<String>| o.as_deref().map(field).unwrap_or_default();
+            let path = |p: &PathBuf| field(&p.display().to_string());
+            if !ws.panes.is_empty() {
+                let active: Vec<String> = ws.pane_active.iter().map(|a| a.map_or("-".into(), |a| a.to_string())).collect();
+                let tab_panes: Vec<String> = ws.tab_panes.iter().map(usize::to_string).collect();
+                out.push_str(&format!("\t\tpanes\t{}\t{}\n", field(&ws.panes), active.join(" ")));
+                out.push_str(&format!("\t\ttab-panes\t{}\n", tab_panes.join(" ")));
+            }
+            for g in &ws.groups {
+                out.push_str(&format!("\t\tgroup\t{}\t{}\t{}\n", field(&g.color), u8::from(g.collapsed), field(&g.name)));
+            }
+            for (i, tab) in ws.tabs.iter().enumerate() {
+                let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
+                let line = match tab {
+                    SavedTab::Claude { name, session, mux } => {
+                        format!("claude\t{}\t{}\t{}", opt(session), opt(name), mux.map(|m| m.to_string()).unwrap_or_default())
+                    },
+                    SavedTab::Shell { name, mux } => format!("shell\t{}\t{}", opt(name), mux.map(|m| m.to_string()).unwrap_or_default()),
+                    SavedTab::File(p) => format!("file\t{}", path(p)),
+                    SavedTab::Diff(p) => format!("diff\t{}", path(p)),
+                    SavedTab::Scratch(p) => format!("scratch\t{}", path(p)),
+                };
+                out.push_str(&format!("\t\t{group}{line}\n"));
+            }
+        }
     }
     out
 }
@@ -416,13 +383,11 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "claude" => {
             let session = next();
             let name = next();
-            let mux = next().and_then(|m| m.parse().ok());
-            SavedTab::Claude { session, name, mux, cwd: next().map(PathBuf::from) }
+            SavedTab::Claude { session, name, mux: next().and_then(|m| m.parse().ok()) }
         },
         "shell" => {
             let name = next();
-            let mux = next().and_then(|m| m.parse().ok());
-            SavedTab::Shell { name, mux, cwd: next().map(PathBuf::from) }
+            SavedTab::Shell { name, mux: next().and_then(|m| m.parse().ok()) }
         },
         "file" => SavedTab::File(next()?.into()),
         "diff" => SavedTab::Diff(next()?.into()),
@@ -431,19 +396,72 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
     })
 }
 
-/// The session; older builds' windows and workspaces become one.
-fn decode_session(text: &str) -> SavedWindow {
-    struct Window {
-        placement: Option<(String, WindowBounds)>,
-        workspaces: Vec<SavedWorkspace>,
-        active: usize,
+/// The folder a terminal line of a one-workspace build's session starts in
+/// (its field after `mux`).
+fn tab_cwd(line: &str) -> Option<PathBuf> {
+    let at = match line.split('\t').next()? {
+        "claude" => 4,
+        "shell" => 3,
+        _ => return None,
+    };
+    line.split('\t').nth(at).filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// What a one-workspace build's session adds to a workspace: its further
+/// folders and each tab's folder.
+#[derive(Default)]
+struct Merged {
+    folders: Vec<PathBuf>,
+    cwds: Vec<Option<PathBuf>>,
+}
+
+/// Split a one-workspace build's workspace back into one per folder: each
+/// tab goes to the folder it runs in (a terminal) or lies in (a file or
+/// diff), else to the first. Tab groups follow their tabs; a split center
+/// does not come back. Also returns the index of the one with the active tab.
+fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usize) {
+    let mut out: Vec<SavedWorkspace> = std::iter::once(ws.folder.clone())
+        .chain(merged.folders)
+        .map(|folder| SavedWorkspace { hidden: ws.hidden.clone(), arrangements: ws.arrangements.clone(), ..SavedWorkspace::fresh(folder) })
+        .collect();
+    let folders: Vec<PathBuf> = out.iter().map(|w| w.folder.clone()).collect();
+    let home = |p: &std::path::Path| {
+        (0..folders.len()).filter(|&i| p.starts_with(&folders[i])).max_by_key(|&i| folders[i].components().count()).unwrap_or(0)
+    };
+    let mut active_ws = 0;
+    for (i, tab) in ws.tabs.into_iter().enumerate() {
+        let place = match &tab {
+            SavedTab::Claude { .. } | SavedTab::Shell { .. } => merged.cwds.get(i).cloned().flatten().map_or(0, |c| home(&c)),
+            SavedTab::File(p) | SavedTab::Diff(p) => home(p),
+            SavedTab::Scratch(_) => 0,
+        };
+        let to = &mut out[place];
+        if i == ws.active {
+            (active_ws, to.active) = (place, to.tabs.len());
+        }
+        let group = ws.tab_groups.get(i).copied().flatten().and_then(|g| {
+            let saved = ws.groups.get(g)?;
+            Some(to.groups.iter().position(|have| have == saved).unwrap_or_else(|| {
+                to.groups.push(saved.clone());
+                to.groups.len() - 1
+            }))
+        });
+        to.tabs.push(tab);
+        to.tab_groups.push(group);
     }
-    let mut out: Vec<Window> = vec![];
+    (out, active_ws)
+}
+
+fn decode_session(text: &str) -> Vec<SavedWindow> {
+    let mut out: Vec<SavedWindow> = vec![];
+    // Per window, per workspace: what a one-workspace build added to it.
+    let mut merged: Vec<Vec<Merged>> = vec![];
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("\t\t") {
             let Some(ws) = out.last_mut().and_then(|w| w.workspaces.last_mut()) else { continue };
+            let Some(m) = merged.last_mut().and_then(|w| w.last_mut()) else { continue };
             if let Some(f) = rest.strip_prefix("folder\t") {
-                ws.folders.push(PathBuf::from(f));
+                m.folders.push(PathBuf::from(f));
             } else if let Some(n) = rest.strip_prefix("active\t") {
                 ws.active = n.parse().unwrap_or(0);
             } else if let Some(p) = rest.strip_prefix("panes\t") {
@@ -471,32 +489,44 @@ fn decode_session(text: &str) -> SavedWindow {
                 if let Some(tab) = decode_tab(rest) {
                     ws.tabs.push(tab);
                     ws.tab_groups.push(group);
+                    m.cwds.push(tab_cwd(rest));
                 }
             }
         } else if let Some(folder) = line.strip_prefix('\t') {
-            if let Some(w) = out.last_mut() {
-                let folders = if folder.is_empty() { vec![] } else { vec![PathBuf::from(folder)] };
-                w.workspaces.push(SavedWorkspace { folders, ..Default::default() });
+            if let (Some(w), Some(m)) = (out.last_mut(), merged.last_mut()) {
+                w.workspaces.push(SavedWorkspace::fresh(PathBuf::from(folder)));
+                m.push(Merged::default());
             }
         } else if let Some(rest) = line.strip_prefix("window ") {
             let (active, placement) = rest.split_once(' ').unwrap_or((rest, ""));
-            out.push(Window { placement: decode(placement), workspaces: vec![], active: active.parse().unwrap_or(0) });
+            out.push(SavedWindow { placement: decode(placement), workspaces: vec![], active: active.parse().unwrap_or(0) });
+            merged.push(vec![]);
         }
     }
-    let placement = out.first().and_then(|w| w.placement.clone());
-    // The first window's shown workspace leads.
-    let active = out.first().map_or(0, |w| w.active.min(w.workspaces.len().saturating_sub(1)));
-    let all: Vec<SavedWorkspace> = out.into_iter().flat_map(|w| w.workspaces).collect();
-    let workspace = if all.len() == 1 { all.into_iter().next().unwrap_or_default() } else { SavedWorkspace::merge(all, active) };
-    SavedWindow { placement, workspace }
+    for (w, merged) in out.iter_mut().zip(merged) {
+        if merged.iter().all(|m| m.folders.is_empty()) {
+            continue;
+        }
+        let (mut split, mut active) = (vec![], 0);
+        for (i, (ws, m)) in std::mem::take(&mut w.workspaces).into_iter().zip(merged).enumerate() {
+            let at = split.len();
+            let (list, ix) = if m.folders.is_empty() { (vec![ws], 0) } else { split_merged(ws, m) };
+            if i == w.active {
+                active = at + ix;
+            }
+            split.extend(list);
+        }
+        (w.workspaces, w.active) = (split, active);
+    }
+    out
 }
 
 /// The session text last read or written, so an unchanged session is not
 /// written again (a tab's status changing asks for a save, too).
 static LAST_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-pub fn save_session(window: &SavedWindow) {
-    let text = encode_session(window);
+pub fn save_session(windows: &[SavedWindow]) {
+    let text = encode_session(windows);
     let mut last = LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if last.as_deref() == Some(text.as_str()) {
         return;
@@ -506,14 +536,19 @@ pub fn save_session(window: &SavedWindow) {
     }
 }
 
-/// The last session, keeping only folders that still exist; `None` without
-/// one.
-pub fn load_session() -> Option<SavedWindow> {
-    let text = std::fs::read_to_string(session_file()).ok().filter(|t| !t.trim().is_empty())?;
+/// The last session's windows, keeping only folders that still exist.
+pub fn load_session() -> Vec<SavedWindow> {
+    let text = std::fs::read_to_string(session_file()).unwrap_or_default();
     *LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.clone());
-    let mut w = decode_session(&text);
-    w.workspace.folders.retain(|f| f.is_dir());
-    Some(w)
+    let mut windows = decode_session(&text);
+    for w in &mut windows {
+        let before = w.workspaces.len();
+        w.workspaces.retain(|ws| ws.folder.is_dir());
+        if w.workspaces.len() != before {
+            w.active = 0;
+        }
+    }
+    windows
 }
 
 #[cfg(test)]
@@ -547,125 +582,119 @@ mod tests {
         assert_eq!(bounds, WindowBounds::Maximized(b));
     }
 
-    fn claude(name: Option<&str>, session: Option<&str>, mux: Option<u64>, cwd: Option<&str>) -> SavedTab {
-        SavedTab::Claude { name: name.map(Into::into), session: session.map(Into::into), mux, cwd: cwd.map(PathBuf::from) }
-    }
-
-    fn shell(name: Option<&str>, mux: Option<u64>, cwd: Option<&str>) -> SavedTab {
-        SavedTab::Shell { name: name.map(Into::into), mux, cwd: cwd.map(PathBuf::from) }
-    }
-
     #[test]
     fn session_round_trip() {
         let b = Bounds::new(point(px(10.), px(20.)), size(px(1200.), px(800.)));
-        let window = SavedWindow {
-            placement: Some(("ABC".into(), WindowBounds::Windowed(b))),
-            workspace: SavedWorkspace {
-                folders: vec![PathBuf::from("/a b/c"), PathBuf::from("/d")],
-                tabs: vec![
-                    claude(None, Some("s-1"), Some(42), Some("/a b/c")),
-                    claude(Some("api work"), None, None, None),
-                    shell(None, Some(7), Some("/d")),
-                    SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
-                    SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
-                    SavedTab::Scratch(PathBuf::from("/s/n.txt")),
+        let windows = vec![
+            SavedWindow {
+                placement: Some(("ABC".into(), WindowBounds::Windowed(b))),
+                workspaces: vec![
+                    SavedWorkspace {
+                        folder: PathBuf::from("/a b/c"),
+                        tabs: vec![
+                            SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42) },
+                            SavedTab::Claude { name: Some("api work".into()), session: None, mux: None },
+                            SavedTab::Shell { name: None, mux: Some(7) },
+                            SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
+                            SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
+                            SavedTab::Scratch(PathBuf::from("/s/n.txt")),
+                        ],
+                        tab_groups: vec![Some(0), Some(0), None, Some(1), None, None],
+                        groups: vec![
+                            SavedGroup { name: "api".into(), color: "blue".into(), collapsed: false },
+                            SavedGroup { name: String::new(), color: "red".into(), collapsed: true },
+                        ],
+                        active: 3,
+                        panes: "h(0,v(1,2))".into(),
+                        tab_panes: vec![0, 0, 1, 1, 2, 0],
+                        pane_active: vec![Some(0), Some(3), None],
+                        hidden: vec!["explorer".into(), "scratches".into()],
+                        arrangements: vec![("k".into(), "left=explorer".into())],
+                    },
+                    SavedWorkspace { hidden: vec!["changes".into()], ..SavedWorkspace::fresh(PathBuf::from("/d")) },
                 ],
-                tab_groups: vec![Some(0), Some(0), None, Some(1), None, None],
-                groups: vec![
-                    SavedGroup { name: "api".into(), color: "blue".into(), collapsed: false },
-                    SavedGroup { name: String::new(), color: "red".into(), collapsed: true },
-                ],
-                active: 3,
-                panes: "h(0,v(1,2))".into(),
-                tab_panes: vec![0, 0, 1, 1, 2, 0],
-                pane_active: vec![Some(0), Some(3), None],
-                hidden: vec!["explorer".into(), "scratches".into()],
-                arrangements: vec![("k".into(), "left=explorer".into())],
+                active: 1,
             },
-        };
-        assert_eq!(decode_session(&encode_session(&window)), window);
+            SavedWindow { placement: None, workspaces: vec![], active: 0 },
+        ];
+        assert_eq!(decode_session(&encode_session(&windows)), windows);
     }
 
     #[test]
-    fn workspace_without_folders_round_trips() {
-        let window = SavedWindow {
-            placement: None,
-            workspace: SavedWorkspace { tabs: vec![shell(None, Some(3), Some("/x"))], tab_groups: vec![None], ..Default::default() },
-        };
-        assert_eq!(decode_session(&encode_session(&window)), window);
-        assert_eq!(decode_session(&encode_session(&SavedWindow::default())), SavedWindow::default());
+    fn one_workspace_session_splits_by_folder() {
+        let text = "window 0\n\t/a\n\t\tfolder\t/b\n\t\tfolder\t/b/sub\n\t\thidden\tchanges\n\t\tactive\t2\n\
+                    \t\tgroup\tblue\t0\tapi\n\t\t@0\tclaude\ts-1\t\t42\t/b\n\t\tshell\t\t7\t/a\n\t\t@0\tfile\t/b/sub/x.rs\n\
+                    \t\tscratch\t/s/n.txt\n\t\tshell\t\t\t/elsewhere\n";
+        let w = &decode_session(text)[0];
+        let folders: Vec<&PathBuf> = w.workspaces.iter().map(|ws| &ws.folder).collect();
+        assert_eq!(folders, [&PathBuf::from("/a"), &PathBuf::from("/b"), &PathBuf::from("/b/sub")]);
+        let [a, b, sub] = &w.workspaces[..] else { panic!("three workspaces") };
+        assert_eq!(
+            a.tabs,
+            [SavedTab::Shell { name: None, mux: Some(7) }, SavedTab::Scratch("/s/n.txt".into()), SavedTab::Shell { name: None, mux: None }]
+        );
+        assert_eq!(b.tabs, [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42) }]);
+        assert_eq!(sub.tabs, [SavedTab::File("/b/sub/x.rs".into())]);
+        assert_eq!((&a.tab_groups[..], &b.tab_groups[..], &sub.tab_groups[..]), (&[None, None, None][..], &[Some(0)][..], &[Some(0)][..]));
+        assert!(a.groups.is_empty() && sub.groups[0].name == "api");
+        assert_eq!((w.active, sub.active), (2, 0));
+        assert!(w.workspaces.iter().all(|ws| ws.hidden == ["changes"] && ws.panes.is_empty()));
     }
 
     #[test]
     fn arrangements_round_trip() {
         let arrangements = vec![("workspace/left+right".to_owned(), "left=explorer;right=[c changes@- scratches@-]".to_owned())];
         let with_tabs = SavedWorkspace {
-            tabs: vec![shell(None, None, None)],
+            tabs: vec![SavedTab::Shell { name: None, mux: None }],
             tab_groups: vec![None],
             tab_panes: vec![],
             arrangements: arrangements.clone(),
             ..SavedWorkspace::fresh(PathBuf::from("/a"))
         };
-        let window = SavedWindow { placement: None, workspace: with_tabs };
-        assert_eq!(decode_session(&encode_session(&window)), window);
-        let without_tabs =
-            SavedWindow { placement: None, workspace: SavedWorkspace { arrangements, ..SavedWorkspace::fresh("/b".into()) } };
-        assert_eq!(decode_session(&encode_session(&without_tabs)), without_tabs);
+        let without_tabs = SavedWorkspace { arrangements, ..SavedWorkspace::fresh(PathBuf::from("/b")) };
+        let windows = vec![SavedWindow { placement: None, workspaces: vec![with_tabs, without_tabs], active: 0 }];
+        assert_eq!(decode_session(&encode_session(&windows)), windows);
     }
 
     #[test]
     fn old_session_has_no_arrangement() {
         let w = decode_session("window 0\n\t/a\n\t\thidden\texplorer\n\t\tshell\tn\n");
-        assert!(w.workspace.arrangements.is_empty());
-        assert_eq!(w.workspace.tabs, vec![shell(Some("n"), None, None)]);
-    }
-
-    #[test]
-    fn older_workspaces_become_one() {
-        // Two windows: the first shows its second workspace.
-        let text = "window 1\n\t/a\n\t\tactive\t0\n\t\tshell\tx\t5\n\t/b\n\t\thidden\tchanges\n\t\tactive\t1\n\t\tgroup\tblue\t0\tg\n\t\tclaude\ts\t\t9\n\t\t@0\tfile\t/b/f.rs\n\t\tpanes\th(0,1)\t0 1\n\t\ttab-panes\t0 1\nwindow 0\n\t/c\n\t/a\n";
-        let w = decode_session(text).workspace;
-        assert_eq!(w.folders, [PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")]);
-        assert_eq!(
-            w.tabs,
-            vec![shell(Some("x"), Some(5), Some("/a")), claude(None, Some("s"), Some(9), Some("/b")), SavedTab::File("/b/f.rs".into())]
-        );
-        assert_eq!(w.tab_groups, vec![None, None, Some(0)]);
-        assert_eq!(w.groups.len(), 1);
-        // The shown workspace's tab, panes and panels.
-        assert_eq!(w.active, 2);
-        assert_eq!(w.hidden, ["changes"]);
-        assert_eq!(w.panes, "h(0,1)");
-        assert_eq!(w.tab_panes, [0, 0, 1]);
-        assert_eq!(w.pane_active, [Some(1), Some(2)]);
+        assert!(w[0].workspaces[0].arrangements.is_empty());
+        assert_eq!(w[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("n".into()), mux: None }]);
     }
 
     #[test]
     fn session_from_folder_only_format() {
         let w = decode_session("window 0\n\t/a\n\t/b\n");
-        assert_eq!(w.workspace, SavedWorkspace { folders: vec!["/a".into(), "/b".into()], ..Default::default() });
+        assert_eq!(w[0].workspaces, vec![SavedWorkspace::fresh("/a".into()), SavedWorkspace::fresh("/b".into())]);
     }
 
     #[test]
     fn tab_names_cannot_break_lines() {
         let ws = SavedWorkspace {
-            tabs: vec![shell(Some("x\ty\nz"), None, None)],
+            folder: PathBuf::from("/a"),
+            tabs: vec![SavedTab::Shell { name: Some("x\ty\nz".into()), mux: None }],
             tab_groups: vec![Some(0)],
             groups: vec![SavedGroup { name: "a\tb".into(), color: "grey".into(), collapsed: false }],
             ..SavedWorkspace::fresh(PathBuf::from("/a"))
         };
-        let back = decode_session(&encode_session(&SavedWindow { placement: None, workspace: ws })).workspace;
-        assert_eq!(back.tabs, vec![shell(Some("x y z"), None, None)]);
-        assert_eq!(back.groups[0].name, "a b");
-        assert_eq!(back.tab_groups, vec![Some(0)]);
+        let w = SavedWindow { placement: None, workspaces: vec![ws], active: 0 };
+        let back = decode_session(&encode_session(&[w]));
+        assert_eq!(back[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("x y z".into()), mux: None }]);
+        assert_eq!(back[0].workspaces[0].groups[0].name, "a b");
+        assert_eq!(back[0].workspaces[0].tab_groups, vec![Some(0)]);
     }
 
     #[test]
     fn tabs_from_before_background_sessions() {
         let w = decode_session("window 0\n\t/a\n\t\tclaude\ts-1\tname\n\t\tshell\t\n\t\tshell\tn\n");
         assert_eq!(
-            w.workspace.tabs,
-            vec![claude(Some("name"), Some("s-1"), None, None), shell(None, None, None), shell(Some("n"), None, None)]
+            w[0].workspaces[0].tabs,
+            vec![
+                SavedTab::Claude { name: Some("name".into()), session: Some("s-1".into()), mux: None },
+                SavedTab::Shell { name: None, mux: None },
+                SavedTab::Shell { name: Some("n".into()), mux: None },
+            ]
         );
     }
 
