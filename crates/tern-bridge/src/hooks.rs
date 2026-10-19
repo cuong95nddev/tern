@@ -191,8 +191,15 @@ pub fn remove_claude_settings(dir: &std::path::Path, token: &str) {
 /// the one it is named for (a daemon that took over another's sessions).
 const RUN_DIR_OWNER: &str = "owner";
 
-/// Mark run dir `dir` (created if needed) as this process's.
+/// Mark run dir `dir` (created if needed) as this process's. It is made
+/// private, as [`write_claude_settings`] wants it.
 pub fn claim_run_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join(RUN_DIR_OWNER), std::process::id().to_string())
 }
@@ -339,6 +346,16 @@ mod tests {
         assert!(me.exists());
         assert!(!dead.exists());
         assert!(root.join("claude-settings-new.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_go_in_a_claimed_run_dir() {
+        let root = std::env::temp_dir().join(format!("tern-claim-settings-{}", std::process::id()));
+        let dir = root.join("run");
+        super::claim_run_dir(&dir).unwrap();
+        let path = super::write_claude_settings(&dir, "tok", "http://127.0.0.1:1/hook/tok").unwrap();
+        assert!(path.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
