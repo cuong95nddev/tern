@@ -144,8 +144,9 @@ fn file(w: &mut TcpStream, path: &Path, head: bool) -> io::Result<()> {
 
 /// Hold the connection open and send an event when the folder changes.
 fn events(mut w: TcpStream, shared: &Shared) -> io::Result<()> {
-    w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n: hi\n\n")?;
+    // Before the page hears back: a change once it has counts.
     let mut seen = *shared.version.lock().unwrap();
+    w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n: hi\n\n")?;
     loop {
         let version = shared.version.lock().unwrap();
         let (version, _) = shared.bumped.wait_timeout_while(version, KEEPALIVE, |v| *v == seen).unwrap();
@@ -335,6 +336,8 @@ mod tests {
         assert!(get(port, "/missing.html").starts_with("HTTP/1.1 404"));
 
         let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // Fail, not hang, when no reload comes.
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         write!(&s, "GET {EVENTS} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         let mut r = BufReader::new(s);
         let mut line = String::new();
