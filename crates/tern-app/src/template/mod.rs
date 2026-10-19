@@ -1919,7 +1919,7 @@ mod tests {
         assert!(!n.style.contains_key("background"));
         let active = n.states.iter().find(|s| s.hover.is_none()).unwrap();
         // The element's set properties, as values.
-        assert!(active.props.contains_key("background") && active.props.contains_key("border"), "{:?}", active.props);
+        assert!(active.props.contains_key("background") && active.props.contains_key("text"), "{:?}", active.props);
         let hover = n.states.iter().find(|s| s.hover.as_deref() == Some("")).unwrap();
         assert!(hover.when.is_some() && hover.holes.len() == 1);
         assert!(n.states.iter().any(|s| s.hover.as_deref() == Some("row") && s.when.is_none()));

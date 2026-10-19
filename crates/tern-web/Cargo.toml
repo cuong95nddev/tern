@@ -11,8 +11,12 @@ qrcode = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
 sha1_smol = "1.0.1"
+sha2 = "0.10.9"
 tern-mux = { path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -66,9 +66,6 @@ button:active { background: var(--line); }
 #title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #subtitle { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.chip { padding: 5px 12px; font-size: 13px; }
-.chip.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-
 .dot {
   width: 9px;
   height: 9px;
@@ -79,9 +76,39 @@ button:active { background: var(--line); }
 .dot.up { background: var(--done); }
 .dot.down { background: var(--bad); }
 
-main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+main { flex: 1; min-height: 0; display: flex; }
+section { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 section[hidden] { display: none; }
+
+/* A wide screen, as Tern's window: the agents panel on the left, the
+   folder's agents as tabs over the terminal. A phone shows one at a time. */
+body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--line); }
+
+#tabs {
+  flex: none;
+  display: flex;
+  height: 36px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+#tabs[hidden] { display: none; }
+#tabs .tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 220px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+}
+#tabs .tab.on { color: var(--fg); background: var(--raised); box-shadow: inset 0 -2px var(--accent); }
+@media (hover: hover) { #tabs .tab:hover { color: var(--fg); } }
+#tabs .dot { width: 6px; height: 6px; }
 
 #list-view { overflow-y: auto; }
 
@@ -106,6 +133,7 @@ section[hidden] { display: none; }
   #sessions li.folder .chevron { opacity: 0; }
   #sessions li.folder:hover .chevron { opacity: 1; }
 }
+#sessions li.on { background: var(--raised); }
 #sessions li.working { opacity: 0.7; }
 #sessions li.exited { opacity: 0.5; }
 
@@ -129,13 +157,19 @@ section[hidden] { display: none; }
 
 .note { color: var(--muted); text-align: center; padding: 32px 20px; margin: 0; }
 
+/* The terminal is made the size of this box (app.js): nothing scrolls but
+   its scrollback, by wheel or touch, without a scrollbar. */
 #term-wrap {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+  /* Not even scrolled by the browser to show xterm.js's hidden textarea. */
+  overflow: clip;
   padding: 4px;
 }
-#term { display: inline-block; }
+#term { display: inline-block; transform-origin: 0 0; }
+#term .xterm-viewport { scrollbar-width: none; }
+#term .xterm-viewport::-webkit-scrollbar { display: none; }
 
 #banner {
   flex: none;

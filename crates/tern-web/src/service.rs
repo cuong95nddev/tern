@@ -13,18 +13,20 @@ const STATUS: &str = "web.json";
 /// The app's own choice, kept to start the server again at its next launch:
 /// `tailscale` or `all`. Missing: off. A server started by hand leaves it be.
 const WANTED: &str = "web-wanted";
-pub(crate) const TOKEN: &str = "web-token";
 
 /// What a running server serves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Serving {
     pub pid: u32,
-    /// The secret links to open, the address one first (then MagicDNS).
+    /// Where it is (`http://host:port/`), the address first (then
+    /// MagicDNS): a pairing link goes on one of these.
     pub links: Vec<String>,
     /// Listening on every network, not just Tailscale.
     pub all_networks: bool,
     /// Only this machine can reach it (no Tailscale address was found).
     pub local_only: bool,
+    /// The paired devices with a page open (see [`crate::access`]).
+    pub connected: Vec<String>,
 }
 
 fn dir() -> PathBuf {
@@ -48,8 +50,12 @@ pub(crate) fn write_status(dir: &Path, s: &Serving) -> io::Result<()> {
         "links": s.links,
         "all_networks": s.all_networks,
         "local_only": s.local_only,
+        "connected": s.connected,
     });
-    std::fs::write(dir.join(STATUS), v.to_string())
+    // Whole, for the app reading it.
+    let tmp = dir.join(format!("{STATUS}.tmp"));
+    std::fs::write(&tmp, v.to_string())?;
+    std::fs::rename(tmp, dir.join(STATUS))
 }
 
 /// What the running server serves; `None` when none runs (or it hasn't
@@ -66,9 +72,15 @@ fn serving_in(dir: &Path) -> Option<Serving> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(STATUS)).ok()?).ok()?;
     Some(Serving {
         pid: v.get("pid")?.as_u64()? as u32,
-        links: v.get("links")?.as_array()?.iter().filter_map(|l| Some(l.as_str()?.to_owned())).collect(),
+        // A server of old gave its secret link.
+        links: v.get("links")?.as_array()?.iter().filter_map(|l| Some(l.as_str()?.split('#').next()?.to_owned())).collect(),
         all_networks: v.get("all_networks").and_then(|b| b.as_bool()).unwrap_or(false),
         local_only: v.get("local_only").and_then(|b| b.as_bool()).unwrap_or(false),
+        connected: v
+            .get("connected")
+            .and_then(|c| c.as_array())
+            .map(|c| c.iter().filter_map(|id| Some(id.as_str()?.to_owned())).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -79,7 +91,8 @@ pub fn start(all_networks: bool) -> io::Result<()> {
     let dir = dir();
     tern_mux::paths::ensure_private_dir(&dir)?;
     std::fs::write(dir.join(WANTED), if all_networks { "all" } else { "tailscale" })?;
-    let args: &[&str] = if all_networks { &["--web", "--bind", "0.0.0.0"] } else { &["--web"] };
+    // The app makes its own pairing links.
+    let args: &[&str] = if all_networks { &["--web", "--no-pair", "--bind", "0.0.0.0"] } else { &["--web", "--no-pair"] };
     tern_mux::client::spawn_background(args, log_file().as_deref())
 }
 
@@ -100,14 +113,6 @@ pub fn wanted() -> Option<bool> {
         "tailscale" => Some(false),
         _ => None,
     }
-}
-
-/// Make a new secret link; the old ones stop working once the server
-/// starts again.
-pub fn renew_token() -> io::Result<()> {
-    let dir = dir();
-    tern_mux::paths::ensure_private_dir(&dir)?;
-    crate::auth::load_token(&dir.join(TOKEN), true).map(drop)
 }
 
 /// The server's log.
@@ -137,7 +142,7 @@ mod tests {
     fn status_reads_back() {
         let dir = std::env::temp_dir().join(format!("tern-web-status-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let s = Serving { pid: 42, links: vec!["http://a:1/#t=x".into()], all_networks: true, local_only: false };
+        let s = Serving { pid: 42, links: vec!["http://a:1/".into()], all_networks: true, local_only: false, connected: vec!["d1".into()] };
         write_status(&dir, &s).unwrap();
         assert_eq!(serving_in(&dir), None);
         let held = lock(&dir).unwrap();
@@ -151,7 +156,7 @@ mod tests {
 
     #[test]
     fn draws_a_qr_code() {
-        let (width, dark) = qr("http://box:7317/#t=0123456789abcdef0123456789abcdef").unwrap();
+        let (width, dark) = qr("http://box:7317/#p=ABCDEFGHJKMN").unwrap();
         assert_eq!(dark.len(), width * width);
         assert!(dark.iter().any(|d| *d) && dark.iter().any(|d| !*d));
     }

@@ -514,12 +514,9 @@
         "when": "grouped && active",
         "position": { "top": 0, "left": -1, "right": -1, "bottom": 0 },
         "style": {
-          "border_top_width": 2,
-          "border_left_width": 2,
-          "border_right_width": 2,
+          "border_width": 2,
           "border": "{group_color}",
-          "radius_top_left": 8,
-          "radius_top_right": 8
+          "radius": "$pane_tab_bar.tab_active.radius"
         }
       }
     ]
@@ -723,7 +720,7 @@
       {
         "layout": "row",
         "shrink": 0,
-        "style": { "padding": 4 },
+        "style": { "padding_x": 8, "padding_y": 6 },
         "children": [
           { "button": "settings", "element": "agents.settings", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
         ]
@@ -756,25 +753,39 @@
       },
       { "grow": 1 },
       {
-        "when": "dot",
-        "shrink": 0,
-        "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
-      },
-      {
-        "when": "buttons",
         "layout": "row",
         "align": "center",
         "shrink": 0,
-        "style": { "opacity": 0 },
-        "states": { "hover:sfolder": { "opacity": 1 } },
         "children": [
-          { "button": "new_tab", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Tab" },
           {
-            "button": "close",
-            "element": "agents.button",
-            "size": "xsmall",
-            "icon": "close",
-            "tooltip": "Close Workspace ({close_key})"
+            "when": "buttons",
+            "layout": "row",
+            "align": "center",
+            "style": { "opacity": 0 },
+            "states": { "hover:sfolder": { "opacity": 1 } },
+            "children": [
+              { "button": "new_tab", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Tab" },
+              {
+                "button": "close",
+                "element": "agents.button",
+                "size": "xsmall",
+                "icon": "close",
+                "tooltip": "Close Workspace ({close_key})"
+              }
+            ]
+          },
+          {
+            "when": "dot",
+            "position": { "top": 0, "right": 0, "bottom": 0 },
+            "layout": "row",
+            "align": "center",
+            "style": { "padding_right": 6 },
+            "states": { "hover:sfolder": { "opacity": 0 } },
+            "children": [
+              {
+                "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+              }
+            ]
           }
         ]
       }
@@ -990,47 +1001,127 @@
     ]
   },
   "settings.remote": {
-    "element": "settings.group",
+    "style": { "gap": 20 },
     "children": [
       {
-        "element": "settings.row",
-        "layout": "row",
-        "align": "start",
+        "when": "serving",
+        "element": "settings.group",
         "children": [
-          { "slot": "qr" },
           {
-            "grow": 1,
-            "shrink": 1,
-            "style": { "gap": 8 },
+            "when": "pairing",
+            "element": "settings.row",
+            "layout": "row",
+            "align": "start",
             "children": [
-              { "element": "settings.row.title", "text": "Pairing link" },
+              { "slot": "qr" },
               {
-                "element": "settings.row.description",
-                "text": "Scan the code with your phone's camera, or open the link on another computer. Anyone with the link can use your terminals: keep it secret."
-              },
-              { "element": "settings.link", "truncate": true, "text": "{link}" },
-              { "when": "dns_link", "element": "settings.row.description", "truncate": true, "text": "With MagicDNS: {dns_link}" },
-              {
-                "layout": "row",
+                "grow": 1,
+                "shrink": 1,
                 "style": { "gap": 8 },
                 "children": [
-                  { "button": "copy", "variant": "outline", "size": "small", "icon": "{copy_icon}", "label": "{copy_label}" },
+                  { "element": "settings.row.title", "text": "Pairing link" },
                   {
-                    "button": "new_link",
-                    "variant": "outline",
-                    "size": "small",
-                    "icon": "refresh-cw",
-                    "label": "New Link",
-                    "tooltip": "Make a new link; the old one stops working",
-                    "loading": "busy",
-                    "disabled": "busy"
+                    "element": "settings.row.description",
+                    "text": "Scan the code with your phone's camera, or open the link on another computer, to pair it. {expires}"
+                  },
+                  { "element": "settings.link", "truncate": true, "text": "{link}" },
+                  { "when": "dns_link", "element": "settings.row.description", "truncate": true, "text": "With MagicDNS: {dns_link}" },
+                  {
+                    "layout": "row",
+                    "style": { "gap": 8 },
+                    "children": [
+                      { "button": "copy", "variant": "outline", "size": "small", "icon": "{copy_icon}", "label": "{copy_label}" },
+                      {
+                        "button": "revoke_link",
+                        "variant": "outline",
+                        "size": "small",
+                        "label": "Revoke",
+                        "tooltip": "Stop this link from working",
+                        "disabled": "busy"
+                      }
+                    ]
                   }
                 ]
               }
             ]
+          },
+          {
+            "when": "!pairing",
+            "element": "settings.row",
+            "layout": "row",
+            "align": "center",
+            "children": [
+              {
+                "grow": 1,
+                "shrink": 1,
+                "style": { "gap": 2 },
+                "children": [
+                  { "element": "settings.row.title", "text": "Pair a device" },
+                  {
+                    "element": "settings.row.description",
+                    "text": "Make a link for your phone or another computer. It works once, for 5 minutes; the device then stays paired until you revoke it."
+                  }
+                ]
+              },
+              { "button": "create_link", "variant": "outline", "size": "small", "icon": "plus", "label": "Create Link", "loading": "busy", "disabled": "busy" }
+            ]
           }
         ]
+      },
+      {
+        "style": { "gap": 8 },
+        "children": [
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 16, "padding_x": 4 },
+            "children": [
+              {
+                "grow": 1,
+                "shrink": 1,
+                "style": { "gap": 2 },
+                "children": [
+                  { "element": "settings.row.title", "text": "Paired devices" },
+                  { "element": "settings.row.description", "text": "{devices_summary}" }
+                ]
+              },
+              {
+                "when": "has_devices",
+                "button": "revoke_all",
+                "variant": "danger",
+                "size": "small",
+                "label": "Revoke All",
+                "tooltip": "Unpair every device: each needs a new pairing link",
+                "disabled": "busy"
+              }
+            ]
+          },
+          { "when": "has_devices", "element": "settings.group", "children": [{ "each": "devices", "item": { "use": "settings.device" } }] }
+        ]
       }
+    ]
+  },
+  "settings.device": {
+    "element": "settings.row",
+    "layout": "row",
+    "align": "center",
+    "states": { "index > 0": { "border_top_width": "$settings.row.divider_width" } },
+    "children": [
+      {
+        "element": "settings.device.dot",
+        "shrink": 0,
+        "states": { "connected": { "background": "$settings.device.dot.connected_background" } }
+      },
+      {
+        "grow": 1,
+        "shrink": 1,
+        "style": { "gap": 2 },
+        "children": [
+          { "element": "settings.row.title", "truncate": true, "text": "{name}" },
+          { "element": "settings.row.description", "truncate": true, "text": "{detail}" }
+        ]
+      },
+      { "button": "revoke", "variant": "outline", "size": "small", "label": "Revoke", "tooltip": "Unpair this device", "disabled": "busy" }
     ]
   },
   "file_header": {
@@ -1699,6 +1790,7 @@
       { "action": "file_tree::NewFolder", "label": "New Folder…" },
       { "separator": true },
       { "action": "file_tree::RevealInFinder", "label": "{reveal}" },
+      { "when": "is_html", "action": "file_tree::OpenLiveServer", "label": "Open with Live Server" },
       { "separator": true },
       { "when": "on_entry", "action": "file_tree::CutEntries", "label": "Cut" },
       { "when": "on_entry", "action": "file_tree::CopyEntries", "label": "Copy" },

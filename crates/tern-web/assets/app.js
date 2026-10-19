@@ -8,10 +8,11 @@ const $ = (id) => document.getElementById(id);
 
 const FONT = 'Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
 const LINE_HEIGHT = 1.15;
+// The terminal is made this screen's size at this font size; a grid of
+// another size (before the resize lands, or set by the desktop since) is
+// drawn smaller until it fits.
+const FONT_SIZE = 13;
 const MIN_FONT = 7;
-const MAX_FONT = 15;
-// The size a fitted terminal is drawn at.
-const FIT_FONT = 13;
 
 let socket = null;
 let retry = 0;
@@ -22,26 +23,39 @@ let sessions = [];
 let current = null;
 let pending = null;
 let size = { cols: 80, rows: 24 };
-// A phone fits the terminal to its screen unless told otherwise: the
-// desktop's grid can't be read at a size that fits there.
-let fit = (localStorage.getItem("tern.fit") ?? (matchMedia("(pointer: coarse)").matches ? "1" : "0")) === "1";
+// A screen this wide shows the agents beside the terminal.
+const wideScreen = matchMedia("(min-width: 900px)");
+// The view asked for: "list-view", "term-view" or "message-view".
+let view = "list-view";
 let term = null;
 let snapshotNext = false;
+// This device isn't paired (any more): don't reconnect.
+let signedOut = false;
+
+const PAIR_HINT = "On the computer running Tern, open Settings ▸ Connections, choose Create Link, and open that link here.";
 
 // ---- The connection ---------------------------------------------------------
 
 async function start() {
-  const m = location.hash.match(/[#&]t=([0-9a-f]+)/);
-  if (m) {
-    // From the link: trade it for a cookie and take it out of the address.
-    history.replaceState(null, "", location.pathname);
-    const r = await fetch("/login", { method: "POST", body: m[1] }).catch(() => null);
-    if (!r || !r.ok) return showMessage("This link isn't valid any more. Run tern --web on the computer and open the link it prints.");
-  }
+  const m = location.hash.match(/[#&]p=([0-9A-Za-z]+)/);
+  const old = /[#&]t=/.test(location.hash);
+  if (m || old) history.replaceState(null, "", location.pathname + location.search);
+  // A pairing link: trade its code for this device's cookie (it works once).
+  const r = m && (await fetch("/pair", { method: "POST", body: m[1] }).catch(() => null));
+  // A device paired already gets in whatever the link says.
   const s = await fetch("/session").then((r) => r.json()).catch(() => false);
-  if (!s) return showMessage("Open the link that tern --web prints on the computer running Tern.");
+  if (!s && m && (!r || !r.ok)) {
+    const why = r && r.status === 429 ? "Too many wrong pairing links: wait a few minutes." : "This pairing link was used already or has expired.";
+    return signOut(`${why} ${PAIR_HINT}`);
+  }
+  if (!s) return signOut(old ? `Links like this one don't work any more: devices now pair once. ${PAIR_HINT}` : `This device isn't paired with Tern. ${PAIR_HINT}`);
   // Ids are strings: they don't fit a JavaScript number.
   connect(new URLSearchParams(location.search).get("s"));
+}
+
+function signOut(text) {
+  signedOut = true;
+  showMessage(text);
 }
 
 function connect(view) {
@@ -55,17 +69,22 @@ function connect(view) {
     if (id != null) openSession(id);
   };
   socket.onmessage = (e) => (typeof e.data === "string" ? onText(JSON.parse(e.data)) : onBytes(e.data));
-  socket.onclose = () => {
+  socket.onclose = async () => {
     $("conn").className = "dot down";
     socket = null;
+    if (signedOut) return;
+    // Refused, or the server is down: ask which (it's back if it answers).
+    if (retry >= 2 && (await fetch("/session").then((r) => r.json()).catch(() => true)) === false) {
+      return signOut(`This device's access to Tern was revoked. ${PAIR_HINT}`);
+    }
     // Back off to 10 s; at once when the page comes back to the front.
     const wait = Math.min(10000, 500 * 2 ** retry++);
-    setTimeout(() => socket || connect(null), wait);
+    setTimeout(() => socket || signedOut || connect(null), wait);
   };
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && !socket) connect(null);
+  if (document.visibilityState === "visible" && !socket && !signedOut) connect(null);
 });
 
 function send(msg) {
@@ -84,6 +103,7 @@ function onText(m) {
       sessions = m.list;
       noteStatuses();
       renderList();
+      renderTabs();
       renderHeading();
       break;
     case "view":
@@ -100,12 +120,11 @@ function onText(m) {
       // Give the PTY this screen's size once the attach's repaint (a one
       // row resize and back) is over, so the size given back later is the
       // real one.
-      if (fit) {
-        const id = m.id;
-        setTimeout(() => fit && current === id && sendFit(), 300);
-      }
+      fitSoon(300);
       break;
     case "resize":
+      // Ours, or another view's (the desktop's window, another browser):
+      // drawn to fit as it is, and taken back on the next key typed here.
       size = { cols: m.cols, rows: m.rows };
       if (term) term.resize(m.cols, m.rows);
       layout();
@@ -123,6 +142,9 @@ function onText(m) {
     case "error":
       showMessage(m.message);
       break;
+    case "revoked":
+      signOut(`This device's access to Tern was revoked. ${PAIR_HINT}`);
+      break;
   }
 }
 
@@ -132,11 +154,7 @@ function onBytes(data) {
   if (snapshotNext) {
     snapshotNext = false;
     // The snapshot paints the whole screen and scrollback: start at the end.
-    // A terminal taller than the screen shows its bottom, where prompts are.
-    term.write(bytes, () => {
-      term.scrollToBottom();
-      $("term-wrap").scrollTop = $("term-wrap").scrollHeight;
-    });
+    term.write(bytes, () => term.scrollToBottom());
   } else {
     term.write(bytes);
   }
@@ -144,8 +162,17 @@ function onBytes(data) {
 
 // ---- The list -------------------------------------------------------------
 // Laid out as Tern's agents panel and agent monitor (templates `agents.folder`
-// and `agents.tab`): each folder, the state of its terminals that most wants
-// you, and its terminals under it with their state.
+// and `agents.tab`): each folder, the state of its agents that most wants
+// you, and its agents under it with their state. Plain terminals aren't
+// listed.
+
+function agents() {
+  return sessions.filter((s) => s.claude);
+}
+
+function byState(a, b) {
+  return (a.exited - b.exited) || label(a).localeCompare(label(b));
+}
 
 function label(s) {
   // Without the status glyph some agents put first (Claude Code's "✳").
@@ -227,13 +254,14 @@ function renderList() {
   ul.replaceChildren();
   // By folder, in the order they come; the agents first in each.
   const groups = new Map();
-  for (const s of sessions) {
+  const shown = agents();
+  for (const s of shown) {
     const key = s.cwd || "";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
   for (const [cwd, list] of groups) {
-    list.sort((a, b) => (a.exited - b.exited) || (b.claude - a.claude) || label(a).localeCompare(label(b)));
+    list.sort(byState);
     const open = !collapsed.has(cwd);
     const folder = document.createElement("li");
     folder.className = "folder";
@@ -260,8 +288,8 @@ function renderList() {
     if (!open) continue;
     for (const s of list) {
       const li = document.createElement("li");
-      li.className = `tab ${s.exited ? "exited" : ""} ${s.status === "Working" ? "working" : ""}`;
-      li.append(icon(s.claude ? "claude" : "terminal", s.claude ? "agent" : "muted"));
+      li.className = `tab ${s.exited ? "exited" : ""} ${s.status === "Working" ? "working" : ""} ${s.id === (pending ?? current) ? "on" : ""}`;
+      li.append(icon("claude", "agent"));
       const title = document.createElement("span");
       title.className = "name";
       title.textContent = label(s);
@@ -276,21 +304,25 @@ function renderList() {
       ul.append(li);
     }
   }
-  $("empty").hidden = sessions.length > 0;
-  const waiting = sessions.filter((s) => s.status === "Blocked" && !s.exited).length;
+  $("empty").hidden = shown.length > 0;
+  const waiting = shown.filter((s) => s.status === "Blocked" && !s.exited).length;
   document.title = waiting ? `(${waiting}) Tern` : "Tern";
 }
 
 // Working times count seconds.
 setInterval(() => {
-  if (!$("list-view").hidden && sessions.some((s) => s.status === "Working" && !s.exited)) renderList();
+  if (sessions.some((s) => s.claude && s.status === "Working" && !s.exited)) {
+    if (!$("list-view").hidden) renderList();
+    renderTabs();
+  }
 }, 1000);
 
 function renderHeading() {
   const s = sessions.find((x) => x.id === (pending ?? current));
   if ($("term-view").hidden || !s) {
     $("title").textContent = "Tern";
-    $("subtitle").textContent = `${sessions.length} terminal${sessions.length === 1 ? "" : "s"}`;
+    const n = agents().length;
+    $("subtitle").textContent = `${n} agent${n === 1 ? "" : "s"}`;
     return;
   }
   $("title").textContent = label(s);
@@ -298,15 +330,56 @@ function renderHeading() {
   $("subtitle").textContent = [status, s.cwd].filter(Boolean).join(" · ");
 }
 
-function show(which) {
-  for (const id of ["list-view", "term-view", "message-view"]) $(id).hidden = id !== which;
-  $("back").hidden = which !== "term-view";
-  $("fit").hidden = which !== "term-view";
-  renderHeading();
+// The agents of the shown session's folder, as Tern's tab bar (wide screens).
+function renderTabs() {
+  const nav = $("tabs");
+  const id = pending ?? current;
+  const s = sessions.find((x) => x.id === id);
+  nav.hidden = !wideScreen.matches || !s;
+  if (nav.hidden) return;
+  const list = agents().filter((x) => (x.cwd || "") === (s.cwd || ""));
+  if (!list.includes(s)) list.push(s);
+  list.sort(byState);
+  nav.replaceChildren(
+    ...list.map((x) => {
+      const b = document.createElement("button");
+      b.className = `tab ${x.id === id ? "on" : ""}`;
+      b.append(icon(x.claude ? "claude" : "terminal", x.claude ? "agent" : "muted"));
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = label(x);
+      b.append(name);
+      if (!x.exited && PRIORITY[x.status]) {
+        const dot = document.createElement("span");
+        dot.className = `dot ${x.status}`;
+        b.append(dot);
+      }
+      b.title = statusLook(x).text;
+      b.onclick = () => x.id !== id && openSession(x.id);
+      return b;
+    }),
+  );
 }
 
+function show(which) {
+  view = which;
+  const wide = wideScreen.matches;
+  document.body.classList.toggle("wide", wide);
+  // Wide: the list stays, and the terminal (or a note) beside it.
+  const shown = which === "message-view" || !wide ? [which] : ["list-view", which === "term-view" ? "term-view" : "pick-view"];
+  for (const id of ["list-view", "pick-view", "term-view", "message-view"]) $(id).hidden = !shown.includes(id);
+  $("back").hidden = wide || which !== "term-view";
+  renderHeading();
+  renderList();
+  renderTabs();
+  layout();
+}
+
+wideScreen.addEventListener("change", () => show(view));
+
 function showList() {
-  if (current != null && fit) send({ t: "unfit" });
+  // The session gets back the size it had before this page.
+  if (current != null) send({ t: "unfit" });
   show("list-view");
 }
 
@@ -334,7 +407,7 @@ function ensureTerm() {
   if (term) return;
   term = new Terminal({
     fontFamily: FONT,
-    fontSize: FIT_FONT,
+    fontSize: FONT_SIZE,
     lineHeight: LINE_HEIGHT,
     scrollback: 10000,
     allowProposedApi: true,
@@ -390,7 +463,11 @@ function quietReplies(t) {
 }
 
 function input(d) {
-  if (current != null && pending == null) send({ t: "input", d });
+  if (current != null && pending == null) {
+    // Typing here takes the size back from a view that changed it.
+    if (!fitted()) sendFit();
+    send({ t: "input", d });
+  }
 }
 
 // The size of one cell at font size `fs`, as xterm.js draws it. It rounds
@@ -414,54 +491,71 @@ function room() {
   return { w, h };
 }
 
-// Draw the session's grid as large as fits the width (and the height, when
-// it was fitted to this screen).
+// Draw the session's grid as large as fits the screen, at most FONT_SIZE;
+// scaled down past MIN_FONT, so nothing ever scrolls or is cut off.
 function layout() {
   if (!term || $("term-view").hidden) return;
   const { w, h } = room();
-  let fs = MIN_FONT;
-  for (let f = MAX_FONT; f > MIN_FONT; f -= 0.5) {
+  let fs = 0;
+  for (let f = FONT_SIZE; f >= MIN_FONT; f -= 0.5) {
     const c = cellAt(f);
-    if (size.cols * c.w <= w && (!fit || size.rows * c.h <= h)) {
+    if (size.cols * c.w <= w && size.rows * c.h <= h) {
       fs = f;
       break;
     }
   }
+  let scale = 1;
+  if (!fs) {
+    fs = MIN_FONT;
+    const c = cellAt(fs);
+    scale = Math.min(w / (size.cols * c.w), h / (size.rows * c.h));
+  }
   if (term.options.fontSize !== fs) term.options.fontSize = fs;
+  $("term").style.transform = scale < 1 ? `scale(${scale})` : "";
+}
+
+// The grid that fills this screen at FONT_SIZE, within what the server
+// takes (bridge.rs).
+function screenGrid() {
+  const { w, h } = room();
+  const c = cellAt(FONT_SIZE);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  return { cols: clamp(Math.floor(w / c.w), 10, 500), rows: clamp(Math.floor(h / c.h), 3, 300) };
+}
+
+function fitted() {
+  const g = screenGrid();
+  return g.cols === size.cols && g.rows === size.rows;
 }
 
 function sendFit() {
+  if (current == null || pending != null || $("term-view").hidden) return;
   const { w, h } = room();
-  const c = cellAt(FIT_FONT);
-  const cols = Math.floor(w / c.w);
-  const rows = Math.floor(h / c.h);
-  if (cols > 0 && rows > 0 && (cols !== size.cols || rows !== size.rows)) send({ t: "resize", cols, rows });
+  if (w <= 0 || h <= 0) return;
+  const g = screenGrid();
+  if (g.cols !== size.cols || g.rows !== size.rows) send({ t: "resize", ...g });
 }
 
-function setFit(on) {
-  fit = on;
-  localStorage.setItem("tern.fit", on ? "1" : "0");
-  $("fit").classList.toggle("on", on);
-  if (current == null) return;
-  if (on) sendFit();
-  else send({ t: "unfit" });
+let fitTimer = 0;
+function fitSoon(ms) {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(sendFit, ms);
 }
 
-$("fit").classList.toggle("on", fit);
-$("fit").onclick = () => setFit(!fit);
-
-let resizeTimer = 0;
+// The screen changed (window, rotation, the on-screen keyboard).
 window.addEventListener("resize", () => {
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    layout();
-    if (fit && current != null) sendFit();
-  }, 150);
+  layout();
+  fitSoon(150);
+});
+
+// Coming back to the page takes the size back too.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") fitSoon(150);
 });
 
 // Leaving the page gives the session its size back.
 window.addEventListener("pagehide", () => {
-  if (fit && current != null) send({ t: "unfit" });
+  if (current != null) send({ t: "unfit" });
 });
 
 // ---- Keys and the message box ---------------------------------------------
@@ -518,4 +612,5 @@ function setBanner(textValue) {
   $("banner").textContent = textValue || "";
 }
 
+show("list-view");
 start();

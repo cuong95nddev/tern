@@ -6668,6 +6668,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sha2 0.10.9",
+ "tempfile",
  "tern-mux",
  "tern-term",
  "windows-sys 0.61.2",

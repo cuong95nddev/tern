@@ -1,8 +1,9 @@
 //! The Settings window (⌘,): a page per section, as in T3 Code. The pages
 //! show and change what `settings.json` holds (its every key stays there
 //! for editing by hand: General ▸ Settings file), and Connections turns on
-//! `tern --web`, Tern's terminals in a browser on another device, with its
-//! secret link and a QR code for a phone's camera.
+//! `tern --web`, Tern's terminals in a browser on another device: it makes
+//! one-time pairing links (with a QR code for a phone's camera), and lists
+//! the paired devices to revoke them.
 //!
 //! Drawn by the `settings` templates; the code fills the rows and attaches
 //! what each control does.
@@ -11,6 +12,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
+
+use tern_web::access::{self, Access, NewPairing};
 
 use crate::template::{self, Framed, on_event};
 use crate::theme_picker::OpenSettings;
@@ -220,9 +223,13 @@ impl Row {
 struct Remote {
     /// The running server, as of the last look.
     serving: Option<tern_web::Serving>,
+    /// Who has access, as of the last look.
+    access: Access,
+    /// The pairing link made here, until it's used, revoked or expired.
+    pairing: Option<NewPairing>,
     /// Looked at least once.
     checked: bool,
-    /// Starting, stopping or renewing the link.
+    /// Starting or stopping the server, or changing who has access.
     busy: bool,
     error: Option<String>,
     /// Listen on every network (else Tailscale's); used at the next start.
@@ -246,7 +253,7 @@ impl SettingsView {
             loop {
                 let Ok(look) = this.update(cx, |v, _| v.section == Section::Connections && !v.remote.busy) else { break };
                 if look {
-                    let found = cx.background_spawn(async move { (tern_web::serving(), tern_web::wanted()) }).await;
+                    let found = cx.background_spawn(async move { (tern_web::serving(), tern_web::wanted(), access::load()) }).await;
                     if this.update(cx, |v, cx| v.found(found, cx)).is_err() {
                         break;
                     }
@@ -263,7 +270,7 @@ impl SettingsView {
         }
     }
 
-    fn found(&mut self, (serving, wanted): (Option<tern_web::Serving>, Option<bool>), cx: &mut Context<Self>) {
+    fn found(&mut self, (serving, wanted, access): (Option<tern_web::Serving>, Option<bool>, Access), cx: &mut Context<Self>) {
         if self.remote.busy {
             return;
         }
@@ -271,10 +278,28 @@ impl SettingsView {
             self.remote.all_networks = serving.as_ref().map(|s| s.all_networks).or(wanted).unwrap_or(false);
         }
         self.remote.checked = true;
-        if self.remote.serving != serving {
+        if self.remote.serving != serving || self.remote.access != access {
+            // Running after all (started by hand, or late): why it didn't start is old news.
+            if serving.is_some() && self.remote.serving.is_none() {
+                self.remote.error = None;
+            }
             self.remote.serving = serving;
+            self.set_access(access);
+            cx.notify();
+        } else if self.remote.pairing.is_some() {
+            // Its countdown.
             cx.notify();
         }
+    }
+
+    /// Who has access now; the pairing link shown goes once it's used,
+    /// revoked or expired.
+    fn set_access(&mut self, access: Access) {
+        let r = &mut self.remote;
+        if r.pairing.as_ref().is_some_and(|p| !access.pairings.iter().any(|q| q.id == p.id) || p.expires <= access::now()) {
+            r.pairing = None;
+        }
+        r.access = access;
     }
 
     /// `settings.json`, read again after a load.
@@ -405,7 +430,7 @@ impl SettingsView {
             Some(_) => "On: reachable over Tailscale.".to_owned(),
         };
         let mut access = Row::new("Network access", description)
-            .switch(r.serving.is_some(), |v, _, cx| if v.remote.serving.is_some() { v.stop_remote(cx) } else { v.start_remote(false, cx) })
+            .switch(r.serving.is_some(), |v, _, cx| if v.remote.serving.is_some() { v.stop_remote(cx) } else { v.start_remote(cx) })
             .busy(r.busy || !r.checked);
         access.problem = r.error.clone();
         let all = Row::new(
@@ -416,7 +441,7 @@ impl SettingsView {
             v.remote.all_networks = !v.remote.all_networks;
             // A running server moves over.
             if v.remote.serving.is_some() {
-                v.start_remote(false, cx);
+                v.start_remote(cx);
             }
             cx.notify();
         })
@@ -424,9 +449,9 @@ impl SettingsView {
         vec![access, all]
     }
 
-    /// (Re)start the server with the current choice, with a new link if
-    /// `renew`; then wait for it to listen.
-    fn start_remote(&mut self, renew: bool, cx: &mut Context<Self>) {
+    /// (Re)start the server with the current choice; then wait for it to
+    /// listen.
+    fn start_remote(&mut self, cx: &mut Context<Self>) {
         let all_networks = self.remote.all_networks;
         let was_running = self.remote.serving.is_some();
         self.remote.busy = true;
@@ -437,9 +462,6 @@ impl SettingsView {
                 .background_spawn(async move {
                     if was_running {
                         tern_web::stop().map_err(|e| format!("can't stop the server: {e}"))?;
-                    }
-                    if renew {
-                        tern_web::renew_token().map_err(|e| format!("can't make a new link: {e}"))?;
                     }
                     tern_web::start(all_networks).map_err(|e| format!("can't start the server: {e}"))
                 })
@@ -491,9 +513,43 @@ impl SettingsView {
         .detach();
     }
 
+    /// The pairing link shown, on the server's address (`0`) or its
+    /// MagicDNS name (`1`).
+    fn pairing_link(&self, which: usize) -> Option<String> {
+        let base = self.remote.serving.as_ref()?.links.get(which)?;
+        Some(self.remote.pairing.as_ref()?.link(base))
+    }
+
+    /// Make a pairing link (in place of one not used yet).
+    fn create_pairing(&mut self, cx: &mut Context<Self>) {
+        self.change_access(|| access::pair().map(Some), cx);
+    }
+
+    /// Change who has access with `f` (in the background), then look again.
+    /// `f` may make a pairing link to show.
+    fn change_access(&mut self, f: impl FnOnce() -> std::io::Result<Option<NewPairing>> + Send + 'static, cx: &mut Context<Self>) {
+        self.remote.busy = true;
+        self.remote.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (result, now) = cx.background_spawn(async move { (f(), access::load()) }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.remote.busy = false;
+                match result {
+                    Ok(Some(p)) => v.remote.pairing = Some(p),
+                    Ok(None) => {},
+                    Err(e) => v.remote.error = Some(format!("can't change who has access: {e}")),
+                }
+                v.set_access(now);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn copy_link(&mut self, cx: &mut Context<Self>) {
-        let Some(link) = self.remote.serving.as_ref().and_then(|s| s.links.first()) else { return };
-        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+        let Some(link) = self.pairing_link(0) else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(link));
         self.remote.copied = Some(Instant::now());
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -503,30 +559,99 @@ impl SettingsView {
         .detach();
     }
 
+    /// The pairing link and the paired devices (`settings.remote`).
     fn render_remote(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let s = self.remote.serving.as_ref()?;
-        let link = s.links.first()?.clone();
-        let copied = self.remote.copied.is_some_and(|t| t.elapsed() < COPIED);
+        let r = &self.remote;
+        if !r.checked {
+            return None;
+        }
+        let now = access::now();
+        let link = self.pairing_link(0);
+        let copied = r.copied.is_some_and(|t| t.elapsed() < COPIED);
+        let mut devices = r.access.devices.clone();
+        devices.sort_by_key(|d| std::cmp::Reverse(d.last_seen));
+        let connected = |id: &str| r.serving.as_ref().is_some_and(|s| s.connected.iter().any(|c| c == id));
+        let rows: Vec<template::Scope> = devices
+            .iter()
+            .map(|d| {
+                let on = connected(&d.id);
+                let used = if on { "Connected".to_owned() } else { format!("Last used {}", ago(now, d.last_seen)) };
+                template::Scope::new(format!("device-{}", d.id))
+                    .var("name", d.name.clone())
+                    .var("detail", format!("{} · {used} · Paired {}", d.ip, ago(now, d.paired)))
+                    .var("connected", on)
+                    .var("busy", r.busy)
+            })
+            .collect();
+        let summary = match devices.len() {
+            0 => "No device is paired.".to_owned(),
+            1 => "1 device can use your terminals.".to_owned(),
+            n => format!("{n} devices can use your terminals."),
+        };
+        let left = r.pairing.as_ref().map_or(0, |p| p.expires.saturating_sub(now));
         let scope = template::Scope::new("remote")
-            .var("link", link.clone())
-            .var("dns_link", s.links.get(1).cloned().unwrap_or_default())
+            .var("serving", r.serving.is_some())
+            .var("pairing", link.is_some())
+            .var("link", link.clone().unwrap_or_default())
+            .var("dns_link", self.pairing_link(1).unwrap_or_default())
+            .var("expires", format!("Works once, for {}:{:02} more.", left / 60, left % 60))
             .var("copy_label", if copied { "Copied" } else { "Copy Link" })
             .var("copy_icon", if copied { "check" } else { "copy" })
-            .var("busy", self.remote.busy)
-            .slot("qr", qr_code(&link, cx));
+            .var("busy", r.busy)
+            .var("devices_summary", summary)
+            .var("has_devices", !devices.is_empty())
+            .list("devices", rows)
+            .slot_opt("qr", link.map(|l| qr_code(&l, cx)));
         let me = cx.entity().downgrade();
+        let ids: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+        let pairing_id = r.pairing.as_ref().map(|p| p.id.clone());
         Some(template::render(
             "settings.remote",
             scope,
-            &mut |name, _, f| match (name, f) {
+            &mut |name, ix, f| match (name, f) {
                 ("copy", Framed::Button(b)) => b.on_click(on_event(&me, |v, _: &ClickEvent, _, cx| v.copy_link(cx))).into_any_element(),
-                ("new_link", Framed::Button(b)) => {
-                    b.on_click(on_event(&me, |v, _: &ClickEvent, _, cx| v.start_remote(true, cx))).into_any_element()
+                ("create_link", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |v, _: &ClickEvent, _, cx| v.create_pairing(cx))).into_any_element()
                 },
+                ("revoke_link", Framed::Button(b)) => {
+                    let Some(id) = pairing_id.clone() else { return b.into_any_element() };
+                    b.on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| {
+                        let id = id.clone();
+                        v.remote.pairing = None;
+                        v.change_access(move || access::revoke_pairing(&id).map(|()| None), cx);
+                    }))
+                    .into_any_element()
+                },
+                ("revoke", Framed::Button(b)) => {
+                    let Some(id) = ix.and_then(|i| ids.get(i)).cloned() else { return b.into_any_element() };
+                    b.on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| {
+                        let id = id.clone();
+                        v.change_access(move || access::revoke(&id).map(|()| None), cx);
+                    }))
+                    .into_any_element()
+                },
+                ("revoke_all", Framed::Button(b)) => b
+                    .on_click(on_event(&me, |v, _: &ClickEvent, _, cx| {
+                        v.remote.pairing = None;
+                        v.change_access(|| access::revoke_all().map(|()| None), cx);
+                    }))
+                    .into_any_element(),
                 (_, f) => f.into_any_element(),
             },
             cx,
         ))
+    }
+}
+
+/// How long before `now` the time `then` was, said shortly ("5 min ago").
+fn ago(now: u64, then: u64) -> String {
+    let s = now.saturating_sub(then);
+    match s {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", s / 60),
+        3600..86400 => format!("{} h ago", s / 3600),
+        86400..172800 => "yesterday".into(),
+        _ => format!("{} days ago", s / 86400),
     }
 }
 

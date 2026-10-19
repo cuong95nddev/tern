@@ -5,8 +5,8 @@
 //! changes), `view` (a view began: the session's size; the bytes that paint
 //! its snapshot follow as one binary message), binary messages (the
 //! session's output), `resize`, `exited`, `gone` and `error`. From the page:
-//! `view`, `input`, `resize` (make the PTY this size), `unfit` (give it
-//! back its size). Session ids go as strings: they don't fit a JavaScript
+//! `view`, `input`, `resize` (make the PTY this size: the page always fits
+//! it to its screen), `unfit` (give it back its size). Session ids go as strings: they don't fit a JavaScript
 //! number.
 
 use std::io::BufReader;
@@ -137,7 +137,12 @@ pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Pa
                 if let (Some(id), Some(size)) = (st.id, st.size) {
                     let want = TermSize { cols: cols.clamp(10, 500), rows: rows.clamp(3, 300), ..size };
                     if want != size {
-                        let orig = st.fitted.map_or(size, |(_, orig)| orig);
+                        // The size from before this page, unless another view
+                        // set one since.
+                        let orig = match st.fitted {
+                            Some((set, orig)) if set == size => orig,
+                            _ => size,
+                        };
                         st.fitted = Some((want, orig));
                         let _ = viewer.resize(id, want);
                     }

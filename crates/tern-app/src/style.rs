@@ -46,7 +46,7 @@ pub const TOKENS: &[(&str, &str, &str)] = &[
     ("text_muted", "$muted.foreground", "Secondary text color"),
     ("border", "$border", "Lines between parts"),
     ("bar_background", "$title_bar.background", "Window chrome: tool strips, status bar, menu bar"),
-    ("tab_bar_background", "$tab_bar.background", "Tab bars and the file header"),
+    ("tab_bar_background", "$background", "Tab bars and the file header"),
     ("panel_background", "$sidebar.background", "Explorer, changes, scratches"),
     ("row_hover", "$list.hover.background", "A row under the pointer"),
     ("row_selected", "$list.active.background", "A selected row"),
@@ -144,6 +144,9 @@ const IMAGE: &[Prop] = &[("background_image", Text, ""), ("background_image_fit"
 
 const PANEL: &[Prop] = &[("background", Color, "$panel_background")];
 
+/// A panel's list of rows: rows sit inset from the panel's edges.
+const LIST: &[Prop] = &[("padding_x", Len, "8")];
+
 /// A list row, the same in each panel by default.
 const ROW: &[Prop] = &[
     ("height", Len, "$row_height"),
@@ -151,7 +154,7 @@ const ROW: &[Prop] = &[
     ("padding_left", Len, "6"),
     ("padding_right", Len, "8"),
     ("gap", Len, "4"),
-    ("radius", Len, "0"),
+    ("radius", Len, "$radius"),
     ("font_size", Len, "$text_sm"),
     ("detail_font_size", Len, "$text_xs"),
     ("text", Color, "$text"),
@@ -197,7 +200,9 @@ const TAB: &[Prop] = &[("text_transform", Text, "none"), ("icon_text", Color, ""
 /// A tab in a horizontal tab bar drawn by a template (`pane_tab_bar.tab`,
 /// `shot_editor.tab`).
 const BAR_TAB: &[Prop] = &[
-    ("height", Len, "32"),
+    ("height", Len, "26"),
+    ("margin_y", Len, "3"),
+    ("radius", Len, "$radius"),
     ("gap", Len, "4"),
     ("font_size", Len, "$text_sm"),
     ("text", Color, "$tab.foreground"),
@@ -207,9 +212,8 @@ const BAR_TAB: &[Prop] = &[
     ("border_right_width", Len, "1"),
 ];
 
-/// The shown tab, over [`BAR_TAB`].
-const BAR_TAB_ACTIVE: &[Prop] =
-    &[("background", Color, "$tab.active.background"), ("text", Color, "$tab.active.foreground"), ("border", Color, "$border")];
+/// The shown tab, over [`BAR_TAB`]: a gray rounded chip.
+const BAR_TAB_ACTIVE: &[Prop] = &[("background", Color, "$muted"), ("text", Color, "$tab.active.foreground")];
 
 /// The screenshot overlay's floating bars.
 const SHOT_BAR: &[Prop] = &[
@@ -254,16 +258,16 @@ pub const ELEMENTS: &[Element] = &[
     Element {
         name: "agents.list",
         about: "The agents panel's list of workspaces and agents",
-        groups: &[&[("padding", Len, "4"), ("gap", Len, "1")]],
+        groups: &[&[("padding_x", Len, "8"), ("padding_y", Len, "6"), ("gap", Len, "2")]],
     },
     Element {
         name: "agents.folder",
         about: "A workspace in the agents panel and the agent monitor: its folder, the state of its agents that most wants you (`dot_size`), its new tab and close buttons",
         groups: &[&[
             ("height", Len, "$bar_height"),
-            ("padding_left", Len, "4"),
-            ("padding_right", Len, "2"),
-            ("gap", Len, "4"),
+            ("padding_left", Len, "8"),
+            ("padding_right", Len, "4"),
+            ("gap", Len, "6"),
             ("radius", Len, "$radius"),
             ("font_size", Len, "$text_sm"),
             ("font_weight", Num, "600"),
@@ -280,8 +284,8 @@ pub const ELEMENTS: &[Element] = &[
         about: "A terminal running an agent, under its workspace. `hidden_text` colors one its pane doesn't show",
         groups: &[&[
             ("height", Len, "$bar_height"),
-            ("padding_left", Len, "4"),
-            ("padding_right", Len, "2"),
+            ("padding_left", Len, "8"),
+            ("padding_right", Len, "4"),
             ("gap", Len, "6"),
             ("radius", Len, "$radius"),
             ("font_size", Len, "$text_sm"),
@@ -305,7 +309,7 @@ pub const ELEMENTS: &[Element] = &[
         about: "The window's title bar: its title, what is wrong with the background terminals or the settings, the buttons of the panels docked on the right, the window controls (Windows)",
         groups: &[&[
             ("height", Len, "34"),
-            ("background", Color, "$bar_background"),
+            ("background", Color, "$background"),
             ("border", Color, "$border"),
             ("border_bottom_width", Len, "1"),
             ("font_size", Len, "$text_sm"),
@@ -331,7 +335,7 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "explorer", about: "The file explorer panel", groups: &[PANEL, &[("start_width", Len, "250")], IMAGE] },
     Element { name: "explorer.header", about: "The explorer's title bar (its title is the folder's name)", groups: &[HEADER] },
     simple!("explorer.header.button", "A button in the explorer's title bar"),
-    simple!("explorer.list", "The explorer's list of rows"),
+    Element { name: "explorer.list", about: "The explorer's list of rows", groups: &[LIST] },
     Element { name: "explorer.row", about: "A file or folder in the explorer", groups: &[ROW, &[("focus_border", Color, "$ring")]] },
     Element {
         name: "changes",
@@ -340,13 +344,13 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element { name: "changes.header", about: "The changes panel's title bar", groups: &[HEADER] },
     simple!("changes.header.button", "A button in the changes panel's title bar"),
-    simple!("changes.list", "The changes panel's list of rows"),
+    Element { name: "changes.list", about: "The changes panel's list of rows", groups: &[LIST] },
     Element { name: "changes.row", about: "A repository or changed file", groups: &[ROW] },
     Element { name: "changes.empty", about: "What the changes panel shows without repositories", groups: &[EMPTY] },
     Element { name: "scratches", about: "The scratch files panel", groups: &[PANEL, &[("start_height", Len, "220")], IMAGE] },
     Element { name: "scratches.header", about: "The scratches panel's title bar", groups: &[HEADER] },
     simple!("scratches.header.button", "A button in the scratches panel's title bar"),
-    simple!("scratches.list", "The scratches panel's list of rows"),
+    Element { name: "scratches.list", about: "The scratches panel's list of rows", groups: &[LIST] },
     Element { name: "scratches.row", about: "A scratch file", groups: &[ROW] },
     Element { name: "scratches.empty", about: "What the scratches panel shows without files", groups: &[EMPTY] },
     Element {
@@ -898,6 +902,17 @@ pub const ELEMENTS: &[Element] = &[
             ("radius", Len, "8"),
             ("background", Color, "#ffffff"),
             ("color", Color, "#000000"),
+        ]],
+    },
+    Element {
+        name: "settings.device.dot",
+        about: "A paired device's dot: `connected_background` while it has a page open",
+        groups: &[&[
+            ("width", Len, "8"),
+            ("height", Len, "8"),
+            ("radius", Len, "4"),
+            ("background", Color, "$muted.foreground/40"),
+            ("connected_background", Color, "$success.background"),
         ]],
     },
 ];

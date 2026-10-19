@@ -40,6 +40,7 @@ actions!(
         CopyPath,
         CopyRelativePath,
         RevealInFinder,
+        OpenLiveServer,
         CollapseAll,
         Refresh,
         SelectPrev,
@@ -164,6 +165,7 @@ impl FileTreeView {
                     batch.paths.extend(b.paths);
                     batch.git_repos.extend(b.git_repos);
                 }
+                tern_web::live::changed(&batch.paths);
                 let ok = this.update(cx, |view, cx| {
                     if view.tree.apply_changes(batch.paths.iter().map(PathBuf::as_path)) {
                         cx.notify();
@@ -625,6 +627,23 @@ impl FileTreeView {
         }
     }
 
+    /// The one HTML file selected, which Live Server can open.
+    fn html_target(&self) -> Option<PathBuf> {
+        let [path] = self.targets().try_into().ok()?;
+        let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+        (matches!(ext.as_str(), "html" | "htm") && path.is_file()).then_some(path)
+    }
+
+    /// Serve the explorer's folder and open the page in the browser; it
+    /// reloads when a file under the folder changes.
+    fn on_live_server(&mut self, _: &OpenLiveServer, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.html_target() else { return };
+        match tern_web::live::url_for(self.root(), &path) {
+            Ok(url) => cx.open_url(&url),
+            Err(e) => window.push_notification(format!("Could not start Live Server for '{}': {e}", self.rel(&path)), cx),
+        }
+    }
+
     fn targets_or_root(&self) -> Vec<PathBuf> {
         let t = self.targets();
         if t.is_empty() { vec![self.root().to_path_buf()] } else { t }
@@ -733,7 +752,8 @@ impl FileTreeView {
         let scope = template::Scope::new("explorer-menu")
             .var("on_entry", !this.targets().is_empty())
             .var("can_paste", this.clip.as_ref().is_some_and(|c| !c.paths.is_empty()))
-            .var("reveal", crate::platform::REVEAL);
+            .var("reveal", crate::platform::REVEAL)
+            .var("is_html", this.html_target().is_some());
         let menu = menu.action_context(this.focus.clone());
         template::menu("menu.explorer", scope, menu, Rc::new(|_, _| None), window, cx)
     }
@@ -930,6 +950,7 @@ impl Render for FileTreeView {
                     .on_action(cx.listener(Self::on_select_next))
                     .on_action(cx.listener(Self::on_collapse))
                     .on_action(cx.listener(Self::on_expand))
+                    .on_action(cx.listener(Self::on_live_server))
                     .on_action(cx.listener(Self::on_open))
                     .on_action(cx.listener(Self::on_open_pinned))
                     .on_action(cx.listener(Self::on_cancel))
