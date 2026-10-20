@@ -37,6 +37,7 @@ mod terminate;
 mod theme_picker;
 mod update;
 mod viewer;
+mod window_grip;
 mod window_state;
 mod workspace;
 

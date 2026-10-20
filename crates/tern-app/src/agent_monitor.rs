@@ -1,6 +1,7 @@
 //! The agent monitor: a small panel floating over every app, listing the
 //! coding agents running in Tern's terminals with their status. Drag it by
-//! its header; click an agent to bring its tab forward.
+//! its header, resize it by its right and bottom edges; click an agent to
+//! bring its tab forward.
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use crate::agents::Agent;
 use crate::main_window;
 use crate::template::{self, Framed, Scope};
 use crate::terminal_view::ActivityStatus;
+use crate::window_grip::{Edge, Grips};
 use crate::workspace::Workspace;
 
 actions!(tern, [ToggleAgentMonitor]);
@@ -18,6 +20,8 @@ actions!(tern, [ToggleAgentMonitor]);
 const WIDTH: f32 = 220.;
 /// The starting height; the window then fits its content.
 const HEIGHT: f32 = 60.;
+/// The smallest the window can be made.
+const MIN: (f32, f32) = (160., 48.);
 /// How often the list is read again: statuses change in other windows.
 const REFRESH: Duration = Duration::from_millis(500);
 /// One cycle of a working dot's pulse.
@@ -28,6 +32,11 @@ const PULSE: Duration = Duration::from_secs(2);
 struct MonitorData {
     window: Option<AnyWindowHandle>,
     origin: Option<Point<Pixels>>,
+    /// The width it was made, if not the starting one.
+    width: Option<Pixels>,
+    /// The height it was made: its list then scrolls. Else it fits its
+    /// content.
+    height: Option<Pixels>,
 }
 
 impl Global for MonitorData {}
@@ -51,10 +60,12 @@ pub fn toggle(cx: &mut App) {
 fn show(cx: &mut App) {
     let Some(display) = cx.primary_display() else { return };
     let size = display.bounds().size;
-    let origin = cx.default_global::<MonitorData>().origin.unwrap_or_else(|| point(size.width - px(WIDTH + 24.), px(64.)));
+    let data = cx.default_global::<MonitorData>();
+    let (width, height) = (data.width.unwrap_or(px(WIDTH)), data.height.unwrap_or(px(HEIGHT)));
+    let origin = data.origin.unwrap_or_else(|| point(size.width - width - px(24.), px(64.)));
     let opened = gpui_kit::open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(px(WIDTH), px(HEIGHT))))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(width, height)))),
             titlebar: None,
             focus: false,
             show: true,
@@ -161,6 +172,7 @@ pub struct Monitor {
     started: Instant,
     /// Whether the last render showed a working dot.
     pulsing: bool,
+    grips: Grips,
     _refresh: Task<()>,
 }
 
@@ -175,7 +187,8 @@ impl Monitor {
                 }
             }
         });
-        Self { started: Instant::now(), pulsing: false, _refresh: refresh }
+        let grips = Grips::new(gpui_kit::size(px(MIN.0), px(MIN.1)));
+        Self { started: Instant::now(), pulsing: false, grips, _refresh: refresh }
     }
 
     /// Where the pulse is in its cycle, from 0 to 1.
@@ -271,10 +284,16 @@ impl Render for Monitor {
             items.push(item);
             rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
         }
-        // Fit the window to the panel's height, which changes with the list.
+        // Fit the window to the panel's height, which changes with the list,
+        // unless it was made a height.
+        let fixed = cx.default_global::<MonitorData>().height.is_some();
+        let resizing = self.grips.resizing();
         let fit = canvas(
-            |bounds, window, cx| {
+            move |bounds, window, cx| {
                 let h = bounds.size.height;
+                if fixed || resizing {
+                    return;
+                }
                 if (window.viewport_size().height - h).abs() > px(1.) {
                     let w = window.viewport_size().width;
                     window.defer(cx, move |window, _| window.resize(gpui_kit::size(w, h)));
@@ -290,6 +309,15 @@ impl Render for Monitor {
             "agent_monitor",
             scope,
             &mut |name, ix, f| match (name, ix.and_then(|i| rows.get(i)), f) {
+                // Made a height, the panel fills the window and its list scrolls.
+                ("panel", _, Framed::Box(d)) => if fixed { d.size_full() } else { d }.into_any_element(),
+                ("list", _, Framed::Box(d)) => {
+                    let d = d.id("monitor-list").overflow_y_scroll();
+                    if fixed { d.flex_1().min_h_0() } else { d }.into_any_element()
+                },
+                ("grip_right", _, Framed::Box(d)) => self.grips.grip(d, "monitor-grip-right", Edge::Right, reset),
+                ("grip_bottom", _, Framed::Box(d)) => self.grips.grip(d, "monitor-grip-bottom", Edge::Bottom, reset),
+                ("grip_corner", _, Framed::Box(d)) => self.grips.grip(d, "monitor-grip-corner", Edge::Corner, reset),
                 // The header moves the window: the system drags it on Windows,
                 // the mouse down starts the move elsewhere.
                 ("header", _, Framed::Box(d)) => d
@@ -321,8 +349,25 @@ impl Render for Monitor {
             cx,
         );
         // The window is the panel's width; its height follows the panel.
-        div().w_full().child(panel)
+        let tracker = self.grips.tracker(|size, edge, cx| {
+            let data = cx.default_global::<MonitorData>();
+            data.width = Some(size.width);
+            if edge != Edge::Right {
+                data.height = Some(size.height);
+            }
+        });
+        let root = div().w_full().child(panel).child(tracker);
+        if fixed { root.h_full() } else { root }
     }
+}
+
+/// Back to the starting width, fitting the content (a double click on a
+/// grip).
+fn reset(window: &mut Window, cx: &mut App) {
+    let data = cx.default_global::<MonitorData>();
+    (data.width, data.height) = (None, None);
+    window.resize(gpui_kit::size(px(WIDTH), window.viewport_size().height));
+    window.refresh();
 }
 
 #[cfg(test)]

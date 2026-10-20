@@ -1220,6 +1220,7 @@
   "tool_strip.left": { "use": "tool_strip", "element": "tool_strip.left" },
   "tool_strip.right": { "use": "tool_strip", "element": "tool_strip.right" },
   "agent_monitor": {
+    "frame": "panel",
     "element": "agent_monitor",
     "children": [
       {
@@ -1236,6 +1237,7 @@
       },
       { "when": "!agents", "element": "agent_monitor.empty", "text": "No agents running" },
       {
+        "frame": "list",
         "element": "agents.list",
         "each": "rows",
         "item": {
@@ -1246,7 +1248,16 @@
           ]
         }
       },
-      { "slot": "fit" }
+      { "slot": "fit" },
+      { "use": "window_grips" }
+    ]
+  },
+  "window_grips": {
+    "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+    "children": [
+      { "frame": "grip_right", "position": { "top": 0, "right": 0, "bottom": 0 }, "style": { "width": 5 } },
+      { "when": "!width_only", "frame": "grip_bottom", "position": { "right": 0, "bottom": 0, "left": 0 }, "style": { "height": 5 } },
+      { "when": "!width_only", "frame": "grip_corner", "position": { "right": 0, "bottom": 0 }, "style": { "width": 10, "height": 10 } }
     ]
   },
   "viewer": {
@@ -1764,7 +1775,8 @@
         ]
       },
       { "when": "error", "element": "shot_tray.error", "text": "{error}" },
-      { "slot": "fit" }
+      { "slot": "fit" },
+      { "use": "window_grips" }
     ]
   },
   "shot_send_menu": {

@@ -1182,6 +1182,13 @@ pub fn control(line: &str, cx: &mut App) -> String {
         crate::agent_monitor::toggle(cx);
         return "ok".into();
     }
+    // Input to the agent monitor.
+    if let Some(cmd) = line.trim().strip_prefix("monitor-input ") {
+        let Some(monitor) = crate::agent_monitor::window(cx) else { return "error: not open".into() };
+        return monitor
+            .update(cx, |_, window, cx| crate::control::input(cmd, window, cx).unwrap_or_else(|| "error: unknown input".into()))
+            .unwrap_or_else(|_| "error: window closed".into());
+    }
     if line.trim() == "restart-background" {
         crate::restart::restart(cx);
         return "ok".into();

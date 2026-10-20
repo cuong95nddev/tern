@@ -1,6 +1,7 @@
 //! The tray: a small floating panel to capture a region, a window or the
 //! screen, collecting the captures with the prompt and the tab they go to.
 //! It stays until it is closed, stepping aside while a capture is on screen.
+//! Its right edge makes it wider.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,14 +15,17 @@ use super::Mode;
 use super::targets::{self, Choice, Dest};
 use crate::style;
 use crate::template::{self, Framed, Scope, on_event};
+use crate::window_grip::{Edge, Grips};
 
-const WIDTH: f32 = 340.;
+const WIDTH: f32 = 280.;
 /// The starting height; the window then fits its content.
 const HEIGHT: f32 = 160.;
 /// About the height with one capture, to place the tray by a region.
 const PLACE_H: f32 = 180.;
 /// The gap between the tray and the region or the display's edges.
 const GAP: f32 = 8.;
+/// The narrowest the tray can be made: its title bar's buttons fit.
+const MIN_WIDTH: f32 = 220.;
 
 /// What the tray holds; it outlives the tray window, which closes while a
 /// capture is on screen.
@@ -40,6 +44,8 @@ struct TrayData {
     open: bool,
     /// Where the tray was last, to come back there.
     origin: Option<Point<Pixels>>,
+    /// The width it was made, if not the starting one.
+    width: Option<f32>,
 }
 
 impl Global for TrayData {}
@@ -109,17 +115,17 @@ fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
     {
         return;
     }
-    let last = cx.default_global::<TrayData>().origin;
+    let (last, width) = (cx.default_global::<TrayData>().origin, cx.default_global::<TrayData>().width.unwrap_or(WIDTH));
     let display = match near {
         Some((id, _)) if last.is_none() => cx.displays().into_iter().find(|d| d.id() == id).or_else(|| cx.primary_display()),
         _ => cx.primary_display(),
     };
     let Some(display) = display else { return };
     let region = near.filter(|(id, _)| *id == display.id()).map(|(_, r)| r);
-    let origin = last.unwrap_or_else(|| super::window_origin(display.bounds()) + place(display.bounds().size, region));
+    let origin = last.unwrap_or_else(|| super::window_origin(display.bounds()) + place(display.bounds().size, region, width));
     let opened = gpui_kit::open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(px(WIDTH), px(HEIGHT))))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, gpui_kit::size(px(width), px(HEIGHT))))),
             titlebar: None,
             focus: true,
             show: true,
@@ -148,13 +154,13 @@ fn open(near: Option<(DisplayId, Bounds<Pixels>)>, cx: &mut App) {
     }
 }
 
-/// Where the tray goes on a display of `size`: under `region`, its right
-/// edge on the region's (as the overlay's toolbar was); above it, or over
-/// its bottom, when there is no room. Without one, bottom right.
-fn place(size: Size<Pixels>, region: Option<Bounds<Pixels>>) -> Point<Pixels> {
+/// Where a tray `width` wide goes on a display of `size`: under `region`,
+/// its right edge on the region's (as the overlay's toolbar was); above it,
+/// or over its bottom, when there is no room. Without one, bottom right.
+fn place(size: Size<Pixels>, region: Option<Bounds<Pixels>>, width: f32) -> Point<Pixels> {
     let (w, h) = (size.width.as_f32(), size.height.as_f32());
-    let Some(r) = region else { return point(px(w - WIDTH - 24.), px(h - HEIGHT - 96.)) };
-    let x = (r.right().as_f32() - WIDTH).min(w - WIDTH - GAP).max(GAP);
+    let Some(r) = region else { return point(px(w - width - 24.), px(h - HEIGHT - 96.)) };
+    let x = (r.right().as_f32() - width).min(w - width - GAP).max(GAP);
     let (top, bottom) = (r.top().as_f32(), r.bottom().as_f32());
     let y = if bottom + GAP + PLACE_H <= h - GAP {
         bottom + GAP
@@ -260,6 +266,7 @@ pub struct Tray {
     choices: Vec<Choice>,
     sending: bool,
     error: Option<String>,
+    grips: Grips,
     _sub: Subscription,
 }
 
@@ -278,7 +285,8 @@ impl Tray {
             _ => {},
         });
         prompt.focus_handle(cx).focus(window, cx);
-        let mut this = Self { prompt, choices: Vec::new(), sending: false, error: None, _sub: sub };
+        let grips = Grips::new(gpui_kit::size(px(MIN_WIDTH), px(0.)));
+        let mut this = Self { prompt, choices: Vec::new(), sending: false, error: None, grips, _sub: sub };
         this.refresh_choices(cx);
         this
     }
@@ -404,10 +412,11 @@ impl Render for Tray {
             .collect();
         // Fit the window to the panel's height, which changes with the
         // shots and the prompt's lines.
+        let resizing = self.grips.resizing();
         let fit = canvas(
-            |bounds, window, cx| {
+            move |bounds, window, cx| {
                 let h = bounds.size.height;
-                if (window.viewport_size().height - h).abs() > px(1.) {
+                if !resizing && (window.viewport_size().height - h).abs() > px(1.) {
                     let w = window.viewport_size().width;
                     window.defer(cx, move |window, _| window.resize(gpui_kit::size(w, h)));
                 }
@@ -424,6 +433,7 @@ impl Render for Tray {
             .var("sending", self.sending)
             .var("capture_key", super::keys("⌘⇧2", "Ctrl+Shift+2"))
             .var("send_key", super::keys("⌘↵", "Ctrl+Enter"))
+            .var("width_only", true)
             .slot("prompt", Textarea::new(&self.prompt).small())
             .slot("fit", fit);
         if let Some(e) = self.error.clone() {
@@ -466,11 +476,20 @@ impl Render for Tray {
                     .into_any_element()
                 },
                 ("send", Framed::Button(b)) => b.on_click(|_, window, cx| super::send_menu::toggle(window.bounds(), cx)).into_any_element(),
+                // A double click goes back to the starting width.
+                ("grip_right", Framed::Box(d)) => self.grips.grip(d, "tray-grip", Edge::Right, |window, cx| {
+                    cx.default_global::<TrayData>().width = None;
+                    window.resize(gpui_kit::size(px(WIDTH), window.viewport_size().height));
+                }),
                 (_, f) => f.into_any_element(),
             },
             cx,
         );
         // The window is the panel's width; its height follows the panel.
-        div().w_full().child(panel)
+        let tracker = self.grips.tracker(|size, _, cx| {
+            super::send_menu::close(cx);
+            cx.default_global::<TrayData>().width = Some(size.width.as_f32());
+        });
+        div().w_full().child(panel).child(tracker)
     }
 }
