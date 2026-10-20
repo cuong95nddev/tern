@@ -624,7 +624,11 @@ impl MainWindow {
 
     fn insert(&mut self, ws: Entity<Workspace>, at: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let sub = cx.subscribe_in(&ws, window, |this, _, ev: &WorkspaceEvent, _, cx| match ev {
-            WorkspaceEvent::TabsChanged => this.changed(cx),
+            WorkspaceEvent::TabsChanged => {
+                // A closed tab may have been the last working agent.
+                crate::caffeine::settle(cx);
+                this.changed(cx)
+            },
         });
         // The agents panel shows its tabs' titles and activity.
         let agents = self.agents.clone();
@@ -1208,11 +1212,15 @@ impl MainWindow {
         let (parts, clicks) = ws.map(|ws| ws.update(cx, |w, cx| w.title_parts(cx))).unwrap_or_default();
         let (background, settings_error) = ws.map(|ws| ws.read(cx).title_status(cx)).unwrap_or_default();
         let update = crate::update::offered(cx);
+        let (caffeine_icon, caffeine_tooltip, caffeine_on) = crate::caffeine::button(cx);
         let mut scope = template::Scope::new("title_bar")
             .var("title", self.title.clone())
             .var("background", background)
             .var("settings_error", settings_error)
             .var("settings_key", crate::platform::shortcut("⌘,").to_string())
+            .var("caffeine_icon", caffeine_icon)
+            .var("caffeine_tooltip", caffeine_tooltip)
+            .var("caffeine_on", caffeine_on)
             .list("parts", parts);
         if let Some((release, installing)) = &update {
             let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
@@ -1226,6 +1234,15 @@ impl MainWindow {
                     let click = click.clone();
                     b.on_click(move |_, w, cx| click(w, cx)).into_any_element()
                 },
+                ("caffeine", Framed::Button(b), _) => b
+                    .on_click(|_, _, cx| crate::caffeine::toggle(cx))
+                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                        cx.stop_propagation();
+                        if let Err(e) = crate::caffeine::toggle_until_agents_finish(cx) {
+                            window.push_notification(e, cx);
+                        }
+                    })
+                    .into_any_element(),
                 ("settings", Framed::Button(b), _) => {
                     b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
                 },

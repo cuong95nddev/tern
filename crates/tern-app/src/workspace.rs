@@ -2017,6 +2017,7 @@ impl Workspace {
             },
             TerminalEvent::StatusChanged(status) => {
                 crate::dock_badge::status_changed(view, *status, window, cx);
+                crate::caffeine::settle(cx);
                 // Finished in front of you: seen, so not left as done.
                 if *status == ActivityStatus::Done && window.is_window_active() && self.is_shown(view) {
                     view.update(cx, |v, cx| v.clear_done_status(cx));

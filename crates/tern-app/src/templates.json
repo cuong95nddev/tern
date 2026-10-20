@@ -1326,6 +1326,7 @@
               "tooltip": "{tooltip}"
             }
           },
+          { "button": "caffeine", "element": "title_bar.button", "size": "small", "icon": "{caffeine_icon}", "selected": "caffeine_on", "tooltip": "{caffeine_tooltip}" },
           { "button": "settings", "element": "title_bar.button", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
         ]
       }

@@ -951,7 +951,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
 | `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `update` (the offer's label, when a new version is offered), `installing`; list `parts` (`icon`, `on`, `tooltip`) | |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup), `update` (the offer's label, when a new version is offered), `installing`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |

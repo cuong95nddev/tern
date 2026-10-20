@@ -63,8 +63,8 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
-/// Component defaults plus [`ExtraIcons`], the agent logos and the
-/// screenshot tool's icons.
+/// Component defaults plus [`ExtraIcons`], the agent logos, the
+/// screenshot tool's icons and the caffeine cup.
 pub struct AppAssets;
 
 impl AssetSource for AppAssets {
@@ -72,7 +72,7 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)) {
+        if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path)) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         gpui_kit::assets::Assets.load(path)
@@ -83,6 +83,7 @@ impl AssetSource for AppAssets {
         paths.extend(ExtraIcons.list(path)?);
         paths.extend(crate::agents::asset_paths(path));
         paths.extend(crate::shot_icons::asset_paths(path));
+        paths.extend(crate::caffeine::asset_paths(path));
         paths.sort();
         paths.dedup();
         Ok(paths)

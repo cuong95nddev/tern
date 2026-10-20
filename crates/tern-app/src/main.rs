@@ -5,6 +5,7 @@ mod accounts;
 mod agent_monitor;
 mod agents;
 mod arrange;
+mod caffeine;
 mod changes_view;
 #[cfg(debug_assertions)]
 mod control;
@@ -272,6 +273,8 @@ fn main() {
             .detach();
         }
         cx.on_window_closed(|cx, _| {
+            // Its agents keep nothing awake any more.
+            caffeine::settle(cx);
             // The agent monitor and the parts' own windows don't keep Tern open by themselves.
             let monitor = agent_monitor::window(cx);
             if cx.windows().iter().all(|w| Some(*w) == monitor || part_window::is_part_window(*w, cx)) {
