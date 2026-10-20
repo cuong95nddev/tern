@@ -30,6 +30,9 @@ const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 #[derive(Default)]
 struct Capture {
     on: bool,
+    /// The capture goes to the tray: it (or the editor) was open when the
+    /// capture started. Otherwise the region is only copied.
+    keep: bool,
     overlays: Vec<AnyWindowHandle>,
     /// Keeps the hotkey registered.
     _hotkey: Option<GlobalHotKeyManager>,
@@ -115,7 +118,10 @@ pub fn capture(mode: Mode, cx: &mut App) {
         grab::open_permission_settings();
         return;
     }
-    cx.default_global::<Capture>().on = true;
+    let keep = tray::is_open(cx) || editor::is_open(cx);
+    let capture = cx.default_global::<Capture>();
+    capture.on = true;
+    capture.keep = keep;
     // The tray's window fades out before the screen is grabbed.
     let wait = if tray::hide(cx) { 400 } else { 0 };
     #[cfg(target_os = "macos")]
@@ -257,16 +263,24 @@ fn window_origin(display: Bounds<Pixels>) -> Point<Pixels> {
     if cfg!(windows) { display.origin } else { point(px(0.), px(0.)) }
 }
 
+/// Whether the capture on screen goes to the tray.
+fn keeps(cx: &mut App) -> bool {
+    cx.default_global::<Capture>().keep
+}
+
 /// Close the overlays (after the current update, which may be one of
-/// theirs); the tray comes back if it was open or holds captures.
+/// theirs); the tray comes back if it was open when the capture started.
 pub fn cancel(cx: &mut App) {
     cx.defer(|cx| {
         let capture = cx.default_global::<Capture>();
         capture.on = false;
+        let keep = capture.keep;
         for w in std::mem::take(&mut capture.overlays) {
             let _ = w.update(cx, |_, w, _| w.remove_window());
         }
-        tray::restore(cx);
+        if keep {
+            tray::restore(cx);
+        }
     });
 }
 
@@ -349,7 +363,10 @@ pub fn control(line: &str, cx: &mut App) -> Option<String> {
             // The overlay over a PNG instead of the screen, on the main display.
             let Some(display) = cx.primary_display() else { return Some("error: no display".into()) };
             let img = image::open(arg).map(|i| i.to_rgba8()).map_err(|e| e.to_string());
-            cx.default_global::<Capture>().on = true;
+            let keep = tray::is_open(cx) || editor::is_open(cx);
+            let capture = cx.default_global::<Capture>();
+            capture.on = true;
+            capture.keep = keep;
             let _ = tray::hide(cx);
             open_overlays(vec![Grab { id: display.id(), bounds: display.bounds(), image: img, windows: None }], cx);
             "ok".into()

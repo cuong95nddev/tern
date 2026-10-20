@@ -66,7 +66,7 @@ const SCHEME_CHECK: Duration = Duration::from_millis(300);
 /// its pseudoconsole is closed) before it is killed.
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// How often Claude Code's session file is read while a turn it called
-/// done is held as working (it waits for a background shell).
+/// done is held as working (its session file still says busy).
 const CLAUDE_CHECK: Duration = Duration::from_secs(1);
 /// How often an adopted program (not our child) is checked for its end.
 const EXIT_POLL: Duration = Duration::from_millis(500);
@@ -945,9 +945,9 @@ impl<P: HostPty> Driver<P> {
                     }
                     let old = *self.shared.status.lock().unwrap();
                     let Some(new) = next_status(old, &sig) else { continue };
-                    // Claude Code calls a turn done while it still waits for
-                    // a background shell: working until its session file
-                    // says otherwise.
+                    // Claude Code can call a turn done before its session
+                    // file stops saying busy: working until the file says
+                    // otherwise.
                     if new == ActivityStatus::Done
                         && st.app.as_deref() == Some("claude-code")
                         && self.claude_status() == Some(ActivityStatus::Working)
@@ -973,10 +973,10 @@ impl<P: HostPty> Driver<P> {
     /// (see [`tern_term::status::claude_session_status`]); `None` when it isn't Claude Code.
     fn claude_status(&self) -> Option<ActivityStatus> {
         #[cfg(unix)]
-        return tern_term::status::claude_session_status(
-            &tern_term::status::claude_sessions_dir()?,
-            tern_term::procs::foreground_pid(self.pty.master())?,
-        );
+        return {
+            let pid = tern_term::procs::foreground_pid(self.pty.master())?;
+            tern_term::status::claude_session_status(&tern_term::status::claude_sessions_dir_of(pid)?, pid)
+        };
         #[cfg(windows)]
         return None;
     }

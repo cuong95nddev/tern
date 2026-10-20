@@ -23,6 +23,7 @@ use tern_fs::{ChangeBatch, GitStatus};
 use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
+use crate::accounts;
 use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
@@ -50,6 +51,9 @@ use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspac
 /// What a name dialog does with the typed name (see `Workspace::ask_name`).
 type ApplyName = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
 
+/// What an account dialog does with the picked account (see `Workspace::pick_account`).
+type PickThen = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
+
 actions!(
     workspace,
     [
@@ -68,7 +72,6 @@ actions!(
         GoToFile,
         SearchInFiles,
         ToggleShells,
-        ToggleUsage,
         ToggleSystem,
         ResetLayout,
         NewPanel,
@@ -152,6 +155,8 @@ struct TermTab {
     token: Option<String>,
     /// The Claude conversation running here (from hooks), to resume it.
     session: Option<String>,
+    /// The Claude account it runs as (see [`crate::accounts`]).
+    account: String,
     /// Its program was started with `--resume`: if that fails at once
     /// (Claude saved no conversation), start a new one.
     resuming: bool,
@@ -358,7 +363,6 @@ pub struct Workspace {
     /// kept, so a search is still there when it opens again.
     palette: Option<(Entity<Palette>, Subscription)>,
     show_shells: bool,
-    show_usage: bool,
     show_system: bool,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
@@ -491,38 +495,28 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-/// Claude Code's own folder (`CLAUDE_CONFIG_DIR`, else `~/.claude`).
-fn claude_dir() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => Some(PathBuf::from(dir)),
-        None => crate::dirs::home().map(|h| h.join(".claude")),
-    }
-}
-
 /// The background job (`/bg`) running conversation `session`, if one still
 /// does: Claude won't `--resume` it then, only `claude attach` it. Read from
 /// the session files Claude keeps in `sessions/<pid>.json`.
 fn claude_bg_job(sessions: &Path, session: &str) -> Option<String> {
-    std::fs::read_dir(sessions).ok()?.flatten().find_map(|entry| {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            return None;
-        }
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-        if v["sessionId"].as_str() != Some(session) || v["kind"].as_str() != Some("bg") {
-            return None;
-        }
-        // A file left behind by a Claude that's gone.
-        #[cfg(unix)]
-        {
-            let pid = i32::try_from(v["pid"].as_i64()?).ok()?;
-            // SAFETY: signal 0 only checks that the process exists.
-            if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
-                return None;
-            }
-        }
-        v["jobId"].as_str().filter(|j| !j.is_empty()).map(str::to_owned)
-    })
+    live_session_files(sessions, session)
+        .into_iter()
+        .filter(|v| v["kind"].as_str() == Some("bg"))
+        .find_map(|v| v["jobId"].as_str().filter(|j| !j.is_empty()).map(str::to_owned))
+}
+
+/// The files in `sessions` (Claude Code's `sessions` folder) of the
+/// running processes that show conversation `session`.
+fn live_session_files(sessions: &Path, session: &str) -> Vec<serde_json::Value> {
+    let Ok(entries) = std::fs::read_dir(sessions) else { return vec![] };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok())
+        .filter(|v| v["sessionId"].as_str() == Some(session))
+        // Not a file left behind by a Claude that's gone.
+        .filter(|v| v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).is_some_and(|p| accounts::alive(p) != Some(false)))
+        .collect()
 }
 
 impl Workspace {
@@ -589,11 +583,13 @@ impl Workspace {
                 this.panels_changed(cx);
             },
         });
-        let usage_sub = cx.subscribe(&usage, |this, _, ev: &UsageEvent, cx| match ev {
-            UsageEvent::Hide => {
-                this.show_usage = false;
-                this.panels_changed(cx);
-            },
+        let usage_sub = cx.subscribe_in(&usage, window, |this, _, ev: &UsageEvent, window, cx| match ev {
+            UsageEvent::UseHere(id) => this.switch_account(id, window, cx),
+            UsageEvent::NewTab(id) => this.new_claude_tab_as(id, window, cx),
+            UsageEvent::Add => this.add_account(window, cx),
+            UsageEvent::Rename(id) => this.rename_account(id.clone(), window, cx),
+            UsageEvent::Remove(id) => this.confirm_remove_account(id.clone(), window, cx),
+            UsageEvent::TurnOff(id) => this.turn_off_account(id.clone(), window, cx),
         });
 
         let mut this = Self {
@@ -620,7 +616,6 @@ impl Workspace {
             show_scratches: shown("scratches"),
             palette: None,
             show_shells: shown("shells"),
-            show_usage: shown("usage"),
             show_system: shown("system"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
@@ -656,8 +651,11 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux } => this.add_term(TabKind::Claude, name, session, mux, window, cx),
-                SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, window, cx),
+                SavedTab::Claude { name, session, mux, account } => {
+                    let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
+                    this.add_term(TabKind::Claude, name, session, mux, &account, window, cx)
+                },
+                SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
                 SavedTab::CommitDiff { repo, hash, rel, from } => {
@@ -713,7 +711,12 @@ impl Workspace {
                     let name = t.rename.as_ref().map(|r| r.to_string());
                     let mux = t.view.read(cx).mux_id();
                     match t.kind {
-                        TabKind::Claude => SavedTab::Claude { name, session: t.session.clone(), mux },
+                        TabKind::Claude => SavedTab::Claude {
+                            name,
+                            session: t.session.clone(),
+                            mux,
+                            account: (t.account != accounts::DEFAULT).then(|| t.account.clone()),
+                        },
                         TabKind::Shell => SavedTab::Shell { name, mux },
                     }
                 },
@@ -742,16 +745,7 @@ impl Workspace {
         } else {
             Default::default()
         };
-        SavedWorkspace {
-            folder: self.root.clone(),
-            tabs,
-            tab_groups,
-            groups,
-            active: self.active,
-            panes,
-            tab_panes,
-            pane_active,
-        }
+        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active }
     }
 
     /// The side panels as this workspace has them.
@@ -761,7 +755,6 @@ impl Workspace {
             ("changes", self.show_changes),
             ("scratches", self.show_scratches),
             ("shells", self.show_shells),
-            ("usage", self.show_usage),
             ("system", self.show_system),
         ]
         .into_iter()
@@ -779,14 +772,8 @@ impl Workspace {
         }
         self.panels_rev = p.rev;
         let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
-        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_usage, self.show_system) = (
-            shown("explorer"),
-            shown("changes"),
-            shown("scratches"),
-            shown("shells"),
-            shown("usage"),
-            shown("system"),
-        );
+        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system) =
+            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"));
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -873,10 +860,24 @@ impl Workspace {
         self.focus_active(window, cx);
     }
 
-    fn spawn_config(&self, kind: TabKind, resume: Option<&str>) -> (SpawnConfig, &'static str) {
+    /// How to start a terminal of `kind` running as Claude account
+    /// `account`: a Claude tab, or a shell one that runs `claude` as it.
+    /// One removed since runs as the default account.
+    fn spawn_config(&self, kind: TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, &'static str) {
         let shell = crate::platform::shell();
         let mut env = std::collections::HashMap::new();
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
+        let account = if accounts::listed(account, cx) { account } else { accounts::DEFAULT };
+        if let Some(dir) = accounts::config_dir(account) {
+            // Made when the account was added, and kept up at start; made
+            // again only when it went missing.
+            if !dir.is_dir()
+                && let Err(e) = accounts::prepare(account)
+            {
+                log::warn!("accounts: prepare {account}: {e}");
+            }
+            env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
+        }
         let (args, title) = match kind {
             TabKind::Shell => (crate::platform::shell_args(), "shell"),
             TabKind::Claude => {
@@ -891,7 +892,7 @@ impl Workspace {
                 // Claude at once: the tab then starts a new one (see
                 // `on_terminal_event`), not on every failed exit.
                 // One moved to the background (`/bg`) is attached to instead.
-                let bg = resume.and_then(|id| claude_bg_job(&claude_dir()?.join("sessions"), id));
+                let bg = resume.and_then(|id| claude_bg_job(&accounts::claude_dir(account)?.join("sessions"), id));
                 let claude = match (bg, resume) {
                     (Some(job), _) => format!("claude attach {}", shell_quote(&job)),
                     (None, Some(id)) => format!("{claude} --resume {}", shell_quote(id)),
@@ -921,24 +922,246 @@ impl Workspace {
         )
     }
 
+    /// A new tab of `kind`. A Claude one runs as the active account, or
+    /// asks which when several are.
     fn add_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(kind, None, None, None, window, cx);
+        if kind == TabKind::Shell {
+            return self.add_term(kind, None, None, None, accounts::DEFAULT, window, cx);
+        }
+        let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
+        match active.as_slice() {
+            [one] => self.add_term(kind, None, None, None, one, window, cx),
+            _ => {
+                let then: PickThen = Rc::new(|this, id, window, cx| this.new_claude_tab_as(id, window, cx));
+                let note = "Turn accounts on or off in the account panel at the bottom of the window";
+                self.pick_account("New Claude Tab As".into(), note.into(), None, then, window, cx)
+            },
+        }
+    }
+
+    /// Turns off account `id`, which the shown Claude tab runs as, once the
+    /// user picked the account the tab switches to.
+    fn turn_off_account(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = accounts::store(cx).read(cx).name(&id);
+        let off = id.clone();
+        let then: PickThen = Rc::new(move |this, to, window, cx| {
+            this.switch_account(to, window, cx);
+            accounts::store(cx).update(cx, |a, cx| a.set_active(&off, false, cx));
+        });
+        let note = format!("This tab runs as {name}: pick the account it switches to");
+        self.pick_account(format!("Turn Off {name}").into(), note.into(), Some(id), then, window, cx);
+    }
+
+    /// A new Claude tab running as `account`.
+    pub fn new_claude_tab_as(&mut self, account: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_term(TabKind::Claude, None, None, None, account, window, cx);
+    }
+
+    /// Ask for an active account but `except`, titled `title` with `note`
+    /// under the list: click one, or type its number; `then` gets it.
+    fn pick_account(
+        &mut self,
+        title: SharedString,
+        note: SharedString,
+        except: Option<String>,
+        then: PickThen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = accounts::store(cx).read(cx);
+        let ids: Vec<(String, String)> = store
+            .active()
+            .iter()
+            .filter(|a| except.as_deref() != Some(a.id.as_str()))
+            .map(|a| (a.id.clone(), store.name(&a.id)))
+            .collect();
+        let store = crate::usage::store(cx);
+        // Key, name, email, usage.
+        let rows: Rc<Vec<[String; 4]>> = Rc::new(
+            ids.iter()
+                .enumerate()
+                .map(|(i, (id, name))| {
+                    let summary = store.update(cx, |s, _| crate::usage_view::summary(s.get(id)));
+                    let key = if i < 9 { (i + 1).to_string() } else { String::new() };
+                    // The email, unless it is the name already.
+                    [key, name.clone(), accounts::email(id).filter(|e| e != name).unwrap_or_default(), summary]
+                })
+                .collect(),
+        );
+        let ids: Rc<Vec<String>> = Rc::new(ids.into_iter().map(|(id, _)| id).collect());
+        let ws = cx.entity().downgrade();
+        let focus = cx.focus_handle();
+        let first = std::cell::Cell::new(true);
+        let pick = Rc::new(move |ws: &WeakEntity<Self>, id: &str, window: &mut Window, cx: &mut App| {
+            window.close_dialog(cx);
+            let _ = ws.update(cx, |this, cx| then(this, id, window, cx));
+        });
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                focus.focus(window, cx);
+            }
+            let footer = template::render(
+                "dialog.pick_account.footer",
+                template::Scope::new("pick-account"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            let (rows, ids, ws, focus, pick) = (rows.clone(), ids.clone(), ws.clone(), focus.clone(), pick.clone());
+            let note = note.clone();
+            dialog.w(style::dialog_width(false, cx)).title(title.clone()).footer(footer).content(move |c, _, cx| {
+                let rows = rows
+                    .iter()
+                    .map(|[key, name, email, usage]| {
+                        template::Scope::default()
+                            .var("key", key.as_str())
+                            .var("name", name.as_str())
+                            .var("detail", email.as_str())
+                            .var("usage", usage.as_str())
+                    })
+                    .collect();
+                let scope = template::Scope::new("pick-account").var("note", note.clone()).list("accounts", rows);
+                let body = template::render(
+                    "dialog.pick_account",
+                    scope,
+                    &mut |n, ix, f| match (n, f) {
+                        ("body", Framed::Box(d)) => {
+                            let (ids, ws, pick) = (ids.clone(), ws.clone(), pick.clone());
+                            d.track_focus(&focus)
+                                .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                                    // A bare digit: a chord is a shortcut.
+                                    if ev.keystroke.modifiers.modified() {
+                                        return;
+                                    }
+                                    let n = ev.keystroke.key.parse::<usize>().ok().filter(|n| *n >= 1);
+                                    if let Some(id) = n.and_then(|n| ids.get(n - 1)) {
+                                        pick(&ws, id, window, cx);
+                                    }
+                                })
+                                .into_any_element()
+                        },
+                        ("account", Framed::Box(d)) => {
+                            let ix = ix.unwrap_or_default();
+                            let Some(id) = ids.get(ix).cloned() else { return d.into_any_element() };
+                            let (ws, pick) = (ws.clone(), pick.clone());
+                            d.id(("pick-account", ix))
+                                .cursor_pointer()
+                                .on_click(move |_, window, cx| pick(&ws, &id, window, cx))
+                                .into_any_element()
+                        },
+                        (_, f) => f.into_any_element(),
+                    },
+                    cx,
+                );
+                c.child(body)
+            })
+        });
+    }
+
+    /// Runs the shown Claude tab as account `id` instead: its `claude`
+    /// ends and a new one starts, where `/resume` finds the conversation
+    /// (the accounts share them).
+    fn switch_account(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active) else { return };
+        if t.kind != TabKind::Claude || t.account == id {
+            return;
+        }
+        t.account = id.to_owned();
+        t.token = None;
+        t.session = None;
+        t.resuming = false;
+        let view = t.view.clone();
+        let (cfg, _) = self.spawn_config(TabKind::Claude, None, id, cx);
+        view.update(cx, |v, cx| {
+            v.set_spawn_config(cfg);
+            v.set_hook(true);
+            v.start(cx);
+        });
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+        self.focus_active(window, cx);
+    }
+
+    /// Ask for a name, add an account by it and open a Claude tab running
+    /// as it, where `/login` signs it in.
+    fn add_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let apply = |this: &mut Self, name: &str, window: &mut Window, cx: &mut Context<Self>| {
+            this._rename = None;
+            window.close_dialog(cx);
+            match accounts::store(cx).update(cx, |a, cx| a.add(name, cx)) {
+                Ok(id) => this.new_claude_tab_as(&id, window, cx),
+                Err(e) => {
+                    log::error!("accounts: add: {e}");
+                    this.focus_active(window, cx);
+                },
+            }
+        };
+        self.ask_name("Add Claude Account", SharedString::default(), Rc::new(apply), window, cx);
+    }
+
+    /// Ask for account `id`'s new name.
+    fn rename_account(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let current = accounts::store(cx).read(cx).name(&id);
+        let apply = move |this: &mut Self, name: &str, window: &mut Window, cx: &mut Context<Self>| {
+            accounts::store(cx).update(cx, |a, cx| a.rename(&id, name, cx));
+            this._rename = None;
+            window.close_dialog(cx);
+            this.focus_active(window, cx);
+        };
+        self.ask_name("Rename Account", current.into(), Rc::new(apply), window, cx);
+    }
+
+    /// Ask before removing account `id`.
+    fn confirm_remove_account(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = accounts::store(cx).read(cx).name(&id);
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let footer = template::render(
+                "dialog.remove_account.footer",
+                template::Scope::new("remove-account"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let id = id.clone();
+                        b.on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            accounts::store(cx).update(cx, |a, cx| a.remove(&id, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            let name = name.clone();
+            dialog
+                .w(style::dialog_width(false, cx))
+                .title("Remove Claude Account")
+                .content(move |c, _, cx| {
+                    let scope = template::Scope::new("remove-account").var("name", name.clone());
+                    c.child(template::render_plain("dialog.remove_account", scope, cx))
+                })
+                .footer(footer)
+        });
     }
 
     /// A new terminal tab named `rename`: background session `mux` when it
     /// still runs, else a new program (a Claude one resumes `session`).
+    #[allow(clippy::too_many_arguments)]
     fn add_term(
         &mut self,
         kind: TabKind,
         rename: Option<String>,
         session: Option<String>,
         mux: Option<u64>,
+        account: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Known once the daemon answers (`TerminalEvent::Ready`).
         let token = None;
-        let (cfg, title) = self.spawn_config(kind, session.as_deref());
+        let (cfg, title) = self.spawn_config(kind, session.as_deref(), account, cx);
         let config = self.services.terminal.clone();
         let connector = self.services.mux.clone();
         let hook = kind == TabKind::Claude;
@@ -949,7 +1172,9 @@ impl Workspace {
         // not a running Claude it reattaches to, says something by exiting
         // at once.
         let resuming = session.is_some();
-        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, follows: None, _subs: vec![sub] };
+        let account = account.to_owned();
+        let tab =
+            TermTab { view, rename, kind, token, session, account, resuming, notified: None, rang: false, follows: None, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -979,7 +1204,7 @@ impl Workspace {
         if let Some(ix) = self.tabs.iter().position(|t| t.term().is_some_and(|t| t.follows.as_ref() == Some(&output))) {
             return self.activate(ix, window, cx);
         }
-        let (mut cfg, _) = self.spawn_config(TabKind::Shell, None);
+        let (mut cfg, _) = self.spawn_config(TabKind::Shell, None, accounts::DEFAULT, cx);
         // From its start, and on past the shell's end. Run directly, not
         // through a shell: the path is whatever the agent's shell opened.
         let Some(path) = output.to_str() else { return self.show_tab(row.tab, window, cx) };
@@ -995,6 +1220,7 @@ impl Workspace {
             kind: TabKind::Shell,
             token: None,
             session: None,
+            account: accounts::DEFAULT.into(),
             resuming: false,
             notified: None,
             rang: false,
@@ -1006,13 +1232,23 @@ impl Workspace {
     }
 
     /// A tab for background session `s` that no tab shows. A Claude one
-    /// resumes its conversation if it has to start again.
+    /// runs as the account its `claude` does, and resumes its conversation
+    /// if it has to start again.
     pub fn adopt_session(&mut self, s: &tern_mux::proto::SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
         if s.claude {
+            let ids: Vec<String> = accounts::store(cx).read(cx).list.iter().map(|a| a.id.clone()).collect();
+            let account = s
+                .claude_session
+                .as_deref()
+                .and_then(|session| {
+                    ids.into_iter()
+                        .find(|id| accounts::claude_dir(id).is_some_and(|d| !live_session_files(&d.join("sessions"), session).is_empty()))
+                })
+                .unwrap_or_else(|| accounts::DEFAULT.into());
             // Claude names its tab itself.
-            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), window, cx);
+            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), &account, window, cx);
         } else {
-            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), window, cx);
+            self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), accounts::DEFAULT, window, cx);
         }
     }
 
@@ -1729,7 +1965,8 @@ impl Workspace {
                     t.token = None;
                     t.session = None;
                     t.resuming = false;
-                    let (cfg, _) = self.spawn_config(TabKind::Shell, None);
+                    let account = t.account.clone();
+                    let (cfg, _) = self.spawn_config(TabKind::Shell, None, &account, cx);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.set_hook(false);
@@ -1745,7 +1982,7 @@ impl Workspace {
                     Some(t) if t.resuming && *quick && code.is_some_and(|c| c != 0) => {
                         t.resuming = false;
                         t.session = None;
-                        Some(t.token.clone())
+                        Some(t.account.clone())
                     },
                     Some(t) => {
                         t.resuming = false;
@@ -1753,8 +1990,8 @@ impl Workspace {
                     },
                     None => None,
                 };
-                if restart.is_some() {
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, None);
+                if let Some(account) = restart {
+                    let (cfg, _) = self.spawn_config(TabKind::Claude, None, &account, cx);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.start(cx);
@@ -1764,8 +2001,8 @@ impl Workspace {
                     && t.kind == TabKind::Claude
                 {
                     // Enter restarts it: resume the conversation it had.
-                    let session = t.session.clone();
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref());
+                    let (session, account) = (t.session.clone(), t.account.clone());
+                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref(), &account, cx);
                     view.update(cx, |v, _| v.set_spawn_config(cfg));
                 }
                 cx.notify();
@@ -1846,8 +2083,8 @@ impl Workspace {
             // Should Claude have to start again (Enter, its daemon
             // restarted), it resumes this conversation.
             if tab.kind == TabKind::Claude {
-                let view = tab.view.clone();
-                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref());
+                let (view, account) = (tab.view.clone(), tab.account.clone());
+                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref(), &account, cx);
                 view.update(cx, |v, _| v.set_spawn_config(cfg));
             }
             cx.emit(WorkspaceEvent::TabsChanged);
@@ -2062,7 +2299,6 @@ impl Workspace {
             "scratches" => ("sticky-note", self.show_scratches, format!("Scratches ({})", shortcut("⌘⇧S"))),
             "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
             "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
-            "usage" => ("chart-pie", self.show_usage, "Usage".to_owned()),
             "system" => ("cpu", self.show_system, "System".to_owned()),
             _ => return None,
         })
@@ -2113,7 +2349,6 @@ impl Workspace {
             "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
             "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
             "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
-            "usage" => |this, w, cx| this.toggle_usage(&ToggleUsage, w, cx),
             "system" => |this, w, cx| this.toggle_system(&ToggleSystem, w, cx),
             _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
         }
@@ -2901,7 +3136,6 @@ impl Workspace {
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
-                    "usage" => self.show_usage = true,
                     "system" => self.show_system = true,
                     _ => {},
                 }
@@ -2985,7 +3219,6 @@ impl Workspace {
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
-                    "usage" => self.show_usage = true,
                     "system" => self.show_system = true,
                     _ => {},
                 }
@@ -3170,7 +3403,6 @@ impl Workspace {
             "scratches" => self.show_scratches,
             "changes" => self.show_changes,
             "shells" => self.show_shells,
-            "usage" => self.show_usage,
             "system" => self.show_system,
             _ => true,
         }
@@ -3183,14 +3415,12 @@ impl Workspace {
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
             .var("shells", self.show_shells)
-            .var("usage", self.show_usage)
             .var("system", self.show_system)
             .var("path", self.root.display().to_string())
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("shells", self.shells.clone().cached(cache_layout()))
-            .slot("usage", self.usage.clone().cached(cache_layout()))
             .slot("system", self.system.clone().cached(cache_layout()))
             .slot_opt("agents", self.agents.clone())
     }
@@ -3289,11 +3519,6 @@ impl Workspace {
 
     fn toggle_shells(&mut self, _: &ToggleShells, _: &mut Window, cx: &mut Context<Self>) {
         self.show_shells = !self.show_shells;
-        self.panels_changed(cx);
-    }
-
-    fn toggle_usage(&mut self, _: &ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_usage = !self.show_usage;
         self.panels_changed(cx);
     }
 
@@ -4344,9 +4569,16 @@ impl Render for Workspace {
         if let Some(a) = arrangement.clone() {
             scope = scope.docks(a, on_change.clone());
         }
+        // The bar marks the account the shown Claude tab runs as. Told
+        // after this draw, not during it.
+        let current = self.tabs.get(self.active).and_then(CenterTab::term).filter(|t| t.kind == TabKind::Claude).map(|t| t.account.clone());
+        if self.usage.read(cx).current() != current.as_deref() {
+            let usage = self.usage.clone();
+            cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
+        }
         // The panes are a panel of their own (template `panes`), so they move as the others do.
         let panes = template::render(PANES, template::Scope::new(PANES).slot("center", center), &mut |_, _, d| d.into_any_element(), cx);
-        let scope = scope.slot("left_strip", left_strip).slot("panes", panes);
+        let scope = scope.slot("left_strip", left_strip).slot("panes", panes).slot("usage", self.usage.clone());
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
@@ -4416,7 +4648,6 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoToFile, w, cx| this.open_palette(palette::Mode::Files, w, cx)))
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::toggle_shells))
-            .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::toggle_system))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))

@@ -359,6 +359,15 @@ impl Tray {
     }
 }
 
+/// Copy the capture at `ix` to the clipboard.
+fn copy(ix: usize, cx: &mut App) {
+    let Some(path) = cx.default_global::<TrayData>().shots.get(ix).cloned() else { return };
+    match std::fs::read(&path) {
+        Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
+        Err(e) => super::notify("Couldn't copy the screenshot", &e.to_string(), cx),
+    }
+}
+
 /// `path`'s image shrunk to fit `w` × `h` pixels.
 fn thumbnail(path: &Path, w: u32, h: u32) -> Option<Arc<RenderImage>> {
     let img = image::open(path).ok()?.to_rgba8();
@@ -473,6 +482,14 @@ impl Render for Tray {
                         cx.stop_propagation();
                         this.remove(i, cx);
                     }))
+                    .into_any_element()
+                },
+                ("copy", Framed::Button(b)) => {
+                    let i = ix.unwrap_or(0);
+                    b.on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy(i, cx);
+                    })
                     .into_any_element()
                 },
                 ("send", Framed::Button(b)) => b.on_click(|_, window, cx| super::send_menu::toggle(window.bounds(), cx)).into_any_element(),

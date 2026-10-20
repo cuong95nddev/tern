@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizablePanel;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 
@@ -24,6 +25,7 @@ use crate::style::{self, Val};
 pub enum Framed {
     Box(Div),
     Button(Button),
+    Switch(Switch),
 }
 
 impl Framed {
@@ -31,6 +33,7 @@ impl Framed {
         match self {
             Framed::Box(d) => d.into_any_element(),
             Framed::Button(b) => b.into_any_element(),
+            Framed::Switch(s) => s.into_any_element(),
         }
     }
 }
@@ -270,6 +273,19 @@ impl Drawer<'_, '_> {
     fn button(&mut self, n: &Node, b: &ButtonNode, look: &style::El, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
         let get = lookup(scope, outer);
         let id = ElementId::Name(format!("{}:{}:{}", scope.id, n.path, scope.index.unwrap_or(0)).into());
+        let holds = |c: &Option<Cond>| c.as_ref().is_some_and(|c| c.holds(&get));
+        if b.switch {
+            let mut switch = look.apply(Switch::new(id)).checked(holds(&b.selected)).disabled(holds(&b.disabled));
+            switch = match b.size {
+                ButtonSize::XSmall | ButtonSize::Small => switch.small(),
+                ButtonSize::Medium => switch,
+                ButtonSize::Large => switch.large(),
+            };
+            if let Some(tip) = &b.tooltip {
+                switch = switch.tooltip(fill(tip, &get));
+            }
+            return (self.frames)(&b.frame, scope.index, Framed::Switch(switch));
+        }
         let mut button = look.apply(Button::new(id));
         button = match b.variant {
             Variant::Ghost => button.ghost(),

@@ -1,6 +1,7 @@
 // A release build is a GUI app on Windows: no console window of its own.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod accounts;
 mod agent_monitor;
 mod agents;
 mod arrange;
@@ -63,6 +64,8 @@ impl Global for AppServices {}
 
 fn main() {
     env_logger::init();
+    // The UI and the daemon both read the added Claude accounts' sessions.
+    tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());
     // The background daemon that runs the terminals (started by the UI).
     if std::env::args().nth(1).as_deref() == Some("--server") {
         // SAFETY: no other thread runs yet. Its programs inherit this env.

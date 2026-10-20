@@ -63,6 +63,9 @@ pub struct Spec {
     /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
     /// `disabled` and `loading`.
     pub button: Option<String>,
+    /// A switch; the code attaches what turning it does by this name, as
+    /// for `button`. It takes `selected` (on), `disabled` and `tooltip`.
+    pub switch: Option<String>,
     /// A button's text; `{name}` puts in a value. In a menu, on a box with
     /// `children`: the submenu's name.
     pub label: Option<String>,
@@ -542,6 +545,8 @@ struct ButtonNode {
     selected: Option<Cond>,
     disabled: Option<Cond>,
     loading: Option<Cond>,
+    /// Drawn as a switch, on while `selected` holds.
+    switch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -801,7 +806,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage", "system", "panes"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "panes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1134,6 +1139,7 @@ impl Compiler<'_, '_> {
             selected: self.flag(&s.selected, &format!("{at}.selected")),
             disabled: self.flag(&s.disabled, &format!("{at}.disabled")),
             loading: self.flag(&s.loading, &format!("{at}.loading")),
+            switch: s.switch.is_some(),
         }
     }
 
@@ -1237,16 +1243,36 @@ impl Compiler<'_, '_> {
     fn panel(&mut self, s: &Spec, at: &str) -> Panel {
         let fixed = self.flag(&s.fixed, &format!("{at}.fixed")).filter(|c| !c.0.is_empty());
         // A button's `size` is its own.
-        let size = if s.button.is_some() || s.action.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
+        let size = if s.button.is_some() || s.action.is_some() || s.switch.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
         Panel { size, min: self.len(&s.min, &format!("{at}.min")), max: self.len(&s.max, &format!("{at}.max")), fixed }
     }
 
     fn own(&mut self, s: &Spec, at: &str) -> Node {
-        let button = s.button.is_some() || s.action.is_some();
+        let switch = s.switch.is_some();
+        let button = s.button.is_some() || s.action.is_some() || switch;
         let icon = s.icon.is_some() && !button;
-        let kinds = [s.slot.is_some(), s.part.is_some(), s.text.is_some(), s.each.is_some(), s.use_.is_some(), icon, button, s.separator];
+        let kinds = [
+            s.slot.is_some(),
+            s.part.is_some(),
+            s.text.is_some(),
+            s.each.is_some(),
+            s.use_.is_some(),
+            icon,
+            s.button.is_some() || s.action.is_some(),
+            switch,
+            s.separator,
+        ];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, button and separator"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, button, switch and separator"));
+        }
+        if switch {
+            for (field, set) in
+                [("icon", s.icon.is_some()), ("label", s.label.is_some()), ("variant", s.variant.is_some()), ("loading", s.loading.is_some())]
+            {
+                if set {
+                    self.problems.push(format!("{at}.{field}: a switch doesn't take it"));
+                }
+            }
         }
         // A box with children takes a label: a submenu's name.
         let submenu = !button && kinds.iter().all(|k| !k) && !s.children.is_empty();
@@ -1292,7 +1318,7 @@ impl Compiler<'_, '_> {
             What::Text(parts(text))
         } else if button {
             // An action alone is named by its action.
-            let frame = s.button.as_ref().or(s.action.as_ref()).cloned().unwrap_or_default();
+            let frame = s.button.as_ref().or(s.switch.as_ref()).or(s.action.as_ref()).cloned().unwrap_or_default();
             What::Button(Arc::new(self.button(&frame, s, at)))
         } else if s.separator {
             What::Separator
@@ -1585,10 +1611,9 @@ mod tests {
         // Each panel in a group of its own.
         assert_eq!(
             a.encode(),
-            "group-1=agents;group-2=usage;group-3=system;group-4=panes;group-5=explorer;group-6=changes;group-7=scratches;\
-             group-8=shells;main=group-4;right=[c group-5@- group-6@260px group-7@220px group-8@180px];\
-             start=[c group-1@- group-2@64px group-3@32px];g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
-             g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
+            "group-1=agents;group-2=system;group-3=panes;group-4=explorer;group-5=changes;group-6=scratches;group-7=shells;\
+             main=group-3;right=[c group-4@- group-5@260px group-6@220px group-7@180px];start=[c group-1@- group-2@32px];\
+             g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;g:group-5=grid;g:group-6=grid;g:group-7=grid"
         );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
@@ -1886,6 +1911,25 @@ mod tests {
     }
 
     #[test]
+    fn switch_compiles() {
+        let (t, problems) = compiled(
+            r#"{"s": { "children": [
+                { "switch": "on", "selected": "active", "disabled": "last", "tooltip": "{tip}" },
+                { "switch": "bad", "icon": "plus", "button": "x" }
+            ]}}"#,
+        );
+        assert_eq!(
+            problems,
+            [
+                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
+                "templates.s.children.1.icon: a switch doesn't take it",
+            ]
+        );
+        let super::What::Button(b) = &t.nodes["s"].children[0].what else { panic!("not a switch") };
+        assert!(b.switch && b.frame == "on" && b.selected.is_some() && b.disabled.is_some());
+    }
+
+    #[test]
     fn menu_problems() {
         let (t, problems) = compiled(
             r#"{"menu.m": { "children": [
@@ -1899,7 +1943,7 @@ mod tests {
             problems,
             [
                 "templates.menu.m.children.0.label: only a button or a submenu takes it",
-                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, button and separator",
+                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
             ]
         );
         let mut problems = vec![];
