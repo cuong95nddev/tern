@@ -32,7 +32,10 @@
                 "size": "$agents.start_width",
                 "min": 160,
                 "max": 480,
-                "children": [{ "part": "agents" }]
+                "children": [
+                  { "part": "agents" },
+                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 40, "max": 600 }
+                ]
               },
               { "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] },
               {
@@ -82,6 +85,7 @@
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "shells.header": { "use": "panel_header", "element": "shells.header" },
+  "usage.header": { "use": "panel_header", "element": "usage.header" },
   "explorer.header.buttons": {
     "layout": "row",
     "align": "center",
@@ -185,6 +189,28 @@
         "size": "xsmall",
         "icon": "close",
         "tooltip": "Hide Shells"
+      }
+    ]
+  },
+  "usage.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$usage.header.gap" },
+    "children": [
+      {
+        "button": "refresh",
+        "element": "usage.header.button",
+        "size": "xsmall",
+        "icon": "refresh-cw",
+        "loading": "reading",
+        "tooltip": "Refresh"
+      },
+      {
+        "button": "hide",
+        "element": "usage.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Usage"
       }
     ]
   },
@@ -1518,6 +1544,118 @@
     "align": "center",
     "justify": "center",
     "children": [{ "text": "No shells running" }, { "style": { "font_size": "$text_xs" }, "text": "Commands agents run show here" }]
+  },
+  "usage": {
+    "frame": "panel",
+    "element": "usage",
+    "fill": true,
+    "children": [
+      { "slot": "header" },
+      { "when": "!ready", "use": "usage.empty" },
+      { "when": "ready", "each": "items", "element": "usage.list", "layout": "fit", "item": { "use": "usage.item" } }
+    ]
+  },
+  "usage.empty": {
+    "element": "usage.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "wrap": true, "text": "{message}" }]
+  },
+  "usage.item": {
+    "frame": "item",
+    "element": "usage.item",
+    "layout": "fit",
+    "style": { "min_width": 0 },
+    "states": { "hover": { "background": "$usage.item.hover_background" } },
+    "children": [
+      { "slot": "icon" },
+      { "nowrap": true, "text": "{short}" },
+      { "nowrap": true, "text": "{used_text}%" },
+      { "element": "usage.item.bar", "children": [{ "use": "usage.bar" }] },
+      { "when": "resets", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "{resets}" }
+    ]
+  },
+  "usage.bar": {
+    "element": "usage.bar",
+    "layout": "row",
+    "clip": true,
+    "children": [
+      {
+        "element": "usage.bar.fill",
+        "style": { "grow": "{used}" },
+        "states": {
+          "warning": { "background": "$usage.bar.fill.warning" },
+          "critical": { "background": "$usage.bar.fill.critical" }
+        }
+      },
+      { "style": { "grow": "{rest}" } },
+      {
+        "when": "has_pace",
+        "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+        "layout": "row",
+        "children": [{ "style": { "grow": "{pace}" } }, { "element": "usage.bar.pace" }, { "style": { "grow": "{pace_rest}" } }]
+      }
+    ]
+  },
+  "usage.card": {
+    "element": "usage.card",
+    "children": [
+      {
+        "element": "usage.card.section",
+        "children": [
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 6 },
+            "children": [{ "slot": "icon" }, { "grow": 1, "truncate": true, "element": "usage.card.title", "text": "{title}" }]
+          },
+          {
+            "layout": "row",
+            "element": "usage.card.detail",
+            "children": [{ "grow": 1, "truncate": true, "text": "{updated}" }, { "when": "plan", "shrink": 0, "text": "{plan}" }]
+          },
+          { "when": "email", "element": "usage.card.detail", "truncate": true, "text": "{email}" },
+          { "when": "error", "element": "usage.card.error", "wrap": true, "text": "{error}" }
+        ]
+      },
+      { "each": "limits", "item": { "use": "usage.card.limit" } },
+      {
+        "when": "extra",
+        "element": "usage.card.section",
+        "style": { "border_top_width": 1 },
+        "children": [
+          { "element": "usage.card.heading", "text": "Extra usage" },
+          { "layout": "row", "element": "usage.card.detail", "children": [{ "grow": 1, "text": "This month" }, { "text": "{extra}" }] }
+        ]
+      },
+      {
+        "element": "usage.card.section",
+        "align": "start",
+        "style": { "border_top_width": 1, "padding_x": 6, "gap": 0 },
+        "children": [
+          { "button": "refresh", "element": "usage.card.link", "size": "small", "icon": "refresh-cw", "label": "Refresh", "loading": "reading" },
+          { "button": "dashboard", "element": "usage.card.link", "size": "small", "icon": "chart-pie", "label": "Usage Dashboard" },
+          { "button": "status", "element": "usage.card.link", "size": "small", "icon": "external-link", "label": "Status Page" }
+        ]
+      }
+    ]
+  },
+  "usage.card.limit": {
+    "element": "usage.card.section",
+    "style": { "border_top_width": 1 },
+    "children": [
+      {
+        "layout": "row",
+        "align": "center",
+        "children": [
+          { "grow": 1, "truncate": true, "element": "usage.card.heading", "text": "{name} {left}% left" },
+          { "when": "resets", "shrink": 0, "element": "usage.card.detail", "text": "Resets in {resets}" }
+        ]
+      },
+      { "use": "usage.bar" },
+      { "when": "pace_text", "element": "usage.card.detail", "text": "{pace_text}" }
+    ]
   },
   "drag_chip": {
     "element": "drag_chip",

@@ -107,8 +107,9 @@ pub struct Spec {
     /// {"element": "pane_tab_bar.tab_active"}}`).
     #[schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")]
     pub states: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
-    /// How the children line up: `column` (the default), `row`, or `wrap`
-    /// (a row that wraps).
+    /// How the children line up: `column` (the default), `row`, `wrap`
+    /// (a row that wraps), or `fit` (a row of the children that fit whole:
+    /// from the end, those that don't are hidden; give the box a `height`).
     pub layout: Option<String>,
     /// Across the layout: `start`, `center`, `end`, `stretch` (the default).
     pub align: Option<String>,
@@ -476,6 +477,8 @@ enum Layout {
     Column,
     Row,
     Wrap,
+    /// A row that hides the children that don't fit whole.
+    Fit,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -731,6 +734,7 @@ const SLOTS: &[&str] = &[
     "explorer",
     "scratches",
     "shells",
+    "usage",
     "center",
     "changes",
     "tab_bar",
@@ -760,7 +764,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1283,9 +1287,10 @@ impl Compiler<'_, '_> {
             }
             found
         };
-        let layout = match pick(&s.layout, "layout", self.problems, &["column", "row", "wrap"]) {
+        let layout = match pick(&s.layout, "layout", self.problems, &["column", "row", "wrap", "fit"]) {
             Some(1) => Layout::Row,
             Some(2) => Layout::Wrap,
+            Some(3) => Layout::Fit,
             _ => Layout::Column,
         };
         let align = pick(&s.align, "align", self.problems, &["start", "center", "end", "stretch"])
@@ -1539,7 +1544,7 @@ mod tests {
         // The agents panel on the left, as T3 Code's sidebar; every other panel on the right.
         assert_eq!(names, ["start", "right"]);
         let a = crate::arrange::Arrangement::defaults("workspace/right+start", &docks);
-        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px shells@180px];start=agents");
+        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px shells@180px];start=[c agents@- usage@64px]");
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }

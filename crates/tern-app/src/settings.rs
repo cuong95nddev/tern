@@ -931,7 +931,8 @@ Where things go is in `templates` (in `{SETTINGS}` or a theme): the window's
 parts as trees of boxes. `reference/templates.json` holds the built-in ones;
 copy one into `templates` under its name and change it. A box takes an element's
 properties (`\"element\"`) and its own (`\"style\"`), lines up its `children`
-(`\"layout\"`: `column`, `row`, `wrap`; `align`, `justify`, `grow`, `fill`), can
+(`\"layout\"`: `column`, `row`, `wrap`, or `fit`: one row of the children that
+fit whole, the others hidden from the end; `align`, `justify`, `grow`, `fill`), can
 sit over its parent (`\"position\": {{\"top\": 0, \"right\": 8}}`, or a
 number the code gives, `\"top\": \"{{bar_top}}\"`; `z`, `overlay`), show only when a condition holds (`\"when\": \"focused && tabs > 1\"`),
 change while one does (`\"states\": {{\"focused\": {{\"border\": \"$accent\"}}}}`),
@@ -946,12 +947,12 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | Template | Values | Slots |
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells` |
+| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `usage` |
 | `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
-| `explorer.header`, `changes.header`, `scratches.header`, `shells.header` | as `panel_header` | as `panel_header` |
+| `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
 | `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
@@ -967,6 +968,10 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
 | `shells`, `shells.empty` | `empty` | `header`, `list` |
+| `usage`, `usage.empty` | `ready`, `stale`, `message`; list `items` (as `usage.item`, one per service) | `header` |
+| `usage.header.buttons` | `reading` | |
+| `usage.item`, `usage.card.limit`, `usage.bar` | `name`, `short`, `used` (0 to 100), `rest`, `used_text`, `left`, `resets`, `warning`, `critical`, `has_pace`, `pace`, `pace_rest`, `pace_text` | `icon` (`usage.item`) |
+| `usage.card` | `title`, `updated`, `plan`, `email`, `error`, `extra`, `reading`; list `limits` (as `usage.card.limit`) | `icon` |
 | `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
 | `drag_chip` | `label`, `icon` | |
@@ -1046,11 +1051,11 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 ### Moving panels
 
-The explorer, scratches, changes and shells panels sit in docks and can be dragged
+The explorer, scratches, changes, shells and usage panels sit in docks and can be dragged
 between them by their headers. In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
-  (`explorer`, `scratches`, `changes`, `shells`). Give it `\"drag\": false` (or a
+  (`explorer`, `scratches`, `changes`, `shells`, `usage`). Give it `\"drag\": false` (or a
   condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or

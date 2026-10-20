@@ -744,6 +744,9 @@ impl Drawer<'_, '_> {
             Layout::Column => d.flex_col(),
             Layout::Row => d.flex_row(),
             Layout::Wrap => d.flex_row().flex_wrap(),
+            // The children that don't fit wrap onto lines below the box's
+            // height, out of sight.
+            Layout::Fit => d.flex_row().flex_wrap().overflow_hidden(),
         };
         d = match n.align {
             Some(Align::Start) => d.items_start(),
@@ -833,6 +836,14 @@ impl Drawer<'_, '_> {
             bs.corner_radii = radii;
             under = Some(b);
         }
+        let kids: Vec<AnyElement> = if n.layout == Layout::Fit {
+            // Each as tall as the box, so a wrapped line starts right below
+            // it; one alone on the line shrinks to the box, so it can fit
+            // what it holds (a `fit` box in it hides the rest).
+            kids.into_iter().map(|k| div().h_full().min_w_0().flex().items_center().child(k).into_any_element()).collect()
+        } else {
+            kids
+        };
         let d = d.children(look.backdrop()).children(under).children(kids);
         let e = match (drag, &n.frame) {
             // gpui doesn't say what is dragged: the drag's start keeps it for the docks.

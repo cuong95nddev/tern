@@ -37,6 +37,8 @@ mod terminal_view;
 mod terminate;
 mod theme_picker;
 mod update;
+mod usage;
+mod usage_view;
 mod viewer;
 mod window_grip;
 mod window_state;

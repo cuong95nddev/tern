@@ -82,11 +82,14 @@ impl Element {
 
 /// What every element can set, unset unless the element gives a default.
 /// `border_width` and the paddings, margins and radii by side or corner go
-/// over the general one. `visible: 0` hides the element. `text_transform`
+/// over the general one. `visible: 0` hides the element. `grow` is its
+/// share of its parent's room, grown from nothing (a box's own `grow`, but
+/// one the code can give: `"{used}"`). `text_transform`
 /// (`uppercase`, `lowercase`, `capitalize`, `none`) applies to the labels
 /// Tern writes (titles, tab names).
 pub const BOX: &[Prop] = &[
     ("visible", Num, ""),
+    ("grow", Num, ""),
     ("width", Len, ""),
     ("height", Len, ""),
     ("min_width", Len, ""),
@@ -363,6 +366,93 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "shells.list", about: "The shells panel's list of rows", groups: &[LIST] },
     Element { name: "shells.row", about: "A shell: the command it runs and how long it has run", groups: &[ROW] },
     Element { name: "shells.empty", about: "What the shells panel shows without shells", groups: &[EMPTY] },
+    Element {
+        name: "usage",
+        about: "The usage panel: how much of each plan is used, as a status bar",
+        groups: &[PANEL, &[("start_height", Len, "64")], IMAGE],
+    },
+    Element { name: "usage.header", about: "The usage panel's title bar", groups: &[HEADER] },
+    simple!("usage.header.button", "A button in the usage panel's title bar"),
+    Element { name: "usage.empty", about: "What the usage panel shows without numbers: why", groups: &[EMPTY] },
+    Element {
+        name: "usage.list",
+        about: "The usage panel's services in one row: those that don't fit are hidden",
+        groups: &[&[("height", Len, "$row_height"), ("margin_x", Len, "8"), ("margin_y", Len, "4"), ("gap", Len, "4")]],
+    },
+    Element {
+        name: "usage.item",
+        about: "A service in the usage panel: its limit closest to running out, how much is used, a small bar and \
+                when it resets, dropped from the end when they don't fit. Hovering it shows `usage.card`",
+        groups: &[&[
+            ("height", Len, "$row_height"),
+            ("padding_x", Len, "6"),
+            ("gap", Len, "6"),
+            ("radius", Len, "$radius"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+            ("detail_text", Color, "$text_muted"),
+            ("hover_background", Color, "$row_hover"),
+        ]],
+    },
+    Element {
+        name: "usage.bar",
+        about: "A limit's bar: the track. `usage.bar.fill` is the used part, `usage.bar.pace` marks how much would be \
+                used by now at an even pace",
+        groups: &[&[("height", Len, "6"), ("radius", Len, "3"), ("background", Color, "$border")]],
+    },
+    Element { name: "usage.item.bar", about: "The small bar of a limit in the usage panel", groups: &[&[("width", Len, "28")]] },
+    Element {
+        name: "usage.bar.fill",
+        about: "The used part of a limit's bar; `warning` and `critical` are its colors from 80% and 95% used",
+        groups: &[&[
+            ("radius", Len, "3"),
+            ("background", Color, "$info.background"),
+            ("warning", Color, "$warning.background"),
+            ("critical", Color, "$danger.background"),
+        ]],
+    },
+    Element {
+        name: "usage.bar.pace",
+        about: "The pace mark on a limit's bar",
+        groups: &[&[("width", Len, "2"), ("background", Color, "$text_muted")]],
+    },
+    Element {
+        name: "usage.card",
+        about: "What hovering a service in the usage panel shows: the plan, every limit with its pace, extra usage, links",
+        groups: &[&[
+            ("width", Len, "300"),
+            ("padding_y", Len, "4"),
+            ("radius", Len, "$radius_lg"),
+            ("background", Color, "$popover"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+            ("shadow", Text, "lg"),
+            ("font_size", Len, "$text_sm"),
+            ("text", Color, "$text"),
+        ]],
+    },
+    Element {
+        name: "usage.card.section",
+        about: "A part of the usage card, with a line above all but the first",
+        groups: &[&[("padding_x", Len, "12"), ("padding_y", Len, "8"), ("gap", Len, "4"), ("border", Color, "$border")]],
+    },
+    Element {
+        name: "usage.card.title",
+        about: "The usage card's service name",
+        groups: &[&[("font_size", Len, "1rem"), ("font_weight", Num, "600")]],
+    },
+    Element { name: "usage.card.heading", about: "A limit's name and how much is left", groups: &[&[("font_weight", Num, "600")]] },
+    Element {
+        name: "usage.card.detail",
+        about: "Smaller, muted text in the usage card",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "usage.card.error",
+        about: "Why the usage card's numbers could not be read",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$danger")]],
+    },
+    simple!("usage.card.link", "A link at the bottom of the usage card (refresh, dashboard, status page)"),
     Element {
         name: "pane",
         about: "A pane of the center: its tabs and what the active one shows. `focused_border` is its border color while \
@@ -1449,6 +1539,15 @@ impl El {
         let l = |p| self.len_opt(p);
         let size = |v: Option<AbsoluteLength>| v.map(|v| Length::Definite(v.into()));
         let st = s.style();
+        // A share of the parent's room, from nothing: `"grow": "{used}"` and
+        // `"grow": "{left}"` side by side draw a bar `used` percent full.
+        if let Some(g) = self.num_opt("grow") {
+            st.flex_grow = Some(g.max(0.));
+            st.flex_shrink = Some(1.);
+            st.flex_basis = Some(relative(0.).into());
+            st.min_size.width = Some(px(0.).into());
+            st.min_size.height = Some(px(0.).into());
+        }
         if let Some(v) = size(l("width")) {
             st.size.width = Some(v);
         }
