@@ -402,6 +402,7 @@ fn stdout_path(_pid: i32) -> Option<PathBuf> {
 
 /// What `argv` runs when it is `<shell> -c <script>` (or `-lc`, ...): the
 /// script, or the command in it Claude Code's wrapper `eval`s.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn shell_command(argv: &[String]) -> Option<String> {
     let [exe, flag, script, ..] = argv else { return None };
     let name = Path::new(exe).file_name()?.to_str()?.trim_start_matches('-');
@@ -416,6 +417,7 @@ fn shell_command(argv: &[String]) -> Option<String> {
 
 /// The command Claude Code's wrapper script (`source <snapshot> && ... &&
 /// eval '<command>' < /dev/null && pwd -P >| <file>`) runs, unquoted.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn wrapped_command(script: &str) -> Option<String> {
     if !script.contains("shell-snapshots/") {
         return None;

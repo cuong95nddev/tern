@@ -860,14 +860,12 @@ impl MainWindow {
                 }),
             ));
         }
-        let mut buttons = template::Scope::new("agents.header.buttons")
+        let buttons = template::Scope::new("agents.header.buttons")
             .var("open_key", shortcut("⌘O"))
             .var("monitor", crate::agent_monitor::window(cx).is_some());
         // Screenshots are on macOS and Windows.
         #[cfg(any(target_os = "macos", windows))]
-        {
-            buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
-        }
+        let buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
         // The close button hides the panel in the workspace it shows.
         let active = self.active_ws().map(|w| w.downgrade());
         let header = crate::dock::panel_header(
