@@ -989,6 +989,10 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `dialog.diff_preview` | `height` | `diff` |
 | `dialog.name`, `dialog.claude_args` | | `field` |
 | `dialog.theme` | | `list` |
+| `palette` | `search`, `case`, `word`, `regex`, `status`, `error`, `empty`, `enter_label`, `escape_label` | `input`, `list` |
+| `palette.command` | `selected`, `title`, `key` | |
+| `palette.file` | `name`, `dir`, `count` | `icon` |
+| `palette.match` | `selected`, `line`, `mono`; list `parts` (`text`, `hit`) | |
 | `menu.explorer` | `on_entry`, `can_paste`, `reveal` | |
 | `menu.scratch` | `reveal` | |
 | `menu.new_scratch` | list `kinds` (`label`, `ext`) | |

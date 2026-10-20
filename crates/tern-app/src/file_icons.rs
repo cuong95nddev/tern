@@ -13,6 +13,7 @@ gpui_kit::assets::icon_assets!(
     [
         Bell,
         Bot,
+        CaseSensitive,
         ChevronsDownUp,
         CircleArrowDown,
         CircleCheck,
@@ -42,8 +43,11 @@ gpui_kit::assets::icon_assets!(
         LayoutGrid,
         MessageCircleQuestionMark,
         Maximize2,
+        Regex,
+        Search,
         Minimize2,
         StickyNote,
+        WholeWord,
     ]
 );
 

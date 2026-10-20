@@ -740,6 +740,68 @@ pub const ELEMENTS: &[Element] = &[
         groups: &[&[("padding_top", Len, "0.5rem"), ("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
     },
     Element { name: "dialog.footer", about: "A dialog's buttons", groups: &[&[("gap", Len, "0.5rem")]] },
+    Element {
+        name: "palette",
+        about: "The command palette (⌘⇧P) and Search in Files (⌘⇧F), in a dialog `dialog_width` wide",
+        groups: &[&[("dialog_width", Len, "640"), ("height", Len, "420"), ("gap", Len, "4")]],
+    },
+    Element {
+        name: "palette.field",
+        about: "The palette's search field, with Search in Files' options (`options_gap` apart)",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("gap", Len, "6"),
+            ("radius", Len, "$radius"),
+            ("border", Color, "$input"),
+            ("border_width", Len, "1"),
+            ("icon_size", Len, "16"),
+            ("icon_color", Color, "$text_muted"),
+            ("options_gap", Len, "2"),
+        ]],
+    },
+    simple!("palette.option", "Search in Files' Match Case, Match Whole Word and Use Regular Expression buttons"),
+    Element {
+        name: "palette.status",
+        about: "The line under the field in Search in Files: searching, how many results, or what is wrong with the query",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text_muted"),
+            ("error_text", Color, "$danger.background"),
+        ]],
+    },
+    Element { name: "palette.list", about: "The palette's list of commands or results", groups: &[&[]] },
+    Element {
+        name: "palette.row",
+        about: "A command, or a matching line (its number `line_width` wide and `line_gap` from the text, the matched text in `match_*`)",
+        groups: &[
+            ROW,
+            &[
+                ("line_width", Len, "36"),
+                ("line_gap", Len, "8"),
+                ("code_font_size", Len, "$text_xs"),
+                ("match_background", Color, "$warning.background/35"),
+                ("match_text", Color, ""),
+            ],
+        ],
+    },
+    Element {
+        name: "palette.file",
+        about: "A file over its matching lines in Search in Files",
+        groups: &[ROW, &[("font_weight", Num, "600")]],
+    },
+    Element { name: "palette.empty", about: "What the palette shows with nothing to list", groups: &[EMPTY] },
+    Element {
+        name: "palette.footer",
+        about: "The keys the palette takes, under its list",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("padding_top", Len, "6"),
+            ("gap", Len, "16"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text_muted"),
+        ]],
+    },
     Element { name: "welcome", about: "The window with no workspace open", groups: &[&[("width", Len, "520"), ("gap", Len, "24")], IMAGE] },
     Element {
         name: "welcome.title",

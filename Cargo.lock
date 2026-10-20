@@ -6599,6 +6599,7 @@ dependencies = [
  "ignore",
  "notify",
  "objc2-foundation 0.3.2",
+ "regex",
  "tempfile",
  "trash",
 ]

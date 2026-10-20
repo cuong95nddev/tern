@@ -1329,6 +1329,110 @@
     "justify": "center",
     "children": [{ "text": "No scratch files" }, { "style": { "font_size": "$text_xs" }, "text": "{new_key} to create one" }]
   },
+  "palette": {
+    "frame": "palette",
+    "element": "palette",
+    "children": [
+      {
+        "element": "palette.field",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "children": [
+          { "icon": "search", "style": { "width": "$palette.field.icon_size", "height": "$palette.field.icon_size", "text": "$palette.field.icon_color" } },
+          { "grow": 1, "children": [{ "slot": "input" }] },
+          {
+            "when": "search",
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": "$palette.field.options_gap" },
+            "children": [
+              { "button": "case", "element": "palette.option", "size": "xsmall", "icon": "case-sensitive", "selected": "case", "tooltip": "Match Case" },
+              { "button": "word", "element": "palette.option", "size": "xsmall", "icon": "whole-word", "selected": "word", "tooltip": "Match Whole Word" },
+              { "button": "regex", "element": "palette.option", "size": "xsmall", "icon": "regex", "selected": "regex", "tooltip": "Use Regular Expression" }
+            ]
+          }
+        ]
+      },
+      {
+        "when": "status",
+        "element": "palette.status",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "states": { "error": { "text": "$palette.status.error_text" } },
+        "children": [{ "truncate": true, "text": "{status}" }]
+      },
+      { "when": "empty", "element": "palette.empty", "grow": 1, "layout": "row", "align": "center", "justify": "center", "children": [{ "text": "{empty}" }] },
+      { "when": "!empty", "grow": 1, "children": [{ "slot": "list" }] },
+      {
+        "element": "palette.footer",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "children": [{ "text": "↑↓ Move" }, { "text": "↩ {enter_label}" }, { "text": "Esc {escape_label}" }]
+      }
+    ]
+  },
+  "palette.command": {
+    "frame": "row",
+    "element": "palette.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "selected": { "background": "$palette.row.selected_background", "text": "$palette.row.selected_text" },
+      "hover && !selected": { "background": "$palette.row.hover_background" }
+    },
+    "children": [
+      { "grow": 1, "truncate": true, "text": "{title}" },
+      { "when": "key", "shrink": 0, "text": "{key}", "style": { "font_size": "$palette.row.detail_font_size", "text": "$palette.row.detail_text" } }
+    ]
+  },
+  "palette.file": {
+    "element": "palette.file",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "children": [
+      { "slot": "icon" },
+      { "shrink": 0, "text": "{name}" },
+      { "grow": 1, "truncate": true, "text": "{dir}", "style": { "font_size": "$palette.file.detail_font_size", "text": "$palette.file.detail_text" } },
+      { "shrink": 0, "text": "{count}", "style": { "font_size": "$palette.file.detail_font_size", "text": "$palette.file.detail_text" } }
+    ]
+  },
+  "palette.match": {
+    "frame": "row",
+    "element": "palette.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "selected": { "background": "$palette.row.selected_background", "text": "$palette.row.selected_text" },
+      "hover && !selected": { "background": "$palette.row.hover_background" }
+    },
+    "children": [
+      {
+        "shrink": 0,
+        "layout": "row",
+        "justify": "end",
+        "style": { "width": "$palette.row.line_width", "margin_right": "$palette.row.line_gap", "font_size": "$palette.row.detail_font_size", "text": "$palette.row.detail_text" },
+        "children": [{ "text": "{line}" }]
+      },
+      {
+        "each": "parts",
+        "grow": 1,
+        "layout": "row",
+        "clip": true,
+        "style": { "font_family": "{mono}", "font_size": "$palette.row.code_font_size" },
+        "item": {
+          "nowrap": true,
+          "text": "{text}",
+          "states": { "hit": { "background": "$palette.row.match_background", "text": "$palette.row.match_text" } }
+        }
+      }
+    ]
+  },
   "drag_chip": {
     "element": "drag_chip",
     "layout": "row",

@@ -54,6 +54,9 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Clear Terminal", terminal_view::Clear),
     ]);
     let view = Menu::new("View").items([
+        MenuItem::action("Command Palette…", workspace::CommandPalette),
+        MenuItem::action("Search in Files", workspace::SearchInFiles),
+        MenuItem::separator(),
         MenuItem::action("Explorer", workspace::ToggleExplorer),
         MenuItem::action("Changes", workspace::ToggleChanges),
         MenuItem::action("Scratches", workspace::ToggleScratches),

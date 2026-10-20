@@ -29,6 +29,7 @@ use crate::diff_pane::DiffPane;
 use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
+use crate::palette::{self, Palette, PaletteEvent};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
 use crate::platform::bind;
 use crate::scratch::{self, Scratch};
@@ -57,6 +58,8 @@ actions!(
         ToggleExplorer,
         ToggleChanges,
         ToggleScratches,
+        CommandPalette,
+        SearchInFiles,
         ResetLayout,
         FocusTerminal,
         SplitRight,
@@ -90,6 +93,8 @@ pub fn bind_keys(cx: &mut App) {
         bind("cmd-b", ToggleExplorer, None),
         bind("cmd-shift-g", ToggleChanges, None),
         bind("cmd-shift-s", ToggleScratches, None),
+        bind("cmd-shift-p", CommandPalette, None),
+        bind("cmd-shift-f", SearchInFiles, None),
         bind("cmd-j", FocusTerminal, None),
         bind("cmd-\\", SplitRight, None),
         bind("cmd-shift-\\", SplitDown, None),
@@ -324,6 +329,9 @@ pub struct Workspace {
     show_explorer: bool,
     show_changes: bool,
     show_scratches: bool,
+    /// The command palette and Search in Files, made when first opened and
+    /// kept, so a search is still there when it opens again.
+    palette: Option<(Entity<Palette>, Subscription)>,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
     /// The pane each tab is in.
@@ -492,6 +500,7 @@ impl Workspace {
             show_explorer: !saved.hidden.iter().any(|h| h == "explorer"),
             show_changes: !saved.hidden.iter().any(|h| h == "changes"),
             show_scratches: !saved.hidden.iter().any(|h| h == "scratches"),
+            palette: None,
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -1563,14 +1572,9 @@ impl Workspace {
                     self.tree.update(cx, |t, cx| t.reveal(path, cx));
                     return cx.notify();
                 }
-                self.open_file(path.clone(), false, window, cx);
-                if let Some(line) = *line
-                    && let Some(view) = self.tabs.iter().find_map(|t| match t {
-                        CenterTab::File { view, .. } if view.read(cx).path() == Some(path.as_path()) => Some(view.clone()),
-                        _ => None,
-                    })
-                {
-                    view.update(cx, |v, _| v.go_to(line, *col));
+                match *line {
+                    Some(line) => self.open_file_at(path.clone(), line, *col, window, cx),
+                    None => self.open_file(path.clone(), false, window, cx),
                 }
             },
         }
@@ -2891,6 +2895,43 @@ impl Workspace {
         self.panels_changed(cx);
     }
 
+    /// Show the command palette, or Search in Files.
+    fn open_palette(&mut self, mode: palette::Mode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_none() {
+            let root = self.root.clone();
+            let p = cx.new(|cx| Palette::new(root, window, cx));
+            let sub = cx.subscribe_in(&p, window, |this, _, ev: &PaletteEvent, window, cx| {
+                window.close_dialog(cx);
+                this.focus_active(window, cx);
+                match ev {
+                    PaletteEvent::Run(action) => {
+                        // Once focus is back in the workspace, which handles most of them.
+                        let action = action.boxed_clone();
+                        window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+                    },
+                    PaletteEvent::Open { path, line, col } => this.open_file_at(path.clone(), *line, Some(*col), window, cx),
+                    PaletteEvent::Close => {},
+                }
+            });
+            self.palette = Some((p, sub));
+        }
+        if let Some((p, _)) = &self.palette {
+            palette::open(p, mode, window, cx);
+        }
+    }
+
+    /// Open `path` (as a preview) with the cursor at 1-based `line`, `col`.
+    fn open_file_at(&mut self, path: PathBuf, line: u32, col: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file(path.clone(), false, window, cx);
+        let view = self.tabs.iter().find_map(|t| match t {
+            CenterTab::File { view, .. } if view.read(cx).path() == Some(path.as_path()) => Some(view.clone()),
+            _ => None,
+        });
+        if let Some(view) = view {
+            view.update(cx, |v, cx| v.go_to(line, col, window, cx));
+        }
+    }
+
     fn ui<R>(&self, pane: PaneId, f: impl FnOnce(&mut PaneUi) -> R) -> R {
         f(self.pane_ui.borrow_mut().entry(pane).or_default())
     }
@@ -3947,6 +3988,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenSettingsFile, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
             .on_action(cx.listener(Self::toggle_changes))
             .on_action(cx.listener(Self::toggle_scratches))
+            .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(palette::Mode::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).

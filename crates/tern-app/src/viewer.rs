@@ -222,9 +222,17 @@ impl Viewer {
         self.image = image;
     }
 
-    /// Put the cursor on 1-based `line` (and `col`) once the file loads.
-    pub fn go_to(&mut self, line: u32, col: Option<u32>) {
-        self.go_to = Some(Position::new(line.saturating_sub(1), col.unwrap_or(1).saturating_sub(1)));
+    /// Put the cursor on 1-based `line` (and `col`) once the file loads, or
+    /// now if it has unsaved edits (it isn't reloaded then).
+    pub fn go_to(&mut self, line: u32, col: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        let pos = Position::new(line.saturating_sub(1), col.unwrap_or(1).saturating_sub(1));
+        if !self.dirty {
+            self.go_to = Some(pos);
+            return;
+        }
+        self.mode = Mode::Edit;
+        self.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
+        cx.notify();
     }
 
     /// Reload from disk keeping the cursor; skipped when there are unsaved edits.
@@ -273,6 +281,14 @@ impl Viewer {
                         if let Some(pos) = this.go_to.take() {
                             this.mode = Mode::Edit;
                             this.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
+                            // The editor scrolls to the cursor only once it has a
+                            // layout of the new text: a tab just opened gets it
+                            // when drawn, a frame or two from now.
+                            cx.on_next_frame(window, move |_, window, cx| {
+                                cx.on_next_frame(window, move |this, window, cx| {
+                                    this.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
+                                });
+                            });
                         }
                         this.loading = false;
                     },

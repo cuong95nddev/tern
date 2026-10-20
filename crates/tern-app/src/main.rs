@@ -17,6 +17,7 @@ mod handoff;
 mod links;
 mod main_window;
 mod menus;
+mod palette;
 mod panes;
 mod part_window;
 mod platform;
