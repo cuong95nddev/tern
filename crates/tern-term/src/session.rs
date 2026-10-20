@@ -355,6 +355,14 @@ impl Session {
         #[cfg(windows)]
         return crate::procs::foreground_cwd(self.pid);
     }
+
+    /// See [`crate::procs::agent_shells`]. None on Windows.
+    pub fn agent_shells(&self) -> Vec<crate::procs::AgentShell> {
+        #[cfg(unix)]
+        return crate::procs::agent_shells(&self.tty);
+        #[cfg(windows)]
+        return Vec::new();
+    }
 }
 
 impl Drop for Session {

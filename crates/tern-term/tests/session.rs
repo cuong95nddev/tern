@@ -90,3 +90,29 @@ fn foreground_programs_name_the_running_command_and_its_script() {
         assert!(programs.iter().any(|p| p == want), "{want} missing from {programs:?}");
     }
 }
+
+#[test]
+fn agent_shells_are_the_commands_run_in_groups_of_their_own() {
+    // With job control on, the background job gets a group of its own, as
+    // Claude Code's Bash tool gives each command; `wait` keeps the parent in
+    // the foreground. `; true` keeps the inner shell from exec-ing `sleep`.
+    let out = std::env::temp_dir().join(format!("tern-shell-out-{}", std::process::id()));
+    let script = format!("set -m; /bin/sh -c 'sleep 3; true' > '{}' 2>&1 & wait", out.display());
+    let (s, _rx) = spawn("/bin/sh", &["-c", &script]);
+    let mut shells = Vec::new();
+    for _ in 0..50 {
+        shells = s.agent_shells();
+        if !shells.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(shells.len(), 1, "{shells:?}");
+    assert_eq!(shells[0].command, "sleep 3; true");
+    let age = shells[0].started.elapsed().unwrap_or_default();
+    assert!(age < Duration::from_secs(5), "started {age:?} ago");
+    // Its output's file, by its real path (`/tmp` is a link on macOS).
+    let want = std::fs::canonicalize(&out).unwrap();
+    assert_eq!(shells[0].output.as_ref().map(|p| std::fs::canonicalize(p).unwrap()), Some(want));
+    let _ = std::fs::remove_file(&out);
+}

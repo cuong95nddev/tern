@@ -35,6 +35,7 @@ use crate::platform::bind;
 use crate::scratch::{self, Scratch};
 use crate::scratches_view::{ScratchesEvent, ScratchesView};
 use crate::settings;
+use crate::shells_view::{ShellRow, ShellsEvent, ShellsView};
 use crate::style;
 use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
@@ -61,6 +62,7 @@ actions!(
         CommandPalette,
         GoToFile,
         SearchInFiles,
+        ToggleShells,
         ResetLayout,
         FocusTerminal,
         SplitRight,
@@ -146,6 +148,8 @@ struct TermTab {
     notified: Option<Instant>,
     /// Rang the bell while not shown; cleared when shown.
     rang: bool,
+    /// The output file of an agent's shell it follows (see `open_shell`).
+    follows: Option<PathBuf>,
     _subs: Vec<Subscription>,
 }
 
@@ -311,6 +315,7 @@ pub struct Workspace {
     tree: Entity<FileTreeView>,
     changes: Entity<ChangesView>,
     scratches: Entity<ScratchesView>,
+    shells: Entity<ShellsView>,
     tabs: Vec<CenterTab>,
     active: usize,
     /// The tab last right-clicked, for the tab context menu.
@@ -334,6 +339,7 @@ pub struct Workspace {
     /// The command palette and Search in Files, made when first opened and
     /// kept, so a search is still there when it opens again.
     palette: Option<(Entity<Palette>, Subscription)>,
+    show_shells: bool,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
     /// The pane each tab is in.
@@ -439,6 +445,7 @@ impl Workspace {
         let tree = cx.new(|cx| FileTreeView::new(root.clone(), cx));
         let changes = cx.new(|cx| ChangesView::new(root.clone(), cx));
         let scratches = cx.new(ScratchesView::new);
+        let shells = cx.new(ShellsView::new);
 
         let tree_sub = cx.subscribe_in(&tree, window, |this, _, ev: &FileTreeEvent, window, cx| match ev {
             FileTreeEvent::OpenFile { path, pin } => {
@@ -482,6 +489,13 @@ impl Workspace {
                 this.panels_changed(cx);
             },
         });
+        let shells_sub = cx.subscribe_in(&shells, window, |this, _, ev: &ShellsEvent, window, cx| match ev {
+            ShellsEvent::Open(row) => this.open_shell(row, window, cx),
+            ShellsEvent::Hide => {
+                this.show_shells = false;
+                this.panels_changed(cx);
+            },
+        });
 
         let mut this = Self {
             root,
@@ -489,6 +503,7 @@ impl Workspace {
             tree,
             changes,
             scratches,
+            shells,
             tabs: vec![],
             active: 0,
             menu_tab: None,
@@ -503,6 +518,7 @@ impl Workspace {
             show_changes: !saved.hidden.iter().any(|h| h == "changes"),
             show_scratches: !saved.hidden.iter().any(|h| h == "scratches"),
             palette: None,
+            show_shells: !saved.hidden.iter().any(|h| h == "shells"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -520,7 +536,7 @@ impl Workspace {
             float_area: None,
             agents: None,
             part_windows: HashMap::new(),
-            _subs: vec![tree_sub, changes_sub, scratches_sub],
+            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
         // Saved tab index → the tab it became (some don't come back).
@@ -613,11 +629,16 @@ impl Workspace {
         } else {
             Default::default()
         };
-        let hidden = [("explorer", self.show_explorer), ("changes", self.show_changes), ("scratches", self.show_scratches)]
-            .into_iter()
-            .filter(|(_, shown)| !shown)
-            .map(|(name, _)| name.to_owned())
-            .collect();
+        let hidden = [
+            ("explorer", self.show_explorer),
+            ("changes", self.show_changes),
+            ("scratches", self.show_scratches),
+            ("shells", self.show_shells),
+        ]
+        .into_iter()
+        .filter(|(_, shown)| !shown)
+        .map(|(name, _)| name.to_owned())
+        .collect();
         SavedWorkspace {
             folder: self.root.clone(),
             tabs,
@@ -784,7 +805,55 @@ impl Workspace {
         // not a running Claude it reattaches to, says something by exiting
         // at once.
         let resuming = session.is_some();
-        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, _subs: vec![sub] };
+        let tab = TermTab { view, rename, kind, token, session, resuming, notified: None, rang: false, follows: None, _subs: vec![sub] };
+        let ix = self.push_tab(CenterTab::Term(tab));
+        self.activate(ix, window, cx);
+    }
+
+    /// The shells the agents in this workspace's terminals run commands in,
+    /// oldest first.
+    fn shell_rows(&self, cx: &App) -> Vec<ShellRow> {
+        let mut rows = vec![];
+        for (i, t) in self.tabs.iter().enumerate() {
+            let Some(term) = t.term() else { continue };
+            let v = term.view.read(cx);
+            let Some(agent) = v.agent().filter(|_| !v.shells().is_empty()) else { continue };
+            let agent = crate::agents::display_name(&self.tab_info(i, cx).0, agent);
+            rows.extend(v.shells().iter().map(|s| ShellRow { tab: t.entity_id(), agent: agent.clone(), shell: s.clone() }));
+        }
+        rows.sort_by_key(|r| (r.shell.started, r.shell.pid));
+        rows
+    }
+
+    /// Show what shell `row` runs: a tab following its output file (the
+    /// one already open, else a new one), or its agent's tab when its
+    /// output goes to no file.
+    fn open_shell(&mut self, row: &ShellRow, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(output) = row.shell.output.clone() else {
+            return self.show_tab(row.tab, window, cx);
+        };
+        if let Some(ix) = self.tabs.iter().position(|t| t.term().is_some_and(|t| t.follows.as_ref() == Some(&output))) {
+            return self.activate(ix, window, cx);
+        }
+        let (mut cfg, _) = self.spawn_config(TabKind::Shell, None);
+        // From its start, and on past the shell's end.
+        cfg.args = crate::platform::shell_command_args(&format!("tail -n +1 -F {}", shell_quote(&output.to_string_lossy())));
+        let title = crate::shells_view::first_line(&row.shell.command);
+        let (config, connector) = (self.services.terminal.clone(), self.services.mux.clone());
+        let view = cx.new(|cx| TerminalView::new(cfg, false, None, title.clone(), config, connector, cx));
+        let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
+        let tab = TermTab {
+            view,
+            rename: Some(title.into()),
+            kind: TabKind::Shell,
+            token: None,
+            session: None,
+            resuming: false,
+            notified: None,
+            rang: false,
+            follows: Some(output),
+            _subs: vec![sub],
+        };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -879,9 +948,13 @@ impl Workspace {
     }
 
     /// What closing tab `ix` would end: a Claude turn in progress (an idle
-    /// conversation resumes at the next launch), or a program a shell runs.
+    /// conversation resumes at the next launch), or a program a shell runs
+    /// (not the `tail` following an agent's shell: it opens again).
     fn running_in(&self, ix: usize, cx: &App) -> Option<String> {
         let t = self.tabs.get(ix)?.term()?;
+        if t.follows.is_some() {
+            return None;
+        }
         let v = t.view.read(cx);
         match t.kind {
             TabKind::Claude => {
@@ -1806,6 +1879,7 @@ impl Workspace {
             "explorer" => ("folder", self.show_explorer, format!("Explorer ({})", shortcut("⌘B"))),
             "scratches" => ("sticky-note", self.show_scratches, format!("Scratches ({})", shortcut("⌘⇧S"))),
             "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
+            "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
             _ => return None,
         })
     }
@@ -1854,6 +1928,7 @@ impl Workspace {
         match part {
             "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
             "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
+            "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
             _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
         }
     }
@@ -1877,7 +1952,7 @@ impl Workspace {
                 })
                 .collect(),
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
-            _ => vec!["changes".into()],
+            _ => vec!["changes".into(), "shells".into()],
         };
         parts.into_iter().filter_map(|p| self.part_button(&p).map(|b| (p, b))).collect()
     }
@@ -2633,6 +2708,7 @@ impl Workspace {
                     "explorer" => self.show_explorer = true,
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
+                    "shells" => self.show_shells = true,
                     _ => {},
                 }
             },
@@ -2686,6 +2762,7 @@ impl Workspace {
                     "explorer" => self.show_explorer = true,
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
+                    "shells" => self.show_shells = true,
                     _ => {},
                 }
             },
@@ -2844,6 +2921,7 @@ impl Workspace {
             "explorer" => self.show_explorer,
             "scratches" => self.show_scratches,
             "changes" => self.show_changes,
+            "shells" => self.show_shells,
             _ => true,
         }
     }
@@ -2854,10 +2932,12 @@ impl Workspace {
             .var("explorer", self.show_explorer)
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
+            .var("shells", self.show_shells)
             .var("path", self.root.display().to_string())
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
+            .slot("shells", self.shells.clone().cached(cache_layout()))
             .slot_opt("agents", self.agents.clone())
     }
 
@@ -2933,6 +3013,11 @@ impl Workspace {
         if let Some(view) = view {
             view.update(cx, |v, cx| v.go_to(line, col, window, cx));
         }
+    }
+
+    fn toggle_shells(&mut self, _: &ToggleShells, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_shells = !self.show_shells;
+        self.panels_changed(cx);
     }
 
     fn ui<R>(&self, pane: PaneId, f: impl FnOnce(&mut PaneUi) -> R) -> R {
@@ -3877,6 +3962,10 @@ pub type TitleClick = Rc<dyn Fn(&mut Window, &mut App)>;
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
+        // Its agents' shells come and go with their tabs (a terminal tells
+        // of a change by notifying this): the panel redraws only on a change.
+        let shells = self.shell_rows(cx);
+        self.shells.update(cx, |s, cx| s.set(shells, cx));
         // A drag that ended outside every drop target leaves these behind.
         if !cx.has_active_drag() {
             self.tab_drag = false;
@@ -3994,6 +4083,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(palette::Mode::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &GoToFile, w, cx| this.open_palette(palette::Mode::Files, w, cx)))
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
+            .on_action(cx.listener(Self::toggle_shells))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).

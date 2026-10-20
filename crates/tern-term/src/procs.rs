@@ -72,6 +72,12 @@ pub fn foreground_programs(tty: &File) -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
+    group_pids(pgid).into_iter().filter_map(|p| argv(p, 2)).collect()
+}
+
+/// The processes of group `pgid`, its leader among them.
+#[cfg(target_os = "macos")]
+fn group_pids(pgid: libc::pid_t) -> Vec<libc::pid_t> {
     let mut pids = vec![0 as libc::pid_t; 256];
     let size = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
     let n = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), size) };
@@ -80,13 +86,14 @@ fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
     if !pids.contains(&pgid) {
         pids.push(pgid);
     }
-    pids.into_iter().filter(|&p| p > 0).filter_map(argv).collect()
+    pids.retain(|&p| p > 0);
+    pids
 }
 
-/// `pid`'s argv, from `KERN_PROCARGS2`: argc, the exec path, NUL padding,
-/// then the arguments.
+/// The first `max` arguments of `pid`'s argv, from `KERN_PROCARGS2`: argc,
+/// the exec path, NUL padding, then the arguments.
 #[cfg(target_os = "macos")]
-fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
+fn argv(pid: libc::pid_t, max: usize) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut len: libc::size_t = 0;
     let rc = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0) };
@@ -103,7 +110,7 @@ fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
     let rest = &buf[4..];
     let exec_end = rest.iter().position(|&b| b == 0)?;
     let args_start = exec_end + rest[exec_end..].iter().position(|&b| b != 0)?;
-    let args = rest[args_start..].split(|&b| b == 0).take(argc.min(2)).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    let args = rest[args_start..].split(|&b| b == 0).take(argc.min(max)).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     Some(args)
 }
 
@@ -176,6 +183,190 @@ fn cwd(pid: libc::pid_t) -> Option<PathBuf> {
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn cwd(_pid: i32) -> Option<PathBuf> {
     None
+}
+
+/// A shell a foreground program started to run a command: a `<shell> -c
+/// <script>` child of the foreground group in a process group of its own,
+/// as Claude Code's Bash tool runs each command (in the foreground or not).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentShell {
+    pub pid: u32,
+    /// What it runs: the script, or the command Claude Code's wrapper
+    /// script `eval`s.
+    pub command: String,
+    pub started: std::time::SystemTime,
+    /// The file its output goes to, when it goes to one (Claude Code's go
+    /// to a task file of the session, foreground commands' too).
+    pub output: Option<std::path::PathBuf>,
+}
+
+/// The shells the programs in `tty`'s foreground group run commands in,
+/// oldest first. Empty when they can't be read.
+#[cfg(unix)]
+pub fn agent_shells(tty: &File) -> Vec<AgentShell> {
+    let pgid = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
+    if pgid <= 0 {
+        return Vec::new();
+    }
+    let mut shells: Vec<AgentShell> = group_children(pgid)
+        .into_iter()
+        .filter_map(|(pid, started, argv)| {
+            let command = shell_command(&argv)?;
+            let output = stdout_path(pid as libc::pid_t).filter(|p| p.is_file());
+            Some(AgentShell { pid, command, started, output })
+        })
+        .collect();
+    shells.sort_by_key(|s| (s.started, s.pid));
+    shells
+}
+
+/// The children of group `pgid`'s processes that lead groups of their own:
+/// each one's pid, start time and first three arguments.
+#[cfg(target_os = "macos")]
+fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+    let mut out = Vec::new();
+    for parent in group_pids(pgid) {
+        let mut pids = vec![0 as libc::pid_t; 64];
+        let size = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
+        let n = unsafe { libc::proc_listchildpids(parent, pids.as_mut_ptr().cast(), size) };
+        let n = if n > 0 { (n as usize).min(pids.len()) } else { 0 };
+        for &pid in pids[..n].iter().filter(|&&p| p > 0) {
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+            if got != size || info.pbi_pgid as libc::pid_t == pgid {
+                continue;
+            }
+            let started = std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(info.pbi_start_tvsec)
+                + std::time::Duration::from_micros(info.pbi_start_tvusec);
+            if let Some(argv) = argv(pid, 3) {
+                out.push((pid as u32, started, argv));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+    use std::time::{Duration, UNIX_EPOCH};
+    // `pid (comm) state ppid pgrp ... starttime` (field 22, in clock ticks
+    // since boot); comm may hold spaces.
+    let stat = |pid: u32| -> Option<(libc::pid_t, libc::pid_t, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, after) = stat.rsplit_once(')')?;
+        let f: Vec<&str> = after.split_whitespace().collect();
+        Some((f.get(1)?.parse().ok()?, f.get(2)?.parse().ok()?, f.get(19)?.parse().ok()?))
+    };
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse::<u64>().ok()))
+        .unwrap_or(0);
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let procs: Vec<(u32, libc::pid_t, libc::pid_t, u64)> = dir
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|pid| stat(pid).map(|(ppid, pgrp, start)| (pid, ppid, pgrp, start)))
+        .collect();
+    let group: Vec<libc::pid_t> = procs.iter().filter(|p| p.2 == pgid).map(|p| p.0 as libc::pid_t).collect();
+    procs
+        .iter()
+        .filter(|(_, ppid, pgrp, _)| *pgrp != pgid && group.contains(ppid))
+        .filter_map(|&(pid, _, _, start)| {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(3).map(|a| String::from_utf8_lossy(a).into_owned());
+            let started = UNIX_EPOCH + Duration::from_secs(boot) + Duration::from_millis(start * 1000 / ticks);
+            Some((pid, started, argv.collect()))
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn group_children(_pgid: i32) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+    Vec::new()
+}
+
+/// What `pid`'s standard output (fd 1) is open on, as a path.
+#[cfg(target_os = "macos")]
+fn stdout_path(pid: libc::pid_t) -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // `struct vnode_fdinfowithpath` of <sys/proc_info.h>, which libc lacks.
+    #[repr(C)]
+    struct ProcFileInfo {
+        openflags: u32,
+        status: u32,
+        offset: libc::off_t,
+        kind: i32,
+        guardflags: u32,
+    }
+    #[repr(C)]
+    struct VnodeFdInfoWithPath {
+        pfi: ProcFileInfo,
+        pvip: libc::vnode_info_path,
+    }
+    const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+    let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
+    let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+    let n = unsafe { libc::proc_pidfdinfo(pid, 1, PROC_PIDFDVNODEPATHINFO, (&raw mut info).cast(), size) };
+    if n != size {
+        return None;
+    }
+    let raw = &info.pvip.vip_path;
+    let bytes = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), size_of_val(raw)) };
+    let path = CStr::from_bytes_until_nul(bytes).ok()?;
+    (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+#[cfg(target_os = "linux")]
+fn stdout_path(pid: libc::pid_t) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/fd/1")).ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn stdout_path(_pid: i32) -> Option<PathBuf> {
+    None
+}
+
+/// What `argv` runs when it is `<shell> -c <script>` (or `-lc`, ...): the
+/// script, or the command in it Claude Code's wrapper `eval`s.
+fn shell_command(argv: &[String]) -> Option<String> {
+    let [exe, flag, script, ..] = argv else { return None };
+    let name = Path::new(exe).file_name()?.to_str()?.trim_start_matches('-');
+    let shell = matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish");
+    let runs = flag.starts_with('-') && !flag.starts_with("--") && flag.ends_with('c');
+    if !shell || !runs {
+        return None;
+    }
+    let command = wrapped_command(script).unwrap_or_else(|| script.trim().to_owned());
+    (!command.is_empty()).then_some(command)
+}
+
+/// The command Claude Code's wrapper script (`source <snapshot> && ... &&
+/// eval '<command>' < /dev/null && pwd -P >| <file>`) runs, unquoted.
+fn wrapped_command(script: &str) -> Option<String> {
+    if !script.contains("shell-snapshots/") {
+        return None;
+    }
+    let mut rest = &script[script.find(" eval '")? + " eval '".len()..];
+    let mut out = String::new();
+    // Single quoted, a quote in it written `'\''`.
+    loop {
+        let end = rest.find('\'')?;
+        out.push_str(&rest[..end]);
+        rest = &rest[end..];
+        match rest.strip_prefix("'\\''") {
+            Some(after) => {
+                out.push('\'');
+                rest = after;
+            },
+            None => return Some(out.trim().to_owned()),
+        }
+    }
 }
 
 /// Names of the programs running in the console of `shell` (the PTY's
@@ -393,7 +584,24 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_interpreter, script_arg};
+    use super::{is_interpreter, script_arg, shell_command};
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn shell_commands() {
+        let wrapped = "source /Users/x/.claude/shell-snapshots/snapshot-zsh-1-a.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval 'sleep 30 && echo '\\''done'\\''' < /dev/null && pwd -P >| /tmp/claude-edee-cwd";
+        assert_eq!(shell_command(&argv(&["/bin/zsh", "-c", wrapped])), Some("sleep 30 && echo 'done'".into()));
+        assert_eq!(shell_command(&argv(&["bash", "-lc", "npm run dev"])), Some("npm run dev".into()));
+        assert_eq!(shell_command(&argv(&["-zsh", "-c", "ls"])), Some("ls".into()));
+        // Not a shell running a command.
+        assert_eq!(shell_command(&argv(&["bash", "/Users/x/.claude/statusline-command.sh"])), None);
+        assert_eq!(shell_command(&argv(&["node", "-c", "x"])), None);
+        assert_eq!(shell_command(&argv(&["zsh", "--norc", "x"])), None);
+        assert_eq!(shell_command(&argv(&["zsh", "-c"])), None);
+    }
 
     #[test]
     fn interpreter_scripts() {

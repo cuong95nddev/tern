@@ -354,6 +354,16 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "scratches.row", about: "A scratch file", groups: &[ROW] },
     Element { name: "scratches.empty", about: "What the scratches panel shows without files", groups: &[EMPTY] },
     Element {
+        name: "shells",
+        about: "The shells panel: the shells the agents in the workspace's terminals run commands in",
+        groups: &[PANEL, &[("start_height", Len, "180")], IMAGE],
+    },
+    Element { name: "shells.header", about: "The shells panel's title bar", groups: &[HEADER] },
+    simple!("shells.header.button", "A button in the shells panel's title bar"),
+    Element { name: "shells.list", about: "The shells panel's list of rows", groups: &[LIST] },
+    Element { name: "shells.row", about: "A shell: the command it runs and how long it has run", groups: &[ROW] },
+    Element { name: "shells.empty", about: "What the shells panel shows without shells", groups: &[EMPTY] },
+    Element {
         name: "pane",
         about: "A pane of the center: its tabs and what the active one shows. `focused_border` is its border color while \
                 it has focus, `focus_line_*` the line along its top while it has focus with more than one pane",

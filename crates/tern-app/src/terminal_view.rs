@@ -25,6 +25,7 @@ use tern_term::mirror::MirrorTerm;
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
 use tern_term::palette::Palette;
+use tern_term::procs::AgentShell;
 use tern_term::status::next_status;
 use tern_term::vt::grid::{Dimensions, Scroll};
 use tern_term::vt::index::{Column, Line, Point as GridPoint, Side};
@@ -291,6 +292,8 @@ pub struct TerminalView {
     idle_ticks: u32,
     /// The coding agent running in the foreground, if any.
     agent: Option<Agent>,
+    /// The shells `agent` runs commands in.
+    shells: Vec<AgentShell>,
     /// When the program last wrote something.
     last_output: Instant,
     _pump: Option<Task<()>>,
@@ -347,20 +350,28 @@ impl Ticker {
                 let (views, fgs): (Vec<_>, Vec<_>) = probes.into_iter().unzip();
                 // A shell's folder too, for starting it there again (a Claude
                 // tab keeps its own: `--resume` needs it).
+                // An agent's shells too, while it has one.
                 let found = cx
                     .background_spawn(async move {
                         fgs.into_iter()
-                            .map(|(f, shell)| f.map(|f| (f.programs(), shell.then(|| f.cwd()).flatten())).unwrap_or_default())
+                            .map(|(f, shell, agent)| {
+                                f.map(|f| {
+                                    let shells = if agent { f.agent_shells() } else { Vec::new() };
+                                    (f.programs(), shell.then(|| f.cwd()).flatten(), shells)
+                                })
+                                .unwrap_or_default()
+                            })
                             .collect::<Vec<_>>()
                     })
                     .await;
                 cx.update(|cx| {
-                    for (v, (programs, cwd)) in views.into_iter().zip(found) {
+                    for (v, (programs, cwd, shells)) in views.into_iter().zip(found) {
                         let _ = v.update(cx, |view, cx| {
                             if cwd.is_some() {
                                 view.last_cwd = cwd;
                             }
-                            view.set_agent(Agent::detect(&programs), cx)
+                            view.set_agent(Agent::detect(&programs), cx);
+                            view.set_shells(shells, cx);
                         });
                     }
                 });
@@ -428,6 +439,7 @@ impl TerminalView {
             cmd_held: false,
             idle_ticks: 0,
             agent: None,
+            shells: Vec::new(),
             last_output: Instant::now(),
             _pump: None,
             _connect: None,
@@ -444,9 +456,11 @@ impl TerminalView {
 
     /// One tick of [`Ticker`]. `Some` when this tab's foreground programs
     /// should be read: each tick while the program writes (an agent starting
-    /// or ending shows), else every fifth.
-    /// The foreground to read now, if any, and whether this is a shell tab.
-    fn tick(&mut self, cx: &mut Context<Self>) -> Option<(Option<Foreground>, bool)> {
+    /// or ending shows) or an agent runs (its shells come and go quietly),
+    /// else every fifth.
+    /// The foreground to read now, if any, whether this is a shell tab, and
+    /// whether to read the agent's shells.
+    fn tick(&mut self, cx: &mut Context<Self>) -> Option<(Option<Foreground>, bool, bool)> {
         // Rendering clears the wakeup flag; a tab not shown never renders,
         // so clear it here or its output stops waking it.
         if let Some(s) = &self.session {
@@ -455,7 +469,9 @@ impl TerminalView {
         self.read_agent_status(cx);
         let busy = self.last_output.elapsed() < Duration::from_secs(10);
         self.idle_ticks = if busy { 0 } else { self.idle_ticks + 1 };
-        (busy || self.idle_ticks.is_multiple_of(5)).then(|| (self.session.as_ref().map(RemoteSession::foreground), !self.hook))
+        let agent = self.agent.is_some();
+        (busy || agent || self.idle_ticks.is_multiple_of(5))
+            .then(|| (self.session.as_ref().map(RemoteSession::foreground), !self.hook, agent))
     }
 
     fn start_once(&mut self, cx: &mut Context<Self>) {
@@ -595,6 +611,11 @@ impl TerminalView {
         self.agent
     }
 
+    /// The shells the agent runs commands in, oldest first.
+    pub fn shells(&self) -> &[AgentShell] {
+        &self.shells
+    }
+
     /// Whether the program has settled for input: it turned on bracketed
     /// paste and has been quiet for `quiet`.
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
@@ -695,6 +716,14 @@ impl TerminalView {
         let agent = agent.filter(|_| self.session.is_some());
         if agent != self.agent {
             self.agent = agent;
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+    }
+
+    fn set_shells(&mut self, shells: Vec<AgentShell>, cx: &mut Context<Self>) {
+        let shells = if self.agent.is_some() { shells } else { Vec::new() };
+        if shells != self.shells {
+            self.shells = shells;
             cx.emit(TerminalEvent::TitleChanged);
         }
     }

@@ -946,17 +946,18 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | Template | Values | Slots |
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes` |
+| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells` |
 | `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
-| `explorer.header`, `changes.header`, `scratches.header` | as `panel_header` | as `panel_header` |
+| `explorer.header`, `changes.header`, `scratches.header`, `shells.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
 | `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
 | `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
+| `shells.row` | `indent`, `selected`, `command`, `agent` (with several agents), `age` | `icon` |
 | `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
 | `terminal` | `background` (the palette's, with `terminal.background_opacity`) | `grid` |
 | `viewer` | as `file_header`; `message` | `diff`, `image`, `preview`, `editor` (the one it shows) |
@@ -965,6 +966,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `explorer` | | `header`, `list` |
 | `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
+| `shells`, `shells.empty` | `empty` | `header`, `list` |
 | `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
 | `drag_chip` | `label`, `icon` | |
@@ -1044,11 +1046,11 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 ### Moving panels
 
-The explorer, scratches and changes panels sit in docks and can be dragged
+The explorer, scratches, changes and shells panels sit in docks and can be dragged
 between them by their headers. In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
-  (`explorer`, `scratches`, `changes`). Give it `\"drag\": false` (or a
+  (`explorer`, `scratches`, `changes`, `shells`). Give it `\"drag\": false` (or a
   condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or
@@ -1112,7 +1114,7 @@ it. Copy the new `workspace` from `reference/templates.json`.
 
 ### Background images
 
-`window`, `agents`, `workspace`, `explorer`, `changes`, `scratches`, `vertical_tabs`,
+`window`, `agents`, `workspace`, `explorer`, `changes`, `scratches`, `shells`, `vertical_tabs`,
 `welcome` and `terminal` can show an image behind their content (so can any
 box of a template, through its `style`): `background_image` (a path:
 absolute, `~/…`, or relative to this folder), `background_image_fit` (`cover`,

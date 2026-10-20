@@ -26,6 +26,7 @@ mod scratch;
 mod scratches_view;
 mod settings;
 mod settings_window;
+mod shells_view;
 #[cfg(any(target_os = "macos", windows))]
 mod shot;
 mod shot_icons;

@@ -49,7 +49,8 @@
                 "children": [
                   { "part": "explorer", "when": "explorer" },
                   { "part": "changes", "when": "changes", "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
-                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 }
+                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 },
+                  { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height", "min": 90, "max": 800 }
                 ]
               }
             ]
@@ -80,6 +81,7 @@
   "explorer.header": { "use": "panel_header", "element": "explorer.header" },
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
+  "shells.header": { "use": "panel_header", "element": "shells.header" },
   "explorer.header.buttons": {
     "layout": "row",
     "align": "center",
@@ -172,6 +174,20 @@
       }
     ]
   },
+  "shells.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$shells.header.gap" },
+    "children": [
+      {
+        "button": "hide",
+        "element": "shells.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Shells"
+      }
+    ]
+  },
   "explorer.row": {
     "frame": "row",
     "element": "explorer.row",
@@ -255,6 +271,24 @@
       { "slot": "icon" },
       { "grow": 1, "truncate": true, "text": "{name}" },
       { "when": "age", "shrink": 0, "text": "{age}", "style": { "font_size": "$scratches.row.detail_font_size", "text": "$scratches.row.detail_text" } }
+    ]
+  },
+  "shells.row": {
+    "frame": "row",
+    "element": "shells.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "selected": { "background": "$shells.row.selected_background", "text": "$shells.row.selected_text" },
+      "hover": { "background": "$shells.row.hover_background" }
+    },
+    "children": [
+      { "slot": "icon" },
+      { "grow": 1, "truncate": true, "text": "{command}" },
+      { "when": "agent", "shrink": 0, "text": "{agent}", "style": { "font_size": "$shells.row.detail_font_size", "text": "$shells.row.detail_text" } },
+      { "shrink": 0, "text": "{age}", "style": { "font_size": "$shells.row.detail_font_size", "text": "$shells.row.detail_text" } }
     ]
   },
   "pane": {
@@ -1471,6 +1505,19 @@
         "item": { "nowrap": true, "text": "{text}", "states": { "hit": { "background": "$palette.row.match_background", "text": "$palette.row.match_text" } } }
       }
     ]
+  },
+  "shells": {
+    "frame": "panel",
+    "element": "shells",
+    "fill": true,
+    "children": [{ "slot": "header" }, { "when": "empty", "use": "shells.empty" }, { "slot": "list" }]
+  },
+  "shells.empty": {
+    "element": "shells.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "No shells running" }, { "style": { "font_size": "$text_xs" }, "text": "Commands agents run show here" }]
   },
   "drag_chip": {
     "element": "drag_chip",

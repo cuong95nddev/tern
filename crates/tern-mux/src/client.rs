@@ -881,6 +881,14 @@ impl Foreground {
         #[cfg(windows)]
         return self.0.tty.lock().unwrap().and_then(tern_term::procs::foreground_cwd);
     }
+
+    /// See [`tern_term::procs::agent_shells`]. None on Windows.
+    pub fn agent_shells(&self) -> Vec<tern_term::procs::AgentShell> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().map(tern_term::procs::agent_shells).unwrap_or_default();
+        #[cfg(windows)]
+        return Vec::new();
+    }
 }
 
 /// A tab's session in the daemon. Dropping it detaches (the program keeps
