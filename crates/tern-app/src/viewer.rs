@@ -15,7 +15,7 @@ use crate::template::{Framed, on_event};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
-actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal]);
+actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal, ToggleWordWrap]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -23,7 +23,25 @@ pub fn bind_keys(cx: &mut App) {
         bind("cmd-shift-d", ToggleDiff, None),
         bind("cmd-shift-v", TogglePreview, None),
         bind("cmd-shift-o", OpenExternal, None),
+        // Only where an editor has focus: in a terminal, Option-Z is typed.
+        bind("alt-z", ToggleWordWrap, Some("Viewer")),
+        bind("alt-z", ToggleWordWrap, Some("Scratch")),
     ]);
+}
+
+/// Flip word wrap for every file and scratch editor. Each one picks it up
+/// with [`sync_word_wrap`] when next drawn.
+pub fn toggle_word_wrap() {
+    crate::window_state::set_word_wrap(!crate::window_state::word_wrap());
+}
+
+/// Bring `editor` to the shared word wrap choice; `wrap` is what it was last set to.
+pub fn sync_word_wrap(editor: &Entity<EditorState>, wrap: &mut bool, window: &mut Window, cx: &mut App) {
+    let want = crate::window_state::word_wrap();
+    if *wrap != want {
+        *wrap = want;
+        editor.update(cx, |ed, cx| ed.set_soft_wrap(want, window, cx));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +88,8 @@ pub struct Viewer {
     root: PathBuf,
     path: Option<PathBuf>,
     editor: Entity<EditorState>,
+    /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
+    wrap: bool,
     diff: Option<Entity<DiffPane>>,
     preview: Entity<TextViewState>,
     /// Set when the open file is an image; the body shows it instead of the editor.
@@ -167,7 +187,8 @@ fn link_target(root: &Path, dir: &Path, target: &str) -> Option<PathBuf> {
 
 impl Viewer {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(false));
+        let wrap = crate::window_state::word_wrap();
+        let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(wrap));
         let sub = cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) && !this.loading && !this.dirty {
                 this.dirty = true;
@@ -179,6 +200,7 @@ impl Viewer {
             root,
             path: None,
             editor,
+            wrap,
             diff: None,
             preview,
             image: None,
@@ -336,6 +358,11 @@ impl Viewer {
         }
     }
 
+    fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
+        toggle_word_wrap();
+        cx.notify();
+    }
+
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value();
         self.preview.update(cx, |p, cx| p.set_text(&text, cx));
@@ -460,7 +487,8 @@ impl Viewer {
 }
 
 impl Render for Viewer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        sync_word_wrap(&self.editor, &mut self.wrap, window, cx);
         let name = self.path.as_ref().map(|p| p.strip_prefix(&self.root).unwrap_or(p).display().to_string()).unwrap_or_default();
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
@@ -473,7 +501,10 @@ impl Render for Viewer {
             .var("image", is_image)
             .var("preview", self.mode == Mode::Preview)
             .var("diff", diff_mode)
+            .var("wrap", self.wrap)
+            .var("wrap_key", crate::platform::shortcut("⌥Z"))
             .var("preview_key", crate::platform::shortcut("⌘⇧V"))
+            .var("diff_key", crate::platform::shortcut("⌘⇧D"))
             .var("open_external_key", crate::platform::shortcut("⌘⇧O"));
         // What the body shows: one slot (or the message) of the template's.
         let scope = if diff_mode && let Some(diff) = &self.diff {
@@ -513,12 +544,16 @@ impl Render for Viewer {
                     .on_action(cx.listener(Self::toggle_diff))
                     .on_action(cx.listener(Self::toggle_preview))
                     .on_action(cx.listener(Self::open_external))
+                    .on_action(cx.listener(Self::toggle_word_wrap))
                     .into_any_element(),
                 ("preview", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_preview(&TogglePreview, w, cx))).into_any_element()
                 },
                 ("diff", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_diff(&ToggleDiff, w, cx))).into_any_element()
+                },
+                ("wrap", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_word_wrap(&ToggleWordWrap, w, cx))).into_any_element()
                 },
                 ("open_external", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.open_external(&OpenExternal, w, cx))).into_any_element()

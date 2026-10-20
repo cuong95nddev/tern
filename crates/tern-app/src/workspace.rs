@@ -4260,6 +4260,14 @@ impl Render for Workspace {
                     view.clone().update(cx, |v, cx| v.toggle_diff(a, w, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &viewer::ToggleWordWrap, _, cx| {
+                viewer::toggle_word_wrap();
+                match this.tabs.get(this.active) {
+                    Some(CenterTab::File { view, .. }) => view.update(cx, |_, cx| cx.notify()),
+                    Some(CenterTab::Scratch { view, .. }) => view.update(cx, |_, cx| cx.notify()),
+                    _ => {},
+                }
+            }))
             .on_action(cx.listener(|this, a: &viewer::TogglePreview, w, cx| {
                 if let Some(CenterTab::File { view, .. }) = this.tabs.get(this.active) {
                     view.clone().update(cx, |v, cx| v.toggle_preview(a, w, cx));

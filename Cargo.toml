@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -25,3 +26,9 @@ opt-level = 1
 
 [profile.dev.package.tern-app]
 opt-level = 1
+
+# gpui's list dropped every item's height hint when its width changed, the
+# first layout included, so off-screen rows counted as zero height and the
+# diff view could not scroll past its first screen. See vendor/README.md.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }

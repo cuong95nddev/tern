@@ -224,6 +224,23 @@ pub fn set_tab_layout(layout: TabLayout) {
     let _ = std::fs::remove_file(file().with_file_name("tab-wrap"));
 }
 
+fn word_wrap_file() -> PathBuf {
+    file().with_file_name("word-wrap")
+}
+
+static WORD_WRAP: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// Whether file and scratch editors wrap long lines, in every window.
+pub fn word_wrap() -> bool {
+    let mut cached = WORD_WRAP.lock().unwrap_or_else(|e| e.into_inner());
+    *cached.get_or_insert_with(|| std::fs::read_to_string(word_wrap_file()).is_ok_and(|s| s.trim() == "on"))
+}
+
+pub fn set_word_wrap(on: bool) {
+    *WORD_WRAP.lock().unwrap_or_else(|e| e.into_inner()) = Some(on);
+    write(&word_wrap_file(), if on { "on\n" } else { "off\n" });
+}
+
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -98,6 +98,8 @@ pub struct EditorSettings {
     pub font_family: Option<String>,
     /// Editor font size (default 13).
     pub font_size: Option<f32>,
+    /// Diffs side by side instead of in one column.
+    pub diff_split: bool,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -416,6 +418,7 @@ fn load(cx: &mut App) {
     templates.check_actions(cx.all_action_names(), &mut problems);
     cx.set_global(templates);
     cx.set_global(crate::dock::LayoutLock(settings.layout.locked));
+    cx.set_global(crate::diff_pane::DiffSplit(settings.editor.diff_split));
 
     let t = &settings.terminal;
     cx.set_global(TerminalLook {
@@ -963,6 +966,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `terminal` | `background` (the palette's, with `terminal.background_opacity`) | `grid` |
 | `viewer` | as `file_header`; `message` | `diff`, `image`, `preview`, `editor` (the one it shows) |
 | `diff_pane` | `message` | `diff` |
+| `diff_pane.mode` (after the file name in its header) | `split` | |
 | `scratch` | `message` | `editor` |
 | `explorer` | | `header`, `list` |
 | `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |

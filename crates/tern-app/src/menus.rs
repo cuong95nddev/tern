@@ -66,6 +66,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Reset Layout", workspace::ResetLayout),
         MenuItem::action("Focus Terminal", workspace::FocusTerminal),
         MenuItem::action("Agent Monitor", agent_monitor::ToggleAgentMonitor),
+        MenuItem::action("Word Wrap", crate::viewer::ToggleWordWrap),
         MenuItem::separator(),
         MenuItem::action("Split Right", workspace::SplitRight),
         MenuItem::action("Split Down", workspace::SplitDown),

@@ -87,6 +87,8 @@ pub struct Scratch {
     path: PathBuf,
     name: SharedString,
     editor: Entity<EditorState>,
+    /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
+    wrap: bool,
     dirty: bool,
     message: Option<SharedString>,
     _subs: Vec<Subscription>,
@@ -103,8 +105,9 @@ impl Scratch {
     pub fn open(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let lang = language_for(&path);
+        let wrap = crate::window_state::word_wrap();
         let editor = cx.new(|cx| {
-            let mut ed = EditorState::new(window, cx).line_number(true).soft_wrap(false).placeholder("Scratch…");
+            let mut ed = EditorState::new(window, cx).line_number(true).soft_wrap(wrap).placeholder("Scratch…");
             ed.set_highlighter(lang, cx);
             ed.set_value(text, window, cx);
             ed
@@ -115,7 +118,7 @@ impl Scratch {
             }
         });
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().into();
-        Self { path, name, editor, dirty: false, message: None, _subs: vec![sub], _autosave: None }
+        Self { path, name, editor, wrap, dirty: false, message: None, _subs: vec![sub], _autosave: None }
     }
 
     pub fn title(&self) -> &SharedString {
@@ -203,12 +206,29 @@ impl Scratch {
 }
 
 impl Render for Scratch {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::viewer::sync_word_wrap(&self.editor, &mut self.wrap, window, cx);
         let scope = Scope::new("scratch")
+            .var("name", self.name.clone())
             .var("message", self.message.clone().unwrap_or_default())
+            .var("wrap", self.wrap)
+            .var("wrap_key", crate::platform::shortcut("⌥Z"))
             .slot("editor", Editor::new(&self.editor).bordered(false).h_full());
         let mut frames = |name: &str, _, f| match (name, f) {
-            ("scratch", Framed::Box(d)) => d.key_context("Scratch").on_action(cx.listener(Self::save)).into_any_element(),
+            ("scratch", Framed::Box(d)) => d
+                .key_context("Scratch")
+                .on_action(cx.listener(Self::save))
+                .on_action(cx.listener(|_, _: &crate::viewer::ToggleWordWrap, _, cx| {
+                    crate::viewer::toggle_word_wrap();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            ("wrap", Framed::Button(b)) => b
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                    crate::viewer::toggle_word_wrap();
+                    cx.notify();
+                }))
+                .into_any_element(),
             (_, f) => f.into_any_element(),
         };
         template::render("scratch", scope, &mut frames, cx)

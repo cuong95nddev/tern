@@ -20,6 +20,7 @@ gpui_kit::assets::icon_assets!(
         CircleDashed,
         Columns2,
         Database,
+        Eye,
         FileArchive,
         FileBadge,
         FileBraces,
@@ -45,8 +46,10 @@ gpui_kit::assets::icon_assets!(
         Maximize2,
         Regex,
         Search,
+        SquareArrowOutUpRight,
         Minimize2,
         StickyNote,
+        TextWrap,
         WholeWord,
     ]
 );

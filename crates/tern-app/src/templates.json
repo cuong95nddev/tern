@@ -1357,6 +1357,29 @@
       { "grow": 1, "slot": "editor" }
     ]
   },
+  "diff_pane.mode": {
+    "layout": "row",
+    "align": "center",
+    "children": [
+      {
+        "when": "split",
+        "button": "mode",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "selected": true,
+        "icon": "columns-2",
+        "tooltip": "Show in one column"
+      },
+      {
+        "when": "!split",
+        "button": "mode",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "icon": "columns-2",
+        "tooltip": "Show side by side"
+      }
+    ]
+  },
   "diff_pane": {
     "frame": "diff_pane",
     "fill": true,
