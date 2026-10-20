@@ -70,7 +70,7 @@ pub fn foreground_programs(tty: &File) -> Vec<String> {
     names
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
     group_pids(pgid).into_iter().filter_map(|p| argv(p, 2)).collect()
 }
@@ -114,8 +114,9 @@ fn argv(pid: libc::pid_t, max: usize) -> Option<Vec<String>> {
     Some(args)
 }
 
+/// The processes of group `pgid`.
 #[cfg(target_os = "linux")]
-fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
+fn group_pids(pgid: libc::pid_t) -> Vec<libc::pid_t> {
     static GROUPS: ScanCache<Vec<(u32, libc::pid_t)>> = ScanCache::new();
     let has_group = |groups: &Vec<(u32, libc::pid_t)>| groups.iter().any(|&(_, g)| g == pgid);
     let groups = GROUPS.get(has_group, || {
@@ -130,21 +131,29 @@ fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
             })
             .collect()
     });
-    groups
-        .iter()
-        .filter(|(_, g)| *g == pgid)
-        .filter_map(|&(pid, _)| {
-            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-            let args: Vec<String> =
-                cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(2).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-            (!args.is_empty()).then_some(args)
-        })
-        .collect()
+    groups.iter().filter(|(_, g)| *g == pgid).map(|&(pid, _)| pid as libc::pid_t).collect()
+}
+
+/// The first `max` arguments of `pid`'s argv.
+#[cfg(target_os = "linux")]
+fn argv(pid: libc::pid_t, max: usize) -> Option<Vec<String>> {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> =
+        cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(max).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (!args.is_empty()).then_some(args)
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn group_argvs(_pgid: i32) -> Vec<Vec<String>> {
     Vec::new()
+}
+
+/// `tty`'s foreground process group leader: the program a shell runs
+/// (it leads its own group), else the shell.
+#[cfg(unix)]
+pub fn foreground_pid(tty: &File) -> Option<u32> {
+    let pgid = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
+    u32::try_from(pgid).ok().filter(|&p| p > 0)
 }
 
 /// The working directory of `tty`'s foreground process group leader (the
@@ -208,7 +217,9 @@ pub fn agent_shells(tty: &File) -> Vec<AgentShell> {
     if pgid <= 0 {
         return Vec::new();
     }
-    let mut shells: Vec<AgentShell> = group_children(pgid)
+    let mut parents = group_pids(pgid);
+    parents.extend(claude_job_pids(&parents));
+    let mut shells: Vec<AgentShell> = group_children(&parents)
         .into_iter()
         .filter_map(|(pid, started, argv)| {
             let command = shell_command(&argv)?;
@@ -220,23 +231,59 @@ pub fn agent_shells(tty: &File) -> Vec<AgentShell> {
     shells
 }
 
-/// The children of group `pgid`'s processes that lead groups of their own:
-/// each one's pid, start time and first three arguments.
+/// The processes Claude Code runs the background jobs in that `pids` show:
+/// `claude attach <job>` shows one the Claude daemon runs, in a process (and
+/// terminal) of its own, as does a session parked on a job.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn claude_job_pids(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
+    let Some(dir) = crate::status::claude_sessions_dir() else { return Vec::new() };
+    pids.iter()
+        .filter_map(|&pid| {
+            let job = argv(pid, 3)
+                .and_then(|a| attached_job(&a))
+                .or_else(|| crate::status::claude_parked_job(&dir, pid as u32))?;
+            libc::pid_t::try_from(crate::status::claude_job_pid(&dir, &job)?).ok()
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn claude_job_pids(_pids: &[i32]) -> Vec<i32> {
+    Vec::new()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn group_pids(pgid: i32) -> Vec<i32> {
+    vec![pgid]
+}
+
+/// The job `argv` attaches to when it is `claude attach <job>`.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn attached_job(argv: &[String]) -> Option<String> {
+    let [exe, cmd, job, ..] = argv else { return None };
+    let claude = Path::new(exe).file_name().is_some_and(|n| n == "claude");
+    (claude && cmd == "attach" && !job.starts_with('-')).then(|| job.clone())
+}
+
+/// The children of `parents` that lead groups of their own (not their
+/// parent's): each one's pid, start time and first three arguments.
 #[cfg(target_os = "macos")]
-fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+fn group_children(parents: &[libc::pid_t]) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+    let bsd_info = |pid: libc::pid_t| {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+        (got == size).then_some(info)
+    };
     let mut out = Vec::new();
-    for parent in group_pids(pgid) {
+    for &parent in parents {
+        let Some(pgid) = bsd_info(parent).map(|i| i.pbi_pgid as libc::pid_t) else { continue };
         let mut pids = vec![0 as libc::pid_t; 64];
         let size = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
         let n = unsafe { libc::proc_listchildpids(parent, pids.as_mut_ptr().cast(), size) };
         let n = if n > 0 { (n as usize).min(pids.len()) } else { 0 };
         for &pid in pids[..n].iter().filter(|&&p| p > 0) {
-            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-            let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
-            let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-            if got != size || info.pbi_pgid as libc::pid_t == pgid {
-                continue;
-            }
+            let Some(info) = bsd_info(pid).filter(|i| i.pbi_pgid as libc::pid_t != pgid) else { continue };
             let started = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(info.pbi_start_tvsec)
                 + std::time::Duration::from_micros(info.pbi_start_tvusec);
@@ -249,7 +296,7 @@ fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<Str
 }
 
 #[cfg(target_os = "linux")]
-fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+fn group_children(parents: &[libc::pid_t]) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
     use std::time::{Duration, UNIX_EPOCH};
     // `pid (comm) state ppid pgrp ... starttime` (field 22, in clock ticks
     // since boot); comm may hold spaces.
@@ -270,21 +317,21 @@ fn group_children(pgid: libc::pid_t) -> Vec<(u32, std::time::SystemTime, Vec<Str
         .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
         .filter_map(|pid| stat(pid).map(|(ppid, pgrp, start)| (pid, ppid, pgrp, start)))
         .collect();
-    let group: Vec<libc::pid_t> = procs.iter().filter(|p| p.2 == pgid).map(|p| p.0 as libc::pid_t).collect();
+    // Each parent's group, to tell the children that lead their own.
+    let groups: Vec<(libc::pid_t, libc::pid_t)> =
+        procs.iter().filter(|p| parents.contains(&(p.0 as libc::pid_t))).map(|p| (p.0 as libc::pid_t, p.2)).collect();
     procs
         .iter()
-        .filter(|(_, ppid, pgrp, _)| *pgrp != pgid && group.contains(ppid))
+        .filter(|(_, ppid, pgrp, _)| groups.iter().any(|(parent, g)| parent == ppid && g != pgrp))
         .filter_map(|&(pid, _, _, start)| {
-            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-            let argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).take(3).map(|a| String::from_utf8_lossy(a).into_owned());
             let started = UNIX_EPOCH + Duration::from_secs(boot) + Duration::from_millis(start * 1000 / ticks);
-            Some((pid, started, argv.collect()))
+            Some((pid, started, argv(pid as libc::pid_t, 3)?))
         })
         .collect()
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-fn group_children(_pgid: i32) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
+fn group_children(_parents: &[i32]) -> Vec<(u32, std::time::SystemTime, Vec<String>)> {
     Vec::new()
 }
 
@@ -584,7 +631,7 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_interpreter, script_arg, shell_command};
+    use super::{attached_job, is_interpreter, script_arg, shell_command};
 
     fn argv(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -601,6 +648,15 @@ mod tests {
         assert_eq!(shell_command(&argv(&["node", "-c", "x"])), None);
         assert_eq!(shell_command(&argv(&["zsh", "--norc", "x"])), None);
         assert_eq!(shell_command(&argv(&["zsh", "-c"])), None);
+    }
+
+    #[test]
+    fn attached_jobs() {
+        assert_eq!(attached_job(&argv(&["claude", "attach", "fd5baae5"])), Some("fd5baae5".into()));
+        assert_eq!(attached_job(&argv(&["/Users/x/.local/bin/claude", "attach", "j1"])), Some("j1".into()));
+        assert_eq!(attached_job(&argv(&["claude", "--resume", "j1"])), None);
+        assert_eq!(attached_job(&argv(&["claude", "attach", "--help"])), None);
+        assert_eq!(attached_job(&argv(&["node", "attach", "j1"])), None);
     }
 
     #[test]

@@ -65,6 +65,9 @@ const SCHEME_CHECK: Duration = Duration::from_millis(300);
 /// How long a closed program has to exit after SIGHUP (on Windows, after
 /// its pseudoconsole is closed) before it is killed.
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// How often Claude Code's session file is read while a turn it called
+/// done is held as working (it waits for a background shell).
+const CLAUDE_CHECK: Duration = Duration::from_secs(1);
 /// How often an adopted program (not our child) is checked for its end.
 const EXIT_POLL: Duration = Duration::from_millis(500);
 /// How long a pause waits for the driver to stop.
@@ -679,6 +682,9 @@ struct Driver<P: HostPty> {
     jiggle: Option<(Instant, TermSize)>,
     /// When a polled program was last checked for its end.
     exit_checked: Instant,
+    /// When to read Claude Code's session file again, while a turn it
+    /// called done is held as working.
+    claude_check: Option<Instant>,
 }
 
 impl<P: HostPty> Driver<P> {
@@ -710,6 +716,7 @@ impl<P: HostPty> Driver<P> {
             scheme_checked: Instant::now(),
             jiggle: None,
             exit_checked: Instant::now(),
+            claude_check: None,
         }
     }
 
@@ -754,7 +761,7 @@ impl<P: HostPty> Driver<P> {
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
             let scheme_check = self.scheme_reports.then(|| self.scheme_checked + SCHEME_CHECK);
             let exit_check = P::POLLED.then(|| self.exit_checked + EXIT_POLL);
-            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check];
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check, self.claude_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -776,6 +783,9 @@ impl<P: HostPty> Driver<P> {
             }
             if scheme_check.is_some_and(|t| t <= now) {
                 self.check_scheme(now);
+            }
+            if self.claude_check.is_some_and(|t| t <= now) {
+                self.check_claude(now);
             }
             if exit_check.is_some_and(|t| t <= now) {
                 self.exit_checked = now;
@@ -929,15 +939,56 @@ impl<P: HostPty> Driver<P> {
                     self.dark = theme_palette().get().is_dark();
                     self.writes.push_back((color_scheme_report(self.dark).into(), 0));
                 },
-                OscSignal::ProgramStatus(_) => {
-                    let mut status = self.shared.status.lock().unwrap();
-                    if let Some(new) = next_status(*status, &sig) {
-                        let old = std::mem::replace(&mut *status, new);
-                        drop(status);
-                        self.observer.status(self.id, old, new);
+                OscSignal::ProgramStatus(st) => {
+                    if st.state == "working" {
+                        self.claude_check = None;
+                    }
+                    let old = *self.shared.status.lock().unwrap();
+                    let Some(new) = next_status(old, &sig) else { continue };
+                    // Claude Code calls a turn done while it still waits for
+                    // a background shell: working until its session file
+                    // says otherwise.
+                    if new == ActivityStatus::Done
+                        && st.app.as_deref() == Some("claude-code")
+                        && self.claude_status() == Some(ActivityStatus::Working)
+                    {
+                        self.claude_check = Some(Instant::now() + CLAUDE_CHECK);
+                    } else {
+                        self.claude_check = None;
+                        self.set_status(new);
                     }
                 },
             }
+        }
+    }
+
+    fn set_status(&self, new: ActivityStatus) {
+        let old = std::mem::replace(&mut *self.shared.status.lock().unwrap(), new);
+        if old != new {
+            self.observer.status(self.id, old, new);
+        }
+    }
+
+    /// What Claude Code's session file says the foreground program does
+    /// (see [`tern_term::status::claude_session_status`]); `None` when it isn't Claude Code.
+    fn claude_status(&self) -> Option<ActivityStatus> {
+        #[cfg(unix)]
+        return tern_term::status::claude_session_status(
+            &tern_term::status::claude_sessions_dir()?,
+            tern_term::procs::foreground_pid(self.pty.master())?,
+        );
+        #[cfg(windows)]
+        return None;
+    }
+
+    /// A held turn ends once Claude Code no longer works on it.
+    fn check_claude(&mut self, now: Instant) {
+        match self.claude_status() {
+            Some(ActivityStatus::Working) => self.claude_check = Some(now + CLAUDE_CHECK),
+            status => {
+                self.claude_check = None;
+                self.set_status(if status == Some(ActivityStatus::Blocked) { ActivityStatus::Blocked } else { ActivityStatus::Done });
+            },
         }
     }
 

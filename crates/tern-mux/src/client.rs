@@ -874,6 +874,15 @@ impl Foreground {
         return self.0.tty.lock().unwrap().map(tern_term::procs::foreground_programs).unwrap_or_default();
     }
 
+    /// See [`tern_term::procs::foreground_pid`]. `None` on Windows, which
+    /// has no process groups.
+    pub fn pid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        return self.0.tty.lock().unwrap().as_ref().and_then(tern_term::procs::foreground_pid);
+        #[cfg(windows)]
+        return None;
+    }
+
     /// See [`tern_term::procs::foreground_cwd`].
     pub fn cwd(&self) -> Option<PathBuf> {
         #[cfg(unix)]

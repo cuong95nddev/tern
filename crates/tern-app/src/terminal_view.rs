@@ -244,6 +244,8 @@ pub struct TerminalView {
     /// The program has reported its status (OSC 7501): `status` is its word,
     /// not a guess.
     reports_status: bool,
+    /// `status` follows Claude Code's session file, not its OSC 7501 reports.
+    status_from_file: bool,
     /// When `status` last changed.
     status_since: Instant,
     /// Reads in a row that found a working agent not working.
@@ -349,29 +351,35 @@ impl Ticker {
                 }
                 let (views, fgs): (Vec<_>, Vec<_>) = probes.into_iter().unzip();
                 // A shell's folder too, for starting it there again (a Claude
-                // tab keeps its own: `--resume` needs it).
-                // An agent's shells too, while it has one.
+                // tab keeps its own: `--resume` needs it). An agent's shells
+                // too, while it has one, and Claude Code's status from its
+                // session file, when it runs.
                 let found = cx
                     .background_spawn(async move {
+                        let sessions = tern_term::status::claude_sessions_dir();
                         fgs.into_iter()
                             .map(|(f, shell, agent)| {
-                                f.map(|f| {
-                                    let shells = if agent { f.agent_shells() } else { Vec::new() };
-                                    (f.programs(), shell.then(|| f.cwd()).flatten(), shells)
-                                })
-                                .unwrap_or_default()
+                                let Some(f) = f else { return Default::default() };
+                                let programs = f.programs();
+                                let shells = if agent { f.agent_shells() } else { Vec::new() };
+                                let claude = (Agent::detect(&programs) == Some(Agent::Claude))
+                                    .then(|| sessions.as_deref().zip(f.pid()))
+                                    .flatten()
+                                    .and_then(|(dir, pid)| tern_term::status::claude_session_status(dir, pid));
+                                (programs, shell.then(|| f.cwd()).flatten(), shells, claude)
                             })
                             .collect::<Vec<_>>()
                     })
                     .await;
                 cx.update(|cx| {
-                    for (v, (programs, cwd, shells)) in views.into_iter().zip(found) {
+                    for (v, (programs, cwd, shells, claude)) in views.into_iter().zip(found) {
                         let _ = v.update(cx, |view, cx| {
                             if cwd.is_some() {
                                 view.last_cwd = cwd;
                             }
                             view.set_agent(Agent::detect(&programs), cx);
                             view.set_shells(shells, cx);
+                            view.set_session_file_status(claude, cx);
                         });
                     }
                 });
@@ -413,6 +421,7 @@ impl TerminalView {
             default_title: title,
             status: ActivityStatus::None,
             reports_status: false,
+            status_from_file: false,
             status_since: Instant::now(),
             quiet_reads: 0,
             exited: None,
@@ -643,12 +652,14 @@ impl TerminalView {
     pub fn debug_info(&self) -> String {
         let size = self.session.as_ref().map(|s| s.size());
         format!(
-            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={}",
+            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={} status={:?} from_file={}",
             self.reported_focus,
             self.mode().contains(TermMode::FOCUS_IN_OUT),
             self.exited,
             self.spawn_error,
             self.session.as_ref().map_or(0, |s| s.term().lock().grid().history_size()),
+            self.status,
+            self.status_from_file,
         )
     }
 
@@ -775,7 +786,12 @@ impl TerminalView {
             },
             TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
                 self.reports_status = true;
-                if let Some(status) = next_status(self.status, &sig) {
+                // Claude Code's session file knows better when a turn has
+                // ended (it may still wait for a background shell); its
+                // reports are only quicker to tell one started.
+                if let Some(status) = next_status(self.status, &sig)
+                    && (!self.status_from_file || matches!(status, ActivityStatus::Working | ActivityStatus::Blocked))
+                {
                     self.set_status(status, cx);
                 }
             },
@@ -862,6 +878,19 @@ impl TerminalView {
             self.status = status;
             self.status_since = Instant::now();
             cx.emit(TerminalEvent::StatusChanged(status));
+        }
+    }
+
+    /// The status Claude Code's session file gives (see
+    /// `tern_term::status::claude_session_status`), `None` when it has
+    /// none: then its OSC 7501 reports alone tell.
+    fn set_session_file_status(&mut self, status: Option<ActivityStatus>, cx: &mut Context<Self>) {
+        self.status_from_file = status.is_some() && self.exited.is_none();
+        let Some(status) = status.filter(|_| self.status_from_file) else { return };
+        self.reports_status = true;
+        // Done stays until its tab is seen.
+        if !(status == ActivityStatus::None && self.status == ActivityStatus::Done) {
+            self.set_status(status, cx);
         }
     }
 

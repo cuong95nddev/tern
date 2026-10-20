@@ -208,3 +208,46 @@ fn shell_in_foreground_tells_a_prompt_from_a_program() {
     wait_until("program", || !host.shell_in_foreground());
     host.kill();
 }
+
+#[derive(Default)]
+struct StatusLog(Mutex<Vec<ActivityStatus>>);
+
+impl Observer for StatusLog {
+    fn status(&self, _: u64, _: ActivityStatus, new: ActivityStatus) {
+        self.0.lock().unwrap().push(new);
+    }
+    fn notify(&self, _: u64, _: Option<String>, _: String) {}
+    fn exited(&self, _: u64, _: Option<i32>) {}
+}
+
+/// Claude Code reports a turn done while it still waits for a background
+/// shell; its session file (`status: "shell"`) says it isn't.
+#[test]
+fn claude_waiting_for_a_shell_is_not_done() {
+    let config = tempfile::tempdir().unwrap();
+    // This binary's only test that reads it.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", config.path()) };
+    let sessions = config.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let script = format!(
+        r#"f={dir}/$$.json
+echo '{{"status":"busy"}}' > $f
+printf '\033]7501;state=working:app=claude-code\033\\'
+echo '{{"status":"shell"}}' > $f
+printf '\033]7501;state=done:app=claude-code\033\\'
+read x
+echo '{{"status":"idle"}}' > $f
+read x"#,
+        dir = sessions.display()
+    );
+    let log = Arc::new(StatusLog::default());
+    let host = Host::spawn(1, &sh(&script), None, log.clone()).unwrap();
+    wait_until("a report", || !log.0.lock().unwrap().is_empty());
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(*log.0.lock().unwrap(), [ActivityStatus::Working], "done while the shell runs");
+    assert_eq!(host.status(), ActivityStatus::Working);
+    host.input(b"\n".to_vec());
+    wait_until("done once the file says idle", || host.status() == ActivityStatus::Done);
+    assert_eq!(*log.0.lock().unwrap(), [ActivityStatus::Working, ActivityStatus::Done]);
+    host.kill();
+}
