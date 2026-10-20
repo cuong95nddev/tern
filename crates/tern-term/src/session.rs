@@ -102,6 +102,8 @@ struct Shared {
     size: Mutex<TermSize>,
     palette: Palette,
     sink: EventSink,
+    /// The child's exit code, held until its last output is in the grid.
+    exit_code: Mutex<Option<Option<i32>>>,
 }
 
 impl Shared {
@@ -149,8 +151,15 @@ impl EventListener for Listener {
                 let size = *sh.size.lock().unwrap();
                 sh.write(fmt(size.window_size()).into_bytes());
             },
-            Event::ChildExit(status) => (sh.sink)(TermEvent::Exit(status.code())),
-            Event::Exit => {},
+            // The event loop reads what the child wrote last after it
+            // reports the exit, then ends with `Exit`: told then, the grid
+            // has it all.
+            Event::ChildExit(status) => *sh.exit_code.lock().unwrap() = Some(status.code()),
+            Event::Exit => {
+                if let Some(code) = sh.exit_code.lock().unwrap().take() {
+                    (sh.sink)(TermEvent::Exit(code));
+                }
+            },
             Event::ClipboardLoad(..) | Event::MouseCursorDirty | Event::CursorBlinkingChange => {},
         }
     }
@@ -252,8 +261,14 @@ pub fn program_word(program: String) -> String {
 
 impl Session {
     pub fn spawn(cfg: SpawnConfig, palette: Palette, sink: EventSink) -> io::Result<Self> {
-        let shared =
-            Arc::new(Shared { wake_pending: AtomicBool::new(false), sender: OnceLock::new(), size: Mutex::new(cfg.size), palette, sink });
+        let shared = Arc::new(Shared {
+            wake_pending: AtomicBool::new(false),
+            sender: OnceLock::new(),
+            size: Mutex::new(cfg.size),
+            palette,
+            sink,
+            exit_code: Mutex::new(None),
+        });
         let term_cell = Arc::new(OnceLock::new());
         let listener = Listener { shared: shared.clone(), term: term_cell.clone() };
 
