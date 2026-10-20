@@ -1,13 +1,16 @@
 //! Right pane: git changes of every repository under the opened folder
 //! (the enclosing repo plus nested repos), grouped per repo. Clicking a file
-//! previews its diff in a popup.
+//! previews its diff in a popup. Under the list, the commit box commits the
+//! checked files (as IntelliJ does: changed files start checked, new ones
+//! not), each repo's in that repo.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Sizable as _};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::*;
 use tern_fs::git::RepoChanges;
 use tern_fs::{ChangeBatch, GitStatus};
@@ -32,6 +35,8 @@ pub enum ChangesEvent {
     Updated(HashMap<PathBuf, GitStatus>),
     /// The header's close button: hide the panel.
     Hide,
+    /// The header's log button: open the Git Log.
+    OpenLog,
 }
 
 #[derive(Clone, Copy)]
@@ -60,8 +65,19 @@ pub struct ChangesView {
     defines_commands: HashMap<PathBuf, bool>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
+    /// Changed files left out of the commit (they start checked).
+    unchecked: HashSet<PathBuf>,
+    /// New files put in the commit (they start unchecked).
+    checked_new: HashSet<PathBuf>,
+    message: Entity<TextareaState>,
+    amend: bool,
+    committing: bool,
+    /// The last commit's summary, or why it failed.
+    commit_result: Option<Result<String, String>>,
     _timer: Option<Task<()>>,
     _task: Option<Task<()>>,
+    _commit: Option<Task<()>>,
+    _message_sub: Subscription,
 }
 
 /// Changes waiting for the next refresh.
@@ -135,7 +151,17 @@ impl Focusable for ChangesView {
 }
 
 impl ChangesView {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let message = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder(format!("Commit message ({} commits)", crate::platform::shortcut("⌘↵")))
+        });
+        let message_sub = cx.subscribe_in(&message, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { secondary: true, .. } => this.commit(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {},
+        });
         let mut this = Self {
             root,
             repos: vec![],
@@ -148,8 +174,16 @@ impl ChangesView {
             defines_commands: HashMap::new(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
+            unchecked: HashSet::new(),
+            checked_new: HashSet::new(),
+            message,
+            amend: false,
+            committing: false,
+            commit_result: None,
             _timer: None,
             _task: None,
+            _commit: None,
+            _message_sub: message_sub,
         };
         this.refresh(true, cx);
         this
@@ -288,6 +322,141 @@ impl ChangesView {
         }
     }
 
+    /// Whether `path` goes into the next commit.
+    fn is_checked(&self, path: &Path, status: GitStatus) -> bool {
+        if status == GitStatus::Untracked { self.checked_new.contains(path) } else { !self.unchecked.contains(path) }
+    }
+
+    fn set_checked(&mut self, path: &Path, status: GitStatus, on: bool) {
+        let (set, add) = if status == GitStatus::Untracked { (&mut self.checked_new, on) } else { (&mut self.unchecked, !on) };
+        if add {
+            set.insert(path.to_owned());
+        } else {
+            set.remove(path);
+        }
+    }
+
+    /// Per repo, its checked files: what the commit box commits.
+    fn checked(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        self.repos
+            .iter()
+            .filter(|r| r.error.is_none())
+            .map(|r| {
+                let mut paths: Vec<PathBuf> = vec![];
+                for (p, st) in r.files.iter().filter(|(p, st)| self.is_checked(p, *st)) {
+                    paths.push(p.clone());
+                    // A rename commits its old path's removal too.
+                    if let Some(from) = r.renamed_from.get(p).filter(|_| *st == GitStatus::Renamed) {
+                        paths.push(from.clone());
+                    }
+                }
+                (r.root.clone(), paths)
+            })
+            .filter(|(_, paths)| !paths.is_empty())
+            .collect()
+    }
+
+    /// Repo `ri`'s checkbox: on when all its files are, else all on.
+    fn toggle_repo(&mut self, ri: usize, cx: &mut Context<Self>) {
+        let files = self.repos[ri].files.clone();
+        let on = !files.iter().all(|(p, st)| self.is_checked(p, *st));
+        for (p, st) in &files {
+            self.set_checked(p, *st, on);
+        }
+        cx.notify();
+    }
+
+    fn toggle_file(&mut self, ri: usize, fi: usize, cx: &mut Context<Self>) {
+        let (p, st) = self.repos[ri].files[fi].clone();
+        let on = !self.is_checked(&p, st);
+        self.set_checked(&p, st, on);
+        cx.notify();
+    }
+
+    /// The repos an amend rewrites the last commit of: those with checked
+    /// files, else the only repo. Amending more than one at once is refused.
+    fn amend_target(&self) -> Result<PathBuf, String> {
+        let checked = self.checked();
+        match (&checked[..], &self.repos[..]) {
+            ([(r, _)], _) => Ok(r.clone()),
+            ([], [only]) => Ok(only.root.clone()),
+            _ => Err("Amend rewrites one repository's last commit: check files in one repository only".into()),
+        }
+    }
+
+    fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.amend = !self.amend;
+        self.commit_result = None;
+        // As IntelliJ does: amending starts from the last commit's message.
+        if self.amend
+            && self.message.read(cx).value().trim().is_empty()
+            && let Ok(repo) = self.amend_target()
+            && let Some(text) = tern_fs::git_log::last_message(&repo)
+        {
+            self.message.update(cx, |m, cx| m.set_value(text, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Commit the checked files of each repo with the message (or amend).
+    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.committing {
+            return;
+        }
+        let message = self.message.read(cx).value().trim().to_owned();
+        if message.is_empty() {
+            self.commit_result = Some(Err("Write a commit message first".into()));
+            cx.notify();
+            return;
+        }
+        let amend = self.amend;
+        let mut plan = self.checked();
+        if amend {
+            match self.amend_target() {
+                Ok(repo) if plan.is_empty() => plan.push((repo, vec![])),
+                Ok(_) => {},
+                Err(e) => {
+                    self.commit_result = Some(Err(e));
+                    cx.notify();
+                    return;
+                },
+            }
+        }
+        if plan.is_empty() {
+            self.commit_result = Some(Err("Check the files to commit".into()));
+            cx.notify();
+            return;
+        }
+        self.committing = true;
+        self.commit_result = None;
+        cx.notify();
+        let label: HashMap<PathBuf, String> = plan.iter().map(|(r, _)| (r.clone(), self.repo_label(r))).collect();
+        let several = plan.len() > 1;
+        self._commit = Some(cx.spawn_in(window, async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    plan.into_iter().map(|(repo, paths)| (repo.clone(), tern_fs::git_log::commit(&repo, &paths, &message, amend))).collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.committing = false;
+                let name = |r: &PathBuf| if several { format!("{}: ", label.get(r).cloned().unwrap_or_default()) } else { String::new() };
+                let errors: Vec<String> = results.iter().filter_map(|(r, res)| res.as_ref().err().map(|e| name(r) + e)).collect();
+                if errors.is_empty() {
+                    let done: Vec<String> = results.iter().filter_map(|(r, res)| res.as_ref().ok().map(|s| name(r) + s)).collect();
+                    this.commit_result = Some(Ok(done.join("  ")));
+                    this.message.update(cx, |m, cx| m.set_value("", window, cx));
+                    this.amend = false;
+                    this.unchecked.clear();
+                    this.checked_new.clear();
+                } else {
+                    this.commit_result = Some(Err(errors.join("\n")));
+                }
+                this.refresh(false, cx);
+            });
+        }));
+    }
+
     fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
         match self.rows.get(ix).copied() {
             Some(RowKind::Repo(ri)) => {
@@ -320,8 +489,17 @@ impl ChangesView {
                             (None, 0) => "clean".into(),
                             (None, n) => n.to_string().into(),
                         };
+                        let on = repo.files.iter().filter(|(p, st)| self.is_checked(p, *st)).count();
+                        let (check_icon, check_tooltip) = match on {
+                            0 => ("square", "Check all"),
+                            n if n == repo.files.len() => ("square-check", "Uncheck all"),
+                            _ => ("square-minus", "Check all"),
+                        };
                         let scope = template::Scope::new("changes.repo")
                             .var("indent", style::row_indent(ROW, 0, cx))
+                            .var("files", repo.files.len())
+                            .var("check_icon", check_icon)
+                            .var("check_tooltip", check_tooltip)
                             .var("folder", true)
                             .var("open", !self.collapsed.contains(&repo.root))
                             .var("name", self.repo_label(&repo.root))
@@ -344,6 +522,7 @@ impl ChangesView {
                             .var("name_color", style::git_color(*st, cx))
                             .var("dir", dir)
                             .var("status", st.letter().to_string())
+                            .var("check_icon", if self.is_checked(path, *st) { "square-check" } else { "square" })
                             .slot("icon", style::row_icon(ROW, icon, icon_color, cx));
                         ("changes.file", scope)
                     },
@@ -354,6 +533,19 @@ impl ChangesView {
                     &mut |name, _, f| match (name, f) {
                         ("row", Framed::Box(d)) => {
                             d.id(ix).on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx))).into_any_element()
+                        },
+                        ("check", Framed::Button(b)) => {
+                            let row = self.rows.get(ix).copied();
+                            b.on_click(cx.listener(move |this, _, _, cx| {
+                                // The row under it would take the click too.
+                                cx.stop_propagation();
+                                match row {
+                                    Some(RowKind::Repo(ri)) => this.toggle_repo(ri, cx),
+                                    Some(RowKind::File(ri, fi)) => this.toggle_file(ri, fi, cx),
+                                    None => {},
+                                }
+                            }))
+                            .into_any_element()
                         },
                         (_, f) => f.into_any_element(),
                     },
@@ -391,6 +583,9 @@ impl Render for ChangesView {
             Some(total),
             buttons,
             &mut |name, _, f| match (name, f) {
+                ("log", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(ChangesEvent::OpenLog))).into_any_element()
+                },
                 ("refresh", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.refresh(true, cx))).into_any_element()
                 },
@@ -401,8 +596,30 @@ impl Render for ChangesView {
             },
             cx,
         );
-        let mut scope =
-            template::Scope::new("changes").var("empty", self.repos.is_empty()).var("refreshing", self.refreshing).slot("header", header);
+        let checked: usize = self.checked().iter().map(|(_, p)| p.len()).sum();
+        let count_text = match (checked, self.amend) {
+            (0, true) => "Message only".to_owned(),
+            (1, _) => "1 file".to_owned(),
+            (n, _) => format!("{n} files"),
+        };
+        let can_commit = !self.committing && (checked > 0 || self.amend) && !self.message.read(cx).value().trim().is_empty();
+        let (done, error) = match &self.commit_result {
+            Some(Ok(s)) => (s.clone(), String::new()),
+            Some(Err(e)) => (String::new(), e.clone()),
+            None => (String::new(), String::new()),
+        };
+        let mut scope = template::Scope::new("changes")
+            .var("empty", self.repos.is_empty())
+            .var("refreshing", self.refreshing)
+            .var("amend_icon", if self.amend { "square-check" } else { "square" })
+            .var("count_text", count_text)
+            .var("can_commit", can_commit)
+            .var("committing", self.committing)
+            .var("commit_key", crate::platform::shortcut("⌘↵"))
+            .var("done", done)
+            .var("error", error)
+            .slot("header", header)
+            .slot("input", Textarea::new(&self.message).small());
         if !self.repos.is_empty() {
             let list = uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1();
             scope = scope.slot("list", style::el("changes.list", cx).apply(list));
@@ -413,6 +630,8 @@ impl Render for ChangesView {
             scope,
             &mut |name, _, f| match (name, f) {
                 ("panel", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
+                ("amend", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_amend(w, cx))).into_any_element(),
+                ("commit", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.commit(w, cx))).into_any_element(),
                 (_, f) => f.into_any_element(),
             },
             cx,

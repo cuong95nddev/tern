@@ -269,6 +269,14 @@ pub enum SavedTab {
     File(PathBuf),
     Diff(PathBuf),
     Scratch(PathBuf),
+    /// A file's diff in a commit: `rel` (and a rename's `from`) relative to `repo`.
+    CommitDiff {
+        repo: PathBuf,
+        hash: String,
+        rel: String,
+        from: Option<String>,
+    },
+    GitLog,
 }
 
 /// A tab group of a saved workspace.
@@ -390,6 +398,10 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                     SavedTab::File(p) => format!("file\t{}", path(p)),
                     SavedTab::Diff(p) => format!("diff\t{}", path(p)),
                     SavedTab::Scratch(p) => format!("scratch\t{}", path(p)),
+                    SavedTab::CommitDiff { repo, hash, rel, from } => {
+                        format!("commit_diff\t{}\t{}\t{}\t{}", path(repo), field(hash), field(rel), opt(from))
+                    },
+                    SavedTab::GitLog => "git_log".to_owned(),
                 };
                 out.push_str(&format!("\t\t{group}{line}\n"));
             }
@@ -415,6 +427,8 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "file" => SavedTab::File(next()?.into()),
         "diff" => SavedTab::Diff(next()?.into()),
         "scratch" => SavedTab::Scratch(next()?.into()),
+        "commit_diff" => SavedTab::CommitDiff { repo: next()?.into(), hash: next()?, rel: next()?, from: next() },
+        "git_log" => SavedTab::GitLog,
         _ => return None,
     })
 }
@@ -455,8 +469,8 @@ fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usi
     for (i, tab) in ws.tabs.into_iter().enumerate() {
         let place = match &tab {
             SavedTab::Claude { .. } | SavedTab::Shell { .. } => merged.cwds.get(i).cloned().flatten().map_or(0, |c| home(&c)),
-            SavedTab::File(p) | SavedTab::Diff(p) => home(p),
-            SavedTab::Scratch(_) => 0,
+            SavedTab::File(p) | SavedTab::Diff(p) | SavedTab::CommitDiff { repo: p, .. } => home(p),
+            SavedTab::Scratch(_) | SavedTab::GitLog => 0,
         };
         let to = &mut out[place];
         if i == ws.active {
@@ -649,15 +663,18 @@ mod tests {
                             SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
                             SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
                             SavedTab::Scratch(PathBuf::from("/s/n.txt")),
+                            SavedTab::CommitDiff { repo: "/a b".into(), hash: "abc".into(), rel: "c/d e.rs".into(), from: None },
+                            SavedTab::CommitDiff { repo: "/r".into(), hash: "def".into(), rel: "new.rs".into(), from: Some("old.rs".into()) },
+                            SavedTab::GitLog,
                         ],
-                        tab_groups: vec![Some(0), Some(0), None, Some(1), None, None],
+                        tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None],
                         groups: vec![
                             SavedGroup { name: "api".into(), color: "blue".into(), collapsed: false },
                             SavedGroup { name: String::new(), color: "red".into(), collapsed: true },
                         ],
                         active: 3,
                         panes: "h(0,v(1,2))".into(),
-                        tab_panes: vec![0, 0, 1, 1, 2, 0],
+                        tab_panes: vec![0, 0, 1, 1, 2, 0, 0, 0, 2],
                         pane_active: vec![Some(0), Some(3), None],
                     },
                     SavedWorkspace::fresh(PathBuf::from("/d")),

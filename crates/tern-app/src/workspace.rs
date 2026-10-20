@@ -18,6 +18,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 use tern_bridge::HookEvent;
+use tern_fs::git_log::CommitFile;
 use tern_fs::{ChangeBatch, GitStatus};
 use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
@@ -25,7 +26,8 @@ use tern_term::{SpawnConfig, TermSize};
 use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
-use crate::diff_pane::DiffPane;
+use crate::diff_pane::{DiffPane, InCommit};
+use crate::git_log_view::{GitLog, GitLogEvent};
 use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
@@ -60,6 +62,7 @@ actions!(
         PrevTab,
         ToggleExplorer,
         ToggleChanges,
+        OpenGitLog,
         ToggleScratches,
         CommandPalette,
         GoToFile,
@@ -158,19 +161,21 @@ struct TermTab {
 }
 
 /// A tab in the center tab bar: a terminal, a file opened from the
-/// explorer, a file diff opened from the Changes preview, or a scratch file.
+/// explorer, a file diff opened from the Changes or Git Log preview, a
+/// scratch file, or the Git Log.
 enum CenterTab {
     Term(TermTab),
     File { view: Entity<Viewer>, _subs: Vec<Subscription> },
     Diff(Entity<DiffPane>),
     Scratch { view: Entity<Scratch>, _sub: Subscription },
+    Log { view: Entity<GitLog>, _sub: Subscription },
 }
 
 impl CenterTab {
     fn term(&self) -> Option<&TermTab> {
         match self {
             CenterTab::Term(t) => Some(t),
-            CenterTab::File { .. } | CenterTab::Diff(_) | CenterTab::Scratch { .. } => None,
+            CenterTab::File { .. } | CenterTab::Diff(_) | CenterTab::Scratch { .. } | CenterTab::Log { .. } => None,
         }
     }
 
@@ -180,6 +185,7 @@ impl CenterTab {
             CenterTab::File { view, .. } => view.focus_handle(cx),
             CenterTab::Diff(d) => d.focus_handle(cx),
             CenterTab::Scratch { view: s, .. } => s.focus_handle(cx),
+            CenterTab::Log { view, .. } => view.focus_handle(cx),
         }
     }
 
@@ -189,13 +195,14 @@ impl CenterTab {
             CenterTab::File { view, .. } => view.entity_id(),
             CenterTab::Diff(d) => d.entity_id(),
             CenterTab::Scratch { view, .. } => view.entity_id(),
+            CenterTab::Log { view, .. } => view.entity_id(),
         }
     }
 
     /// The file a file, diff or scratch tab shows.
     fn file_path(&self, cx: &App) -> Option<PathBuf> {
         match self {
-            CenterTab::Term(_) => None,
+            CenterTab::Term(_) | CenterTab::Log { .. } => None,
             CenterTab::File { view, .. } => view.read(cx).path().map(Path::to_owned),
             CenterTab::Diff(d) => Some(d.read(cx).path().to_owned()),
             CenterTab::Scratch { view, .. } => Some(view.read(cx).path().to_owned()),
@@ -521,7 +528,7 @@ impl Workspace {
         let (panels, panels_rev) = cx.try_global::<Panels>().map(|p| (p.saved.clone(), p.rev)).unwrap_or_default();
         let shown = |name: &str| !panels.hidden.iter().any(|h| h == name);
         let tree = cx.new(|cx| FileTreeView::new(root.clone(), cx));
-        let changes = cx.new(|cx| ChangesView::new(root.clone(), cx));
+        let changes = cx.new(|cx| ChangesView::new(root.clone(), window, cx));
         let scratches = cx.new(ScratchesView::new);
         let shells = cx.new(ShellsView::new);
         let usage = cx.new(UsageView::new);
@@ -559,6 +566,7 @@ impl Workspace {
                 this.show_changes = false;
                 this.panels_changed(cx);
             },
+            ChangesEvent::OpenLog => this.open_git_log(window, cx),
         });
         let scratches_sub = cx.subscribe_in(&scratches, window, |this, _, ev: &ScratchesEvent, window, cx| match ev {
             ScratchesEvent::Open(p) => this.open_scratch(p.clone(), window, cx),
@@ -653,6 +661,11 @@ impl Workspace {
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
+                SavedTab::CommitDiff { repo, hash, rel, from } => {
+                    let commit = InCommit { repo, hash, rel, from };
+                    this.open_diff_tab(cx.new(|cx| DiffPane::in_commit(commit, cx)), window, cx)
+                },
+                SavedTab::GitLog => this.open_git_log(window, cx),
                 SavedTab::Scratch(p) if p.is_file() => this.open_scratch(p, window, cx),
                 SavedTab::File(_) | SavedTab::Scratch(_) => {},
             }
@@ -706,8 +719,12 @@ impl Workspace {
                     }
                 },
                 CenterTab::File { view, .. } => SavedTab::File(view.read(cx).path().map(Path::to_owned).unwrap_or_default()),
-                CenterTab::Diff(d) => SavedTab::Diff(d.read(cx).path().to_owned()),
+                CenterTab::Diff(d) => match d.read(cx).commit() {
+                    Some(c) => SavedTab::CommitDiff { repo: c.repo.clone(), hash: c.hash.clone(), rel: c.rel.clone(), from: c.from.clone() },
+                    None => SavedTab::Diff(d.read(cx).path().to_owned()),
+                },
                 CenterTab::Scratch { view, .. } => SavedTab::Scratch(view.read(cx).path().to_owned()),
+                CenterTab::Log { .. } => SavedTab::GitLog,
             })
             .collect();
         let groups = self
@@ -1479,10 +1496,39 @@ impl Workspace {
     /// Show `path`'s diff in a popup centered on the window, with a button
     /// to move it into a center tab.
     fn preview_diff(&mut self, path: PathBuf, status: GitStatus, window: &mut Window, cx: &mut Context<Self>) {
-        window.close_all_dialogs(cx);
         let rel = path.strip_prefix(&self.root).unwrap_or(&path).display().to_string();
         let title: SharedString = format!("{rel}  {}", status.letter()).into();
         let pane = cx.new(|cx| DiffPane::new(path, cx));
+        self.show_diff_preview(pane, title, window, cx);
+    }
+
+    /// Show `file`'s diff in commit `hash` of `repo` in the preview popup.
+    fn preview_commit_diff(&mut self, repo: PathBuf, hash: String, file: CommitFile, window: &mut Window, cx: &mut Context<Self>) {
+        let short: String = hash.chars().take(8).collect();
+        let title: SharedString = format!("{}  {}  ({short})", file.path, file.status.letter()).into();
+        let commit = InCommit { repo, hash, rel: file.path, from: file.from };
+        let pane = cx.new(|cx| DiffPane::in_commit(commit, cx));
+        self.show_diff_preview(pane, title, window, cx);
+    }
+
+    /// Open the Git Log tab, or switch to it.
+    fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| matches!(t, CenterTab::Log { .. })) {
+            self.activate(ix, window, cx);
+            return;
+        }
+        let view = cx.new(|cx| GitLog::new(self.root.clone(), window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, ev: &GitLogEvent, window, cx| match ev {
+            GitLogEvent::PreviewDiff { repo, hash, file } => this.preview_commit_diff(repo.clone(), hash.clone(), file.clone(), window, cx),
+        });
+        let ix = self.push_tab(CenterTab::Log { view, _sub: sub });
+        self.activate(ix, window, cx);
+    }
+
+    /// `pane` in a popup centered on the window, with a button to move it
+    /// into a center tab.
+    fn show_diff_preview(&mut self, pane: Entity<DiffPane>, title: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_all_dialogs(cx);
         self.preview = Some(pane.downgrade());
         let ws = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -1520,8 +1566,9 @@ impl Workspace {
     /// Show `pane` as a center tab; a tab already showing that file is
     /// reused instead.
     fn open_diff_tab(&mut self, pane: Entity<DiffPane>, window: &mut Window, cx: &mut Context<Self>) {
-        let path = pane.read(cx).path().to_owned();
-        let existing = self.tabs.iter().position(|t| matches!(t, CenterTab::Diff(d) if d.read(cx).path() == path));
+        let (path, commit) = (pane.read(cx).path().to_owned(), pane.read(cx).commit().cloned());
+        let existing =
+            self.tabs.iter().position(|t| matches!(t, CenterTab::Diff(d) if d.read(cx).path() == path && d.read(cx).commit() == commit.as_ref()));
         match existing {
             Some(ix) => {
                 if let CenterTab::Diff(d) = &self.tabs[ix] {
@@ -1544,6 +1591,7 @@ impl Workspace {
             match t {
                 CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(&batch.paths, window, cx)),
                 CenterTab::Diff(d) => diffs.push(d.clone()),
+                CenterTab::Log { view, .. } => view.update(cx, |v, cx| v.files_changed(batch, cx)),
                 CenterTab::Term(_) | CenterTab::Scratch { .. } => {},
             }
         }
@@ -1946,6 +1994,7 @@ impl Workspace {
                 let dot = if s.is_dirty() { " ●" } else { "" };
                 return (format!("{}{dot}", s.title()), s.title().to_string().into(), None);
             },
+            CenterTab::Log { .. } => return ("Git Log".into(), "Git Log".into(), None),
         };
         let v = t.view.read(cx);
         let badge = match v.status() {
@@ -1993,6 +2042,9 @@ impl Workspace {
             CenterTab::Scratch { view, .. } => return Some(file(Some(view.read(cx).path()))),
             CenterTab::Diff(_) => {
                 return Some(Icon::new(AssetIcon::FileDiff).text_color(mono).small().flex_shrink_0().into_any_element());
+            },
+            CenterTab::Log { .. } => {
+                return Some(Icon::new(AssetIcon::GitCommitHorizontal).text_color(mono).small().flex_shrink_0().into_any_element());
             },
         };
         let agent = t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude));
@@ -3557,6 +3609,7 @@ impl Workspace {
             Some(CenterTab::File { view, .. }) => view.clone().cached(cache_layout()).into_any_element(),
             Some(CenterTab::Diff(d)) => d.clone().cached(cache_layout()).into_any_element(),
             Some(CenterTab::Scratch { view: s, .. }) => s.clone().cached(cache_layout()).into_any_element(),
+            Some(CenterTab::Log { view, .. }) => view.clone().cached(cache_layout()).into_any_element(),
             None => self.empty_pane(pane, cx).into_any_element(),
         };
         let scope = template::Scope::new(format!("pane-{pane}"))
@@ -3795,6 +3848,7 @@ impl Workspace {
                             },
                             CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state()),
                             CenterTab::Diff(d) => format!("diff:{}", d.read(cx).path().display()),
+                            CenterTab::Log { view, .. } => format!("git_log:{}", view.read(cx).root().display()),
                             CenterTab::Scratch { view: s, .. } => {
                                 let s = s.read(cx);
                                 format!("scratch:{}{}", s.path().display(), if s.is_dirty() { "*" } else { "" })
@@ -4245,6 +4299,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_explorer))
             .on_action(cx.listener(|this, _: &OpenSettingsFile, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
             .on_action(cx.listener(Self::toggle_changes))
+            .on_action(cx.listener(|this, _: &OpenGitLog, window, cx| this.open_git_log(window, cx)))
             .on_action(cx.listener(Self::toggle_scratches))
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(palette::Mode::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &GoToFile, w, cx| this.open_palette(palette::Mode::Files, w, cx)))

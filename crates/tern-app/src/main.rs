@@ -12,6 +12,7 @@ mod dirs;
 mod dock;
 mod file_icons;
 mod file_tree_view;
+mod git_log_view;
 #[cfg(not(target_os = "macos"))]
 mod handoff;
 mod links;

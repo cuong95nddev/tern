@@ -762,6 +762,8 @@ const SLOTS: &[&str] = &[
     "thumb",
     "prompt",
     "part",
+    "graph",
+    "files",
 ];
 
 /// The parts a template may name.

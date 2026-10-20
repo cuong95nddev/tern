@@ -80,6 +80,7 @@ const COMMANDS: &[Command] = &[
     cmd!("New Scratch File", "⌘N", workspace::NewScratch),
     cmd!("Toggle Explorer", "⌘B", workspace::ToggleExplorer),
     cmd!("Toggle Changes", "⌘⇧G", workspace::ToggleChanges),
+    cmd!("Git Log", "", workspace::OpenGitLog),
     cmd!("Toggle Scratches", "⌘⇧S", workspace::ToggleScratches),
     cmd!("Toggle Usage", "", workspace::ToggleUsage),
     cmd!("Toggle System", "", workspace::ToggleSystem),

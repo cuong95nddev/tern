@@ -3,6 +3,7 @@
 
 pub mod fuzzy;
 pub mod git;
+pub mod git_log;
 pub mod ops;
 pub mod search;
 pub mod tree;

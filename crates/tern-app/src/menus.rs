@@ -60,6 +60,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Explorer", workspace::ToggleExplorer),
         MenuItem::action("Changes", workspace::ToggleChanges),
+        MenuItem::action("Git Log", workspace::OpenGitLog),
         MenuItem::action("Scratches", workspace::ToggleScratches),
         MenuItem::action("Usage", workspace::ToggleUsage),
         MenuItem::action("System", workspace::ToggleSystem),

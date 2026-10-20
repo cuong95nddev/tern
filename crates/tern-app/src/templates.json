@@ -136,6 +136,13 @@
     "style": { "gap": "$changes.header.gap" },
     "children": [
       {
+        "button": "log",
+        "element": "changes.header.button",
+        "size": "xsmall",
+        "icon": "git-commit-horizontal",
+        "tooltip": "Git Log"
+      },
+      {
         "button": "refresh",
         "element": "changes.header.button",
         "size": "xsmall",
@@ -268,6 +275,7 @@
       { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
       { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
       { "when": "!folder", "shrink": 0, "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size" } },
+      { "when": "!error && files > 0", "button": "check", "element": "changes.check", "size": "xsmall", "icon": "{check_icon}", "tooltip": "{check_tooltip}" },
       { "shrink": 0, "text": "{name}" },
       { "when": "branch", "grow": 1, "truncate": true, "text": "{branch}", "style": { "font_size": "$changes.row.detail_font_size", "text": "$changes.row.detail_text" } },
       { "when": "!branch", "grow": 1 },
@@ -289,6 +297,7 @@
       { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
       { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size", "text": "$changes.row.chevron_color" } },
       { "when": "!folder", "shrink": 0, "style": { "width": "$changes.row.chevron_size", "height": "$changes.row.chevron_size" } },
+      { "button": "check", "element": "changes.check", "size": "xsmall", "icon": "{check_icon}" },
       { "slot": "icon" },
       { "shrink": 0, "text": "{name}", "style": { "text": "{name_color}" } },
       { "grow": 1, "truncate": true, "text": "{dir}", "style": { "font_size": "$changes.row.detail_font_size", "text": "$changes.row.detail_text" } },
@@ -1416,7 +1425,165 @@
     "frame": "panel",
     "element": "changes",
     "fill": true,
-    "children": [{ "slot": "header" }, { "when": "empty", "use": "changes.empty" }, { "slot": "list" }]
+    "children": [
+      { "slot": "header" },
+      { "when": "empty", "use": "changes.empty" },
+      { "slot": "list" },
+      { "when": "!empty", "use": "changes.commit" }
+    ]
+  },
+  "changes.commit": {
+    "element": "changes.commit",
+    "shrink": 0,
+    "children": [
+      { "slot": "input" },
+      { "when": "error", "element": "changes.commit.error", "wrap": true, "text": "{error}" },
+      { "when": "done && !error", "element": "changes.commit.done", "truncate": true, "text": "{done}" },
+      {
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$changes.commit.gap" },
+        "children": [
+          { "button": "amend", "element": "changes.commit.button", "size": "xsmall", "icon": "{amend_icon}", "label": "Amend", "tooltip": "Rewrite the last commit" },
+          { "grow": 1 },
+          { "element": "changes.commit.count", "truncate": true, "text": "{count_text}" },
+          { "button": "commit", "variant": "primary", "size": "small", "label": "Commit", "tooltip": "Commit the checked files ({commit_key})", "disabled": "!can_commit", "loading": "committing" }
+        ]
+      }
+    ]
+  },
+  "git_log": {
+    "frame": "git_log",
+    "element": "git_log",
+    "fill": true,
+    "children": [
+      { "use": "git_log.toolbar" },
+      {
+        "grow": 1,
+        "split": "row",
+        "style": { "min_height": 0 },
+        "children": [
+          {
+            "fill": true,
+            "style": { "min_width": 0 },
+            "children": [
+              { "when": "message", "element": "git_log.message", "grow": 1, "layout": "row", "align": "center", "justify": "center", "text": "{message}" },
+              { "slot": "list" }
+            ]
+          },
+          { "fixed": true, "fill": true, "size": "$git_log.details.start_width", "min": 220, "max": 900, "children": [{ "use": "git_log.details" }] }
+        ]
+      }
+    ]
+  },
+  "git_log.toolbar": {
+    "element": "git_log.toolbar",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "children": [
+      { "element": "git_log.search", "children": [{ "slot": "input" }] },
+      { "when": "repos > 1", "button": "repo", "element": "git_log.button", "size": "small", "label": "Repository: {repo}" },
+      { "button": "branch", "element": "git_log.button", "size": "small", "label": "Branch: {branch}" },
+      { "button": "user", "element": "git_log.button", "size": "small", "label": "User: {user}" },
+      { "grow": 1 },
+      { "element": "git_log.count", "shrink": 0, "text": "{count_text}" },
+      { "button": "refresh", "element": "git_log.button", "size": "xsmall", "icon": "refresh-cw", "loading": "loading", "tooltip": "Refresh" }
+    ]
+  },
+  "git_log.row": {
+    "frame": "row",
+    "element": "git_log.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "selected": { "background": "$git_log.row.selected_background", "text": "$git_log.row.selected_text" },
+      "hover && !selected": { "background": "$git_log.row.hover_background" }
+    },
+    "children": [
+      { "slot": "graph" },
+      {
+        "grow": 1,
+        "layout": "row",
+        "align": "center",
+        "style": { "gap": "$git_log.row.gap", "min_width": 0 },
+        "children": [
+          {
+            "each": "refs",
+            "item": {
+              "element": "git_log.ref",
+              "shrink": 0,
+              "nowrap": true,
+              "states": {
+                "head": { "element": "git_log.ref_head" },
+                "remote": { "element": "git_log.ref_remote" },
+                "tag": { "element": "git_log.ref_tag" }
+              },
+              "text": "{name}"
+            }
+          },
+          { "grow": 1, "truncate": true, "text": "{subject}" }
+        ]
+      },
+      { "element": "git_log.row.author", "shrink": 0, "truncate": true, "text": "{author}" },
+      { "element": "git_log.row.date", "shrink": 0, "truncate": true, "text": "{date}" }
+    ]
+  },
+  "git_log.details": {
+    "element": "git_log.details",
+    "fill": true,
+    "children": [
+      { "when": "!selected", "element": "git_log.message", "grow": 1, "layout": "row", "align": "center", "justify": "center", "text": "Select a commit" },
+      {
+        "when": "selected",
+        "element": "git_log.details.info",
+        "shrink": 0,
+        "children": [
+          { "element": "git_log.details.subject", "wrap": true, "text": "{subject}" },
+          { "when": "body", "element": "git_log.details.body", "wrap": true, "text": "{body}" },
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 6 },
+            "children": [
+              { "button": "copy_hash", "element": "git_log.details.hash", "size": "xsmall", "label": "{short}", "tooltip": "Copy {hash}" },
+              { "element": "git_log.details.meta", "truncate": true, "text": "{author} <{email}>" }
+            ]
+          },
+          { "element": "git_log.details.meta", "truncate": true, "text": "{date}" },
+          { "when": "committer", "element": "git_log.details.meta", "truncate": true, "text": "Committed by {committer} on {commit_date}" },
+          {
+            "when": "refs",
+            "layout": "wrap",
+            "style": { "gap": 4 },
+            "children": [{ "each": "refs", "item": { "element": "git_log.ref", "nowrap": true, "states": { "head": { "element": "git_log.ref_head" }, "remote": { "element": "git_log.ref_remote" }, "tag": { "element": "git_log.ref_tag" } }, "text": "{name}" } }]
+          }
+        ]
+      },
+      { "when": "selected", "element": "git_log.details.files_title", "shrink": 0, "text": "{files_text}" },
+      { "when": "selected", "grow": 1, "slot": "files" }
+    ]
+  },
+  "git_log.file": {
+    "frame": "row",
+    "element": "git_log.file",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "selected": { "background": "$git_log.file.selected_background", "text": "$git_log.file.selected_text" },
+      "hover && !selected": { "background": "$git_log.file.hover_background" }
+    },
+    "children": [
+      { "slot": "icon" },
+      { "shrink": 0, "text": "{name}", "style": { "text": "{name_color}" } },
+      { "grow": 1, "truncate": true, "text": "{dir}", "style": { "font_size": "$git_log.file.detail_font_size", "text": "$git_log.file.detail_text" } },
+      { "shrink": 0, "text": "{status}", "style": { "font_size": "$git_log.file.detail_font_size", "text": "{name_color}" } }
+    ]
+  },
+  "menu.git_log_filter": {
+    "children": [{ "each": "options", "item": { "button": "pick", "label": "{label}", "selected": "on" } }]
   },
   "changes.empty": {
     "element": "changes.empty",

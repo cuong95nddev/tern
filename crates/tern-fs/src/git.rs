@@ -37,6 +37,8 @@ pub struct RepoChanges {
     pub branch: Option<String>,
     /// Changed files (absolute) in porcelain order.
     pub files: Vec<(PathBuf, GitStatus)>,
+    /// A renamed file's old path, by its new one.
+    pub renamed_from: HashMap<PathBuf, PathBuf>,
     /// Why status is unavailable (e.g. skipped for safety).
     pub error: Option<String>,
 }
@@ -160,9 +162,10 @@ pub fn repo_changes_with(repo: &Path, scope: &Path, defines_commands: bool) -> R
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            let (branch, files) = parse_status(&o.stdout, repo);
+            let (branch, files, renamed_from) = parse_status(&o.stdout, repo);
             rc.branch = branch;
             rc.files = files;
+            rc.renamed_from = renamed_from;
         },
         Ok(o) => rc.error = Some(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("git status failed").to_owned()),
         Err(e) => rc.error = Some(format!("git: {e}")),
@@ -195,7 +198,7 @@ pub fn status_map<'a>(repos: impl IntoIterator<Item = &'a RepoChanges>, root: &P
 /// `core.sshCommand` / credential helper — so lazy fetch and every transport
 /// are disabled. Also avoid taking the index lock so we never contend with git
 /// commands Claude runs.
-fn git(root: &Path) -> Command {
+pub(crate) fn git(root: &Path) -> Command {
     let mut c = Command::new("git");
     c.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
         .args(["-c", "protocol.allow=never"])
@@ -210,6 +213,13 @@ fn git(root: &Path) -> Command {
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     c
+}
+
+/// `path` relative to `repo`, with `/` separators (git takes a Windows `\`
+/// as part of the name); None outside it or for the repo itself.
+pub(crate) fn rel_slash(repo: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(repo).ok().filter(|r| !r.as_os_str().is_empty())?;
+    Some(rel.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/"))
 }
 
 /// True if repo-scoped config (`local`/`worktree`, including files those
@@ -231,10 +241,13 @@ pub fn repo_defines_commands(root: &Path) -> bool {
     })
 }
 
-/// Parse `status --porcelain=v1 -z [-b]` output. Paths are joined to `toplevel`.
-pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBuf, GitStatus)>) {
+/// Parse `status --porcelain=v1 -z [-b]` output: the branch line, the
+/// changed files, renamed files' old paths. Paths are joined to `toplevel`.
+#[allow(clippy::type_complexity)]
+pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBuf, GitStatus)>, HashMap<PathBuf, PathBuf>) {
     let mut branch = None;
     let mut files = vec![];
+    let mut renamed_from = HashMap::new();
     let mut parts = raw.split(|&b| b == 0).filter(|p| !p.is_empty());
     while let Some(rec) = parts.next() {
         if let Some(b) = rec.strip_prefix(b"## ") {
@@ -251,7 +264,9 @@ pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBu
             (b'?', b'?') => GitStatus::Untracked,
             (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => GitStatus::Conflicted,
             (b'R', _) => {
-                parts.next(); // rename source
+                if let Some(from) = parts.next() {
+                    renamed_from.insert(path.clone(), toplevel.join(String::from_utf8_lossy(from).as_ref()));
+                }
                 GitStatus::Renamed
             },
             (b'A', _) => GitStatus::Added,
@@ -260,7 +275,7 @@ pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBu
         };
         files.push((path, st));
     }
-    (branch, files)
+    (branch, files, renamed_from)
 }
 
 /// Unified diff of `path` against HEAD in its own repository (or vs /dev/null
@@ -316,9 +331,10 @@ mod tests {
     fn parses_status_and_marks_dirs() {
         let raw = b"## main...origin/main [ahead 1]\0 M src/a.rs\0?? new.txt\0R  b.rs\0old.rs\0A  src/x/y.rs\0";
         let root = Path::new("/r");
-        let (branch, files) = parse_status(raw, root);
+        let (branch, files, renamed_from) = parse_status(raw, root);
         assert_eq!(branch.as_deref(), Some("main...origin/main [ahead 1]"));
         assert_eq!(files.len(), 4);
+        assert_eq!(renamed_from[Path::new("/r/b.rs")], Path::new("/r/old.rs"));
         let rc = RepoChanges { root: root.into(), files, ..Default::default() };
         let m = status_map([&rc], root);
         assert_eq!(m[Path::new("/r/src/a.rs")], GitStatus::Modified);

@@ -958,8 +958,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header`, `system.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
 | `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
-| `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
-| `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
+| `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error`, `files`, `check_icon`, `check_tooltip` | |
+| `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status`, `check_icon` | `icon` |
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
 | `shells.row` | `indent`, `selected`, `command`, `agent` (with several agents), `age` | `icon` |
 | `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
@@ -969,7 +969,12 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `diff_pane.mode` (after the file name in its header) | `split` | |
 | `scratch` | `message` | `editor` |
 | `explorer` | | `header`, `list` |
-| `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |
+| `changes`, `changes.empty` | `empty`, `refreshing`; as `changes.commit` | `header`, `list`, `input` |
+| `changes.commit` | `amend_icon`, `count_text`, `can_commit`, `committing`, `commit_key`, `done`, `error` | `input` (the message) |
+| `git_log`, `git_log.toolbar` | `message`, `loading`, `repos`, `repo`, `branch`, `user`, `count_text`; as `git_log.details` | `input` (the search), `list`, `files` |
+| `git_log.row` | `selected`, `subject`, `author`, `date`; list `refs` (`name`, `head`, `remote`, `tag`) | `graph` |
+| `git_log.details` | `selected`, `subject`, `body`, `hash`, `short`, `author`, `email`, `date`, `committer` (when not the author), `commit_date`, `files_text`; list `refs` | `files` |
+| `git_log.file` | `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
 | `shells`, `shells.empty` | `empty` | `header`, `list` |
 | `usage`, `usage.empty` | `ready`, `stale`, `message`; list `items` (as `usage.item`, one per service: list `limits`, as `usage.item.limit`) | `header` |
@@ -1017,6 +1022,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.tab_group` | `collapsed`, `all`; list `colors` (`label`, `color`, `on`) | |
 | `menu.tab_bar` | as `menu.pane_layout` and `menu.tab_layout` | |
 | `menu.tabs` | list `tabs` (`label`, `on`) | |
+| `menu.git_log_filter` | list `options` (`label`, `on`) | |
 | `menu.part` | `part`, `floating`, `popped`, `can_float`, `can_window` | |
 | `part_window` | | `part` |
 | `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |

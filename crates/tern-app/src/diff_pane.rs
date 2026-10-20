@@ -1,5 +1,5 @@
-//! Diff of one file vs HEAD. Shared by the Changes preview popup, diff tabs
-//! and the viewer's diff mode.
+//! Diff of one file vs HEAD, or in one commit. Shared by the Changes and Git
+//! Log preview popups, diff tabs and the viewer's diff mode.
 
 use std::path::{Path, PathBuf};
 
@@ -24,8 +24,21 @@ pub fn language_for(path: &Path) -> SharedString {
     Language::from_str(ext).name().into()
 }
 
+/// A file's change in one commit, against its first parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InCommit {
+    pub repo: PathBuf,
+    pub hash: String,
+    /// The file, relative to `repo` with `/` separators.
+    pub rel: String,
+    /// A renamed file's old path, as `rel`.
+    pub from: Option<String>,
+}
+
 pub struct DiffPane {
     path: PathBuf,
+    /// Set: the diff is this commit's, not the file's against HEAD.
+    commit: Option<InCommit>,
     diff: Option<Entity<DiffState>>,
     message: Option<SharedString>,
     focus: FocusHandle,
@@ -41,6 +54,15 @@ impl Focusable for DiffPane {
 
 impl DiffPane {
     pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::with(path, None, cx)
+    }
+
+    /// The diff of a file in a commit.
+    pub fn in_commit(commit: InCommit, cx: &mut Context<Self>) -> Self {
+        Self::with(commit.repo.join(&commit.rel), Some(commit), cx)
+    }
+
+    fn with(path: PathBuf, commit: Option<InCommit>, cx: &mut Context<Self>) -> Self {
         // Every diff follows the setting, whichever one changed it.
         let settings = cx.observe_global::<DiffSplit>(|this, cx| {
             let mode = split_mode(cx);
@@ -48,8 +70,15 @@ impl DiffPane {
                 diff.update(cx, |d, cx| d.set_mode(mode, cx));
             }
         });
-        let mut this =
-            Self { path, diff: None, message: Some("Loading…".into()), focus: cx.focus_handle(), _load: None, _settings: settings };
+        let mut this = Self {
+            path,
+            commit,
+            diff: None,
+            message: Some("Loading…".into()),
+            focus: cx.focus_handle(),
+            _load: None,
+            _settings: settings,
+        };
         this.reload(cx);
         this
     }
@@ -58,11 +87,23 @@ impl DiffPane {
         &self.path
     }
 
+    pub fn commit(&self) -> Option<&InCommit> {
+        self.commit.as_ref()
+    }
+
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let path = self.path.clone();
         let lang = language_for(&path);
+        let commit = self.commit.clone();
         self._load = Some(cx.spawn(async move |this, cx| {
-            let patch = cx.background_spawn(async move { tern_fs::git::diff_vs_head(&path) }).await;
+            let patch = cx
+                .background_spawn(async move {
+                    match commit {
+                        Some(c) => tern_fs::git_log::commit_diff(&c.repo, &c.hash, &c.rel, c.from.as_deref()),
+                        None => tern_fs::git::diff_vs_head(&path),
+                    }
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let files = patch
                     .as_deref()
@@ -73,7 +114,7 @@ impl DiffPane {
                     .collect::<Vec<_>>();
                 if files.is_empty() {
                     this.diff = None;
-                    this.message = Some("No changes vs HEAD".into());
+                    this.message = Some(if this.commit.is_some() { "No text changes" } else { "No changes vs HEAD" }.into());
                 } else {
                     this.message = None;
                     match &this.diff {
@@ -97,7 +138,8 @@ impl DiffPane {
     /// Paths changed on disk: reload if this file is among them, or git
     /// metadata (commit, stage, checkout) of a repo holding it changed.
     pub fn files_changed(&mut self, batch: &ChangeBatch, cx: &mut Context<Self>) {
-        if batch.paths.contains(&self.path) || batch.git_repos.iter().any(|r| self.path.starts_with(r)) {
+        // A commit's diff never changes.
+        if self.commit.is_none() && (batch.paths.contains(&self.path) || batch.git_repos.iter().any(|r| self.path.starts_with(r))) {
             self.reload(cx);
         }
     }
