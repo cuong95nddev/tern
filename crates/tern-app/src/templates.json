@@ -34,8 +34,7 @@
                 "min": 160,
                 "max": 480,
                 "children": [
-                  { "part": "agents" },
-                  { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 }
+                  { "part": "agents", "when": "agents" }
                 ]
               },
               {
@@ -46,7 +45,18 @@
                 "zones": ["edges", "stack"],
                 "strip": "right",
                 "fill": true,
-                "children": [{ "part": "panes", "attach": false, "float": false, "window": false }]
+                "children": [
+                  { "part": "panes", "attach": false, "float": false, "window": false },
+                  {
+                    "split": "row",
+                    "fixed": true,
+                    "size": "$usage.start_height",
+                    "children": [
+                      { "part": "usage", "when": "usage", "min": 32 },
+                      { "part": "system", "when": "system", "min": 32 }
+                    ]
+                  }
+                ]
               },
               {
                 "dock": "right",
@@ -70,8 +80,7 @@
             ]
           }
         ]
-      },
-      { "slot": "usage" }
+      }
     ]
   },
   "panes": {
@@ -724,16 +733,6 @@
     "style": { "gap": "$agents.header.gap" },
     "children": [
       {
-        "when": "update",
-        "button": "update",
-        "element": "agents.header.button",
-        "size": "xsmall",
-        "icon": "circle-arrow-down",
-        "label": "{update}",
-        "loading": "installing",
-        "tooltip": "A new version of Tern is available"
-      },
-      {
         "button": "agent_monitor",
         "element": "agents.header.button",
         "size": "xsmall",
@@ -756,6 +755,13 @@
         "size": "xsmall",
         "icon": "folder-plus",
         "tooltip": "Open Workspace… ({open_key})"
+      },
+      {
+        "button": "close",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Agents"
       }
     ]
   },
@@ -778,14 +784,6 @@
           ]
         },
         "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
-      },
-      {
-        "layout": "row",
-        "shrink": 0,
-        "style": { "padding_x": 8, "padding_y": 6 },
-        "children": [
-          { "button": "settings", "element": "agents.settings", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
-        ]
       }
     ]
   },
@@ -837,15 +835,24 @@
             ]
           },
           {
-            "when": "dot",
+            "when": "dot || needs",
             "position": { "top": 0, "right": 0, "bottom": 0 },
             "layout": "row",
             "align": "center",
-            "style": { "padding_right": 6 },
+            "style": { "padding_right": "$agents.status.padding_x" },
             "states": { "hover:sfolder": { "opacity": 0 } },
             "children": [
+              { "when": "needs", "element": "agents.folder.needs", "text": "{needs}" },
               {
-                "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+                "when": "!needs",
+                "align": "center",
+                "justify": "center",
+                "style": { "width": "$agents.ring.width", "height": "$agents.ring.height" },
+                "children": [
+                  {
+                    "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+                  }
+                ]
               }
             ]
           }
@@ -864,22 +871,43 @@
       "active": { "background": "$agents.tab.selected_background", "text": "$agents.tab.selected_text" },
       "hover && !active": { "background": "$agents.tab.hover_background" },
       "!shown && !active": { "text": "$agents.tab.hidden_text" },
-      "working && !active": { "opacity": "$agents.tab.working_opacity" }
+      "working && !active": { "opacity": "$agents.tab.working_opacity" },
+      "done": { "font_weight": "$agents.tab.done_weight" }
     },
     "children": [
       { "slot": "icon" },
       { "grow": 1, "truncate": true, "text": "{label}" },
       {
-        "when": "status",
+        "frame": "status",
         "element": "agents.status",
         "layout": "row",
         "align": "center",
         "shrink": 0,
-        "style": { "text": "{status_color}" },
         "states": { "hover:stab": { "opacity": 0 } },
         "children": [
-          { "when": "status_icon", "icon": "{status_icon}", "style": { "width": 12, "height": 12 } },
-          { "text": "{status}" }
+          { "text": "{time}" },
+          {
+            "element": "agents.state",
+            "shrink": 0,
+            "align": "center",
+            "justify": "center",
+            "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
+            "children": [
+              { "when": "working", "element": "agents.ring", "ring": "75" },
+              { "when": "needs", "icon": "agent-needs", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.needs" } },
+              { "when": "rang", "icon": "agent-dot", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.bell" } },
+              { "when": "done && !shell_dot", "icon": "agent-done", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+              { "when": "done && shell_dot", "icon": "agent-done-cut", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+              { "when": "seen", "icon": "agent-tick", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.seen" } },
+              { "when": "pending", "icon": "agent-ring", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.pending" } },
+              {
+                "when": "shell_dot",
+                "element": "agents.shell_dot",
+                "position": { "top": -1.5, "right": -1.5 },
+                "style": { "width": "$agents.shell_dot.size", "height": "$agents.shell_dot.size", "radius": 9999 }
+              }
+            ]
+          }
         ]
       },
       {
@@ -1308,15 +1336,34 @@
         "frame": "buttons",
         "shrink": 0,
         "style": { "gap": "$title_bar.buttons_gap" },
-        "each": "parts",
-        "item": {
-          "button": "part",
-          "element": "title_bar.button",
-          "size": "small",
-          "icon": "{icon}",
-          "selected": "on",
-          "tooltip": "{tooltip}"
-        }
+        "children": [
+          {
+            "when": "update",
+            "button": "update",
+            "element": "title_bar.update",
+            "size": "small",
+            "icon": "circle-arrow-down",
+            "label": "{update}",
+            "loading": "installing",
+            "tooltip": "A new version of Tern is available"
+          },
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": "$title_bar.buttons_gap" },
+            "each": "parts",
+            "item": {
+              "button": "part",
+              "element": "title_bar.button",
+              "size": "small",
+              "icon": "{icon}",
+              "selected": "on",
+              "tooltip": "{tooltip}"
+            }
+          },
+          { "button": "caffeine", "element": "title_bar.button", "size": "small", "icon": "{caffeine_icon}", "selected": "caffeine_on", "tooltip": "{caffeine_tooltip}" },
+          { "button": "settings", "element": "title_bar.button", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
+        ]
       }
     ]
   },
@@ -1786,6 +1833,12 @@
       }
     ]
   },
+  "panel.edit": {
+    "element": "panel.edit",
+    "handle": true,
+    "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+    "states": { "hover": { "background": "$panel.edit.hover_background" } }
+  },
   "panel_group.seam": {
     "group": "seam",
     "fill": true,
@@ -1823,7 +1876,7 @@
     "grow": 1,
     "align": "center",
     "justify": "center",
-    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here by their title bar" }]
+    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here" }]
   },
   "shells.empty": {
     "element": "shells.empty",
@@ -1834,6 +1887,7 @@
   },
   "usage": {
     "element": "usage",
+    "fill": true,
     "layout": "row",
     "align": "center",
     "children": [{ "use": "usage.item" }, { "grow": 1 }]
@@ -1993,6 +2047,7 @@
     "frame": "panel",
     "element": "system",
     "fill": true,
+    "justify": "center",
     "children": [
       { "when": "!ready", "use": "system.empty" },
       {

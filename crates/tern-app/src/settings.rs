@@ -13,7 +13,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::{ActiveTheme, Theme, ThemeConfig, ThemeConfigColors, ThemeRegistry, try_parse_color};
+use gpui_kit::component::highlighter::HighlightTheme;
+use gpui_kit::component::{ActiveTheme, Theme, ThemeColor, ThemeConfig, ThemeConfigColors, ThemeRegistry, try_parse_color};
 use gpui_kit::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -173,6 +174,8 @@ struct Loader {
     themes: Vec<ThemeChoice>,
     /// The theme `settings.json` names (or the default).
     current: SharedString,
+    /// The `elements` of the theme applied, under the settings' ones.
+    theme_elements: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 impl Global for Loader {}
@@ -206,7 +209,14 @@ pub fn init(mono_font: SharedString, cx: &mut App) {
         log::warn!("settings: can't write {}: {e}", dir.display());
     }
     cx.set_global(SettingsStatus::default());
-    cx.set_global(Loader { dir: dir.clone(), mono_font, preview: None, themes: vec![], current: DEFAULT_THEME.into() });
+    cx.set_global(Loader {
+        dir: dir.clone(),
+        mono_font,
+        preview: None,
+        themes: vec![],
+        current: DEFAULT_THEME.into(),
+        theme_elements: BTreeMap::new(),
+    });
     load(cx);
 
     let (tx, rx) = flume::unbounded::<()>();
@@ -244,6 +254,12 @@ fn is_app_data(dir: &Path, p: &Path) -> bool {
 pub fn themes(cx: &App) -> (Vec<ThemeChoice>, SharedString) {
     let l = cx.global::<Loader>();
     (l.themes.clone(), l.current.clone())
+}
+
+/// What the theme applied gives `element`'s `prop`, if it sets it: the
+/// value it has without `settings.json` setting one.
+pub fn theme_element(element: &str, prop: &str, cx: &App) -> Option<serde_json::Value> {
+    cx.global::<Loader>().theme_elements.get(element)?.get(prop).cloned()
 }
 
 /// Shows theme `name` without saving it, or with `None` goes back to the
@@ -377,6 +393,7 @@ fn load(cx: &mut App) {
         },
     };
 
+    cx.global_mut::<Loader>().theme_elements = theme.elements.clone();
     let over = overrides(&theme, &settings, &mut problems);
     let ui = match ui_config(&theme.ui, &settings, &over, &mut problems) {
         Ok(ui) => ui,
@@ -386,13 +403,22 @@ fn load(cx: &mut App) {
         },
     };
     let palette = terminal_palette(&theme, &settings.terminal.colors, &mut problems);
-    if let Err(e) = write_if_changed(&tern_mux::paths::palette_path(), &palette.to_text()) {
+    // The daemon's directory, made as the daemon wants it: one this made
+    // with the default mode would keep it from starting.
+    let written = tern_mux::paths::ensure_private_dir(&tern_mux::paths::mux_dir())
+        .and_then(|()| write_if_changed(&tern_mux::paths::palette_path(), &palette.to_text()));
+    if let Err(e) = written {
         log::warn!("settings: can't write the daemon's palette: {e}");
     }
 
     let editor_font: SharedString = settings.editor.font_family.clone().map_or_else(|| mono_font.clone(), Into::into);
     let editor_size = settings.editor.font_size;
     Theme::update(cx, |t| {
+        // `apply_config` keeps the highlight colors a theme leaves out: a
+        // theme without `highlight` would get the last theme's editor.
+        if ui.highlight.is_none() {
+            t.highlight_theme = if ui.mode.is_dark() { HighlightTheme::default_dark() } else { HighlightTheme::default_light() };
+        }
         t.apply_config(&Rc::new(ui.clone()));
         t.mode = ui.mode;
         // The theme's default barely shows on a black window.
@@ -409,7 +435,14 @@ fn load(cx: &mut App) {
 
     let (colors, rem) = (cx.theme().colors, cx.theme().font_size);
     style::check_names(&over, &colors, &mut problems);
-    let looks = style::resolve(&over, &colors, rem, dir, &mut problems);
+    let mut looks = style::resolve(&over, &colors, rem, dir, &mut problems);
+    let opacity = style::window_opacity(&looks);
+    if opacity < 1. {
+        // A see-through window: the theme's surfaces let the desktop show,
+        // and so does every element drawn with them.
+        Theme::update(cx, |t| see_through(&mut t.colors, opacity));
+        looks = style::resolve(&over, &cx.theme().colors, rem, dir, &mut vec![]);
+    }
     cx.set_global(looks);
     let mut specs = crate::template::builtin();
     specs.extend(theme.templates.clone());
@@ -433,6 +466,29 @@ fn load(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// The theme colors parts of the window are filled with, at `opacity` of
+/// their own. Menus, dialogs and what's drawn over a surface keep theirs.
+fn see_through(c: &mut ThemeColor, opacity: f32) {
+    for color in [
+        &mut c.background,
+        &mut c.sidebar,
+        &mut c.title_bar,
+        &mut c.status_bar,
+        &mut c.tab_bar,
+        &mut c.tab,
+        &mut c.tab_active,
+        &mut c.list,
+        &mut c.list_even,
+        &mut c.list_head,
+        &mut c.table,
+        &mut c.table_even,
+        &mut c.table_head,
+        &mut c.table_foot,
+    ] {
+        color.a *= opacity;
+    }
+}
+
 fn set_error(error: Option<String>, cx: &mut App) {
     if let Some(e) = &error {
         log::warn!("settings: {e}");
@@ -441,8 +497,13 @@ fn set_error(error: Option<String>, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Built-in theme sets kept as files, in the `themes/*.json` format.
+/// "Cute" is webfreak's Cute theme for VS Code (CC0).
+const BUILTIN_SETS: [&str; 1] = [include_str!("themes/cute.json")];
+
 /// "Tern Dark" and "Tern Light": the component's default themes with
-/// Tern's terminal palettes, and a gray selected row where theirs is blue.
+/// Tern's terminal palettes, and a gray selected row where theirs is blue;
+/// then the themes in `BUILTIN_SETS`.
 fn builtin_themes(cx: &App) -> Vec<(SharedString, TernTheme)> {
     let registry = ThemeRegistry::global(cx);
     let named = |config: &Rc<ThemeConfig>, name: &str, selected: (&str, &str)| {
@@ -453,7 +514,7 @@ fn builtin_themes(cx: &App) -> Vec<(SharedString, TernTheme)> {
         c.colors.list_active_border = Some(selected.1.into());
         c
     };
-    vec![
+    let mut themes = vec![
         (
             DEFAULT_THEME.into(),
             TernTheme {
@@ -470,7 +531,11 @@ fn builtin_themes(cx: &App) -> Vec<(SharedString, TernTheme)> {
                 ..Default::default()
             },
         ),
-    ]
+    ];
+    for set in BUILTIN_SETS {
+        themes.extend(parse_theme_set(set).expect("built-in theme set"));
+    }
+    themes
 }
 
 /// A light palette (One Light's ANSI colors) on the light theme's white.
@@ -661,8 +726,11 @@ fn user_themes(dir: &Path, problems: &mut Vec<String>) -> Vec<(SharedString, Ter
 }
 
 fn read_theme_set(path: &Path) -> Result<Vec<(SharedString, TernTheme)>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut set: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    parse_theme_set(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
+}
+
+fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String> {
+    let mut set: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let themes = set.get_mut("themes").and_then(|t| t.as_array_mut()).ok_or("no \"themes\" list")?;
     let mut out = vec![];
     for theme in themes.iter_mut() {
@@ -950,8 +1018,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | Template | Values | Slots |
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
+| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup), `update` (the offer's label, when a new version is offered), `installing`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
@@ -980,6 +1048,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `panel_group` | `empty`, `edit` (the layout is edited) | `header`, `content` |
 | `panel_group.header` | `part` (the group's name, `group-<n>`), `title` | `buttons` |
 | `panel_group.seam` | | |
+| `panel.edit` | `part`, `title` (the panel under it) | |
 | `panel_group.header.buttons` | `grid`, `tabs`, `stack` (the layout it has); buttons `grid`, `tabs`, `stack`, `close` | |
 | `panel_group.empty` | | |
 | `usage`, `usage.item` | `name`, `note`, `open`; list `limits` (as `usage.item.limit`): the account the shown Claude tab runs as, else the first one turned on | `icon` |
@@ -993,8 +1062,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
-| `agents` | `settings_key`; list `items` | `header` |
-| `agents.header.buttons` | `open_key`, `monitor`, `update`, `installing` | |
+| `agents` | list `items` | `header` |
+| `agents.header.buttons` | `open_key`, `monitor` | |
 | `agents.folder` (also in `agent_monitor`) | `folder`, `name`, `active`, `open`, `dot`, `dot_color`, `buttons`, `close_key` | |
 | `agents.tab` (also in `agent_monitor`) | `label`, `active`, `shown`, `working`, `status`, `status_icon`, `status_color`, `buttons`, `close_key` | `icon` |
 | `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
@@ -1068,11 +1137,12 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 ### Moving panels
 
-The explorer, scratches, changes, shells and system panels sit in docks and can be dragged
-between them by their headers. In a template:
+The explorer, scratches, changes, shells, system and usage panels sit in docks and can be dragged
+between them by their headers, or from anywhere on them while the layout is edited (View ▸ Edit
+Layout draws `panel.edit` over each). In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
-  (`explorer`, `scratches`, `changes`, `shells`, `system`). Give it `\"drag\": false` (or a
+  (`explorer`, `scratches`, `changes`, `shells`, `system`, `usage`). Give it `\"drag\": false` (or a
   condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or
@@ -1158,6 +1228,27 @@ absolute, `~/…`, or relative to this folder), `background_image_fit` (`cover`,
 `transparent` or a color with alpha (`#00000080`); in a terminal, set
 `terminal.background_opacity` below 1.
 
+### See-through window
+
+`window.background_opacity` below 1 (in `settings.json` or a theme's
+`elements`) lets the desktop show through the window, blurred by
+`window.background_blur` points (default 20; 0 doesn't blur). On macOS the
+radius is used as given; Windows and Linux blur as the system does, for any
+radius but 0.
+
+```json
+\"elements\": {{ \"window\": {{ \"background_opacity\": 0.85, \"background_blur\": 30 }} }}
+```
+
+Every part painted with the theme's surfaces (`background`, `sidebar`,
+`title_bar`, `tab_bar`, `status_bar`, tabs, lists, tables) and every terminal
+takes that opacity, as one layer: a part the color of the window's
+background doesn't paint it a second time. A part of another color (the
+title bar, a tab bar in some themes) is laid over the window's, so it shows
+a little more solid. Menus, dialogs and popovers stay opaque.
+`terminal.background_opacity` goes over it, but a terminal can't be more
+see-through than the window under it.
+
 ### Light and dark in terminal programs
 
 Terminal programs learn the theme's background the ways terminals tell them:
@@ -1195,12 +1286,15 @@ the theme format of gpui-component, so its themes work here too.
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::component::{ThemeConfig, ThemeMode};
+    use gpui_kit::component::{ThemeColor, ThemeConfig, ThemeMode};
     use tern_term::palette::DARK_ANSI;
     use tern_term::vt::vte::ansi::Rgb;
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, read_theme_set, terminal_palette, with_value};
+    use super::{
+        BUILTIN_SETS, SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, parse_theme_set, read_theme_set, see_through,
+        terminal_palette, with_value,
+    };
 
     /// The session and window places live next to the settings on Windows:
     /// saving them (every few seconds while a tab's status changes) must not
@@ -1215,6 +1309,41 @@ mod tests {
             assert!(!is_app_data(dir, &dir.join(setting)), "{setting}");
         }
         assert!(!is_app_data(dir, std::path::Path::new("/elsewhere/session")));
+    }
+
+    /// A built-in set names only colors the theme knows, each readable, and
+    /// a full terminal palette.
+    #[test]
+    fn builtin_sets_read_cleanly() {
+        let known = match serde_json::to_value(gpui_kit::component::ThemeConfigColors::default()) {
+            Ok(serde_json::Value::Object(m)) => m.into_iter().map(|(k, _)| k).collect::<std::collections::HashSet<_>>(),
+            _ => panic!("colors are an object"),
+        };
+        for text in BUILTIN_SETS {
+            let raw: serde_json::Value = serde_json::from_str(text).unwrap();
+            for theme in raw["themes"].as_array().unwrap() {
+                for (key, color) in theme["colors"].as_object().unwrap() {
+                    assert!(known.contains(key), "no color \"{key}\"");
+                    assert!(gpui_kit::component::try_parse_color(color.as_str().unwrap()).is_ok(), "{key}: {color}");
+                }
+            }
+            for (name, theme) in parse_theme_set(text).unwrap() {
+                assert!(theme.terminal.slots().iter().all(|(_, v)| v.is_some()), "{name}: terminal colors missing");
+                let mut problems = vec![];
+                terminal_palette(&theme, &TerminalColors::default(), &mut problems);
+                assert!(problems.is_empty(), "{name}: {problems:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn see_through_leaves_menus_opaque() {
+        let mut c = ThemeColor::default();
+        c.background.a = 1.;
+        c.popover.a = 1.;
+        see_through(&mut c, 0.8);
+        assert_eq!(c.background.a, 0.8);
+        assert_eq!(c.popover.a, 1.);
     }
 
     #[test]

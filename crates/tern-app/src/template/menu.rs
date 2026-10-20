@@ -107,7 +107,7 @@ fn entries(n: &Node, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>],
                 None => out.extend(kids),
             }
         },
-        What::Slot(_) | What::Part(_) | What::Icon(_) => {},
+        What::Slot(_) | What::Part(_) | What::Icon(_) | What::Ring(_) => {},
     }
 }
 

@@ -8,8 +8,10 @@ const $ = (id) => document.getElementById(id);
 
 const FONT = 'Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
 const LINE_HEIGHT = 1.15;
-// The session keeps the size the desktop gives it; the page draws that
-// grid at this font size, or smaller until it fits.
+// The page asks for the grid that fits its screen at this font size; the
+// session takes it while the page is the one used last (see bridge.rs).
+// Until it does, or once the desktop takes it back, the page draws the grid
+// it has at this size or smaller until it fits.
 const FONT_SIZE = 13;
 const MIN_FONT = 7;
 
@@ -83,7 +85,10 @@ function connect(view) {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && !socket && !signedOut) connect(null);
+  if (document.visibilityState !== "visible") return;
+  if (!socket && !signedOut) connect(null);
+  // Back to the page: it's the one used now.
+  else fit(true);
 });
 
 function send(msg) {
@@ -116,6 +121,7 @@ function onText(m) {
       snapshotNext = true;
       setBanner(null);
       layout();
+      fit(true);
       break;
     case "resize":
       // The desktop's window changed: drawn to fit as it is.
@@ -367,6 +373,7 @@ function show(which) {
   renderList();
   renderTabs();
   layout();
+  fit();
 }
 
 wideScreen.addEventListener("change", () => show(view));
@@ -390,6 +397,10 @@ function openSession(id) {
 
 $("back").onclick = () => {
   history.replaceState(null, "", location.pathname);
+  // The session goes back to the desktop's size.
+  send({ t: "leave" });
+  current = pending = null;
+  asked = null;
   showList();
 };
 
@@ -502,8 +513,49 @@ function layout() {
   $("term").style.transform = scale < 1 ? `scale(${scale})` : "";
 }
 
+// The grid that fits the screen at FONT_SIZE, and the size of its cell in
+// device pixels.
+function fitting() {
+  const { w, h } = room();
+  const c = cellAt(FONT_SIZE);
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    cols: Math.max(10, Math.floor(w / c.w)),
+    rows: Math.max(3, Math.floor(h / c.h)),
+    cell_width: Math.round(c.w * dpr),
+    cell_height: Math.round(c.h * dpr),
+  };
+}
+
+// The size last asked for the shown session ("id cols rows").
+let asked = null;
+let fitTimer = null;
+
+// Ask for the grid that fits the screen: at once with `now` (a view began,
+// or the page came back: asked again, the desktop may have it since), else
+// once the screen stops changing (rotation and the on-screen keyboard
+// animate), when it changed.
+function fit(now) {
+  clearTimeout(fitTimer);
+  if (now) ask(true);
+  else fitTimer = setTimeout(() => ask(false), 150);
+}
+
+function ask(again) {
+  if (!term || current == null || pending != null || $("term-view").hidden) return;
+  const want = fitting();
+  const key = `${current} ${want.cols} ${want.rows}`;
+  if (again || key !== asked) {
+    asked = key;
+    send({ t: "resize", ...want });
+  }
+}
+
 // The screen changed (window, rotation, the on-screen keyboard).
-window.addEventListener("resize", layout);
+window.addEventListener("resize", () => {
+  layout();
+  fit();
+});
 
 // The on-screen keyboard: iOS ignores `interactive-widget` and lays the page
 // out behind it, so the page is made the height of what is left above it.
@@ -515,6 +567,7 @@ if (window.visualViewport) {
     // iOS scrolls the page to show the focused box: it fits now.
     if (vv.scale <= 1.01) window.scrollTo(0, 0);
     layout();
+    fit();
   };
   vv.addEventListener("resize", fitKeyboard);
   vv.addEventListener("scroll", fitKeyboard);

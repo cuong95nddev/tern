@@ -5,9 +5,11 @@
 //! changes), `view` (a view began: the session's size; the bytes that paint
 //! its snapshot follow as one binary message), binary messages (the
 //! session's output), `resize`, `exited`, `gone` and `error`. From the page:
-//! `view` and `input`. The page never resizes the session: it draws it at
-//! the size the desktop gives it. Session ids go as strings: they don't fit
-//! a JavaScript number.
+//! `view`, `leave` (back to the list), `input` and `resize` (the size that
+//! fits its screen). The daemon
+//! gives the PTY the size of whoever used it last: the page's while it is
+//! viewed and typed into, the desktop's once that types again or the page
+//! leaves. Session ids go as strings: they don't fit a JavaScript number.
 
 use std::io::BufReader;
 use std::net::TcpStream;
@@ -17,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde_json::json;
 use tern_mux::viewer::{ViewEvent, Viewer};
+use tern_term::TermSize;
 use tern_term::mirror::Marker;
 use tern_term::palette::{Palette, PaletteFile};
 use tern_term::vt::vte::ansi::Rgb;
@@ -30,8 +33,16 @@ enum FromPage {
         #[serde(with = "id_string")]
         id: u64,
     },
+    Leave,
     Input {
         d: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+        /// One cell in device pixels, for programs that draw images.
+        cell_width: u16,
+        cell_height: u16,
     },
 }
 
@@ -107,9 +118,16 @@ pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Pa
                 st.id = Some(id);
                 let _ = viewer.view(id);
             },
+            FromPage::Leave => st.leave(&viewer),
             FromPage::Input { d } => {
                 if let Some(id) = st.id {
                     let _ = viewer.input(id, d.into_bytes());
+                }
+            },
+            FromPage::Resize { cols, rows, cell_width, cell_height } => {
+                if let Some(id) = st.id {
+                    let size = TermSize { cols: cols.clamp(10, 500), rows: rows.clamp(3, 300), cell_width, cell_height };
+                    let _ = viewer.resize(id, size);
                 }
             },
         }
@@ -224,9 +242,11 @@ mod tests {
     fn reads_what_the_page_sends() {
         let m: FromPage = serde_json::from_str(r#"{"t":"view","id":"9223372036854775807"}"#).unwrap();
         assert!(matches!(m, FromPage::View { id: 9223372036854775807 }));
+        assert!(matches!(serde_json::from_str(r#"{"t":"leave"}"#).unwrap(), FromPage::Leave));
         let m: FromPage = serde_json::from_str(r#"{"t":"input","d":"ls\r"}"#).unwrap();
         assert!(matches!(m, FromPage::Input { d } if d == "ls\r"));
-        assert!(serde_json::from_str::<FromPage>(r#"{"t":"resize","cols":80,"rows":24}"#).is_err());
+        let m: FromPage = serde_json::from_str(r#"{"t":"resize","cols":45,"rows":30,"cell_width":24,"cell_height":45}"#).unwrap();
+        assert!(matches!(m, FromPage::Resize { cols: 45, rows: 30, cell_width: 24, cell_height: 45 }));
         assert!(serde_json::from_str::<FromPage>(r#"{"t":"view","id":12}"#).is_err());
     }
 

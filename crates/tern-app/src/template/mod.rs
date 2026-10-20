@@ -59,6 +59,12 @@ pub struct Spec {
     /// An icon by name (`"plus"`, `"columns-2"`: the bundled Lucide names),
     /// or `"{name}"` for one the code gives. On a `button`: its icon.
     pub icon: Option<String>,
+    /// A ring `"{name}"` percent full (0 to 100): an arc clockwise from the
+    /// top over its track, which is dashed while the value is empty. Its
+    /// `text` colors the arc, `track` the track, `stroke_width` both;
+    /// `spin` turns it once every that many seconds (0 keeps it still). Size
+    /// it with `width` and `height`.
+    pub ring: Option<String>,
     /// A button; the code attaches what it does by this name, as for `frame`.
     /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
     /// `disabled` and `loading`.
@@ -352,6 +358,11 @@ impl Scope {
         self
     }
 
+    /// Value `name` as text, when it was given.
+    pub fn text_var(&self, name: &str) -> Option<SharedString> {
+        self.vars.get(name).map(Value::text)
+    }
+
     pub fn slot(mut self, name: &'static str, e: impl IntoElement) -> Self {
         self.slots.insert(name, e.into_any_element());
         self
@@ -526,6 +537,8 @@ enum What {
     Each(SharedString, Arc<Node>),
     /// An icon's name.
     Icon(Vec<Part>),
+    /// How full a ring is, in percent.
+    Ring(Vec<Part>),
     Button(Arc<ButtonNode>),
     /// In a menu: a line between entries.
     Separator,
@@ -806,7 +819,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "panes"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "usage", "panes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1258,12 +1271,13 @@ impl Compiler<'_, '_> {
             s.each.is_some(),
             s.use_.is_some(),
             icon,
+            s.ring.is_some(),
             s.button.is_some() || s.action.is_some(),
             switch,
             s.separator,
         ];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, button, switch and separator"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator"));
         }
         if switch {
             for (field, set) in
@@ -1324,6 +1338,8 @@ impl Compiler<'_, '_> {
             What::Separator
         } else if let Some(name) = &s.icon {
             What::Icon(self.icon(name, &format!("{at}.icon")))
+        } else if let Some(ring) = &s.ring {
+            What::Ring(parts(ring))
         } else if let Some(list) = &s.each {
             match &s.item {
                 Some(item) => What::Each(list.clone().into(), Arc::new(self.node(item, &format!("{at}.item")))),
@@ -1469,8 +1485,8 @@ impl Compiler<'_, '_> {
                 None
             },
         };
-        for c in children.iter().filter(|c| !matches!(c.what, What::Part(_))) {
-            self.problems.push(format!("{}: a dock holds only parts", c.path));
+        for c in children.iter().filter(|c| !dock_item(c)) {
+            self.problems.push(format!("{}: a dock holds only parts, and splits of parts", c.path));
         }
         let defaults = dock_defaults(dir, children);
         let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults, grouped: s.grouped };
@@ -1491,20 +1507,41 @@ impl Compiler<'_, '_> {
 /// leaves it to share what's left. A dock without parts has an empty split,
 /// which `prune` reads as nothing.
 fn dock_defaults(dir: Dir, children: &[Node]) -> Tree {
-    let mut names = BTreeSet::new();
+    defaults_in(dir, children, &mut BTreeSet::new())
+}
+
+/// True when `node` may sit in a dock: a part, or a split of parts.
+fn dock_item(node: &Node) -> bool {
+    match node.what {
+        What::Part(_) => true,
+        What::Box => node.split.is_some() && node.dock.is_none() && node.children.iter().all(dock_item),
+        _ => false,
+    }
+}
+
+/// The tree `children` start a split along `dir` with; `names` are the parts
+/// placed so far, so each goes in once.
+fn defaults_in(dir: Dir, children: &[Node], names: &mut BTreeSet<&'static str>) -> Tree {
     let mut items: Vec<(Tree, Size)> = children
         .iter()
         .filter_map(|c| {
-            let What::Part(p) = c.what else { return None };
-            if !names.insert(p) {
-                return None;
-            }
+            let tree = match (&c.what, c.split) {
+                (What::Part(p), _) => names.insert(p).then(|| Tree::Part((*p).to_owned()))?,
+                (What::Box, Some(axis)) if c.dock.is_none() => {
+                    let inner = if axis == Axis::Horizontal { Dir::Row } else { Dir::Column };
+                    match defaults_in(inner, &c.children, names) {
+                        Tree::Split(_, items) if items.is_empty() => return None,
+                        t => t,
+                    }
+                },
+                _ => return None,
+            };
             let fixed = c.panel.fixed.is_some();
             let size = match c.panel.size {
                 Some(AbsoluteLength::Pixels(px)) if fixed => Size::Px(f32::from(px)),
                 _ => Size::Auto,
             };
-            Some((Tree::Part(p.to_owned()), size))
+            Some((tree, size))
         })
         .collect();
     match items.len() {
@@ -1605,15 +1642,17 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         let docks = t.docks("workspace");
         let names: Vec<&str> = docks.iter().map(|d| d.name.as_str()).collect();
-        // The agents panel on the left, as T3 Code's sidebar; the panes in the middle; every other panel on the right.
+        // The agents panel on the left, as T3 Code's sidebar; the panes in the middle, usage and system in a row
+        // under them; every other panel on the right.
         assert_eq!(names, ["start", "main", "right"]);
         let a = crate::arrange::Arrangement::defaults("workspace/main+right+start", &docks);
         // Each panel in a group of its own.
         assert_eq!(
             a.encode(),
-            "group-1=agents;group-2=system;group-3=panes;group-4=explorer;group-5=changes;group-6=scratches;group-7=shells;\
-             main=group-3;right=[c group-4@- group-5@260px group-6@220px group-7@180px];start=[c group-1@- group-2@32px];\
-             g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;g:group-5=grid;g:group-6=grid;g:group-7=grid"
+            "group-1=agents;group-2=panes;group-3=usage;group-4=system;group-5=explorer;group-6=changes;group-7=scratches;\
+             group-8=shells;main=[c group-2@- [r group-3@- group-4@-]@32px];\
+             right=[c group-5@- group-6@260px group-7@220px group-8@180px];start=group-1;g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
+             g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
         );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
@@ -1648,8 +1687,8 @@ mod tests {
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
         assert_eq!(problems.len(), 12, "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts")), "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts, and splits of parts")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts, and splits of parts")), "{problems:?}");
     }
 
     #[test]
@@ -1921,7 +1960,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
+                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
                 "templates.s.children.1.icon: a switch doesn't take it",
             ]
         );
@@ -1943,7 +1982,7 @@ mod tests {
             problems,
             [
                 "templates.menu.m.children.0.label: only a button or a submenu takes it",
-                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
+                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
             ]
         );
         let mut problems = vec![];

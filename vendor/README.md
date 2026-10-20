@@ -19,3 +19,16 @@ scrolled. Items now keep their last height (or hint) as the hint until they
 are measured again. Zed's `main` has the same code. Test:
 `test_uniform_height_hint_survives_first_layout_and_width_change` (the
 published crate's tests need Zed's workspace to build).
+
+## gpui-pre-apple 0.3.9 and gpui-pre-windows 0.3.9
+
+`src/metal_renderer.rs` (`build_pipeline_state`, `build_path_sprite_pipeline_state`)
+and `src/directx_renderer.rs` (`create_blend_state`,
+`create_blend_state_for_path_sprite`): the blend kept the destination's alpha
+whole (`One`), so each layer's alpha was added to what was under it rather
+than laid over it. In an opaque window that changes nothing, but in a
+see-through one (`WindowBackgroundAppearance::Transparent` or `Blurred`) a
+few half-transparent backgrounds over each other came out fully opaque: a
+panel at 30% over the window at 30% over the workspace at 30% was solid. The
+destination's alpha now goes by `OneMinusSourceAlpha`, the usual "over", as
+the wgpu renderer (Linux) already does with `PREMULTIPLIED_ALPHA_BLENDING`.

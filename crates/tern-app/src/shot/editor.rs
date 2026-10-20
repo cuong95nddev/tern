@@ -60,6 +60,7 @@ pub fn open(shots: Vec<PathBuf>, at: usize, cx: &mut App) {
             display_id: Some(display.id()),
             focus: true,
             show: true,
+            window_background: crate::style::backdrop(cx).appearance,
             ..Default::default()
         },
         cx,
@@ -335,6 +336,8 @@ pub struct Editor {
     /// The pictures the last render used: one no longer used is dropped
     /// from the window's sprite atlas, which would keep it otherwise.
     shown: Vec<Arc<RenderImage>>,
+    /// What the desktop does behind the window, as last set.
+    backdrop: crate::style::Backdrop,
 }
 
 impl Editor {
@@ -364,6 +367,7 @@ impl Editor {
             blanks: 0,
             done: false,
             shown: Vec::new(),
+            backdrop: crate::style::Backdrop::default(),
         };
         for path in shots {
             this.load(path);
@@ -834,6 +838,7 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let live: Vec<_> = self.pages.iter().map(|p| p.picture.clone()).chain(self.floating.as_ref().map(|f| f.picture.clone())).collect();
         for old in std::mem::take(&mut self.shown) {
             if !live.iter().any(|l| Arc::ptr_eq(l, &old)) {

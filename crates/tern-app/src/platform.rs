@@ -246,3 +246,34 @@ mod tests {
         assert_eq!(shortcut_one("⌘\\"), "Ctrl+Shift+\\");
     }
 }
+
+/// Blurs what's behind `window` by `radius` points (0: not at all), where
+/// the window is see-through. NSVisualEffectView, which gpui blurs with,
+/// has one strength; the window server's own radius, as Ghostty, kitty and
+/// Alacritty set theirs, takes any.
+#[cfg(target_os = "macos")]
+pub fn set_blur_radius(window: &Window, radius: u32) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGSDefaultConnectionForThread() -> i32;
+        fn CGSSetWindowBackgroundBlurRadius(connection: i32, window: isize, radius: i32) -> i32;
+    }
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+    // SAFETY: `view` is this live window's content view; `window` and
+    // `windowNumber` are plain NSView / NSWindow getters.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let number: isize = msg_send![ns_window, windowNumber];
+        CGSSetWindowBackgroundBlurRadius(CGSDefaultConnectionForThread(), number, radius.min(i32::MAX as u32) as i32);
+    }
+}

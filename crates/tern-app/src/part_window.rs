@@ -25,6 +25,8 @@ pub struct PartWindow {
     ws: WeakEntity<Workspace>,
     part: SharedString,
     title: String,
+    /// What the desktop does behind the window, as last set.
+    backdrop: crate::style::Backdrop,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
     _save: Task<()>,
@@ -45,6 +47,7 @@ pub fn open(
             display_id: display,
             titlebar: Some(TitlebarOptions { title: Some(crate::dock::part_title(&part)), ..Default::default() }),
             window_min_size: Some(size(px(120.), px(80.))),
+            window_background: crate::style::backdrop(cx).appearance,
             app_id: Some("dev.tern.Tern".into()),
             ..Default::default()
         },
@@ -113,7 +116,15 @@ impl PartWindow {
             let _ = weak.update(cx, |ws, cx| ws.dock_named(&name, cx));
             true
         });
-        PartWindow { ws: ws.downgrade(), part, title: String::new(), focus, _subs: subs, _save: Task::ready(()) }
+        PartWindow {
+            ws: ws.downgrade(),
+            part,
+            title: String::new(),
+            backdrop: Default::default(),
+            focus,
+            _subs: subs,
+            _save: Task::ready(()),
+        }
     }
 }
 
@@ -125,6 +136,7 @@ impl Render for PartWindow {
             window.set_window_title(&title);
             self.title = title;
         }
+        crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let part = template::render_part(&self.part, ws.read(cx).arranged_scope(self.ws.clone()), cx);
         let body = template::render(
             "part_window",

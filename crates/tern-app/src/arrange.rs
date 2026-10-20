@@ -405,6 +405,14 @@ pub fn shown(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
     walk(tree, &mut Vec::new(), shown)
 }
 
+/// The sizes to keep for a split the user dragged to `shown` (`fixed`: which
+/// of its children kept a size): every child keeps the size it was dragged
+/// to but the largest of those without one, which takes up the rest.
+pub fn dragged_sizes(shown: &[f32], fixed: &[bool]) -> Vec<Size> {
+    let flex = (0..shown.len()).filter(|&i| !fixed.get(i).copied().unwrap_or(false)).max_by(|&a, &b| shown[a].total_cmp(&shown[b]).then(b.cmp(&a)));
+    shown.iter().enumerate().map(|(i, s)| if Some(i) == flex { Size::Auto } else { Size::Px(*s) }).collect()
+}
+
 /// The stored sizes of a split with `new` put in for its kept children
 /// (`kept`: their stored indices, in order).
 pub fn merge_sizes(stored: &[Size], kept: &[usize], new: &[Size]) -> Vec<Size> {
@@ -1531,6 +1539,18 @@ mod tests {
     }
 
     #[test]
+    fn dragged_sizes_keep_all_but_the_largest_flexible_one() {
+        // Two groups side by side, neither with a size: the smaller keeps its own.
+        assert_eq!(dragged_sizes(&[80.0, 160.0], &[false, false]), [Size::Px(80.0), Size::Auto]);
+        // Equal: the first takes up the rest.
+        assert_eq!(dragged_sizes(&[100.0, 100.0], &[false, false]), [Size::Auto, Size::Px(100.0)]);
+        // The panes and a group under them: the panes take up the rest.
+        assert_eq!(dragged_sizes(&[600.0, 120.0, 40.0], &[false, false, true]), [Size::Auto, Size::Px(120.0), Size::Px(40.0)]);
+        // All sized: all keep it.
+        assert_eq!(dragged_sizes(&[60.0, 40.0], &[true, true]), [Size::Px(60.0), Size::Px(40.0)]);
+    }
+
+    #[test]
     fn encode_decode_round_trip() {
         let mut a = fresh();
         assert_eq!(a.encode(), DEFAULT);
@@ -2144,5 +2164,9 @@ mod tests {
         // An empty group added below another.
         assert_eq!(a.add_group("left", Drop::After("group-4".into()), &d), Some("group-5".into()));
         assert_eq!(a.docks["left"].as_ref().unwrap().parts(), ["group-1", "group-4", "group-5", "group-2"]);
+        // And one beside another: the two split its place in a row.
+        assert_eq!(a.add_group("left", Drop::Edge("group-5".into(), Edge::Right), &d), Some("group-6".into()));
+        assert_eq!(a.docks["left"].as_ref().unwrap().parts(), ["group-1", "group-4", "group-5", "group-6", "group-2"]);
+        assert!(a.encode().contains("[r group-5@- group-6@-]"), "{}", a.encode());
     }
 }

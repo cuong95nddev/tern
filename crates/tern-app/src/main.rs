@@ -5,12 +5,14 @@ mod accounts;
 mod agent_monitor;
 mod agents;
 mod arrange;
+mod caffeine;
 mod changes_view;
 #[cfg(debug_assertions)]
 mod control;
 mod diff_pane;
 mod dirs;
 mod dock;
+mod dock_badge;
 mod file_icons;
 mod file_tree_view;
 mod git_log_view;
@@ -63,6 +65,12 @@ struct AppServices(workspace::Services);
 impl Global for AppServices {}
 
 fn main() {
+    // Claude Code's status line in a Tern tab: before anything else, as it
+    // runs after every message.
+    if std::env::args().nth(1).as_deref() == Some("--statusline") {
+        let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
+        std::process::exit(tern_bridge::statusline::run(&settings));
+    }
     env_logger::init();
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());
@@ -265,6 +273,8 @@ fn main() {
             .detach();
         }
         cx.on_window_closed(|cx, _| {
+            // Its agents keep nothing awake any more.
+            caffeine::settle(cx);
             // The agent monitor and the parts' own windows don't keep Tern open by themselves.
             let monitor = agent_monitor::window(cx);
             if cx.windows().iter().all(|w| Some(*w) == monitor || part_window::is_part_window(*w, cx)) {
