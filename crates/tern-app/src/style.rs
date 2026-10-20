@@ -134,11 +134,16 @@ pub const BOX: &[Prop] = &[
     ("text_transform", Text, ""),
 ];
 
-/// A template box's own properties: those of [`BOX`], and of [`IMAGE`] (any
-/// box can show an image behind its children).
+/// A template box's own properties: those of [`BOX`], of [`IMAGE`] (any
+/// box can show an image behind its children), and of [`RING`] (for a
+/// `ring`).
 pub fn box_prop(name: &str) -> Option<&'static Prop> {
-    BOX.iter().chain(IMAGE).find(|p| p.0 == name)
+    BOX.iter().chain(IMAGE).chain(RING).find(|p| p.0 == name)
 }
+
+/// A template `ring`: its track's color, the width of its track and arc, and
+/// how far it is turned (in turns). Its arc takes its `text` color.
+pub const RING: &[Prop] = &[("track", Color, ""), ("stroke_width", Len, ""), ("rotate", Num, "")];
 
 /// A container that can show an image behind its content: the file
 /// (absolute, `~/…`, or relative to the config folder), how it fits
@@ -257,7 +262,6 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element { name: "agents.header", about: "The agents panel's title bar", groups: &[HEADER] },
     simple!("agents.header.button", "A button in the agents panel's title bar"),
-    simple!("agents.settings", "The Settings button under the agents panel's list"),
     Element {
         name: "agents.list",
         about: "The agents panel's list of workspaces and agents",
@@ -302,8 +306,13 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element {
         name: "agents.status",
-        about: "An agent's state (Working 12s, Needs input, Done, or how long ago its turn ended), in its state's color",
-        groups: &[&[("gap", Len, "4"), ("padding_x", Len, "4"), ("font_size", Len, "$text_xs")]],
+        about: "An agent's state: how long it has been working or since its turn ended, and its ring",
+        groups: &[&[("gap", Len, "6"), ("padding_x", Len, "4"), ("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "agents.ring",
+        about: "An agent's ring: how full its context window is, turning while it works, amber with a dot while it waits for you, with a tick once its turn is done",
+        groups: &[&[("width", Len, "16"), ("height", Len, "16"), ("stroke_width", Len, "1.8"), ("track", Color, "$muted.foreground/25")]],
     },
     simple!("agents.button", "The buttons on a workspace or agent row (new tab, close)"),
     Element { name: "workspace", about: "One workspace: its panels and tabs", groups: &[&[("background", Color, "$background")], IMAGE] },
@@ -323,7 +332,8 @@ pub const ELEMENTS: &[Element] = &[
             ("buttons_padding", Len, "6"),
         ]],
     },
-    simple!("title_bar.button", "A panel's button in the title bar"),
+    simple!("title_bar.button", "A button in the title bar: a panel's, or Settings"),
+    simple!("title_bar.update", "The button in the title bar that offers a new version of Tern, left of the others"),
     Element {
         name: "tool_strip.left",
         about: "The panel buttons down the window's left edge",
@@ -557,20 +567,25 @@ pub const ELEMENTS: &[Element] = &[
         groups: &[&[("border", Color, "$primary/40"), ("border_width", Len, "1")]],
     },
     Element {
+        name: "panel.edit",
+        about: "Over each panel while the layout is edited: it drags the panel, from anywhere on it",
+        groups: &[&[("hover_background", Color, "$primary/10")]],
+    },
+    Element {
         name: "panel_group.seam",
-        about: "The strip along a panel group's bottom while the layout is edited; `size` is how tall it is",
+        about: "A strip along a panel group's bottom, and one along its right side, while the layout is edited; `size` is \
+                how thick each is",
         groups: &[&[("size", Len, "18")]],
     },
-    simple!("panel_group.seam.button", "The button on a seam that adds an empty panel group there"),
+    simple!("panel_group.seam.button", "The button on a seam that adds an empty panel group there: below the group, or beside it"),
     Element {
         name: "usage",
-        about: "The bar under the window's panes: the Claude account the shown tab runs as (the first one turned on when \
-                it isn't a Claude tab) and how much of its plan is used",
-        groups: &[&[
-            ("height", Len, "26"),
+        about: "The usage panel: the Claude account the shown tab runs as (the first one turned on when it isn't a \
+                Claude tab) and how much of its plan is used, as a status bar",
+        groups: &[PANEL, &[
+            ("start_height", Len, "32"),
             ("padding_x", Len, "6"),
             ("gap", Len, "4"),
-            ("background", Color, "$bar_background"),
             ("font_size", Len, "$text_xs"),
             ("text", Color, "$text"),
         ]],

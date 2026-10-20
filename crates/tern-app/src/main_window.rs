@@ -5,7 +5,7 @@
 //! out of the agents panel onto another Tern window to join it, or anywhere
 //! else to give it a window of its own; the folder's menu does the same.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -518,6 +518,7 @@ impl MainWindow {
         let activation_sub = cx.observe_window_activation(window, |_: &mut Self, window, cx| {
             if window.is_window_active() {
                 crate::menus::install(cx);
+                crate::dock_badge::clear(cx);
             }
         });
         // The close button asks first when that ends running programs.
@@ -795,6 +796,8 @@ impl MainWindow {
         let close_key = shortcut("⌘⇧W");
         let mut entries = vec![];
         let mut items = vec![];
+        // What each agent's ring says, in words.
+        let mut tips: HashMap<EntityId, SharedString> = HashMap::new();
         let mut active_row = 0;
         let mut working = false;
         for (i, slot) in self.slots.iter().enumerate() {
@@ -820,6 +823,9 @@ impl MainWindow {
             items.push(folder);
             if open {
                 for (id, scope, _) in tabs {
+                    if let Some(tip) = scope.text_var("tip") {
+                        tips.insert(id, tip);
+                    }
                     entries.push(Entry::Tab(i, id));
                     items.push(scope);
                 }
@@ -842,7 +848,6 @@ impl MainWindow {
                 }),
             ));
         }
-        let update = crate::update::offered(cx);
         let mut buttons = template::Scope::new("agents.header.buttons")
             .var("open_key", shortcut("⌘O"))
             .var("monitor", crate::agent_monitor::window(cx).is_some());
@@ -850,10 +855,6 @@ impl MainWindow {
         #[cfg(any(target_os = "macos", windows))]
         {
             buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
-        }
-        if let Some((release, installing)) = &update {
-            let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
-            buttons = buttons.var("update", label).var("installing", *installing);
         }
         let header = crate::dock::panel_header(
             "agents",
@@ -868,20 +869,11 @@ impl MainWindow {
                 ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
                 #[cfg(any(target_os = "macos", windows))]
                 ("screenshots", Framed::Button(b)) => b.on_click(|_, _, cx| crate::shot::toggle_panel(cx)).into_any_element(),
-                ("update", Framed::Button(b)) => {
-                    let update = update.clone();
-                    b.on_click(move |_, _, cx| {
-                        if let Some((release, false)) = &update {
-                            crate::update::offer(release.clone(), cx)
-                        }
-                    })
-                    .into_any_element()
-                },
                 (_, f) => f.into_any_element(),
             },
             cx,
         );
-        let scope = template::Scope::new("agents").var("settings_key", shortcut("⌘,")).slot("header", header).list("items", items);
+        let scope = template::Scope::new("agents").slot("header", header).list("items", items);
         let me = cx.entity().downgrade();
         let workspaces: Vec<Entity<Workspace>> = self.slots.iter().map(|s| s.ws.clone()).collect();
         let drag: Vec<DraggedWorkspace> =
@@ -959,6 +951,13 @@ impl MainWindow {
                         None => d.into_any_element(),
                     }
                 },
+                ("status", Framed::Box(d), Some(Entry::Tab(_, id))) => match tips.get(&id).cloned() {
+                    Some(tip) => d
+                        .id(("agents-status", id.as_u64() as usize))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                        .into_any_element(),
+                    None => d.into_any_element(),
+                },
                 ("close", Framed::Button(b), Some(Entry::Tab(i, id))) => b
                     .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
                         // Don't let the row's own click show it.
@@ -968,9 +967,6 @@ impl MainWindow {
                         }
                     }))
                     .into_any_element(),
-                ("settings", Framed::Button(b), _) => {
-                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
-                },
                 ("end", Framed::Box(d), _) => d
                     .id("agents-end")
                     .drag_over::<DraggedWorkspace>(move |s, _, _, cx| s.bg(drop_bg(cx)))
@@ -1211,11 +1207,17 @@ impl MainWindow {
     fn render_title_bar(&self, ws: Option<&Entity<Workspace>>, cx: &mut Context<Self>) -> AnyElement {
         let (parts, clicks) = ws.map(|ws| ws.update(cx, |w, cx| w.title_parts(cx))).unwrap_or_default();
         let (background, settings_error) = ws.map(|ws| ws.read(cx).title_status(cx)).unwrap_or_default();
-        let scope = template::Scope::new("title_bar")
+        let update = crate::update::offered(cx);
+        let mut scope = template::Scope::new("title_bar")
             .var("title", self.title.clone())
             .var("background", background)
             .var("settings_error", settings_error)
+            .var("settings_key", crate::platform::shortcut("⌘,").to_string())
             .list("parts", parts);
+        if let Some((release, installing)) = &update {
+            let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
+            scope = scope.var("update", label).var("installing", *installing);
+        }
         let bar = template::render(
             "title_bar",
             scope,
@@ -1223,6 +1225,18 @@ impl MainWindow {
                 ("part", Framed::Button(b), Some(click)) => {
                     let click = click.clone();
                     b.on_click(move |_, w, cx| click(w, cx)).into_any_element()
+                },
+                ("settings", Framed::Button(b), _) => {
+                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
+                },
+                ("update", Framed::Button(b), _) => {
+                    let update = update.clone();
+                    b.on_click(move |_, _, cx| {
+                        if let Some((release, false)) = &update {
+                            crate::update::offer(release.clone(), cx)
+                        }
+                    })
+                    .into_any_element()
                 },
                 // Over the bar's drag area: without this, Windows takes a click on a button for the caption's.
                 ("buttons", Framed::Box(d), _) => d.occlude().into_any_element(),

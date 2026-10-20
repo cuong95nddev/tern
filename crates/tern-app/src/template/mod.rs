@@ -59,6 +59,11 @@ pub struct Spec {
     /// An icon by name (`"plus"`, `"columns-2"`: the bundled Lucide names),
     /// or `"{name}"` for one the code gives. On a `button`: its icon.
     pub icon: Option<String>,
+    /// A ring `"{name}"` percent full (0 to 100): an arc clockwise from the
+    /// top over its track, which is dashed while the value is empty. Its
+    /// `text` colors the arc, `track` the track, `stroke_width` both;
+    /// `rotate` turns it (in turns, 0 to 1). Size it with `width` and `height`.
+    pub ring: Option<String>,
     /// A button; the code attaches what it does by this name, as for `frame`.
     /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,
     /// `disabled` and `loading`.
@@ -352,6 +357,11 @@ impl Scope {
         self
     }
 
+    /// Value `name` as text, when it was given.
+    pub fn text_var(&self, name: &str) -> Option<SharedString> {
+        self.vars.get(name).map(Value::text)
+    }
+
     pub fn slot(mut self, name: &'static str, e: impl IntoElement) -> Self {
         self.slots.insert(name, e.into_any_element());
         self
@@ -526,6 +536,8 @@ enum What {
     Each(SharedString, Arc<Node>),
     /// An icon's name.
     Icon(Vec<Part>),
+    /// How full a ring is, in percent.
+    Ring(Vec<Part>),
     Button(Arc<ButtonNode>),
     /// In a menu: a line between entries.
     Separator,
@@ -806,7 +818,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "panes"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "usage", "panes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1258,12 +1270,13 @@ impl Compiler<'_, '_> {
             s.each.is_some(),
             s.use_.is_some(),
             icon,
+            s.ring.is_some(),
             s.button.is_some() || s.action.is_some(),
             switch,
             s.separator,
         ];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, button, switch and separator"));
+            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator"));
         }
         if switch {
             for (field, set) in
@@ -1324,6 +1337,8 @@ impl Compiler<'_, '_> {
             What::Separator
         } else if let Some(name) = &s.icon {
             What::Icon(self.icon(name, &format!("{at}.icon")))
+        } else if let Some(ring) = &s.ring {
+            What::Ring(parts(ring))
         } else if let Some(list) = &s.each {
             match &s.item {
                 Some(item) => What::Each(list.clone().into(), Arc::new(self.node(item, &format!("{at}.item")))),
@@ -1611,9 +1626,10 @@ mod tests {
         // Each panel in a group of its own.
         assert_eq!(
             a.encode(),
-            "group-1=agents;group-2=system;group-3=panes;group-4=explorer;group-5=changes;group-6=scratches;group-7=shells;\
-             main=group-3;right=[c group-4@- group-5@260px group-6@220px group-7@180px];start=[c group-1@- group-2@32px];\
-             g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;g:group-5=grid;g:group-6=grid;g:group-7=grid"
+            "group-1=agents;group-2=system;group-3=usage;group-4=panes;group-5=explorer;group-6=changes;group-7=scratches;\
+             group-8=shells;main=group-4;right=[c group-5@- group-6@260px group-7@220px group-8@180px];\
+             start=[c group-1@- group-2@32px group-3@32px];g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
+             g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
         );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
@@ -1921,7 +1937,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
+                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
                 "templates.s.children.1.icon: a switch doesn't take it",
             ]
         );
@@ -1943,7 +1959,7 @@ mod tests {
             problems,
             [
                 "templates.menu.m.children.0.label: only a button or a submenu takes it",
-                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, button, switch and separator",
+                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
             ]
         );
         let mut problems = vec![];

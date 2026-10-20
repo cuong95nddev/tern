@@ -63,6 +63,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Git Log", workspace::OpenGitLog),
         MenuItem::action("Scratches", workspace::ToggleScratches),
         MenuItem::action("System", workspace::ToggleSystem),
+        MenuItem::action("Usage", workspace::ToggleUsage),
         MenuItem::action("Edit Layout", workspace::ToggleEditLayout),
         MenuItem::action("New Panel", workspace::NewPanel),
         MenuItem::action("Reset Layout", workspace::ResetLayout),

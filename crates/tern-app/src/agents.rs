@@ -19,6 +19,96 @@ pub fn status_look(status: ActivityStatus, rang: bool, since: std::time::Duratio
     }
 }
 
+/// How full a Claude conversation's context window is: what its status
+/// line's input says (see `tern_bridge::statusline`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextUse {
+    /// Percent of the window used, 0 to 100.
+    pub percent: f32,
+    /// The window's size, in tokens.
+    pub size: u64,
+}
+
+impl ContextUse {
+    /// From a status line's input. Before the first answer the window is
+    /// empty: Claude Code then gives no percentage.
+    pub fn read(line: &serde_json::Value) -> Option<Self> {
+        let w = line.get("context_window")?;
+        let size = w.get("context_window_size")?.as_u64().filter(|s| *s > 0)?;
+        let percent = w.get("used_percentage").and_then(serde_json::Value::as_f64).unwrap_or(0.);
+        Some(Self { percent: percent.clamp(0., 100.) as f32, size })
+    }
+
+    /// From this percent on, the ring warns that the window is filling up.
+    const HIGH: f32 = 80.;
+}
+
+/// The size of a context window, short: `200k`, `1M`.
+pub fn tokens_label(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 && n % 1_000_000 == 0 => format!("{}M", n / 1_000_000),
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        n => format!("{}k", n / 1000),
+    }
+}
+
+/// An agent row's ring (template `agents.tab`), as Harp's sidebar draws its
+/// states: how full its context window is (`ring`, empty when unknown),
+/// turning a step each second while it works (`spin`), in amber with a dot
+/// while it waits for you, with a tick once its turn is done; `time`, how
+/// long it has been working or since its turn ended; `tip`, all of it in
+/// words.
+pub fn ring_vars(
+    scope: crate::template::Scope,
+    status: ActivityStatus,
+    rang: bool,
+    since: std::time::Duration,
+    context: Option<ContextUse>,
+    theme: &Theme,
+) -> crate::template::Scope {
+    let (word, _, _) = status_look(status, rang, since, theme);
+    let (color, glyph) = match (status, rang) {
+        (ActivityStatus::Working, _) => (theme.foreground, None),
+        (ActivityStatus::Blocked, _) => (theme.warning, Some(("agent-dot", theme.warning))),
+        (ActivityStatus::Done, _) => (theme.foreground, Some(("agent-tick", theme.foreground))),
+        (ActivityStatus::None, true) => (theme.muted_foreground, Some(("agent-dot", theme.warning))),
+        (ActivityStatus::None, false) => (theme.muted_foreground, None),
+    };
+    let high = context.is_some_and(|c| c.percent >= ContextUse::HIGH);
+    let time = match status {
+        ActivityStatus::Working => working_label(since),
+        _ => ago_label(since),
+    };
+    let tip = match context {
+        Some(c) => format!("{word} · context {:.0}% of {}", c.percent, tokens_label(c.size)),
+        None => word,
+    };
+    let spin = match status {
+        ActivityStatus::Working => (since.as_secs() % 12) as f64 / 12.,
+        _ => 0.,
+    };
+    let mut scope = scope
+        .var("ring", context.map(|c| format!("{:.1}", c.percent)).unwrap_or_default())
+        .var("ring_color", if high { theme.danger } else { color })
+        .var("spin", spin)
+        .var("time", time)
+        .var("tip", tip)
+        .var("working", status == ActivityStatus::Working);
+    if let Some((icon, color)) = glyph {
+        scope = scope.var("ring_icon", icon).var("ring_icon_color", color);
+    }
+    scope
+}
+
+/// The glyphs drawn in a ring (16×16, in the text color).
+const GLYPHS: &[(&str, &str)] = &[
+    (
+        "icons/agent-tick.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="black" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 8.2l1.7 1.7 3.3-3.6"/></svg>"#,
+    ),
+    ("icons/agent-dot.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.8" fill="black"/></svg>"#),
+];
+
 /// A state's color: blue while working, amber while waiting for you,
 /// green once done (as t3code's sidebar has them).
 pub fn status_color(status: ActivityStatus, theme: &Theme) -> Hsla {
@@ -205,13 +295,14 @@ impl Agent {
     }
 }
 
-/// The logo at `path`, for the app's asset source.
+/// The logo or ring glyph at `path`, for the app's asset source.
 pub fn asset(path: &str) -> Option<&'static [u8]> {
-    LOGOS.iter().find(|(p, _)| *p == path).map(|(_, b)| *b)
+    LOGOS.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).or_else(|| GLYPHS.iter().find(|(p, _)| *p == path).map(|(_, s)| s.as_bytes()))
 }
 
 pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
-    LOGOS.iter().map(|(p, _)| *p).filter(move |p| p.starts_with(prefix)).map(SharedString::from)
+    let glyphs = GLYPHS.iter().map(|(p, _)| *p);
+    LOGOS.iter().map(|(p, _)| *p).chain(glyphs).filter(move |p| p.starts_with(prefix)).map(SharedString::from)
 }
 
 #[cfg(test)]
@@ -240,6 +331,17 @@ mod tests {
         assert_eq!(c.read_screen("codex", "• working (12s • esc to interrupt)"), Some(Working));
         assert_eq!(c.read_screen("Action Required", ""), Some(Blocked));
         assert_eq!(c.read_screen("codex", "› "), Some(None));
+    }
+
+    #[test]
+    fn context_from_the_status_line() {
+        use super::ContextUse;
+        let line = serde_json::json!({"context_window": {"context_window_size": 1000000, "used_percentage": 42.5}});
+        assert_eq!(ContextUse::read(&line), Some(ContextUse { percent: 42.5, size: 1_000_000 }));
+        let fresh = serde_json::json!({"context_window": {"context_window_size": 200000, "used_percentage": null}});
+        assert_eq!(ContextUse::read(&fresh), Some(ContextUse { percent: 0., size: 200_000 }));
+        assert_eq!(ContextUse::read(&serde_json::json!({"model": {}})), Option::None);
+        assert_eq!((super::tokens_label(200_000), super::tokens_label(1_000_000)), ("200k".to_owned(), "1M".to_owned()));
     }
 
     #[test]

@@ -73,6 +73,7 @@ actions!(
         SearchInFiles,
         ToggleShells,
         ToggleSystem,
+        ToggleUsage,
         ResetLayout,
         NewPanel,
         ToggleEditLayout,
@@ -167,6 +168,9 @@ struct TermTab {
     rang: bool,
     /// The output file of an agent's shell it follows (see `open_shell`).
     follows: Option<PathBuf>,
+    /// How full its Claude conversation's context window is, from its
+    /// status line.
+    context: Option<crate::agents::ContextUse>,
     _subs: Vec<Subscription>,
 }
 
@@ -364,6 +368,7 @@ pub struct Workspace {
     palette: Option<(Entity<Palette>, Subscription)>,
     show_shells: bool,
     show_system: bool,
+    show_usage: bool,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
     /// The pane each tab is in.
@@ -617,6 +622,7 @@ impl Workspace {
             palette: None,
             show_shells: shown("shells"),
             show_system: shown("system"),
+            show_usage: shown("usage"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -756,6 +762,7 @@ impl Workspace {
             ("scratches", self.show_scratches),
             ("shells", self.show_shells),
             ("system", self.show_system),
+            ("usage", self.show_usage),
         ]
         .into_iter()
         .filter(|(_, shown)| !shown)
@@ -772,8 +779,8 @@ impl Workspace {
         }
         self.panels_rev = p.rev;
         let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
-        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system) =
-            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"));
+        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system, self.show_usage) =
+            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"), shown("usage"));
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -1174,7 +1181,7 @@ impl Workspace {
         let resuming = session.is_some();
         let account = account.to_owned();
         let tab =
-            TermTab { view, rename, kind, token, session, account, resuming, notified: None, rang: false, follows: None, _subs: vec![sub] };
+            TermTab { view, rename, kind, token, session, account, resuming, notified: None, rang: false, follows: None, context: None, _subs: vec![sub] };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -1225,6 +1232,7 @@ impl Workspace {
             notified: None,
             rang: false,
             follows: Some(output),
+            context: None,
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -2008,6 +2016,7 @@ impl Workspace {
                 cx.notify();
             },
             TerminalEvent::StatusChanged(status) => {
+                crate::dock_badge::status_changed(view, *status, window, cx);
                 // Finished in front of you: seen, so not left as done.
                 if *status == ActivityStatus::Done && window.is_window_active() && self.is_shown(view) {
                     view.update(cx, |v, cx| v.clear_done_status(cx));
@@ -2078,6 +2087,14 @@ impl Workspace {
         }) else {
             return;
         };
+        let status_line = ev.event == tern_bridge::statusline::EVENT;
+        if status_line {
+            let context = crate::agents::ContextUse::read(&ev.raw);
+            if tab.context != context {
+                tab.context = context;
+                cx.notify();
+            }
+        }
         if ev.session_id.is_some() && tab.session != ev.session_id {
             tab.session = ev.session_id.clone();
             // Should Claude have to start again (Enter, its daemon
@@ -2088,6 +2105,9 @@ impl Workspace {
                 view.update(cx, |v, _| v.set_spawn_config(cfg));
             }
             cx.emit(WorkspaceEvent::TabsChanged);
+        }
+        if status_line {
+            return;
         }
         let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| p.starts_with(&self.root)).collect();
         if paths.is_empty() {
@@ -2132,7 +2152,7 @@ impl Workspace {
                 let Some(t) = self.tabs[i].term() else { unreachable!("filtered to terminals") };
                 let v = t.view.read(cx);
                 let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
-                let (status, icon, color) = crate::agents::status_look(now, t.rang, v.status_since().elapsed(), cx.theme());
+                let since = v.status_since().elapsed();
                 let label = crate::agents::display_name(&label, agent);
                 let mut scope = template::Scope::new(format!("side-tab-{}", id.as_u64()))
                     .var("label", label)
@@ -2141,10 +2161,7 @@ impl Workspace {
                     .var("close_key", close_key.clone())
                     .var("buttons", true)
                     .slot_opt("icon", self.tab_icon(i, None, cx));
-                scope = scope.var("status", status).var("status_color", color).var("working", now == ActivityStatus::Working);
-                if !icon.is_empty() {
-                    scope = scope.var("status_icon", icon);
-                }
+                scope = crate::agents::ring_vars(scope, now, t.rang, since, t.context, cx.theme());
                 (id, scope, now)
             })
             .collect()
@@ -2300,6 +2317,7 @@ impl Workspace {
             "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
             "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
             "system" => ("cpu", self.show_system, "System".to_owned()),
+            "usage" => ("chart-pie", self.show_usage, "Usage".to_owned()),
             _ => return None,
         })
     }
@@ -2350,6 +2368,7 @@ impl Workspace {
             "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
             "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
             "system" => |this, w, cx| this.toggle_system(&ToggleSystem, w, cx),
+            "usage" => |this, w, cx| this.toggle_usage(&ToggleUsage, w, cx),
             _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
         }
     }
@@ -3137,6 +3156,7 @@ impl Workspace {
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
                     "system" => self.show_system = true,
+                    "usage" => self.show_usage = true,
                     _ => {},
                 }
             },
@@ -3220,6 +3240,7 @@ impl Workspace {
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
                     "system" => self.show_system = true,
+                    "usage" => self.show_usage = true,
                     _ => {},
                 }
             },
@@ -3404,6 +3425,7 @@ impl Workspace {
             "changes" => self.show_changes,
             "shells" => self.show_shells,
             "system" => self.show_system,
+            "usage" => self.show_usage,
             _ => true,
         }
     }
@@ -3416,12 +3438,14 @@ impl Workspace {
             .var("changes", self.show_changes)
             .var("shells", self.show_shells)
             .var("system", self.show_system)
+            .var("usage", self.show_usage)
             .var("path", self.root.display().to_string())
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("shells", self.shells.clone().cached(cache_layout()))
             .slot("system", self.system.clone().cached(cache_layout()))
+            .slot("usage", self.usage.clone().cached(cache_layout()))
             .slot_opt("agents", self.agents.clone())
     }
 
@@ -3524,6 +3548,11 @@ impl Workspace {
 
     fn toggle_system(&mut self, _: &ToggleSystem, _: &mut Window, cx: &mut Context<Self>) {
         self.show_system = !self.show_system;
+        self.panels_changed(cx);
+    }
+
+    fn toggle_usage(&mut self, _: &ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_usage = !self.show_usage;
         self.panels_changed(cx);
     }
 
@@ -4578,7 +4607,7 @@ impl Render for Workspace {
         }
         // The panes are a panel of their own (template `panes`), so they move as the others do.
         let panes = template::render(PANES, template::Scope::new(PANES).slot("center", center), &mut |_, _, d| d.into_any_element(), cx);
-        let scope = scope.slot("left_strip", left_strip).slot("panes", panes).slot("usage", self.usage.clone());
+        let scope = scope.slot("left_strip", left_strip).slot("panes", panes);
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
@@ -4649,6 +4678,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::toggle_shells))
             .on_action(cx.listener(Self::toggle_system))
+            .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).

@@ -950,8 +950,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | Template | Values | Slots |
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
+| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `update` (the offer's label, when a new version is offered), `installing`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
@@ -980,6 +980,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `panel_group` | `empty`, `edit` (the layout is edited) | `header`, `content` |
 | `panel_group.header` | `part` (the group's name, `group-<n>`), `title` | `buttons` |
 | `panel_group.seam` | | |
+| `panel.edit` | `part`, `title` (the panel under it) | |
 | `panel_group.header.buttons` | `grid`, `tabs`, `stack` (the layout it has); buttons `grid`, `tabs`, `stack`, `close` | |
 | `panel_group.empty` | | |
 | `usage`, `usage.item` | `name`, `note`, `open`; list `limits` (as `usage.item.limit`): the account the shown Claude tab runs as, else the first one turned on | `icon` |
@@ -993,8 +994,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
-| `agents` | `settings_key`; list `items` | `header` |
-| `agents.header.buttons` | `open_key`, `monitor`, `update`, `installing` | |
+| `agents` | list `items` | `header` |
+| `agents.header.buttons` | `open_key`, `monitor` | |
 | `agents.folder` (also in `agent_monitor`) | `folder`, `name`, `active`, `open`, `dot`, `dot_color`, `buttons`, `close_key` | |
 | `agents.tab` (also in `agent_monitor`) | `label`, `active`, `shown`, `working`, `status`, `status_icon`, `status_color`, `buttons`, `close_key` | `icon` |
 | `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
@@ -1068,11 +1069,12 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 ### Moving panels
 
-The explorer, scratches, changes, shells and system panels sit in docks and can be dragged
-between them by their headers. In a template:
+The explorer, scratches, changes, shells, system and usage panels sit in docks and can be dragged
+between them by their headers, or from anywhere on them while the layout is edited (View ▸ Edit
+Layout draws `panel.edit` over each). In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
-  (`explorer`, `scratches`, `changes`, `shells`, `system`). Give it `\"drag\": false` (or a
+  (`explorer`, `scratches`, `changes`, `shells`, `system`, `usage`). Give it `\"drag\": false` (or a
   condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or

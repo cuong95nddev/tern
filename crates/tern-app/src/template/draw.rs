@@ -220,6 +220,10 @@ impl Drawer<'_, '_> {
                 let place = place(n, &lookup(scope, outer));
                 return Some(self.boxed(n, &style::el_with("", Default::default(), self.cx), hovers, kids, place, scope.index, None));
             },
+            What::Ring(parts) => {
+                let full = fill(parts, &lookup(scope, outer)).trim().parse::<f32>().ok();
+                kids.push(ring(full, &look).into_any_element());
+            },
             What::Button(b) => return Some(self.button(n, b, &look, scope, outer)),
             What::Each(list, item) => {
                 let items = scope.lists.remove(list.as_ref()).unwrap_or_default();
@@ -436,7 +440,17 @@ impl Drawer<'_, '_> {
         }
         let cx = self.cx;
         let body = cx.try_global::<Templates>().and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
-        body.unwrap_or_else(|| div().into_any_element())
+        let body = body.unwrap_or_else(|| div().into_any_element());
+        // The panes hold docks of their own: their tabs and panes drag in them.
+        if self.no_drag() || cx.try_global::<Templates>().is_none_or(|ts| !ts.docks(name).is_empty()) {
+            return body;
+        }
+        // While the layout is edited, all of it drags it (a panel without a
+        // title bar has nothing else to drag it by), and clicks don't reach it.
+        let title = crate::dock::part_title(name);
+        let edit = Scope::new(format!("{}:edit:{name}", scope.id)).var("part", name.to_owned()).var("title", title);
+        let edit = div().absolute().inset_0().occlude().child(render("panel.edit", edit, &mut |_, _, f| f.into_any_element(), cx));
+        div().relative().size_full().flex().flex_col().child(body).child(edit).into_any_element()
     }
 
     /// Panel group `name` (template `panel_group`): its title bar, with a
@@ -609,28 +623,36 @@ impl Drawer<'_, '_> {
 
     /// `body`, the area of panel group `shown` in dock `d`, while the layout
     /// is edited: along its far side (its bottom in a column) a strip
-    /// (`panel_group.seam`) whose button adds an empty group right after it.
+    /// (`panel_group.seam`) whose button adds an empty group right after it,
+    /// and another across (its right side in a column) whose button adds one
+    /// beside it, splitting its place.
     fn seam(&self, d: &DockNode, shown: Option<&String>, body: AnyElement, scope: &Scope) -> AnyElement {
         let (Some(name), Some(on_change)) = (shown.filter(|n| arrange::is_group(n)), scope.on_change.clone()) else { return body };
         let size = style::el("panel_group.seam", self.cx).px("size");
-        let (dock, after) = (d.name.clone(), name.clone());
-        let mut frames = |button: &str, _: Option<usize>, f: Framed| match (button, f) {
-            ("add", Framed::Button(b)) => {
-                let (on_change, dock, after) = (on_change.clone(), dock.clone(), after.clone());
-                b.on_click(move |_, window, cx| {
-                    on_change(Change::AddGroup { dock: dock.clone(), at: arrange::Drop::After(after.clone()) }, window, cx);
-                })
-                .into_any_element()
-            },
-            (_, f) => f.into_any_element(),
+        let (after, beside) = match d.dir {
+            arrange::Dir::Column => (arrange::Edge::Bottom, arrange::Edge::Right),
+            arrange::Dir::Row => (arrange::Edge::Right, arrange::Edge::Bottom),
         };
-        let strip = render("panel_group.seam", Scope::new(format!("{}:seam:{name}", scope.id)), &mut frames, self.cx);
-        let place = div().absolute();
-        let place = match d.dir {
-            arrange::Dir::Column => place.left_0().right_0().bottom_0().h(size),
-            arrange::Dir::Row => place.top_0().bottom_0().right_0().w(size),
-        };
-        div().relative().size_full().flex().flex_col().child(body).child(place.child(strip)).into_any_element()
+        let strips = [(after, arrange::Drop::After(name.clone())), (beside, arrange::Drop::Edge(name.clone(), beside))].map(|(edge, at)| {
+            let (on_change, dock) = (on_change.clone(), d.name.clone());
+            let mut frames = |button: &str, _: Option<usize>, f: Framed| match (button, f) {
+                ("add", Framed::Button(b)) => {
+                    let (on_change, dock, at) = (on_change.clone(), dock.clone(), at.clone());
+                    b.on_click(move |_, window, cx| on_change(Change::AddGroup { dock: dock.clone(), at: at.clone() }, window, cx))
+                        .into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            };
+            let id = format!("{}:seam:{edge:?}:{name}", scope.id);
+            let strip = render("panel_group.seam", Scope::new(id), &mut frames, self.cx);
+            let place = div().absolute();
+            let place = match edge {
+                arrange::Edge::Bottom => place.left_0().right_0().bottom_0().h(size),
+                _ => place.top_0().bottom_0().right_0().w(size),
+            };
+            place.child(strip)
+        });
+        div().relative().size_full().flex().flex_col().child(body).children(strips).into_any_element()
     }
 
     /// The parts floating over the docks, each in a `floating` box where the
@@ -807,13 +829,8 @@ impl Drawer<'_, '_> {
             let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
             let kept: Vec<usize> = items.iter().map(|(i, _)| *i).collect();
             group = group.on_resize(move |state, window, cx| {
-                let shown: Vec<Size> = state
-                    .read(cx)
-                    .sizes()
-                    .iter()
-                    .zip(&fixed_by_kept)
-                    .map(|(s, f)| if *f { Size::Px(f32::from(*s)) } else { Size::Auto })
-                    .collect();
+                let shown: Vec<f32> = state.read(cx).sizes().iter().map(|s| f32::from(*s)).collect();
+                let shown = arrange::dragged_sizes(&shown, &fixed_by_kept);
                 let sizes = arrange::merge_sizes(&stored, &kept, &shown);
                 on_change(Change::Resize { dock: dock.clone(), path: path.clone(), sizes }, window, cx);
             });
@@ -1140,4 +1157,56 @@ impl Node {
             && self.align.is_none()
             && self.justify.is_none()
     }
+}
+
+/// A ring `full` percent full, as [`super::Spec::ring`] says, in the box
+/// it is drawn in.
+fn ring(full: Option<f32>, look: &style::El) -> impl IntoElement {
+    let (arc, track) = (look.color("text"), look.color("track"));
+    let width = look.px("stroke_width").max(px(1.));
+    let turn = look.num("rotate");
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            use lyon_tessellation::{LineCap, StrokeOptions};
+            let size = bounds.size.width.min(bounds.size.height);
+            let r = (size - width) / 2.;
+            let c = bounds.center();
+            // Clockwise from the top, `turn` turns on.
+            let at = |t: f32| {
+                let a = (t + turn) * std::f32::consts::TAU;
+                point(c.x + r * a.sin(), c.y - r * a.cos())
+            };
+            let points = |from: f32, to: f32| -> Vec<Point<Pixels>> {
+                let n = ((to - from) * 64.).ceil().max(2.) as usize;
+                (0..=n).map(|i| at(from + (to - from) * i as f32 / n as f32)).collect()
+            };
+            let mut stroke = |pts: &[Point<Pixels>], closed: bool, dash: bool, color: Hsla| {
+                let opts = StrokeOptions::default().with_line_width(f32::from(width)).with_line_cap(LineCap::Round);
+                let mut pb = PathBuilder::stroke(width).with_style(PathStyle::Stroke(opts));
+                if dash {
+                    // Twelve dashes around.
+                    let step = r * std::f32::consts::TAU / 24.;
+                    pb = pb.dash_array(&[step * 0.9, step * 1.1]);
+                }
+                pb.add_polygon(pts, closed);
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, color);
+                }
+            };
+            let whole = points(0., 1.);
+            match full.map(|f| (f / 100.).clamp(0., 1.)) {
+                None => stroke(&whole, true, true, track),
+                Some(f) => {
+                    stroke(&whole, true, false, track);
+                    if f >= 1. {
+                        stroke(&whole, true, false, arc);
+                    } else if f > 0. {
+                        stroke(&points(0., f), false, false, arc);
+                    }
+                },
+            }
+        },
+    )
+    .size_full()
 }

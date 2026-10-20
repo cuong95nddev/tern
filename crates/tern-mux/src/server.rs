@@ -673,7 +673,7 @@ impl Server {
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
-                match tern_bridge::write_claude_settings(&self.run_dir, &token, &hooks.hook_url(&token)) {
+                match tern_bridge::write_claude_settings(&self.run_dir, &token, &hooks.hook_url(&token), std::env::current_exe().ok().as_deref()) {
                     Ok(path) => {
                         let quoted = shell_quote(&path.to_string_lossy());
                         for a in &mut cfg.args {
@@ -846,6 +846,10 @@ impl Server {
         match s.owner.as_ref().and_then(Weak::upgrade) {
             Some(conn) => conn.send(ServerMsg::Hook { token: ev.token, body }),
             None => {
+                // Only the latest status line matters.
+                if ev.event == tern_bridge::statusline::EVENT {
+                    s.hooks.retain(|b| !tern_bridge::statusline::is_event(b));
+                }
                 if s.hooks.len() >= MAX_QUEUED_HOOKS {
                     s.hooks.pop_front();
                 }

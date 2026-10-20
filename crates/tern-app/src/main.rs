@@ -11,6 +11,7 @@ mod control;
 mod diff_pane;
 mod dirs;
 mod dock;
+mod dock_badge;
 mod file_icons;
 mod file_tree_view;
 mod git_log_view;
@@ -63,6 +64,12 @@ struct AppServices(workspace::Services);
 impl Global for AppServices {}
 
 fn main() {
+    // Claude Code's status line in a Tern tab: before anything else, as it
+    // runs after every message.
+    if std::env::args().nth(1).as_deref() == Some("--statusline") {
+        let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
+        std::process::exit(tern_bridge::statusline::run(&settings));
+    }
     env_logger::init();
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());

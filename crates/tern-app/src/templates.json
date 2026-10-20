@@ -35,7 +35,8 @@
                 "max": 480,
                 "children": [
                   { "part": "agents" },
-                  { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 }
+                  { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 },
+                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 32, "max": 600 }
                 ]
               },
               {
@@ -70,8 +71,7 @@
             ]
           }
         ]
-      },
-      { "slot": "usage" }
+      }
     ]
   },
   "panes": {
@@ -724,16 +724,6 @@
     "style": { "gap": "$agents.header.gap" },
     "children": [
       {
-        "when": "update",
-        "button": "update",
-        "element": "agents.header.button",
-        "size": "xsmall",
-        "icon": "circle-arrow-down",
-        "label": "{update}",
-        "loading": "installing",
-        "tooltip": "A new version of Tern is available"
-      },
-      {
         "button": "agent_monitor",
         "element": "agents.header.button",
         "size": "xsmall",
@@ -778,14 +768,6 @@
           ]
         },
         "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
-      },
-      {
-        "layout": "row",
-        "shrink": 0,
-        "style": { "padding_x": 8, "padding_y": 6 },
-        "children": [
-          { "button": "settings", "element": "agents.settings", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
-        ]
       }
     ]
   },
@@ -870,16 +852,27 @@
       { "slot": "icon" },
       { "grow": 1, "truncate": true, "text": "{label}" },
       {
-        "when": "status",
+        "frame": "status",
         "element": "agents.status",
         "layout": "row",
         "align": "center",
         "shrink": 0,
-        "style": { "text": "{status_color}" },
         "states": { "hover:stab": { "opacity": 0 } },
         "children": [
-          { "when": "status_icon", "icon": "{status_icon}", "style": { "width": 12, "height": 12 } },
-          { "text": "{status}" }
+          { "text": "{time}" },
+          {
+            "shrink": 0,
+            "style": { "width": "$agents.ring.width", "height": "$agents.ring.height" },
+            "children": [
+              { "element": "agents.ring", "fill": true, "ring": "{ring}", "style": { "text": "{ring_color}", "rotate": "{spin}" } },
+              {
+                "when": "ring_icon",
+                "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+                "icon": "{ring_icon}",
+                "style": { "text": "{ring_icon_color}" }
+              }
+            ]
+          }
         ]
       },
       {
@@ -1308,15 +1301,33 @@
         "frame": "buttons",
         "shrink": 0,
         "style": { "gap": "$title_bar.buttons_gap" },
-        "each": "parts",
-        "item": {
-          "button": "part",
-          "element": "title_bar.button",
-          "size": "small",
-          "icon": "{icon}",
-          "selected": "on",
-          "tooltip": "{tooltip}"
-        }
+        "children": [
+          {
+            "when": "update",
+            "button": "update",
+            "element": "title_bar.update",
+            "size": "small",
+            "icon": "circle-arrow-down",
+            "label": "{update}",
+            "loading": "installing",
+            "tooltip": "A new version of Tern is available"
+          },
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": "$title_bar.buttons_gap" },
+            "each": "parts",
+            "item": {
+              "button": "part",
+              "element": "title_bar.button",
+              "size": "small",
+              "icon": "{icon}",
+              "selected": "on",
+              "tooltip": "{tooltip}"
+            }
+          },
+          { "button": "settings", "element": "title_bar.button", "size": "small", "icon": "settings", "tooltip": "Settings ({settings_key})" }
+        ]
       }
     ]
   },
@@ -1786,6 +1797,12 @@
       }
     ]
   },
+  "panel.edit": {
+    "element": "panel.edit",
+    "handle": true,
+    "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+    "states": { "hover": { "background": "$panel.edit.hover_background" } }
+  },
   "panel_group.seam": {
     "group": "seam",
     "fill": true,
@@ -1823,7 +1840,7 @@
     "grow": 1,
     "align": "center",
     "justify": "center",
-    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here by their title bar" }]
+    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here" }]
   },
   "shells.empty": {
     "element": "shells.empty",
@@ -1834,6 +1851,7 @@
   },
   "usage": {
     "element": "usage",
+    "fill": true,
     "layout": "row",
     "align": "center",
     "children": [{ "use": "usage.item" }, { "grow": 1 }]

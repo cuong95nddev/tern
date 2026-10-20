@@ -158,8 +158,12 @@ impl HookServer {
 /// file is created exclusively without following symlinks. Remove it with
 /// [`remove_claude_settings`] when the tab closes. On Windows `dir` is under
 /// the user's local app data, which only they can read.
-pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str) -> std::io::Result<PathBuf> {
+///
+/// With `exe` (Tern's own binary), Claude Code's status line runs through it
+/// (see [`crate::statusline`]).
+pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str, exe: Option<&std::path::Path>) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("claude-settings-{token}.json"));
+    let status_line = exe.map(|e| crate::statusline::command(e, &path));
     #[cfg(unix)]
     let mut f = {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -179,7 +183,7 @@ pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str)
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?
     };
-    f.write_all(claude_settings_json(hook_url).as_bytes())?;
+    f.write_all(claude_settings_json(hook_url, status_line.as_deref()).as_bytes())?;
     Ok(path)
 }
 
@@ -253,10 +257,11 @@ fn process_alive(pid: i32) -> bool {
     }
 }
 
-/// Settings JSON passed to `claude --settings` for a tab.
-pub fn claude_settings_json(hook_url: &str) -> String {
+/// Settings JSON passed to `claude --settings` for a tab, its status line
+/// `status_line` when given.
+pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>) -> String {
     let handler = serde_json::json!([{ "type": "http", "url": hook_url, "timeout": 5 }]);
-    serde_json::json!({
+    let mut settings = serde_json::json!({
         "hooks": {
             "PostToolUse": [
                 { "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": handler }
@@ -265,8 +270,11 @@ pub fn claude_settings_json(hook_url: &str) -> String {
             "UserPromptSubmit": [{ "hooks": handler }],
             "Stop": [{ "hooks": handler }]
         }
-    })
-    .to_string()
+    });
+    if let Some(command) = status_line {
+        settings["statusLine"] = serde_json::json!({ "type": "command", "command": command });
+    }
+    settings.to_string()
 }
 
 pub fn random_token() -> String {
@@ -354,7 +362,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tern-claim-settings-{}", std::process::id()));
         let dir = root.join("run");
         super::claim_run_dir(&dir).unwrap();
-        let path = super::write_claude_settings(&dir, "tok", "http://127.0.0.1:1/hook/tok").unwrap();
+        let path = super::write_claude_settings(&dir, "tok", "http://127.0.0.1:1/hook/tok", None).unwrap();
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -418,22 +426,25 @@ mod tests {
     fn settings_file_private_and_removed() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("run");
-        let p = write_claude_settings(&dir, "abc", "http://127.0.0.1:1/hook/abc").unwrap();
+        let p = write_claude_settings(&dir, "abc", "http://127.0.0.1:1/hook/abc", None).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        assert!(write_claude_settings(&dir, "abc", "x").is_err(), "must not overwrite");
+        assert!(write_claude_settings(&dir, "abc", "x", None).is_err(), "must not overwrite");
         remove_claude_settings(&dir, "abc");
         assert!(!p.exists());
     }
 
     #[test]
     fn settings_json_shape() {
-        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t")).unwrap();
+        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t", None)).unwrap();
         assert_eq!(v.pointer("/hooks/PostToolUse/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/UserPromptSubmit/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/Stop/0/hooks/0/type").unwrap(), "http");
+        assert!(v.get("statusLine").is_none());
+        let v: Value = serde_json::from_str(&claude_settings_json("u", Some("'tern' --statusline 's'"))).unwrap();
+        assert_eq!(v.pointer("/statusLine/command").unwrap(), "'tern' --statusline 's'");
     }
 }

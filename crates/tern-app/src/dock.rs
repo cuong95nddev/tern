@@ -256,7 +256,9 @@ pub fn zone_overlay(area: &str, cx: &App) -> Div {
 /// The strips along the sides of an area holding a panel group, each with
 /// its side, for the code to make take drags (`drop_zone`, `size` wide; the
 /// pointer over one lights it as `drop_zone.hover` does for `T`). A drop on
-/// one goes on that side of the group; the group's middle is its own.
+/// one goes on that side of the group; the group's middle is its own, so a
+/// band takes at most a quarter of the area (a group as thin as a status
+/// bar keeps a middle to drop onto).
 pub fn side_bands<T: 'static>(sides: &[Edge], cx: &App) -> Vec<(Edge, Div)> {
     let look = style::el("drop_zone", cx);
     let hover = style::el("drop_zone.hover", cx);
@@ -266,10 +268,10 @@ pub fn side_bands<T: 'static>(sides: &[Edge], cx: &App) -> Vec<(Edge, Div)> {
         .map(|&edge| {
             let d = look.apply(div().absolute());
             let d = match edge {
-                Edge::Left => d.top_0().bottom_0().left_0().w(size),
-                Edge::Right => d.top_0().bottom_0().right_0().w(size),
-                Edge::Top => d.left_0().right_0().top_0().h(size),
-                Edge::Bottom => d.left_0().right_0().bottom_0().h(size),
+                Edge::Left => d.top_0().bottom_0().left_0().w(size).max_w(relative(0.25)),
+                Edge::Right => d.top_0().bottom_0().right_0().w(size).max_w(relative(0.25)),
+                Edge::Top => d.left_0().right_0().top_0().h(size).max_h(relative(0.25)),
+                Edge::Bottom => d.left_0().right_0().bottom_0().h(size).max_h(relative(0.25)),
             };
             let hover = hover.clone();
             (edge, d.drag_over::<T>(move |s, _, _, _| hover.apply(s)))
