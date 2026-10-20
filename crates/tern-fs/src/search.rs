@@ -215,7 +215,12 @@ mod tests {
     }
 
     fn lines(r: &Results) -> Vec<(String, u32)> {
-        r.matches.iter().map(|m| (m.path.display().to_string(), m.line)).collect()
+        r.matches.iter().map(|m| (slashed(&m.path), m.line)).collect()
+    }
+
+    /// `path` with `/` between its parts on every platform.
+    fn slashed(path: &Path) -> String {
+        path.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
     }
 
     #[test]
@@ -259,7 +264,7 @@ mod tests {
     #[test]
     fn lists_files_skipping_ignored_ones() {
         let d = fixture();
-        let names: Vec<String> = files(d.path(), 100, &AtomicBool::new(false)).iter().map(|p| p.display().to_string()).collect();
+        let names: Vec<String> = files(d.path(), 100, &AtomicBool::new(false)).iter().map(|p| slashed(p)).collect();
         assert_eq!(names, [".gitignore", "bin.dat", "src/a.rs", "src/b.rs"]);
         assert_eq!(files(d.path(), 2, &AtomicBool::new(false)).len(), 2);
     }

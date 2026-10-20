@@ -232,10 +232,21 @@ pub fn alive(pid: u32) -> Option<bool> {
         }
         (std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)).then_some(false)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        Some(true)
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: the handle is checked, read only and closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return (GetLastError() != ERROR_ACCESS_DENIED).then_some(false);
+            }
+            let mut code = 0u32;
+            let alive = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            CloseHandle(h);
+            Some(alive)
+        }
     }
 }
 
