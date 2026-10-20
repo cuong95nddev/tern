@@ -1,6 +1,7 @@
 //! Filesystem model for the explorer: lazy gitignore-aware tree, debounced
 //! watcher, git status. No UI deps.
 
+pub mod fuzzy;
 pub mod git;
 pub mod ops;
 pub mod search;

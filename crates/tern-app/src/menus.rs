@@ -55,6 +55,7 @@ fn menus() -> Vec<Menu> {
     ]);
     let view = Menu::new("View").items([
         MenuItem::action("Command Palette…", workspace::CommandPalette),
+        MenuItem::action("Go to File…", workspace::GoToFile),
         MenuItem::action("Search in Files", workspace::SearchInFiles),
         MenuItem::separator(),
         MenuItem::action("Explorer", workspace::ToggleExplorer),

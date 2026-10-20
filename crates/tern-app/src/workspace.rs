@@ -59,6 +59,7 @@ actions!(
         ToggleChanges,
         ToggleScratches,
         CommandPalette,
+        GoToFile,
         SearchInFiles,
         ResetLayout,
         FocusTerminal,
@@ -94,6 +95,7 @@ pub fn bind_keys(cx: &mut App) {
         bind("cmd-shift-g", ToggleChanges, None),
         bind("cmd-shift-s", ToggleScratches, None),
         bind("cmd-shift-p", CommandPalette, None),
+        bind("cmd-p", GoToFile, None),
         bind("cmd-shift-f", SearchInFiles, None),
         bind("cmd-j", FocusTerminal, None),
         bind("cmd-\\", SplitRight, None),
@@ -2910,6 +2912,7 @@ impl Workspace {
                         window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
                     },
                     PaletteEvent::Open { path, line, col } => this.open_file_at(path.clone(), *line, Some(*col), window, cx),
+                    PaletteEvent::OpenFile(path) => this.open_file(path.clone(), false, window, cx),
                     PaletteEvent::Close => {},
                 }
             });
@@ -3989,6 +3992,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_changes))
             .on_action(cx.listener(Self::toggle_scratches))
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(palette::Mode::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToFile, w, cx| this.open_palette(palette::Mode::Files, w, cx)))
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))

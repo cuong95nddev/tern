@@ -1444,6 +1444,34 @@
       }
     ]
   },
+  "palette.path": {
+    "frame": "row",
+    "element": "palette.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "selected": { "background": "$palette.row.selected_background", "text": "$palette.row.selected_text" },
+      "hover && !selected": { "background": "$palette.row.hover_background" }
+    },
+    "children": [
+      { "slot": "icon" },
+      {
+        "each": "name",
+        "shrink": 0,
+        "layout": "row",
+        "item": { "nowrap": true, "text": "{text}", "states": { "hit": { "background": "$palette.row.match_background", "text": "$palette.row.match_text" } } }
+      },
+      {
+        "each": "dir",
+        "grow": 1,
+        "layout": "row",
+        "clip": true,
+        "style": { "margin_left": "$palette.row.gap", "font_size": "$palette.row.detail_font_size", "text": "$palette.row.detail_text" },
+        "item": { "nowrap": true, "text": "{text}", "states": { "hit": { "background": "$palette.row.match_background", "text": "$palette.row.match_text" } } }
+      }
+    ]
+  },
   "drag_chip": {
     "element": "drag_chip",
     "layout": "row",

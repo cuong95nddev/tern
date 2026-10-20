@@ -742,7 +742,7 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "dialog.footer", about: "A dialog's buttons", groups: &[&[("gap", Len, "0.5rem")]] },
     Element {
         name: "palette",
-        about: "The command palette (⌘⇧P) and Search in Files (⌘⇧F), in a dialog `dialog_width` wide",
+        about: "The command palette (⌘⇧P), Go to File (⌘P) and Search in Files (⌘⇧F), in a dialog `dialog_width` wide",
         groups: &[&[("dialog_width", Len, "640"), ("height", Len, "420"), ("gap", Len, "4")]],
     },
     Element {
@@ -770,10 +770,10 @@ pub const ELEMENTS: &[Element] = &[
             ("error_text", Color, "$danger.background"),
         ]],
     },
-    Element { name: "palette.list", about: "The palette's list of commands or results", groups: &[&[]] },
+    Element { name: "palette.list", about: "The palette's list of commands, files or results", groups: &[&[]] },
     Element {
         name: "palette.row",
-        about: "A command, or a matching line (its number `line_width` wide and `line_gap` from the text, the matched text in `match_*`)",
+        about: "A command, a file in Go to File, or a matching line (its number `line_width` wide and `line_gap` from the text, the matched text in `match_*`)",
         groups: &[
             ROW,
             &[

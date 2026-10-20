@@ -50,19 +50,25 @@ the debug build (palette list, search results, Enter opens at the line and scrol
 Not verified by hand: the Aa/ab/.* buttons by click (logic is unit tested in `tern-fs`), a match in a file with
 unsaved edits, Windows/Linux.
 
-## Not mine, don't touch
+## Session 2 (same day)
 
-`crates/tern-web/assets/app.js` and `crates/tern-web/src/bridge.rs` were modified in the working tree by
-other work (page no longer resizes the session). Leave them out of the search commit.
+- Search committed as `aa402ad` (only its hunks; `main.rs`/`templates.json` had another session's grip work).
+- `⌘P` Go to File, uncommitted: third palette mode `Mode::Files` (also "Go to File…" first in the command
+  list, View menu). `tern_fs::search::files` lists files with the same walk as the search (shared `walker`);
+  `tern_fs::fuzzy::score` is an fzf-v1 style match (tightest window, word-start and run bonuses, gap penalty,
+  a match within the file name wins). The list is read again on every show, filtered off the main thread,
+  best 500 shown, ties by shorter path. Template `palette.path` (icon, name and dir with matched chars
+  marked). Enter opens as a preview tab; Esc back to the commands.
+- Verified: tests green, and in the debug build (list, ranking, Enter opens, Esc back, the command).
+- Gotcha: a `TERN_CONTROL` socket under the long scratchpad path silently fails (Unix socket path limit,
+  104 bytes), and then the debug app is *not* scripted and may save the real session. Use `target/<x>.sock`.
+- Disk is tight (the repo `target` filled the disk once); another session ran `cargo clean`.
 
 ## Next steps
 
-1. Ask the user before committing (memory: ask before committing). Commit only the search files listed above
-   plus `Cargo.lock`.
-2. `⌘P` file picker as a third palette mode (T3's `files` mode): fuzzy match on paths from the same `ignore`
-   walk; Esc back to the commands too.
-3. Maybe: keyboard toggles for the options (VS Code ⌥⌘C / ⌥⌘W / ⌥⌘R), keeping the dialog height when the
-   list is short, a "Replace" later only if asked.
+1. Ask the user before committing ⌘P.
+2. Maybe: recently opened files first with an empty query, `file:line` in Go to File, option keys
+   (⌥⌘C / ⌥⌘W / ⌥⌘R) in Search in Files.
 
 ## How to see it
 

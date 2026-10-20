@@ -1,6 +1,7 @@
 //! The command palette (⌘⇧P), as in T3 Code: Tern's commands, filtered as
-//! you type, and Search in Files (⌘⇧F), which searches the workspace's
-//! files and opens a match at its line. Escape in Search in Files goes
+//! you type; Go to File (⌘P), the workspace's files fuzzy matched by path;
+//! and Search in Files (⌘⇧F), which searches the workspace's files and
+//! opens a match at its line. Escape in Go to File or Search in Files goes
 //! back to the commands (with what was typed there); Escape there closes.
 //! A workspace keeps its palette, so a search is still there when it opens
 //! again.
@@ -14,6 +15,7 @@ use std::time::Duration;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
+use tern_fs::fuzzy;
 use tern_fs::search::{Match, Query, Results};
 
 use crate::platform::shortcut;
@@ -24,6 +26,10 @@ use crate::{OpenFolder, agent_monitor, file_icons, main_window, restart, style, 
 const DEBOUNCE: Duration = Duration::from_millis(120);
 /// At most this many matching lines.
 const LIMIT: usize = 500;
+/// Go to File lists at most this many files of the workspace…
+const MAX_FILES: usize = 200_000;
+/// …and shows at most this many of those matching.
+const FILE_HITS: usize = 500;
 /// A match further into its line than this many bytes is shown with the
 /// start of the line cut.
 const LEAD: usize = 48;
@@ -33,6 +39,7 @@ const KEEP: usize = 16;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Commands,
+    Files,
     Search,
 }
 
@@ -41,12 +48,14 @@ pub enum PaletteEvent {
     Run(Box<dyn Action>),
     /// Open the file at `path` with the cursor at `line`, `col` (1-based).
     Open { path: PathBuf, line: u32, col: u32 },
+    /// Open the file at `path`.
+    OpenFile(PathBuf),
     /// Escape with the commands showing.
     Close,
 }
 
 enum Do {
-    Search,
+    Show(Mode),
     Action(fn() -> Box<dyn Action>),
 }
 
@@ -64,7 +73,8 @@ macro_rules! cmd {
 
 /// The commands, in the order shown before anything is typed.
 const COMMANDS: &[Command] = &[
-    Command { title: "Search in Files", key: "⌘⇧F", run: Do::Search },
+    Command { title: "Go to File…", key: "⌘P", run: Do::Show(Mode::Files) },
+    Command { title: "Search in Files", key: "⌘⇧F", run: Do::Show(Mode::Search) },
     cmd!("New Claude Tab", "⌘T", workspace::NewClaudeTab),
     cmd!("New Shell Tab", "⌘⇧T", workspace::NewShellTab),
     cmd!("New Scratch File", "⌘N", workspace::NewScratch),
@@ -128,9 +138,18 @@ pub struct Palette {
     root: PathBuf,
     mode: Mode,
     commands_input: Entity<InputState>,
+    files_input: Entity<InputState>,
     search_input: Entity<InputState>,
     /// Indices into [`COMMANDS`], as filtered.
     commands: Vec<usize>,
+    /// The workspace's files (relative, `/` between folders), read again
+    /// each time Go to File shows.
+    files: Arc<Vec<String>>,
+    /// Whether `files` is being read.
+    listing: bool,
+    /// The files matching, best first: an index into `files`, the byte
+    /// offsets matched.
+    hits: Vec<(usize, Vec<usize>)>,
     options: Query,
     results: Results,
     rows: Vec<Row>,
@@ -144,6 +163,8 @@ pub struct Palette {
     /// Set to stop the running search.
     cancel: Arc<AtomicBool>,
     _search: Option<Task<()>>,
+    _list: Option<Task<()>>,
+    _filter: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -158,6 +179,7 @@ impl Focusable for Palette {
 impl Palette {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let commands_input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
+        let files_input = cx.new(|cx| InputState::new(window, cx).placeholder("Go to file"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in files"));
         let subs = vec![
             cx.subscribe_in(&commands_input, window, |this, input, ev: &InputEvent, window, cx| match ev {
@@ -165,6 +187,11 @@ impl Palette {
                     this.commands = filter_commands(&input.read(cx).value());
                     this.select(0, cx);
                 },
+                InputEvent::PressEnter { .. } => this.confirm(window, cx),
+                _ => {},
+            }),
+            cx.subscribe_in(&files_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => this.filter_files(cx),
                 InputEvent::PressEnter { .. } => this.confirm(window, cx),
                 _ => {},
             }),
@@ -178,8 +205,12 @@ impl Palette {
             root,
             mode: Mode::Commands,
             commands_input,
+            files_input,
             search_input,
             commands: filter_commands(""),
+            files: Arc::default(),
+            listing: false,
+            hits: vec![],
             options: Query::default(),
             results: Results::default(),
             rows: vec![],
@@ -190,6 +221,8 @@ impl Palette {
             focus: cx.focus_handle(),
             cancel: Arc::new(AtomicBool::new(false)),
             _search: None,
+            _list: None,
+            _filter: None,
             _subs: subs,
         }
     }
@@ -202,8 +235,11 @@ impl Palette {
             i.focus(window, cx);
             i.select_all(window, cx);
         });
-        if mode == Mode::Commands {
-            self.commands = filter_commands(&input.read(cx).value());
+        match mode {
+            Mode::Commands => self.commands = filter_commands(&input.read(cx).value()),
+            // The list so far shows until the new one is read.
+            Mode::Files => self.list_files(cx),
+            Mode::Search => {},
         }
         self.select(0, cx);
     }
@@ -211,6 +247,7 @@ impl Palette {
     fn input(&self) -> &Entity<InputState> {
         match self.mode {
             Mode::Commands => &self.commands_input,
+            Mode::Files => &self.files_input,
             Mode::Search => &self.search_input,
         }
     }
@@ -219,13 +256,14 @@ impl Palette {
     fn len(&self) -> usize {
         match self.mode {
             Mode::Commands => self.commands.len(),
+            Mode::Files => self.hits.len(),
             Mode::Search => self.results.matches.len(),
         }
     }
 
     fn row_of(&self, entry: usize) -> usize {
         match self.mode {
-            Mode::Commands => entry,
+            Mode::Commands | Mode::Files => entry,
             Mode::Search => self.match_row.get(entry).copied().unwrap_or(0),
         }
     }
@@ -250,7 +288,7 @@ impl Palette {
 
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
-            Mode::Search => self.show(Mode::Commands, window, cx),
+            Mode::Files | Mode::Search => self.show(Mode::Commands, window, cx),
             Mode::Commands => cx.emit(PaletteEvent::Close),
         }
     }
@@ -261,9 +299,13 @@ impl Palette {
             Mode::Commands => {
                 let Some(c) = self.commands.get(self.selected).map(|&i| &COMMANDS[i]) else { return };
                 match c.run {
-                    Do::Search => self.show(Mode::Search, window, cx),
+                    Do::Show(mode) => self.show(mode, window, cx),
                     Do::Action(make) => cx.emit(PaletteEvent::Run(make())),
                 }
+            },
+            Mode::Files => {
+                let Some((i, _)) = self.hits.get(self.selected) else { return };
+                cx.emit(PaletteEvent::OpenFile(self.root.join(&self.files[*i])));
             },
             Mode::Search => {
                 let Some(m) = self.results.matches.get(self.selected) else { return };
@@ -271,6 +313,39 @@ impl Palette {
                 cx.emit(PaletteEvent::Open { path: self.root.join(&m.path), line: m.line, col });
             },
         }
+    }
+
+    /// Read the workspace's files again, then match them.
+    fn list_files(&mut self, cx: &mut Context<Self>) {
+        self.listing = true;
+        let root = self.root.clone();
+        self._list = Some(cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_spawn(async move {
+                    let files = tern_fs::search::files(&root, MAX_FILES, &AtomicBool::new(false));
+                    files.into_iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.files = Arc::new(files);
+                this.listing = false;
+                this.filter_files(cx);
+            });
+        }));
+    }
+
+    /// Match the files with what is typed, off the main thread; a filter
+    /// still running is dropped.
+    fn filter_files(&mut self, cx: &mut Context<Self>) {
+        let query = self.files_input.read(cx).value().to_string();
+        let files = self.files.clone();
+        self._filter = Some(cx.spawn(async move |this, cx| {
+            let hits = cx.background_spawn(async move { filter_files(&query, &files) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.hits = hits;
+                this.select(0, cx);
+            });
+        }));
     }
 
     fn toggle_option(&mut self, set: fn(&mut Query), cx: &mut Context<Self>) {
@@ -341,6 +416,7 @@ impl Palette {
     fn empty_text(&self) -> Option<&'static str> {
         match self.mode {
             Mode::Commands if self.commands.is_empty() => Some("No matching commands"),
+            Mode::Files if self.hits.is_empty() && !self.listing => Some("No matching files"),
             Mode::Search if self.results.matches.is_empty() => match self.status {
                 Status::Done => Some("No results found"),
                 Status::Idle => Some("Type to search the workspace's files"),
@@ -362,6 +438,24 @@ impl Palette {
                             .var("title", c.title)
                             .var("key", if c.key.is_empty() { String::new() } else { shortcut(c.key) });
                         ("palette.command", scope, Some(ix))
+                    },
+                    Mode::Files => {
+                        let (i, at) = self.hits.get(ix)?;
+                        let path = &self.files[*i];
+                        let name_at = path.rfind('/').map_or(0, |n| n + 1);
+                        let (icon, color) = file_icons::file_icon(&path[name_at..], cx.theme());
+                        let runs = |from: usize, to: usize| {
+                            hit_runs(&path[from..to], from, at)
+                                .into_iter()
+                                .map(|(text, hit)| template::Scope::new("part").var("text", text).var("hit", hit))
+                                .collect()
+                        };
+                        let scope = template::Scope::new("palette.path")
+                            .var("selected", ix == self.selected)
+                            .list("name", runs(name_at, path.len()))
+                            .list("dir", runs(0, name_at.saturating_sub(1)))
+                            .slot("icon", style::row_icon("palette.row", icon, color, cx));
+                        ("palette.path", scope, Some(ix))
                     },
                     Mode::Search => match *self.rows.get(ix)? {
                         Row::File(first, count) => {
@@ -411,6 +505,30 @@ impl Palette {
     }
 }
 
+/// The files `query` matches, best first (shorter paths first among equals),
+/// at most [`FILE_HITS`]: an index into `files`, the byte offsets matched.
+fn filter_files(query: &str, files: &[String]) -> Vec<(usize, Vec<usize>)> {
+    let mut found: Vec<(i32, usize, Vec<usize>)> =
+        files.iter().enumerate().filter_map(|(i, p)| fuzzy::score(query, p).map(|(s, at)| (s, i, at))).collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(files[a.1].len().cmp(&files[b.1].len())).then(a.1.cmp(&b.1)));
+    found.truncate(FILE_HITS);
+    found.into_iter().map(|(_, i, at)| (i, at)).collect()
+}
+
+/// `text` (at byte `from` of a path) as runs of characters, each matched or
+/// not, `at` being the path's matched byte offsets, in order.
+fn hit_runs(text: &str, from: usize, at: &[usize]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = vec![];
+    for (i, c) in text.char_indices() {
+        let hit = at.binary_search(&(from + i)).is_ok();
+        match out.last_mut() {
+            Some((run, h)) if *h == hit => run.push(c),
+            _ => out.push((c.to_string(), hit)),
+        }
+    }
+    out
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { word.to_owned() } else { format!("{word}s") }
 }
@@ -447,7 +565,13 @@ fn segments(m: &Match) -> Vec<(String, bool)> {
 impl Render for Palette {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self.mode == Mode::Search;
-        let list = uniform_list("palette", if search { self.rows.len() } else { self.commands.len() }, cx.processor(Self::render_rows))
+        let commands = self.mode == Mode::Commands;
+        let count = match self.mode {
+            Mode::Commands => self.commands.len(),
+            Mode::Files => self.hits.len(),
+            Mode::Search => self.rows.len(),
+        };
+        let list = uniform_list("palette", count, cx.processor(Self::render_rows))
             .track_scroll(&self.scroll)
             .flex_1();
         let (status, error) = self.status_text().filter(|_| search).unwrap_or_default();
@@ -460,8 +584,8 @@ impl Render for Palette {
             .var("status", status)
             .var("error", error)
             .var("empty", self.empty_text().unwrap_or_default())
-            .var("enter_label", if search { "Open" } else { "Run" })
-            .var("escape_label", if search { "Back" } else { "Close" })
+            .var("enter_label", if commands { "Run" } else { "Open" })
+            .var("escape_label", if commands { "Close" } else { "Back" })
             .slot("input", field)
             .slot("list", style::el("palette.list", cx).apply(list));
         let me = cx.entity().downgrade();
@@ -523,7 +647,7 @@ mod tests {
 
     use tern_fs::search::Match;
 
-    use super::{COMMANDS, KEEP, filter_commands, segments};
+    use super::{COMMANDS, KEEP, filter_commands, filter_files, hit_runs, segments};
 
     fn titles(q: &str) -> Vec<&'static str> {
         filter_commands(q).into_iter().map(|i| COMMANDS[i].title).collect()
@@ -538,6 +662,22 @@ mod tests {
         assert_eq!(titles("next")[..2], ["Next Tab", "Next Workspace"]);
         assert_eq!(titles("toggle")[0], "Toggle Explorer");
         assert!(titles("zzz").is_empty());
+    }
+
+    #[test]
+    fn files_best_first_shorter_among_equals() {
+        let files = ["src/workspace.rs", "docs/w.md", "a/b/workspace.rs", "readme.md"].map(String::from);
+        let names = |q: &str| filter_files(q, &files).into_iter().map(|(i, _)| files[i].as_str()).collect::<Vec<_>>();
+        assert_eq!(names("works"), ["src/workspace.rs", "a/b/workspace.rs"]);
+        assert_eq!(names("").len(), 4);
+        assert_eq!(names("")[0], "docs/w.md");
+    }
+
+    #[test]
+    fn hit_runs_split_on_matched_bytes() {
+        let runs = hit_runs("palette.rs", 4, &[1, 4, 5, 9]);
+        let want = [("pa", true), ("let", false), ("t", true), ("e.rs", false)];
+        assert_eq!(runs, want.map(|(t, h)| (t.to_owned(), h)));
     }
 
     fn m(text: &str, ranges: &[std::ops::Range<usize>]) -> Match {

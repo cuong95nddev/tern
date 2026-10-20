@@ -993,6 +993,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `palette.command` | `selected`, `title`, `key` | |
 | `palette.file` | `name`, `dir`, `count` | `icon` |
 | `palette.match` | `selected`, `line`, `mono`; list `parts` (`text`, `hit`) | |
+| `palette.path` | `selected`; lists `name`, `dir` (`text`, `hit`) | `icon` |
 | `menu.explorer` | `on_entry`, `can_paste`, `reveal` | |
 | `menu.scratch` | `reveal` | |
 | `menu.new_scratch` | list `kinds` (`label`, `ext`) | |

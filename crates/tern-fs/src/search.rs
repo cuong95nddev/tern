@@ -66,34 +66,25 @@ pub fn search(root: &Path, q: &Query, limit: usize, cancel: &AtomicBool) -> Resu
     let found = Mutex::new(Vec::new());
     let count = AtomicUsize::new(0);
     let truncated = AtomicBool::new(false);
-    WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != ".DS_Store")
-        .build_parallel()
-        .run(|| {
-            Box::new(|entry| {
-                if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= limit {
-                    truncated.store(true, Ordering::Relaxed);
-                    return WalkState::Quit;
-                }
-                let Ok(entry) = entry else { return WalkState::Continue };
-                if !entry.file_type().is_some_and(|t| t.is_file()) || entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-                    return WalkState::Continue;
-                }
-                let lines = search_file(entry.path(), &re, q.whole_word);
-                if !lines.is_empty() {
-                    count.fetch_add(lines.len(), Ordering::Relaxed);
-                    let rel = entry.path().strip_prefix(root).unwrap_or(entry.path()).to_path_buf();
-                    found.lock().unwrap().push((rel, lines));
-                }
-                WalkState::Continue
-            })
-        });
+    walker(root).build_parallel().run(|| {
+        Box::new(|entry| {
+            if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= limit {
+                truncated.store(true, Ordering::Relaxed);
+                return WalkState::Quit;
+            }
+            let Ok(entry) = entry else { return WalkState::Continue };
+            if !entry.file_type().is_some_and(|t| t.is_file()) || entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+                return WalkState::Continue;
+            }
+            let lines = search_file(entry.path(), &re, q.whole_word);
+            if !lines.is_empty() {
+                count.fetch_add(lines.len(), Ordering::Relaxed);
+                let rel = entry.path().strip_prefix(root).unwrap_or(entry.path()).to_path_buf();
+                found.lock().unwrap().push((rel, lines));
+            }
+            WalkState::Continue
+        })
+    });
     let mut files = found.into_inner().unwrap();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut matches: Vec<Match> = files
@@ -103,6 +94,48 @@ pub fn search(root: &Path, q: &Query, limit: usize, cancel: &AtomicBool) -> Resu
     let truncated = truncated.into_inner() || matches.len() > limit;
     matches.truncate(limit);
     Ok(Results { matches, truncated })
+}
+
+/// The files under `root` (relative to it), sorted, at most `limit`; empty
+/// once `cancel` is set. Hidden files are in, ignored ones and `.git` out.
+pub fn files(root: &Path, limit: usize, cancel: &AtomicBool) -> Vec<PathBuf> {
+    let found = Mutex::new(Vec::new());
+    let count = AtomicUsize::new(0);
+    walker(root).build_parallel().run(|| {
+        Box::new(|entry| {
+            if cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= limit {
+                return WalkState::Quit;
+            }
+            let Ok(entry) = entry else { return WalkState::Continue };
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                count.fetch_add(1, Ordering::Relaxed);
+                let rel = entry.path().strip_prefix(root).unwrap_or(entry.path()).to_path_buf();
+                found.lock().unwrap().push(rel);
+            }
+            WalkState::Continue
+        })
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return vec![];
+    }
+    let mut files = found.into_inner().unwrap();
+    files.sort();
+    files.truncate(limit);
+    files
+}
+
+/// A walk of `root` as the explorer shows it: .gitignore honored, hidden
+/// files in, `.git` out.
+fn walker(root: &Path) -> WalkBuilder {
+    let mut w = WalkBuilder::new(root);
+    w.hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != ".DS_Store");
+    w
 }
 
 /// The lines of the file at `path` that `re` matches: number, text, ranges.
@@ -221,6 +254,14 @@ mod tests {
         let r = search(d.path(), &q, 2, &AtomicBool::new(false)).unwrap();
         assert_eq!(r.matches.len(), 2);
         assert!(r.truncated);
+    }
+
+    #[test]
+    fn lists_files_skipping_ignored_ones() {
+        let d = fixture();
+        let names: Vec<String> = files(d.path(), 100, &AtomicBool::new(false)).iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(names, [".gitignore", "bin.dat", "src/a.rs", "src/b.rs"]);
+        assert_eq!(files(d.path(), 2, &AtomicBool::new(false)).len(), 2);
     }
 
     #[test]
