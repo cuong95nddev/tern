@@ -19,7 +19,7 @@ use gpui_kit::*;
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
 use crate::theme_picker::{self, OpenSettings, OpenSettingsFile, SelectTheme};
-use crate::workspace::{Workspace, WorkspaceEvent, confirm_close};
+use crate::workspace::{Panels, Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 use tern_term::status::ActivityStatus;
 
@@ -123,12 +123,14 @@ pub fn save_session(cx: &mut App) {
             }
         })
         .collect();
-    window_state::save_session(&saved);
+    let panels = cx.try_global::<Panels>().map(|p| p.saved.clone()).unwrap_or_default();
+    window_state::save_session(&saved, &panels);
 }
 
 /// Reopen the last session's windows. False when there was none.
 pub fn restore_session(cx: &mut App) -> bool {
-    let saved = window_state::load_session();
+    let (saved, panels) = window_state::load_session();
+    cx.set_global(Panels::new(panels));
     for w in &saved {
         let at = w.placement.as_ref().and_then(|(uuid, bounds)| window_state::resolve(uuid, *bounds, cx));
         open_window(Content::Workspaces(w.workspaces.clone(), w.active), at, cx);

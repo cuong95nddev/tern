@@ -278,7 +278,12 @@ pub struct SavedWorkspace {
     pub tab_panes: Vec<usize>,
     /// Per pane, the tab it shows (none when it is empty).
     pub pane_active: Vec<Option<usize>>,
-    /// Side panels the user hid: `explorer`, `changes`, `scratches`.
+}
+
+/// The side panels, the same in every workspace.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SavedPanels {
+    /// Side panels the user hid: `explorer`, `changes`, `scratches`, `shells`.
     pub hidden: Vec<String>,
     /// Panel arrangements as `(key, Arrangement::encode text)`, kept opaque here.
     pub arrangements: Vec<(String, String)>,
@@ -296,8 +301,6 @@ impl SavedWorkspace {
             panes: String::new(),
             tab_panes: vec![],
             pane_active: vec![],
-            hidden: vec![],
-            arrangements: vec![],
         }
     }
 }
@@ -319,16 +322,24 @@ fn field(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// `window <active> [<placement as in the window file>]`, then per workspace
+/// First the side panels, shared by every workspace: `hidden` lists those
+/// the user hid; `arrange` is one line per panel arrangement, its key and
+/// encoded text. Then per window `window <active> [<placement as in the
+/// window file>]`, then per workspace
 /// a tab-indented folder line followed by two-tab-indented lines: `active N`,
 /// one per tab group (`group`, color, collapsed, name) and one per tab, its
 /// kind and fields separated by tabs, after `@N` when it is in group N.
 /// A split center adds `panes`, its layout and each pane's tab (`-` for none),
-/// and `tab-panes`, each tab's pane; older builds skip both lines. `hidden`
-/// lists the side panels the user hid; `arrange` is one line per panel
-/// arrangement, its key and encoded text (older builds skip it).
-fn encode_session(windows: &[SavedWindow]) -> String {
+/// and `tab-panes`, each tab's pane; older builds skip both lines. Builds
+/// before shared panels kept `hidden` and `arrange` per workspace.
+fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
     let mut out = String::new();
+    if !panels.hidden.is_empty() {
+        out.push_str(&format!("hidden\t{}\n", field(&panels.hidden.join(" "))));
+    }
+    for (key, encoded) in &panels.arrangements {
+        out.push_str(&format!("arrange\t{}\t{}\n", field(key), field(encoded)));
+    }
     for w in windows {
         match &w.placement {
             Some((display, bounds)) => out.push_str(&format!("window {} {}", w.active, encode(display, *bounds))),
@@ -336,12 +347,6 @@ fn encode_session(windows: &[SavedWindow]) -> String {
         }
         for ws in &w.workspaces {
             out.push_str(&format!("\t{}\n", field(&ws.folder.display().to_string())));
-            if !ws.hidden.is_empty() {
-                out.push_str(&format!("\t\thidden\t{}\n", field(&ws.hidden.join(" "))));
-            }
-            for (key, encoded) in &ws.arrangements {
-                out.push_str(&format!("\t\tarrange\t{}\t{}\n", field(key), field(encoded)));
-            }
             // Also with no tabs: panels among the panes keep their places.
             if !ws.panes.is_empty() {
                 let active: Vec<String> = ws.pane_active.iter().map(|a| a.map_or("-".into(), |a| a.to_string())).collect();
@@ -423,7 +428,7 @@ struct Merged {
 fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usize) {
     let mut out: Vec<SavedWorkspace> = std::iter::once(ws.folder.clone())
         .chain(merged.folders)
-        .map(|folder| SavedWorkspace { hidden: ws.hidden.clone(), arrangements: ws.arrangements.clone(), ..SavedWorkspace::fresh(folder) })
+        .map(SavedWorkspace::fresh)
         .collect();
     let folders: Vec<PathBuf> = out.iter().map(|w| w.folder.clone()).collect();
     let home = |p: &std::path::Path| {
@@ -453,12 +458,33 @@ fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usi
     (out, active_ws)
 }
 
-fn decode_session(text: &str) -> Vec<SavedWindow> {
+/// A panel line's fields: `hidden` or `arrange`, at the top or (older
+/// builds) in a workspace.
+fn decode_panel_line(line: &str, panels: &mut SavedPanels) -> bool {
+    if let Some(h) = line.strip_prefix("hidden\t") {
+        panels.hidden = h.split_whitespace().map(str::to_owned).collect();
+    } else if let Some(a) = line.strip_prefix("arrange\t") {
+        if let Some((key, encoded)) = a.split_once('\t') {
+            panels.arrangements.push((key.to_owned(), encoded.to_owned()));
+        }
+    } else {
+        return false;
+    }
+    true
+}
+
+fn decode_session(text: &str) -> (Vec<SavedWindow>, SavedPanels) {
     let mut out: Vec<SavedWindow> = vec![];
+    let mut panels = SavedPanels::default();
+    let mut shared = false;
+    // An older build's panels, per workspace of the first window: its
+    // active workspace's are taken.
+    let mut per_ws: Vec<SavedPanels> = vec![];
     // Per window, per workspace: what a one-workspace build added to it.
     let mut merged: Vec<Vec<Merged>> = vec![];
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("\t\t") {
+            let first_window = out.len() == 1;
             let Some(ws) = out.last_mut().and_then(|w| w.workspaces.last_mut()) else { continue };
             let Some(m) = merged.last_mut().and_then(|w| w.last_mut()) else { continue };
             if let Some(f) = rest.strip_prefix("folder\t") {
@@ -469,11 +495,9 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
                 let (layout, active) = p.split_once('\t').unwrap_or((p, ""));
                 ws.panes = layout.to_owned();
                 ws.pane_active = active.split_whitespace().map(|a| a.parse().ok()).collect();
-            } else if let Some(h) = rest.strip_prefix("hidden\t") {
-                ws.hidden = h.split_whitespace().map(str::to_owned).collect();
-            } else if let Some(a) = rest.strip_prefix("arrange\t") {
-                if let Some((key, encoded)) = a.split_once('\t') {
-                    ws.arrangements.push((key.to_owned(), encoded.to_owned()));
+            } else if rest.starts_with("hidden\t") || rest.starts_with("arrange\t") {
+                if first_window && let Some(p) = per_ws.last_mut() {
+                    decode_panel_line(rest, p);
                 }
             } else if let Some(p) = rest.strip_prefix("tab-panes\t") {
                 ws.tab_panes = p.split_whitespace().map(|n| n.parse().unwrap_or(0)).collect();
@@ -497,12 +521,20 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
             if let (Some(w), Some(m)) = (out.last_mut(), merged.last_mut()) {
                 w.workspaces.push(SavedWorkspace::fresh(PathBuf::from(folder)));
                 m.push(Merged::default());
+                if out.len() == 1 {
+                    per_ws.push(SavedPanels::default());
+                }
             }
         } else if let Some(rest) = line.strip_prefix("window ") {
             let (active, placement) = rest.split_once(' ').unwrap_or((rest, ""));
             out.push(SavedWindow { placement: decode(placement), workspaces: vec![], active: active.parse().unwrap_or(0) });
             merged.push(vec![]);
+        } else if out.is_empty() && decode_panel_line(line, &mut panels) {
+            shared = true;
         }
+    }
+    if !shared && let Some(first) = out.first() {
+        panels = per_ws.get(first.active).or(per_ws.first()).cloned().unwrap_or_default();
     }
     for (w, merged) in out.iter_mut().zip(merged) {
         if merged.iter().all(|m| m.folders.is_empty()) {
@@ -519,15 +551,15 @@ fn decode_session(text: &str) -> Vec<SavedWindow> {
         }
         (w.workspaces, w.active) = (split, active);
     }
-    out
+    (out, panels)
 }
 
 /// The session text last read or written, so an unchanged session is not
 /// written again (a tab's status changing asks for a save, too).
 static LAST_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-pub fn save_session(windows: &[SavedWindow]) {
-    let text = encode_session(windows);
+pub fn save_session(windows: &[SavedWindow], panels: &SavedPanels) {
+    let text = encode_session(windows, panels);
     let mut last = LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if last.as_deref() == Some(text.as_str()) {
         return;
@@ -537,11 +569,12 @@ pub fn save_session(windows: &[SavedWindow]) {
     }
 }
 
-/// The last session's windows, keeping only folders that still exist.
-pub fn load_session() -> Vec<SavedWindow> {
+/// The last session's windows, keeping only folders that still exist, and
+/// its side panels.
+pub fn load_session() -> (Vec<SavedWindow>, SavedPanels) {
     let text = std::fs::read_to_string(session_file()).unwrap_or_default();
     *LAST_SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.clone());
-    let mut windows = decode_session(&text);
+    let (mut windows, panels) = decode_session(&text);
     for w in &mut windows {
         let before = w.workspaces.len();
         w.workspaces.retain(|ws| ws.folder.is_dir());
@@ -549,12 +582,12 @@ pub fn load_session() -> Vec<SavedWindow> {
             w.active = 0;
         }
     }
-    windows
+    (windows, panels)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SavedGroup, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag, toggle_flag};
+    use super::{SavedGroup, SavedPanels, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag, toggle_flag};
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
     use std::path::PathBuf;
 
@@ -609,16 +642,18 @@ mod tests {
                         panes: "h(0,v(1,2))".into(),
                         tab_panes: vec![0, 0, 1, 1, 2, 0],
                         pane_active: vec![Some(0), Some(3), None],
-                        hidden: vec!["explorer".into(), "scratches".into()],
-                        arrangements: vec![("k".into(), "left=explorer".into())],
                     },
-                    SavedWorkspace { hidden: vec!["changes".into()], ..SavedWorkspace::fresh(PathBuf::from("/d")) },
+                    SavedWorkspace::fresh(PathBuf::from("/d")),
                 ],
                 active: 1,
             },
             SavedWindow { placement: None, workspaces: vec![], active: 0 },
         ];
-        assert_eq!(decode_session(&encode_session(&windows)), windows);
+        let panels = SavedPanels {
+            hidden: vec!["explorer".into(), "scratches".into()],
+            arrangements: vec![("k".into(), "left=explorer".into())],
+        };
+        assert_eq!(decode_session(&encode_session(&windows, &panels)), (windows, panels));
     }
 
     #[test]
@@ -626,7 +661,8 @@ mod tests {
         let text = "window 0\n\t/a\n\t\tfolder\t/b\n\t\tfolder\t/b/sub\n\t\thidden\tchanges\n\t\tactive\t2\n\
                     \t\tgroup\tblue\t0\tapi\n\t\t@0\tclaude\ts-1\t\t42\t/b\n\t\tshell\t\t7\t/a\n\t\t@0\tfile\t/b/sub/x.rs\n\
                     \t\tscratch\t/s/n.txt\n\t\tshell\t\t\t/elsewhere\n";
-        let w = &decode_session(text)[0];
+        let (windows, panels) = decode_session(text);
+        let w = &windows[0];
         let folders: Vec<&PathBuf> = w.workspaces.iter().map(|ws| &ws.folder).collect();
         assert_eq!(folders, [&PathBuf::from("/a"), &PathBuf::from("/b"), &PathBuf::from("/b/sub")]);
         let [a, b, sub] = &w.workspaces[..] else { panic!("three workspaces") };
@@ -639,34 +675,41 @@ mod tests {
         assert_eq!((&a.tab_groups[..], &b.tab_groups[..], &sub.tab_groups[..]), (&[None, None, None][..], &[Some(0)][..], &[Some(0)][..]));
         assert!(a.groups.is_empty() && sub.groups[0].name == "api");
         assert_eq!((w.active, sub.active), (2, 0));
-        assert!(w.workspaces.iter().all(|ws| ws.hidden == ["changes"] && ws.panes.is_empty()));
+        assert!(w.workspaces.iter().all(|ws| ws.panes.is_empty()));
+        assert_eq!(panels.hidden, ["changes"]);
     }
 
     #[test]
-    fn arrangements_round_trip() {
-        let arrangements = vec![("workspace/left+right".to_owned(), "left=explorer;right=[c changes@- scratches@-]".to_owned())];
+    fn panels_are_shared() {
+        let panels = SavedPanels {
+            hidden: vec![],
+            arrangements: vec![("workspace/left+right".to_owned(), "left=explorer;right=[c changes@- scratches@-]".to_owned())],
+        };
         let with_tabs = SavedWorkspace {
             tabs: vec![SavedTab::Shell { name: None, mux: None }],
             tab_groups: vec![None],
-            tab_panes: vec![],
-            arrangements: arrangements.clone(),
             ..SavedWorkspace::fresh(PathBuf::from("/a"))
         };
-        let without_tabs = SavedWorkspace { arrangements, ..SavedWorkspace::fresh(PathBuf::from("/b")) };
-        let windows = vec![SavedWindow { placement: None, workspaces: vec![with_tabs, without_tabs], active: 0 }];
-        assert_eq!(decode_session(&encode_session(&windows)), windows);
+        let windows = vec![SavedWindow { placement: None, workspaces: vec![with_tabs, SavedWorkspace::fresh("/b".into())], active: 0 }];
+        let text = encode_session(&windows, &panels);
+        assert!(text.starts_with("arrange\t"));
+        assert_eq!(decode_session(&text), (windows, panels));
     }
 
     #[test]
-    fn old_session_has_no_arrangement() {
-        let w = decode_session("window 0\n\t/a\n\t\thidden\texplorer\n\t\tshell\tn\n");
-        assert!(w[0].workspaces[0].arrangements.is_empty());
+    fn old_session_panels_come_from_the_active_workspace() {
+        let (w, panels) = decode_session(
+            "window 1\n\t/a\n\t\thidden\texplorer\n\t\tshell\tn\n\t/b\n\t\thidden\tchanges\n\t\tarrange\tk\tleft=explorer\n\
+             window 0\n\t/c\n\t\thidden\tshells\n",
+        );
+        assert_eq!(panels, SavedPanels { hidden: vec!["changes".into()], arrangements: vec![("k".into(), "left=explorer".into())] });
         assert_eq!(w[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("n".into()), mux: None }]);
+        assert_eq!(decode_session("window 0\n\t/a\n\t\tshell\tn\n").1, SavedPanels::default());
     }
 
     #[test]
     fn session_from_folder_only_format() {
-        let w = decode_session("window 0\n\t/a\n\t/b\n");
+        let (w, _) = decode_session("window 0\n\t/a\n\t/b\n");
         assert_eq!(w[0].workspaces, vec![SavedWorkspace::fresh("/a".into()), SavedWorkspace::fresh("/b".into())]);
     }
 
@@ -680,7 +723,7 @@ mod tests {
             ..SavedWorkspace::fresh(PathBuf::from("/a"))
         };
         let w = SavedWindow { placement: None, workspaces: vec![ws], active: 0 };
-        let back = decode_session(&encode_session(&[w]));
+        let (back, _) = decode_session(&encode_session(&[w], &SavedPanels::default()));
         assert_eq!(back[0].workspaces[0].tabs, vec![SavedTab::Shell { name: Some("x y z".into()), mux: None }]);
         assert_eq!(back[0].workspaces[0].groups[0].name, "a b");
         assert_eq!(back[0].workspaces[0].tab_groups, vec![Some(0)]);
@@ -688,7 +731,7 @@ mod tests {
 
     #[test]
     fn tabs_from_before_background_sessions() {
-        let w = decode_session("window 0\n\t/a\n\t\tclaude\ts-1\tname\n\t\tshell\t\n\t\tshell\tn\n");
+        let (w, _) = decode_session("window 0\n\t/a\n\t\tclaude\ts-1\tname\n\t\tshell\t\n\t\tshell\tn\n");
         assert_eq!(
             w[0].workspaces[0].tabs,
             vec![

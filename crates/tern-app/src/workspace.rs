@@ -41,7 +41,7 @@ use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
 use crate::theme_picker::OpenSettingsFile;
 use crate::viewer::{self, Viewer, ViewerEvent};
-use crate::window_state::{self, SavedGroup, SavedTab, SavedWorkspace, TabLayout};
+use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspace, TabLayout};
 
 /// What a name dialog does with the typed name (see `Workspace::ask_name`).
 type ApplyName = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
@@ -358,6 +358,8 @@ pub struct Workspace {
     pane_ui: RefCell<HashMap<PaneId, PaneUi>>,
     /// Where the side panels sit, per template and docks (`arrange::key`).
     arrangements: Kept,
+    /// The `Panels` revision the side panels follow.
+    panels_rev: u64,
     /// Bumped when the parts move, the layout resets or the arrangement is
     /// fitted again: the docks' splits start over from the arrangement.
     docks_epoch: usize,
@@ -397,6 +399,23 @@ pub enum WorkspaceEvent {
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
 
+/// The side panels, the same in every workspace: those hidden and where they
+/// sit. A workspace whose panels change publishes them here; the others follow.
+#[derive(Default)]
+pub struct Panels {
+    pub saved: SavedPanels,
+    /// Bumped on every change.
+    rev: u64,
+}
+
+impl Global for Panels {}
+
+impl Panels {
+    pub fn new(saved: SavedPanels) -> Self {
+        Self { saved, rev: 0 }
+    }
+}
+
 /// Common `claude` flags, toggled from the new-tab menu.
 const CLAUDE_FLAGS: [(&str, &str); 2] = [("Skip Permissions", "--dangerously-skip-permissions"), ("Chrome", "--chrome")];
 
@@ -415,6 +434,21 @@ fn on_ws(
     let ws = ws.clone();
     Some(Rc::new(move |_, window, cx| {
         let _ = ws.update(cx, |this, cx| f(this, window, cx));
+    }))
+}
+
+/// `on_ws`, then bring `ws` forward in its window.
+fn on_ws_shown(
+    ws: &WeakEntity<Workspace>,
+    f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> Option<template::MenuHandler> {
+    let ws = ws.clone();
+    Some(Rc::new(move |_, window, cx| {
+        let Some(this) = ws.upgrade() else { return };
+        this.update(cx, |this, cx| f(this, window, cx));
+        // Deferred: the window is still being updated.
+        let handle = window.window_handle();
+        cx.defer(move |cx| crate::main_window::reveal(handle, &this, cx));
     }))
 }
 
@@ -437,11 +471,47 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// Claude Code's own folder (`CLAUDE_CONFIG_DIR`, else `~/.claude`).
+fn claude_dir() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => crate::dirs::home().map(|h| h.join(".claude")),
+    }
+}
+
+/// The background job (`/bg`) running conversation `session`, if one still
+/// does: Claude won't `--resume` it then, only `claude attach` it. Read from
+/// the session files Claude keeps in `sessions/<pid>.json`.
+fn claude_bg_job(sessions: &Path, session: &str) -> Option<String> {
+    std::fs::read_dir(sessions).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        if v["sessionId"].as_str() != Some(session) || v["kind"].as_str() != Some("bg") {
+            return None;
+        }
+        // A file left behind by a Claude that's gone.
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(v["pid"].as_i64()?).ok()?;
+            // SAFETY: signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+                return None;
+            }
+        }
+        v["jobId"].as_str().filter(|j| !j.is_empty()).map(str::to_owned)
+    })
+}
+
 impl Workspace {
     /// Open `saved.folder` with `saved`'s tabs (none when none of them can
     /// come back: the workspace stays open without tabs).
     pub fn new(saved: SavedWorkspace, services: Services, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let root = saved.folder;
+        let (panels, panels_rev) = cx.try_global::<Panels>().map(|p| (p.saved.clone(), p.rev)).unwrap_or_default();
+        let shown = |name: &str| !panels.hidden.iter().any(|h| h == name);
         let tree = cx.new(|cx| FileTreeView::new(root.clone(), cx));
         let changes = cx.new(|cx| ChangesView::new(root.clone(), cx));
         let scratches = cx.new(ScratchesView::new);
@@ -514,11 +584,11 @@ impl Workspace {
             next_group: 0,
             _rename: None,
             preview: None,
-            show_explorer: !saved.hidden.iter().any(|h| h == "explorer"),
-            show_changes: !saved.hidden.iter().any(|h| h == "changes"),
-            show_scratches: !saved.hidden.iter().any(|h| h == "scratches"),
+            show_explorer: shown("explorer"),
+            show_changes: shown("changes"),
+            show_scratches: shown("scratches"),
             palette: None,
-            show_shells: !saved.hidden.iter().any(|h| h == "shells"),
+            show_shells: shown("shells"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -529,14 +599,15 @@ impl Workspace {
             tab_drag: false,
             pane_ui: RefCell::new(HashMap::new()),
             docks_epoch: 0,
-            arrangements: Kept::new(saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
+            arrangements: Kept::new(panels.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str()))),
+            panels_rev,
             arranged_for: None,
             arranged: None,
             arrange_problems: vec![],
             float_area: None,
             agents: None,
             part_windows: HashMap::new(),
-            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub],
+            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, cx.observe_global::<Panels>(Self::follow_panels)],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
         // Saved tab index → the tab it became (some don't come back).
@@ -629,6 +700,20 @@ impl Workspace {
         } else {
             Default::default()
         };
+        SavedWorkspace {
+            folder: self.root.clone(),
+            tabs,
+            tab_groups,
+            groups,
+            active: self.active,
+            panes,
+            tab_panes,
+            pane_active,
+        }
+    }
+
+    /// The side panels as this workspace has them.
+    fn saved_panels(&self) -> SavedPanels {
         let hidden = [
             ("explorer", self.show_explorer),
             ("changes", self.show_changes),
@@ -639,18 +724,24 @@ impl Workspace {
         .filter(|(_, shown)| !shown)
         .map(|(name, _)| name.to_owned())
         .collect();
-        SavedWorkspace {
-            folder: self.root.clone(),
-            tabs,
-            tab_groups,
-            groups,
-            active: self.active,
-            panes,
-            tab_panes,
-            pane_active,
-            hidden,
-            arrangements: self.saved_arrangements(),
+        SavedPanels { hidden, arrangements: self.saved_arrangements() }
+    }
+
+    /// Another workspace changed the side panels: show them the same.
+    fn follow_panels(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = cx.try_global::<Panels>() else { return };
+        if p.rev == self.panels_rev {
+            return;
         }
+        self.panels_rev = p.rev;
+        let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
+        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells) =
+            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"));
+        self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
+        // Fit again: the docks' splits start over from the new arrangement.
+        self.arranged_for = None;
+        self.arranged = None;
+        cx.notify();
     }
 
     fn subscribe_viewer(viewer: &Entity<Viewer>, window: &Window, cx: &mut Context<Self>) -> Vec<Subscription> {
@@ -749,9 +840,12 @@ impl Workspace {
                 // A conversation that can't be resumed (deleted, ...) ends
                 // Claude at once: the tab then starts a new one (see
                 // `on_terminal_event`), not on every failed exit.
-                let claude = match resume {
-                    Some(id) => format!("{claude} --resume {}", shell_quote(id)),
-                    None => claude,
+                // One moved to the background (`/bg`) is attached to instead.
+                let bg = resume.and_then(|id| claude_bg_job(&claude_dir()?.join("sessions"), id));
+                let claude = match (bg, resume) {
+                    (Some(job), _) => format!("claude attach {}", shell_quote(&job)),
+                    (None, Some(id)) => format!("{claude} --resume {}", shell_quote(id)),
+                    (None, None) => claude,
                 };
                 // Hooks post to 127.0.0.1; keep them off the user's proxy.
                 let no_proxy = ["NO_PROXY", "no_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
@@ -1645,7 +1739,7 @@ impl Workspace {
                 if path.is_dir() {
                     if !self.show_explorer {
                         self.show_explorer = true;
-                        cx.emit(WorkspaceEvent::TabsChanged);
+                        self.panels_changed(cx);
                     }
                     self.tree.update(cx, |t, cx| t.reveal(path, cx));
                     return cx.notify();
@@ -2071,6 +2165,11 @@ impl Workspace {
                 .list("scratch_files", names);
             let ws = ws.clone();
             let items: template::MenuItems = Rc::new(move |name, entry| match name {
+                // The menu of a folder that isn't the shown one: the action
+                // would reach the shown workspace, so open the tab in this one.
+                "workspace::NewClaudeTab" => on_ws_shown(&ws, |this, window, cx| this.add_tab(TabKind::Claude, window, cx)),
+                "workspace::NewShellTab" => on_ws_shown(&ws, |this, window, cx| this.add_tab(TabKind::Shell, window, cx)),
+                "workspace::NewScratch" => on_ws_shown(&ws, |this, window, cx| this.new_scratch("txt", window, cx)),
                 "flag" => {
                     let (_, flag) = *CLAUDE_FLAGS.get(entry?)?;
                     Some(Rc::new(move |_, _, _| {
@@ -2959,8 +3058,14 @@ impl Workspace {
         self.panels_changed(cx);
     }
 
-    /// A side panel was shown or hidden: keep it so at the next launch.
+    /// A side panel was shown, hidden, moved or resized: show it so in every
+    /// workspace, and keep it so at the next launch.
     fn panels_changed(&mut self, cx: &mut Context<Self>) {
+        let saved = self.saved_panels();
+        let panels = cx.default_global::<Panels>();
+        panels.rev += 1;
+        panels.saved = saved;
+        self.panels_rev = panels.rev;
         cx.emit(WorkspaceEvent::TabsChanged);
         cx.notify();
     }
@@ -4127,4 +4232,29 @@ pub fn services(terminal: TerminalConfig) -> Services {
     });
     let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, reveal));
     Services { mux, hook_events: rx, reveal_events: reveal_rx, terminal }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_bg_job;
+
+    #[test]
+    fn finds_the_background_job_of_a_live_session() {
+        let dir = std::env::temp_dir().join(format!("tern-claude-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id();
+        let write = |name: &str, body: String| std::fs::write(dir.join(name), body).unwrap();
+        write("1.json", format!(r#"{{"pid":{me},"sessionId":"aaa","kind":"interactive"}}"#));
+        write("2.json", format!(r#"{{"pid":{me},"sessionId":"bbb","kind":"bg","jobId":"bbb1"}}"#));
+        // No such process: left behind.
+        write("3.json", r#"{"pid":999999,"sessionId":"ccc","kind":"bg","jobId":"ccc1"}"#.to_owned());
+        write("4.key", "bbb".to_owned());
+
+        assert_eq!(claude_bg_job(&dir, "bbb").as_deref(), Some("bbb1"));
+        assert_eq!(claude_bg_job(&dir, "aaa"), None);
+        assert_eq!(claude_bg_job(&dir, "ccc"), None);
+        assert_eq!(claude_bg_job(&dir, "zzz"), None);
+        assert_eq!(claude_bg_job(&dir.join("missing"), "bbb"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
