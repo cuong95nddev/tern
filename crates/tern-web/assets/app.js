@@ -8,9 +8,8 @@ const $ = (id) => document.getElementById(id);
 
 const FONT = 'Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
 const LINE_HEIGHT = 1.15;
-// The terminal is made this screen's size at this font size; a grid of
-// another size (before the resize lands, or set by the desktop since) is
-// drawn smaller until it fits.
+// The session keeps the size the desktop gives it; the page draws that
+// grid at this font size, or smaller until it fits.
 const FONT_SIZE = 13;
 const MIN_FONT = 7;
 
@@ -117,14 +116,9 @@ function onText(m) {
       snapshotNext = true;
       setBanner(null);
       layout();
-      // Give the PTY this screen's size once the attach's repaint (a one
-      // row resize and back) is over, so the size given back later is the
-      // real one.
-      fitSoon(300);
       break;
     case "resize":
-      // Ours, or another view's (the desktop's window, another browser):
-      // drawn to fit as it is, and taken back on the next key typed here.
+      // The desktop's window changed: drawn to fit as it is.
       size = { cols: m.cols, rows: m.rows };
       if (term) term.resize(m.cols, m.rows);
       layout();
@@ -378,8 +372,6 @@ function show(which) {
 wideScreen.addEventListener("change", () => show(view));
 
 function showList() {
-  // The session gets back the size it had before this page.
-  if (current != null) send({ t: "unfit" });
   show("list-view");
 }
 
@@ -463,11 +455,7 @@ function quietReplies(t) {
 }
 
 function input(d) {
-  if (current != null && pending == null) {
-    // Typing here takes the size back from a view that changed it.
-    if (!fitted()) sendFit();
-    send({ t: "input", d });
-  }
+  if (current != null && pending == null) send({ t: "input", d });
 }
 
 // The size of one cell at font size `fs`, as xterm.js draws it. It rounds
@@ -514,49 +502,54 @@ function layout() {
   $("term").style.transform = scale < 1 ? `scale(${scale})` : "";
 }
 
-// The grid that fills this screen at FONT_SIZE, within what the server
-// takes (bridge.rs).
-function screenGrid() {
-  const { w, h } = room();
-  const c = cellAt(FONT_SIZE);
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-  return { cols: clamp(Math.floor(w / c.w), 10, 500), rows: clamp(Math.floor(h / c.h), 3, 300) };
-}
-
-function fitted() {
-  const g = screenGrid();
-  return g.cols === size.cols && g.rows === size.rows;
-}
-
-function sendFit() {
-  if (current == null || pending != null || $("term-view").hidden) return;
-  const { w, h } = room();
-  if (w <= 0 || h <= 0) return;
-  const g = screenGrid();
-  if (g.cols !== size.cols || g.rows !== size.rows) send({ t: "resize", ...g });
-}
-
-let fitTimer = 0;
-function fitSoon(ms) {
-  clearTimeout(fitTimer);
-  fitTimer = setTimeout(sendFit, ms);
-}
-
 // The screen changed (window, rotation, the on-screen keyboard).
-window.addEventListener("resize", () => {
-  layout();
-  fitSoon(150);
-});
+window.addEventListener("resize", layout);
 
-// Coming back to the page takes the size back too.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") fitSoon(150);
-});
+// The on-screen keyboard: iOS ignores `interactive-widget` and lays the page
+// out behind it, so the page is made the height of what is left above it.
+// Times the zoom, so pinching in doesn't shrink the page.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const fitKeyboard = () => {
+    document.body.style.height = `${Math.round(vv.height * vv.scale)}px`;
+    // iOS scrolls the page to show the focused box: it fits now.
+    if (vv.scale <= 1.01) window.scrollTo(0, 0);
+    layout();
+  };
+  vv.addEventListener("resize", fitKeyboard);
+  vv.addEventListener("scroll", fitKeyboard);
+  fitKeyboard();
+}
 
-// Leaving the page gives the session its size back.
-window.addEventListener("pagehide", () => {
-  if (current != null) send({ t: "unfit" });
-});
+// A finger drag scrolls as a mouse wheel does. xterm.js only scrolls its
+// scrollback by touch, and not at all while the program reads the mouse
+// (Claude Code does): the wheel goes to the program then, as on the desktop.
+// Two fingers are left to the browser (pinch to zoom).
+{
+  const wrap = $("term-wrap");
+  let lastY = null;
+  wrap.addEventListener("touchstart", (e) => {
+    lastY = e.touches.length === 1 ? e.touches[0].clientY : null;
+  }, { capture: true, passive: true });
+  wrap.addEventListener("touchmove", (e) => {
+    if (lastY == null || e.touches.length !== 1 || !term) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.touches[0];
+    const dy = lastY - t.clientY;
+    lastY = t.clientY;
+    if (!dy) return;
+    term.element.querySelector(".xterm-screen").dispatchEvent(new WheelEvent("wheel", {
+      deltaY: dy,
+      deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      clientX: t.clientX,
+      clientY: t.clientY,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }, { capture: true, passive: false });
+  wrap.addEventListener("touchend", () => (lastY = null), { capture: true, passive: true });
+}
 
 // ---- Keys and the message box ---------------------------------------------
 

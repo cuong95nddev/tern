@@ -5,9 +5,9 @@
 //! changes), `view` (a view began: the session's size; the bytes that paint
 //! its snapshot follow as one binary message), binary messages (the
 //! session's output), `resize`, `exited`, `gone` and `error`. From the page:
-//! `view`, `input`, `resize` (make the PTY this size: the page always fits
-//! it to its screen), `unfit` (give it back its size). Session ids go as strings: they don't fit a JavaScript
-//! number.
+//! `view` and `input`. The page never resizes the session: it draws it at
+//! the size the desktop gives it. Session ids go as strings: they don't fit
+//! a JavaScript number.
 
 use std::io::BufReader;
 use std::net::TcpStream;
@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde_json::json;
 use tern_mux::viewer::{ViewEvent, Viewer};
-use tern_term::TermSize;
 use tern_term::mirror::Marker;
 use tern_term::palette::{Palette, PaletteFile};
 use tern_term::vt::vte::ansi::Rgb;
@@ -34,39 +33,19 @@ enum FromPage {
     Input {
         d: String,
     },
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
-    Unfit,
 }
 
 /// The page's view.
 #[derive(Default)]
 struct State {
     id: Option<u64>,
-    /// Its size, as last heard from the daemon.
-    size: Option<TermSize>,
-    /// The size the page gave it, and the one it had before.
-    fitted: Option<(TermSize, TermSize)>,
 }
 
 impl State {
-    /// Stop viewing, giving the session back the size it had if the page
-    /// changed it (and nobody did since).
+    /// Stop viewing.
     fn leave(&mut self, viewer: &Viewer) {
         if let Some(id) = self.id.take() {
             let _ = viewer.unview(id);
-            self.unfit(viewer, id);
-        }
-        self.size = None;
-    }
-
-    fn unfit(&mut self, viewer: &Viewer, id: u64) {
-        if let Some((set, orig)) = self.fitted.take()
-            && self.size == Some(set)
-        {
-            let _ = viewer.resize(id, orig);
         }
     }
 }
@@ -133,26 +112,6 @@ pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Pa
                     let _ = viewer.input(id, d.into_bytes());
                 }
             },
-            FromPage::Resize { cols, rows } => {
-                if let (Some(id), Some(size)) = (st.id, st.size) {
-                    let want = TermSize { cols: cols.clamp(10, 500), rows: rows.clamp(3, 300), ..size };
-                    if want != size {
-                        // The size from before this page, unless another view
-                        // set one since.
-                        let orig = match st.fitted {
-                            Some((set, orig)) if set == size => orig,
-                            _ => size,
-                        };
-                        st.fitted = Some((want, orig));
-                        let _ = viewer.resize(id, want);
-                    }
-                }
-            },
-            FromPage::Unfit => {
-                if let Some(id) = st.id {
-                    st.unfit(&viewer, id);
-                }
-            },
         }
     }
     state.lock().unwrap().leave(&viewer);
@@ -177,7 +136,6 @@ fn on_event(event: ViewEvent, viewer: &Viewer, sender: &Sender, state: &Mutex<St
             sender.text(&json!({ "t": "sessions", "list": list }).to_string())
         },
         ViewEvent::Viewing { id, snapshot } if st.id == Some(id) => {
-            st.size = Some(snapshot.size);
             drop(st);
             let s = snapshot.size;
             sender
@@ -190,7 +148,6 @@ fn on_event(event: ViewEvent, viewer: &Viewer, sender: &Sender, state: &Mutex<St
         },
         ViewEvent::Marker { id, marker } if st.id == Some(id) => match marker {
             Marker::Resized(s) => {
-                st.size = Some(s);
                 drop(st);
                 sender.text(&json!({ "t": "resize", "cols": s.cols, "rows": s.rows }).to_string())
             },
@@ -207,8 +164,6 @@ fn on_event(event: ViewEvent, viewer: &Viewer, sender: &Sender, state: &Mutex<St
         },
         ViewEvent::NotFound { id } if st.id == Some(id) => {
             st.id = None;
-            st.size = None;
-            st.fitted = None;
             drop(st);
             sender.text(&json!({ "t": "gone", "id": id.to_string() }).to_string())
         },
@@ -271,8 +226,7 @@ mod tests {
         assert!(matches!(m, FromPage::View { id: 9223372036854775807 }));
         let m: FromPage = serde_json::from_str(r#"{"t":"input","d":"ls\r"}"#).unwrap();
         assert!(matches!(m, FromPage::Input { d } if d == "ls\r"));
-        let m: FromPage = serde_json::from_str(r#"{"t":"resize","cols":80,"rows":24}"#).unwrap();
-        assert!(matches!(m, FromPage::Resize { cols: 80, rows: 24 }));
+        assert!(serde_json::from_str::<FromPage>(r#"{"t":"resize","cols":80,"rows":24}"#).is_err());
         assert!(serde_json::from_str::<FromPage>(r#"{"t":"view","id":12}"#).is_err());
     }
 
