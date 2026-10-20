@@ -836,8 +836,11 @@ impl Workspace {
             return self.activate(ix, window, cx);
         }
         let (mut cfg, _) = self.spawn_config(TabKind::Shell, None);
-        // From its start, and on past the shell's end.
-        cfg.args = crate::platform::shell_command_args(&format!("tail -n +1 -F {}", shell_quote(&output.to_string_lossy())));
+        // From its start, and on past the shell's end. Run directly, not
+        // through a shell: the path is whatever the agent's shell opened.
+        let Some(path) = output.to_str() else { return self.show_tab(row.tab, window, cx) };
+        cfg.program = Some("/usr/bin/tail".to_owned());
+        cfg.args = ["-n", "+1", "-F", "--", path].map(str::to_owned).to_vec();
         let title = crate::shells_view::first_line(&row.shell.command);
         let (config, connector) = (self.services.terminal.clone(), self.services.mux.clone());
         let view = cx.new(|cx| TerminalView::new(cfg, false, None, title.clone(), config, connector, cx));
