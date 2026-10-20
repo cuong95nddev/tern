@@ -62,6 +62,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Changes", workspace::ToggleChanges),
         MenuItem::action("Scratches", workspace::ToggleScratches),
         MenuItem::action("Usage", workspace::ToggleUsage),
+        MenuItem::action("System", workspace::ToggleSystem),
         MenuItem::action("Reset Layout", workspace::ResetLayout),
         MenuItem::action("Focus Terminal", workspace::FocusTerminal),
         MenuItem::action("Agent Monitor", agent_monitor::ToggleAgentMonitor),

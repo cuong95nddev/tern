@@ -82,6 +82,7 @@ const COMMANDS: &[Command] = &[
     cmd!("Toggle Changes", "⌘⇧G", workspace::ToggleChanges),
     cmd!("Toggle Scratches", "⌘⇧S", workspace::ToggleScratches),
     cmd!("Toggle Usage", "", workspace::ToggleUsage),
+    cmd!("Toggle System", "", workspace::ToggleSystem),
     cmd!("Focus Terminal", "⌘J", workspace::FocusTerminal),
     cmd!("Split Right", "⌘\\", workspace::SplitRight),
     cmd!("Split Down", "⌘⇧\\", workspace::SplitDown),

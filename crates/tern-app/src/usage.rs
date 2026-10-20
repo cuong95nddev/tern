@@ -6,7 +6,9 @@
 //!
 //! One store for the app ([`Usage`]); the usage panels only draw it. It reads
 //! while a panel was drawn lately, every [`REFRESH`], and backs off when the
-//! service says no.
+//! service says no. The last answer and when to ask next are kept in the
+//! cache folder, shared by every Tern running, so a restart or a second
+//! Tern doesn't ask again before it is due.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// The endpoint serves Claude Code's OAuth clients.
@@ -35,6 +37,8 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const REJECTED_LIMIT: Duration = Duration::from_secs(6 * 60 * 60);
 /// A click can't queue reads back to back.
 const MANUAL_SPACING: Duration = Duration::from_secs(10);
+/// A click doesn't ask again within this of the last answer (from any Tern).
+const FORCED_FRESH: Duration = Duration::from_secs(60);
 /// No panel drawn for this long: nobody looks, so nothing is read.
 const UNSEEN: Duration = Duration::from_secs(15 * 60);
 
@@ -115,23 +119,68 @@ pub struct Report {
     pub extra: Option<String>,
 }
 
-impl Report {
-    /// The limit closest to running out.
-    pub fn tightest(&self) -> Option<&Limit> {
-        self.limits.iter().max_by(|a, b| a.used.total_cmp(&b.used))
+/// What a read found, from the service or from the cache.
+struct Outcome {
+    /// `None`: signed out, or nothing read yet.
+    report: Option<Report>,
+    error: Option<String>,
+    read_at: Option<SystemTime>,
+    /// When anyone may ask the service again.
+    next_at: SystemTime,
+}
+
+/// The last answer, kept on disk so neither a restart nor another Tern
+/// running (the installed one and a dev build) asks the rate-limited
+/// endpoint again before it is due.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct Cached {
+    /// Unix seconds of the last good answer.
+    read_at: u64,
+    /// Unix seconds before which nobody asks again.
+    next_at: u64,
+    /// The last good answer, as the service gave it.
+    body: Option<String>,
+    plan: Option<String>,
+    email: Option<String>,
+    /// Why the last ask failed, if it did.
+    error: Option<String>,
+    /// Sign-in rejections in a row.
+    rejections: u32,
+}
+
+impl Cached {
+    fn outcome(&self) -> Outcome {
+        let report = self.body.as_deref().and_then(|b| parse(b).ok()).map(|r| Report { plan: self.plan.clone(), email: self.email.clone(), ..r });
+        Outcome {
+            read_at: report.as_ref().map(|_| UNIX_EPOCH + Duration::from_secs(self.read_at)),
+            report,
+            error: self.error.clone(),
+            next_at: UNIX_EPOCH + Duration::from_secs(self.next_at),
+        }
     }
 }
 
-/// How a read went.
-enum Read {
-    Done(Report),
-    /// No Claude Code sign-in on this machine (or an API-key one).
-    SignedOut,
-    RateLimited,
-    /// The service refused the sign-in (it expired; Claude Code renews it
-    /// when it runs).
-    Rejected,
-    Failed(String),
+fn cache_path() -> PathBuf {
+    crate::dirs::cache().join("claude-usage.json")
+}
+
+fn load() -> Option<Cached> {
+    serde_json::from_slice(&std::fs::read(cache_path()).ok()?).ok()
+}
+
+fn save(c: &Cached) {
+    let path = cache_path();
+    let Ok(text) = serde_json::to_vec(c) else { return };
+    // Whole or not at all: another Tern may read it meanwhile.
+    let tmp = path.with_extension(format!("json.{}", std::process::id()));
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn secs(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// The app's one usage store.
@@ -146,7 +195,8 @@ pub struct UsageStore {
     pub updated: Option<SystemTime>,
     pub reading: bool,
     due: Instant,
-    rejections: u32,
+    /// A click asked for this read.
+    forced: bool,
     manual: Option<Instant>,
     seen: Option<Instant>,
     _task: Task<()>,
@@ -166,31 +216,38 @@ impl UsageStore {
     fn new(cx: &mut Context<Self>) -> Self {
         let task = cx.spawn(async move |this, cx| {
             loop {
-                let go = this.update(cx, |this, _| this.should_read(Instant::now()));
+                let go = this.update(cx, |this, cx| {
+                    let go = this.should_read(Instant::now()).then_some(this.forced);
+                    if go.is_some() {
+                        this.reading = true;
+                        this.forced = false;
+                        cx.notify();
+                    }
+                    go
+                });
                 match go {
-                    Ok(true) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.reading = true;
-                            cx.notify();
-                        });
-                        let read = cx.background_executor().spawn(async { read() }).await;
-                        if this.update(cx, |this, cx| this.take(read, cx)).is_err() {
+                    Ok(Some(forced)) => {
+                        let outcome = cx.background_executor().spawn(async move { read(forced) }).await;
+                        if this.update(cx, |this, cx| this.take(outcome, cx)).is_err() {
                             break;
                         }
                     },
-                    Ok(false) => {},
+                    Ok(None) => {},
                     Err(_) => break,
                 }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
         });
+        // The last answer at once, from the cache; the first read asks the
+        // service only if it is due.
+        let cached = load().map(|c| c.outcome());
         Self {
-            report: None,
-            error: None,
-            updated: None,
+            report: cached.as_ref().and_then(|c| c.report.clone()),
+            error: cached.as_ref().and_then(|c| c.error.clone()),
+            updated: cached.and_then(|c| c.read_at),
             reading: false,
             due: Instant::now(),
-            rejections: 0,
+            forced: false,
             manual: None,
             seen: None,
             _task: task,
@@ -206,74 +263,111 @@ impl UsageStore {
         self.seen = Some(Instant::now());
     }
 
-    /// Read now, unless a click just did.
+    /// Read now, unless a click just did (the service's own limits and
+    /// backoff still hold: see [`read`]).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         if self.manual.is_some_and(|m| now.duration_since(m) < MANUAL_SPACING) {
             return;
         }
         self.manual = Some(now);
+        self.forced = true;
         self.due = now;
         self.seen = Some(now);
         cx.notify();
     }
 
-    fn take(&mut self, read: Read, cx: &mut Context<Self>) {
-        let now = Instant::now();
+    fn take(&mut self, o: Outcome, cx: &mut Context<Self>) {
         self.reading = false;
-        let wait = match read {
-            Read::Done(report) => {
-                self.report = Some(report);
-                self.error = None;
-                self.updated = Some(SystemTime::now());
-                self.rejections = 0;
-                REFRESH
-            },
-            Read::SignedOut => {
-                self.report = None;
-                self.error = None;
-                REFRESH
-            },
-            Read::RateLimited => {
-                self.error = Some("Rate limited by Claude; trying again later".into());
-                RATE_LIMITED
-            },
-            Read::Rejected => {
-                self.rejections += 1;
-                self.error = Some("Claude rejected the sign-in; run Claude Code to renew it".into());
-                (REFRESH * 2u32.saturating_pow(self.rejections - 1)).min(REJECTED_LIMIT)
-            },
-            Read::Failed(e) => {
-                self.error = Some(e);
-                ERROR_BACKOFF
-            },
-        };
-        self.due = now + wait;
+        self.report = o.report;
+        self.error = o.error;
+        self.updated = o.read_at;
+        let wait = o.next_at.duration_since(SystemTime::now()).unwrap_or_default();
+        // Not before the next tick: a cache another Tern keeps stale must
+        // not make this one spin.
+        self.due = Instant::now() + wait.max(MANUAL_SPACING);
         cx.notify();
     }
 }
 
-/// Reads the usage once, blocking: the sign-in, then the endpoint.
-fn read() -> Read {
-    let Some(credentials) = credentials() else { return Read::SignedOut };
-    let Some(oauth) = credentials.claude_ai_oauth else { return Read::SignedOut };
-    let Some(token) = oauth.access_token.filter(|t| !t.is_empty()) else { return Read::SignedOut };
+/// Reads the usage once, blocking. The service is asked only when the
+/// cache (shared with other Terns) says it is due; a click (`forced`) asks
+/// sooner, but not within [`FORCED_FRESH`] of the last answer nor while
+/// the service said to wait.
+fn read(forced: bool) -> Outcome {
+    let now = SystemTime::now();
+    let cached = load().unwrap_or_default();
+    let next_at = UNIX_EPOCH + Duration::from_secs(cached.next_at);
+    let fresh = UNIX_EPOCH + Duration::from_secs(cached.read_at) + FORCED_FRESH > now;
+    let waiting = cached.error.is_some() && next_at > now;
+    if if forced { fresh || waiting } else { next_at > now } {
+        return cached.outcome();
+    }
+    let mut c = cached;
+    let result = ask();
+    let now = SystemTime::now();
+    let wait = match result {
+        Ask::Done { body, plan, email } => {
+            c = Cached { read_at: secs(now), body: Some(body), plan, email, ..Cached::default() };
+            REFRESH
+        },
+        Ask::SignedOut => {
+            c = Cached::default();
+            REFRESH
+        },
+        Ask::RateLimited => {
+            c.error = Some("Rate limited by Claude; trying again later".into());
+            RATE_LIMITED
+        },
+        Ask::Rejected => {
+            c.rejections += 1;
+            c.error = Some("Claude rejected the sign-in; run Claude Code to renew it".into());
+            (REFRESH * 2u32.saturating_pow(c.rejections - 1)).min(REJECTED_LIMIT)
+        },
+        Ask::Failed(e) => {
+            c.error = Some(e);
+            ERROR_BACKOFF
+        },
+    };
+    c.next_at = secs(now + wait);
+    save(&c);
+    c.outcome()
+}
+
+/// What the service answered.
+enum Ask {
+    Done { body: String, plan: Option<String>, email: Option<String> },
+    /// No Claude Code sign-in on this machine (or an API-key one).
+    SignedOut,
+    RateLimited,
+    /// The service refused the sign-in (it expired; Claude Code renews it
+    /// when it runs).
+    Rejected,
+    Failed(String),
+}
+
+/// Asks the service, blocking: the sign-in, then the endpoint.
+fn ask() -> Ask {
+    let Some(credentials) = credentials() else { return Ask::SignedOut };
+    let Some(oauth) = credentials.claude_ai_oauth else { return Ask::SignedOut };
+    let Some(token) = oauth.access_token.filter(|t| !t.is_empty()) else { return Ask::SignedOut };
     let (status, body) = match get(&token) {
         Ok(r) => r,
-        Err(e) => return Read::Failed(e),
+        Err(e) => return Ask::Failed(e),
     };
     match status {
+        // Checked now, so an answer it can't read isn't kept.
         200 => match parse(&body) {
-            Ok(mut report) => {
-                report.plan = plan(oauth.subscription_type.as_deref(), oauth.rate_limit_tier.as_deref());
-                report.email = email();
-                Read::Done(report)
+            Ok(_) => Ask::Done {
+                body,
+                plan: plan(oauth.subscription_type.as_deref(), oauth.rate_limit_tier.as_deref()),
+                email: email(),
             },
-            Err(e) => Read::Failed(e),
+            Err(e) => Ask::Failed(e),
         },
-        401 | 403 => Read::Rejected,
-        429 => Read::RateLimited,
-        s => Read::Failed(format!("Claude answered {s}")),
+        401 | 403 => Ask::Rejected,
+        429 => Ask::RateLimited,
+        s => Ask::Failed(format!("Claude answered {s}")),
     }
 }
 
@@ -543,7 +637,7 @@ pub fn ago(t: SystemTime, now: SystemTime) -> String {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{Limit, WEEK, countdown, parse, plan, timestamp};
+    use super::{Cached, Limit, WEEK, countdown, parse, plan, timestamp};
 
     const ANSWER: &str = r#"{
         "five_hour": {"utilization": 27.0, "resets_at": "2026-10-20T07:59:59.879107+00:00"},
@@ -564,7 +658,21 @@ mod tests {
         let names: Vec<_> = r.limits.iter().map(|l| (l.name.as_str(), l.short.as_str(), l.used)).collect();
         assert_eq!(names, [("Session", "5h", 27.), ("Weekly", "W", 8.), ("Fable weekly", "Fable", 0.)]);
         assert_eq!(r.extra.as_deref(), Some("$1.20"));
-        assert_eq!(r.tightest().unwrap().name, "Session");
+    }
+
+    #[test]
+    fn cached_answers() {
+        let c = Cached { read_at: 100, next_at: 700, body: Some(ANSWER.into()), plan: Some("Max 5x".into()), ..Cached::default() };
+        let back: Cached = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
+        let o = c.outcome();
+        let r = o.report.unwrap();
+        assert_eq!((r.limits.len(), r.plan.as_deref()), (3, Some("Max 5x")));
+        assert_eq!(o.read_at, Some(UNIX_EPOCH + Duration::from_secs(100)));
+        assert_eq!(o.next_at, UNIX_EPOCH + Duration::from_secs(700));
+        // Signed out, or an answer it can't read: no numbers.
+        assert!(Cached { body: Some("<html>".into()), ..c }.outcome().report.is_none());
+        assert!(Cached::default().outcome().read_at.is_none());
     }
 
     #[test]

@@ -40,6 +40,7 @@ use crate::style;
 use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
 use crate::theme_picker::OpenSettingsFile;
+use crate::system_view::{SystemEvent, SystemView};
 use crate::usage_view::{UsageEvent, UsageView};
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspace, TabLayout};
@@ -65,6 +66,7 @@ actions!(
         SearchInFiles,
         ToggleShells,
         ToggleUsage,
+        ToggleSystem,
         ResetLayout,
         FocusTerminal,
         SplitRight,
@@ -319,6 +321,7 @@ pub struct Workspace {
     scratches: Entity<ScratchesView>,
     shells: Entity<ShellsView>,
     usage: Entity<UsageView>,
+    system: Entity<SystemView>,
     tabs: Vec<CenterTab>,
     active: usize,
     /// The tab last right-clicked, for the tab context menu.
@@ -344,6 +347,7 @@ pub struct Workspace {
     palette: Option<(Entity<Palette>, Subscription)>,
     show_shells: bool,
     show_usage: bool,
+    show_system: bool,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
     /// The pane each tab is in.
@@ -521,6 +525,7 @@ impl Workspace {
         let scratches = cx.new(ScratchesView::new);
         let shells = cx.new(ShellsView::new);
         let usage = cx.new(UsageView::new);
+        let system = cx.new(SystemView::new);
 
         let tree_sub = cx.subscribe_in(&tree, window, |this, _, ev: &FileTreeEvent, window, cx| match ev {
             FileTreeEvent::OpenFile { path, pin } => {
@@ -577,6 +582,12 @@ impl Workspace {
                 this.panels_changed(cx);
             },
         });
+        let system_sub = cx.subscribe(&system, |this, _, ev: &SystemEvent, cx| match ev {
+            SystemEvent::Hide => {
+                this.show_system = false;
+                this.panels_changed(cx);
+            },
+        });
 
         let mut this = Self {
             root,
@@ -586,6 +597,7 @@ impl Workspace {
             scratches,
             shells,
             usage,
+            system,
             tabs: vec![],
             active: 0,
             menu_tab: None,
@@ -602,6 +614,7 @@ impl Workspace {
             palette: None,
             show_shells: shown("shells"),
             show_usage: shown("usage"),
+            show_system: shown("system"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -620,7 +633,7 @@ impl Workspace {
             float_area: None,
             agents: None,
             part_windows: HashMap::new(),
-            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, cx.observe_global::<Panels>(Self::follow_panels)],
+            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, system_sub, cx.observe_global::<Panels>(Self::follow_panels)],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
         // Saved tab index → the tab it became (some don't come back).
@@ -733,6 +746,7 @@ impl Workspace {
             ("scratches", self.show_scratches),
             ("shells", self.show_shells),
             ("usage", self.show_usage),
+            ("system", self.show_system),
         ]
         .into_iter()
         .filter(|(_, shown)| !shown)
@@ -749,8 +763,14 @@ impl Workspace {
         }
         self.panels_rev = p.rev;
         let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
-        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_usage) =
-            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("usage"));
+        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_usage, self.show_system) = (
+            shown("explorer"),
+            shown("changes"),
+            shown("scratches"),
+            shown("shells"),
+            shown("usage"),
+            shown("system"),
+        );
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -1992,6 +2012,7 @@ impl Workspace {
             "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
             "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
             "usage" => ("chart-pie", self.show_usage, "Usage".to_owned()),
+            "system" => ("cpu", self.show_system, "System".to_owned()),
             _ => return None,
         })
     }
@@ -2042,6 +2063,7 @@ impl Workspace {
             "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
             "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
             "usage" => |this, w, cx| this.toggle_usage(&ToggleUsage, w, cx),
+            "system" => |this, w, cx| this.toggle_system(&ToggleSystem, w, cx),
             _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
         }
     }
@@ -2828,6 +2850,7 @@ impl Workspace {
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
                     "usage" => self.show_usage = true,
+                    "system" => self.show_system = true,
                     _ => {},
                 }
             },
@@ -2883,6 +2906,7 @@ impl Workspace {
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
                     "usage" => self.show_usage = true,
+                    "system" => self.show_system = true,
                     _ => {},
                 }
             },
@@ -3043,6 +3067,7 @@ impl Workspace {
             "changes" => self.show_changes,
             "shells" => self.show_shells,
             "usage" => self.show_usage,
+            "system" => self.show_system,
             _ => true,
         }
     }
@@ -3055,12 +3080,14 @@ impl Workspace {
             .var("changes", self.show_changes)
             .var("shells", self.show_shells)
             .var("usage", self.show_usage)
+            .var("system", self.show_system)
             .var("path", self.root.display().to_string())
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("shells", self.shells.clone().cached(cache_layout()))
             .slot("usage", self.usage.clone().cached(cache_layout()))
+            .slot("system", self.system.clone().cached(cache_layout()))
             .slot_opt("agents", self.agents.clone())
     }
 
@@ -3151,6 +3178,11 @@ impl Workspace {
 
     fn toggle_usage(&mut self, _: &ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
         self.show_usage = !self.show_usage;
+        self.panels_changed(cx);
+    }
+
+    fn toggle_system(&mut self, _: &ToggleSystem, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_system = !self.show_system;
         self.panels_changed(cx);
     }
 
@@ -4219,6 +4251,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::toggle_shells))
             .on_action(cx.listener(Self::toggle_usage))
+            .on_action(cx.listener(Self::toggle_system))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).

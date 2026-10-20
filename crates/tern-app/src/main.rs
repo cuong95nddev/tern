@@ -31,6 +31,8 @@ mod shells_view;
 mod shot;
 mod shot_icons;
 mod style;
+mod system;
+mod system_view;
 mod template;
 mod terminal_view;
 #[cfg(target_os = "macos")]

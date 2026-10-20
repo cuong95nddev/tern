@@ -1,6 +1,7 @@
 //! Usage panel: the plans' usage as a status bar (template `usage`, a
-//! `usage.item` per service, showing its limit closest to running out; for
-//! now Claude's only). Hovering an item shows the whole report
+//! `usage.item` per service, for now Claude's only, with a
+//! `usage.item.limit` per limit as far as they fit). Hovering an item shows
+//! the whole report
 //! (`usage.card`), which stays open under the pointer for its links. The
 //! numbers come from the app's one store ([`crate::usage`]).
 
@@ -111,13 +112,15 @@ impl Render for UsageView {
             cx,
         );
         let now = SystemTime::now();
-        // One item per service, as the limit closest to running out; the
-        // card has the rest.
+        // One item per service, with its limits as far as they fit.
         let items: Vec<template::Scope> = s
             .report
             .as_ref()
-            .and_then(|r| r.tightest())
-            .map(|l| limit_scope(l, now).slot("icon", Agent::Claude.icon(cx.theme())))
+            .map(|r| {
+                template::Scope::new("usage-claude")
+                    .slot("icon", Agent::Claude.icon(cx.theme()))
+                    .list("limits", r.limits.iter().map(|l| limit_scope(l, now)).collect())
+            })
             .into_iter()
             .collect();
         let message = match (&s.report, &s.error) {

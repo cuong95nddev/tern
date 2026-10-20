@@ -381,8 +381,7 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element {
         name: "usage.item",
-        about: "A service in the usage panel: its limit closest to running out, how much is used, a small bar and \
-                when it resets, dropped from the end when they don't fit. Hovering it shows `usage.card`",
+        about: "A service in the usage panel: its icon and limits. Hovering it shows `usage.card`",
         groups: &[&[
             ("height", Len, "$row_height"),
             ("padding_x", Len, "6"),
@@ -393,6 +392,17 @@ pub const ELEMENTS: &[Element] = &[
             ("detail_text", Color, "$text_muted"),
             ("hover_background", Color, "$row_hover"),
         ]],
+    },
+    Element {
+        name: "usage.item.limits",
+        about: "A service's limits in the usage panel, in one row: those that don't fit are hidden",
+        groups: &[&[("height", Len, "$row_height"), ("min_width", Len, "0"), ("gap", Len, "12")]],
+    },
+    Element {
+        name: "usage.item.limit",
+        about: "A limit in the usage panel: its name, how much is used, a small bar and when it resets, dropped from the \
+                end when they don't fit",
+        groups: &[&[("height", Len, "$row_height"), ("min_width", Len, "0"), ("gap", Len, "6")]],
     },
     Element {
         name: "usage.bar",
@@ -453,6 +463,66 @@ pub const ELEMENTS: &[Element] = &[
         groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$danger")]],
     },
     simple!("usage.card.link", "A link at the bottom of the usage card (refresh, dashboard, status page)"),
+    Element {
+        name: "system",
+        about: "The system panel: how busy the machine is (CPU and memory), as a status bar",
+        groups: &[PANEL, &[("start_height", Len, "64")], IMAGE],
+    },
+    Element { name: "system.header", about: "The system panel's title bar", groups: &[HEADER] },
+    simple!("system.header.button", "A button in the system panel's title bar"),
+    Element { name: "system.empty", about: "What the system panel shows before its first sample", groups: &[EMPTY] },
+    Element {
+        name: "system.list",
+        about: "The system panel's CPU and memory in one row: those that don't fit are hidden",
+        groups: &[&[("height", Len, "$row_height"), ("margin_x", Len, "8"), ("margin_y", Len, "4"), ("gap", Len, "10")]],
+    },
+    Element {
+        name: "system.item",
+        about: "CPU or memory in the system panel: its label, a graph and the percent",
+        groups: &[&[
+            ("height", Len, "$row_height"),
+            ("gap", Len, "6"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+        ]],
+    },
+    Element {
+        name: "system.label",
+        about: "The name before a system graph: `CPU`, `MEM`",
+        groups: &[&[("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "system.spark",
+        about: "The CPU's sparkline: a bar per sample, oldest first",
+        groups: &[&[("width", Len, "36"), ("height", Len, "10"), ("gap", Len, "1")]],
+    },
+    Element { name: "system.spark.bar", about: "A sample of the CPU sparkline: the room it may fill", groups: &[&[]] },
+    Element {
+        name: "system.spark.fill",
+        about: "The busy part of a CPU sample; `warning` and `critical` are its colors from 80% and 95%",
+        groups: &[&[
+            ("min_height", Len, "1"),
+            ("radius", Len, "1"),
+            ("background", Color, "$text_muted"),
+            ("warning", Color, "$warning.background"),
+            ("critical", Color, "$danger.background"),
+        ]],
+    },
+    Element {
+        name: "system.bar",
+        about: "The memory bar: the track. `system.bar.fill` is the part in use",
+        groups: &[&[("width", Len, "36"), ("height", Len, "6"), ("radius", Len, "3"), ("background", Color, "$border")]],
+    },
+    Element {
+        name: "system.bar.fill",
+        about: "The memory in use on its bar; `warning` and `critical` are its colors from 80% and 95%",
+        groups: &[&[
+            ("radius", Len, "3"),
+            ("background", Color, "$text_muted"),
+            ("warning", Color, "$warning.background"),
+            ("critical", Color, "$danger.background"),
+        ]],
+    },
     Element {
         name: "pane",
         about: "A pane of the center: its tabs and what the active one shows. `focused_border` is its border color while \

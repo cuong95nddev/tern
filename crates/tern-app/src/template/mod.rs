@@ -735,6 +735,7 @@ const SLOTS: &[&str] = &[
     "scratches",
     "shells",
     "usage",
+    "system",
     "center",
     "changes",
     "tab_bar",
@@ -764,7 +765,7 @@ const SLOTS: &[&str] = &[
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage", "system"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1544,7 +1545,7 @@ mod tests {
         // The agents panel on the left, as T3 Code's sidebar; every other panel on the right.
         assert_eq!(names, ["start", "right"]);
         let a = crate::arrange::Arrangement::defaults("workspace/right+start", &docks);
-        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px shells@180px];start=[c agents@- usage@64px]");
+        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px shells@180px];start=[c agents@- usage@64px system@64px]");
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }

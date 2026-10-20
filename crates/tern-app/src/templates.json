@@ -34,7 +34,8 @@
                 "max": 480,
                 "children": [
                   { "part": "agents" },
-                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 40, "max": 600 }
+                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 40, "max": 600 },
+                  { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 }
                 ]
               },
               { "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] },
@@ -86,6 +87,7 @@
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "shells.header": { "use": "panel_header", "element": "shells.header" },
   "usage.header": { "use": "panel_header", "element": "usage.header" },
+  "system.header": { "use": "panel_header", "element": "system.header" },
   "explorer.header.buttons": {
     "layout": "row",
     "align": "center",
@@ -211,6 +213,20 @@
         "size": "xsmall",
         "icon": "close",
         "tooltip": "Hide Usage"
+      }
+    ]
+  },
+  "system.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$system.header.gap" },
+    "children": [
+      {
+        "button": "hide",
+        "element": "system.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide System"
       }
     ]
   },
@@ -1565,11 +1581,19 @@
   "usage.item": {
     "frame": "item",
     "element": "usage.item",
-    "layout": "fit",
+    "layout": "row",
+    "align": "center",
     "style": { "min_width": 0 },
     "states": { "hover": { "background": "$usage.item.hover_background" } },
     "children": [
-      { "slot": "icon" },
+      { "slot": "icon", "shrink": 0 },
+      { "each": "limits", "element": "usage.item.limits", "layout": "fit", "item": { "use": "usage.item.limit" } }
+    ]
+  },
+  "usage.item.limit": {
+    "element": "usage.item.limit",
+    "layout": "fit",
+    "children": [
       { "nowrap": true, "text": "{short}" },
       { "nowrap": true, "text": "{used_text}%" },
       { "element": "usage.item.bar", "children": [{ "use": "usage.bar" }] },
@@ -1656,6 +1680,84 @@
       { "use": "usage.bar" },
       { "when": "pace_text", "element": "usage.card.detail", "text": "{pace_text}" }
     ]
+  },
+  "system": {
+    "frame": "panel",
+    "element": "system",
+    "fill": true,
+    "children": [
+      { "slot": "header" },
+      { "when": "!ready", "use": "system.empty" },
+      {
+        "when": "ready",
+        "element": "system.list",
+        "layout": "fit",
+        "children": [
+          {
+            "element": "system.item",
+            "layout": "row",
+            "align": "center",
+            "children": [
+              { "element": "system.label", "nowrap": true, "text": "CPU" },
+              {
+                "element": "system.spark",
+                "layout": "row",
+                "each": "cpu",
+                "item": {
+                  "element": "system.spark.bar",
+                  "layout": "column",
+                  "grow": 1,
+                  "children": [
+                    { "style": { "grow": "{rest}" } },
+                    {
+                      "element": "system.spark.fill",
+                      "style": { "grow": "{used}" },
+                      "states": {
+                        "warning": { "background": "$system.spark.fill.warning" },
+                        "critical": { "background": "$system.spark.fill.critical" }
+                      }
+                    }
+                  ]
+                }
+              },
+              { "nowrap": true, "text": "{cpu_text}%" }
+            ]
+          },
+          {
+            "element": "system.item",
+            "layout": "row",
+            "align": "center",
+            "children": [
+              { "element": "system.label", "nowrap": true, "text": "MEM" },
+              {
+                "element": "system.bar",
+                "layout": "row",
+                "clip": true,
+                "children": [
+                  {
+                    "element": "system.bar.fill",
+                    "style": { "grow": "{used}" },
+                    "states": {
+                      "warning": { "background": "$system.bar.fill.warning" },
+                      "critical": { "background": "$system.bar.fill.critical" }
+                    }
+                  },
+                  { "style": { "grow": "{rest}" } }
+                ]
+              },
+              { "nowrap": true, "text": "{text}%" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "system.empty": {
+    "element": "system.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "Reading…" }]
   },
   "drag_chip": {
     "element": "drag_chip",

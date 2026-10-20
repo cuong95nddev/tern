@@ -947,12 +947,12 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | Template | Values | Slots |
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
-| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `usage` |
+| `workspace` | `explorer`, `scratches`, `changes`, `shells`, `usage`, `system`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `usage`, `system` |
 | `title_bar` | `title`, `background`, `settings_error`; list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
-| `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header` | as `panel_header` | as `panel_header` |
+| `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header`, `system.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
 | `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error` | |
@@ -968,10 +968,11 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `changes`, `changes.empty` | `empty`, `refreshing` | `header`, `list` |
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
 | `shells`, `shells.empty` | `empty` | `header`, `list` |
-| `usage`, `usage.empty` | `ready`, `stale`, `message`; list `items` (as `usage.item`, one per service) | `header` |
+| `usage`, `usage.empty` | `ready`, `stale`, `message`; list `items` (as `usage.item`, one per service: list `limits`, as `usage.item.limit`) | `header` |
 | `usage.header.buttons` | `reading` | |
-| `usage.item`, `usage.card.limit`, `usage.bar` | `name`, `short`, `used` (0 to 100), `rest`, `used_text`, `left`, `resets`, `warning`, `critical`, `has_pace`, `pace`, `pace_rest`, `pace_text` | `icon` (`usage.item`) |
+| `usage.item.limit`, `usage.card.limit`, `usage.bar` | `name`, `short`, `used` (0 to 100), `rest`, `used_text`, `left`, `resets`, `warning`, `critical`, `has_pace`, `pace`, `pace_rest`, `pace_text` | `icon` (`usage.item`) |
 | `usage.card` | `title`, `updated`, `plan`, `email`, `error`, `extra`, `reading`; list `limits` (as `usage.card.limit`) | `icon` |
+| `system`, `system.empty` | `ready`, `cpu_text`; the memory's `used` (0 to 100), `rest`, `text`, `warning`, `critical`, `mem_detail` (`12.3 GB of 32.0 GB`); list `cpu` (one per sample, oldest first: `used`, `rest`, `text`, `warning`, `critical`) | `header` |
 | `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
 | `drag_chip` | `label`, `icon` | |
@@ -1051,11 +1052,11 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 ### Moving panels
 
-The explorer, scratches, changes, shells and usage panels sit in docks and can be dragged
+The explorer, scratches, changes, shells, usage and system panels sit in docks and can be dragged
 between them by their headers. In a template:
 
 - `\"part\": \"explorer\"` draws a movable view where it sits by default
-  (`explorer`, `scratches`, `changes`, `shells`, `usage`). Give it `\"drag\": false` (or a
+  (`explorer`, `scratches`, `changes`, `shells`, `usage`, `system`). Give it `\"drag\": false` (or a
   condition on the values its `when` reads) to pin it.
 - `\"dock\": \"left\"` with a `split` is an area that holds parts; its
   children are the parts it starts with. `accepts` lists the part names or
