@@ -152,10 +152,51 @@ struct Session {
     owner: Option<Weak<Conn>>,
     /// Connections viewing it.
     viewers: Vec<Weak<Conn>>,
+    /// The size each connection wants it at, the one used last at the end:
+    /// the PTY takes that one's (tmux's `window-size latest`), so a phone
+    /// viewing it gets its own size until the desktop types again.
+    sizes: Vec<(Weak<Conn>, TermSize)>,
     /// Hook requests that came while no one was attached.
     hooks: VecDeque<Vec<u8>>,
     /// `session_id` of its latest Claude hook event.
     claude_session: Option<String>,
+}
+
+impl Session {
+    /// `conn` wants the PTY at `size`, and was used last.
+    fn want(&mut self, conn: &Arc<Conn>, size: TermSize) {
+        self.forget(Arc::as_ptr(conn));
+        self.sizes.push((Arc::downgrade(conn), size));
+    }
+
+    /// `conn` was used: the size it wants, when that becomes the PTY's.
+    fn used(&mut self, conn: &Arc<Conn>) -> Option<TermSize> {
+        let i = self.sizes.iter().position(|(c, _)| c.as_ptr() == Arc::as_ptr(conn))?;
+        if i + 1 == self.sizes.len() {
+            return None;
+        }
+        let e = self.sizes.remove(i);
+        let size = e.1;
+        self.sizes.push(e);
+        Some(size)
+    }
+
+    /// `conn` let go of it: when it was used last, the size of the one used
+    /// before it.
+    fn forget(&mut self, conn: *const Conn) -> Option<TermSize> {
+        let last = self.sizes.last().is_some_and(|(c, _)| c.as_ptr() == conn);
+        self.sizes.retain(|(c, _)| c.as_ptr() != conn && c.strong_count() > 0);
+        if last { self.sizes.last().map(|e| e.1) } else { None }
+    }
+
+    /// `forget`, resizing the PTY to the size that takes over.
+    fn let_go(&mut self, conn: *const Conn) {
+        if let Some(size) = self.forget(conn)
+            && size != self.host.size()
+        {
+            self.host.resize(size);
+        }
+    }
 }
 
 struct State {
@@ -528,6 +569,7 @@ impl Server {
                 s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(&conn));
                 s.host.unview(&sub);
             }
+            s.let_go(Arc::as_ptr(&conn));
         }
         Self::update_idle(&mut st);
         result
@@ -553,16 +595,23 @@ impl Server {
                 {
                     s.owner = None;
                     s.host.detach(&(conn.clone() as Arc<dyn Subscriber>));
+                    s.let_go(Arc::as_ptr(conn));
                 }
             },
             ClientMsg::Input { id, bytes } => {
-                if let Some(h) = self.host(id) {
-                    h.input(bytes);
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
+                    if let Some(size) = s.used(conn) {
+                        s.host.resize(size);
+                    }
+                    s.host.input(bytes);
                 }
             },
             ClientMsg::Resize { id, size } => {
-                if let Some(h) = self.host(id) {
-                    h.resize(size);
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
+                    s.want(conn, size);
+                    s.host.resize(size);
                 }
             },
             ClientMsg::View { req, id } => self.view(conn, req, id),
@@ -571,6 +620,7 @@ impl Server {
                 if let Some(s) = st.sessions.get_mut(&id) {
                     s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(conn));
                     s.host.unview(&(conn.clone() as Arc<dyn Subscriber>));
+                    s.let_go(Arc::as_ptr(conn));
                 }
             },
             ClientMsg::Close { id } => self.close(id),
@@ -673,7 +723,12 @@ impl Server {
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
-                match tern_bridge::write_claude_settings(&self.run_dir, &token, &hooks.hook_url(&token), std::env::current_exe().ok().as_deref()) {
+                match tern_bridge::write_claude_settings(
+                    &self.run_dir,
+                    &token,
+                    &hooks.hook_url(&token),
+                    std::env::current_exe().ok().as_deref(),
+                ) {
                     Ok(path) => {
                         let quoted = shell_quote(&path.to_string_lossy());
                         for a in &mut cfg.args {
@@ -715,6 +770,7 @@ impl Server {
                     token: token.clone(),
                     owner: None,
                     viewers: Vec::new(),
+                    sizes: vec![(Arc::downgrade(conn), cfg.size)],
                     hooks: VecDeque::new(),
                     claude_session: None,
                 },
@@ -738,6 +794,12 @@ impl Server {
             let mut st = self.state.lock().unwrap();
             let Some(s) = st.sessions.get_mut(&id) else { return conn.send(ServerMsg::NotFound { req, id }) };
             let previous = s.owner.replace(Arc::downgrade(conn)).and_then(|w| w.upgrade()).filter(|p| !Arc::ptr_eq(p, conn));
+            if let Some(p) = &previous {
+                s.forget(Arc::as_ptr(p));
+            }
+            if let Some(size) = size {
+                s.want(conn, size);
+            }
             (s.host.clone(), s.token.clone(), previous, std::mem::take(&mut s.hooks))
         };
         if let Some(p) = previous {
@@ -1122,8 +1184,18 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             let (host, driver) = Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, observer)?;
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
-            st.sessions
-                .insert(s.id, Session { host, token: s.token, owner: None, viewers: Vec::new(), hooks, claude_session: s.claude_session });
+            st.sessions.insert(
+                s.id,
+                Session {
+                    host,
+                    token: s.token,
+                    owner: None,
+                    viewers: Vec::new(),
+                    sizes: Vec::new(),
+                    hooks,
+                    claude_session: s.claude_session,
+                },
+            );
         }
         Server::update_idle(&mut st);
     }

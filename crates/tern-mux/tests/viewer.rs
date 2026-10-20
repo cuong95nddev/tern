@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use tern_mux::client::{Open, RemoteSession};
 use tern_mux::viewer::{ViewEvent, Viewer};
-use tern_term::SpawnConfig;
 use tern_term::snapshot::Snapshot;
 use tern_term::vt::grid::Dimensions;
 use tern_term::vt::index::Line;
+use tern_term::{SpawnConfig, TermSize};
 
 mod common;
 use common::*;
@@ -122,4 +122,42 @@ fn viewer_does_not_keep_the_daemon_alive() {
     let t = d.thread.take().unwrap();
     wait_until("idle exit with a viewer connected", || t.is_finished());
     t.join().unwrap().unwrap();
+}
+
+#[test]
+fn the_pty_takes_the_size_of_whoever_used_it_last() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    let cols = |s: &RemoteSession| s.term().lock().grid().columns();
+    wait_until("the owner's size", || cols(&s) == SIZE.cols as usize);
+
+    let (viewer, stream) = Viewer::connect(&d.dir).unwrap();
+    let _rx = events(stream);
+    viewer.view(id).unwrap();
+    let phone = TermSize { cols: 40, rows: 20, ..SIZE };
+    viewer.resize(id, phone).unwrap();
+    wait_until("the viewer's size", || cols(&s) == 40);
+
+    // The owner types: its size again.
+    s.write(b"a".to_vec());
+    wait_until("the owner's size back", || cols(&s) == SIZE.cols as usize);
+
+    // The viewer types: its size again.
+    viewer.input(id, b"b".to_vec()).unwrap();
+    wait_until("the viewer's size back", || cols(&s) == 40);
+
+    // The viewer leaves: the owner's size.
+    viewer.unview(id).unwrap();
+    wait_until("the owner's size once the viewer left", || cols(&s) == SIZE.cols as usize);
+
+    // And when it goes away while used last.
+    viewer.view(id).unwrap();
+    viewer.resize(id, phone).unwrap();
+    wait_until("the viewer's size again", || cols(&s) == 40);
+    viewer.shutdown();
+    wait_until("the owner's size once the viewer is gone", || cols(&s) == SIZE.cols as usize);
 }
