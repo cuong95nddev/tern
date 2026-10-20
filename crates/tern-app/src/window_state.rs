@@ -686,7 +686,12 @@ mod tests {
                             SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
                             SavedTab::Scratch(PathBuf::from("/s/n.txt")),
                             SavedTab::CommitDiff { repo: "/a b".into(), hash: "abc".into(), rel: "c/d e.rs".into(), from: None },
-                            SavedTab::CommitDiff { repo: "/r".into(), hash: "def".into(), rel: "new.rs".into(), from: Some("old.rs".into()) },
+                            SavedTab::CommitDiff {
+                                repo: "/r".into(),
+                                hash: "def".into(),
+                                rel: "new.rs".into(),
+                                from: Some("old.rs".into()),
+                            },
                             SavedTab::GitLog,
                         ],
                         tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None],

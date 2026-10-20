@@ -28,10 +28,10 @@ use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::diff_pane::{DiffPane, InCommit};
-use crate::git_log_view::{GitLog, GitLogEvent};
 use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
 use crate::file_tree_view::{FileTreeEvent, FileTreeView};
+use crate::git_log_view::{GitLog, GitLogEvent};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
 use crate::platform::bind;
@@ -731,7 +731,9 @@ impl Workspace {
                 },
                 CenterTab::File { view, .. } => SavedTab::File(view.read(cx).path().map(Path::to_owned).unwrap_or_default()),
                 CenterTab::Diff(d) => match d.read(cx).commit() {
-                    Some(c) => SavedTab::CommitDiff { repo: c.repo.clone(), hash: c.hash.clone(), rel: c.rel.clone(), from: c.from.clone() },
+                    Some(c) => {
+                        SavedTab::CommitDiff { repo: c.repo.clone(), hash: c.hash.clone(), rel: c.rel.clone(), from: c.from.clone() }
+                    },
                     None => SavedTab::Diff(d.read(cx).path().to_owned()),
                 },
                 CenterTab::Scratch { view, .. } => SavedTab::Scratch(view.read(cx).path().to_owned()),
@@ -783,15 +785,15 @@ impl Workspace {
         }
         self.panels_rev = p.rev;
         let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
-        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system, self.show_usage, self.show_agents) = (
-            shown("explorer"),
-            shown("changes"),
-            shown("scratches"),
-            shown("shells"),
-            shown("system"),
-            shown("usage"),
-            shown("agents"),
-        );
+        (
+            self.show_explorer,
+            self.show_changes,
+            self.show_scratches,
+            self.show_shells,
+            self.show_system,
+            self.show_usage,
+            self.show_agents,
+        ) = (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"), shown("usage"), shown("agents"));
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -987,12 +989,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let store = accounts::store(cx).read(cx);
-        let ids: Vec<(String, String)> = store
-            .active()
-            .iter()
-            .filter(|a| except.as_deref() != Some(a.id.as_str()))
-            .map(|a| (a.id.clone(), store.name(&a.id)))
-            .collect();
+        let ids: Vec<(String, String)> =
+            store.active().iter().filter(|a| except.as_deref() != Some(a.id.as_str())).map(|a| (a.id.clone(), store.name(&a.id))).collect();
         let store = crate::usage::store(cx);
         // Key, name, email, usage.
         let rows: Rc<Vec<[String; 4]>> = Rc::new(
@@ -1191,8 +1189,20 @@ impl Workspace {
         // at once.
         let resuming = session.is_some();
         let account = account.to_owned();
-        let tab =
-            TermTab { view, rename, kind, token, session, account, resuming, notified: None, rang: false, follows: None, context: None, _subs: vec![sub] };
+        let tab = TermTab {
+            view,
+            rename,
+            kind,
+            token,
+            session,
+            account,
+            resuming,
+            notified: None,
+            rang: false,
+            follows: None,
+            context: None,
+            _subs: vec![sub],
+        };
         let ix = self.push_tab(CenterTab::Term(tab));
         self.activate(ix, window, cx);
     }
@@ -1821,8 +1831,10 @@ impl Workspace {
     /// reused instead.
     fn open_diff_tab(&mut self, pane: Entity<DiffPane>, window: &mut Window, cx: &mut Context<Self>) {
         let (path, commit) = (pane.read(cx).path().to_owned(), pane.read(cx).commit().cloned());
-        let existing =
-            self.tabs.iter().position(|t| matches!(t, CenterTab::Diff(d) if d.read(cx).path() == path && d.read(cx).commit() == commit.as_ref()));
+        let existing = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, CenterTab::Diff(d) if d.read(cx).path() == path && d.read(cx).commit() == commit.as_ref()));
         match existing {
             Some(ix) => {
                 if let CenterTab::Diff(d) = &self.tabs[ix] {

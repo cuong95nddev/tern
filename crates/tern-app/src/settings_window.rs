@@ -342,7 +342,7 @@ impl SettingsView {
     fn flag(&mut self, path: &'static [&'static str], default: bool, cx: &App) -> (bool, Handler) {
         let on = self.get(path, cx).and_then(|v| v.as_bool()).unwrap_or(default);
         // Back to the default leaves the key out.
-        let toggle: Handler = Rc::new(move |_, _, cx| settings::set_value(path, (!on != default).then_some((!on).into()), cx));
+        let toggle: Handler = Rc::new(move |_, _, cx| settings::set_value(path, (on == default).then_some((!on).into()), cx));
         (on, toggle)
     }
 

@@ -409,7 +409,9 @@ pub fn shown(tree: &Tree, shown: &dyn Fn(&str) -> bool) -> Option<Shown> {
 /// of its children kept a size): every child keeps the size it was dragged
 /// to but the largest of those without one, which takes up the rest.
 pub fn dragged_sizes(shown: &[f32], fixed: &[bool]) -> Vec<Size> {
-    let flex = (0..shown.len()).filter(|&i| !fixed.get(i).copied().unwrap_or(false)).max_by(|&a, &b| shown[a].total_cmp(&shown[b]).then(b.cmp(&a)));
+    let flex = (0..shown.len())
+        .filter(|&i| !fixed.get(i).copied().unwrap_or(false))
+        .max_by(|&a, &b| shown[a].total_cmp(&shown[b]).then(b.cmp(&a)));
     shown.iter().enumerate().map(|(i, s)| if Some(i) == flex { Size::Auto } else { Size::Px(*s) }).collect()
 }
 

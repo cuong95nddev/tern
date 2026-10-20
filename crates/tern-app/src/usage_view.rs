@@ -279,11 +279,7 @@ impl Render for UsageCard {
                 .map(|(a, name)| {
                     // The email, unless it is the name already, and the usage.
                     let email = accounts::email(&a.id).filter(|e| e != name).unwrap_or_default();
-                    let detail = [email, summary(s.get(&a.id))]
-                        .into_iter()
-                        .filter(|t| !t.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" · ");
+                    let detail = [email, summary(s.get(&a.id))].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · ");
                     template::Scope::default()
                         .var("name", name.as_str())
                         .var("detail", detail)

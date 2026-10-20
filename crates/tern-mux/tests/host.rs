@@ -220,10 +220,10 @@ impl Observer for StatusLog {
     fn exited(&self, _: u64, _: Option<i32>) {}
 }
 
-/// Claude Code reports a turn done while it still waits for a background
-/// shell; its session file (`status: "shell"`) says it isn't.
+/// Claude Code can report a turn done before its session file stops saying
+/// `busy`: the turn is done once the file says so too.
 #[test]
-fn claude_waiting_for_a_shell_is_not_done() {
+fn claude_done_while_its_file_says_busy_is_not_done() {
     let config = tempfile::tempdir().unwrap();
     // This binary's only test that reads it.
     unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", config.path()) };
@@ -233,7 +233,6 @@ fn claude_waiting_for_a_shell_is_not_done() {
         r#"f={dir}/$$.json
 echo '{{"status":"busy"}}' > $f
 printf '\033]7501;state=working:app=claude-code\033\\'
-echo '{{"status":"shell"}}' > $f
 printf '\033]7501;state=done:app=claude-code\033\\'
 read x
 echo '{{"status":"idle"}}' > $f
@@ -244,7 +243,7 @@ read x"#,
     let host = Host::spawn(1, &sh(&script), None, log.clone()).unwrap();
     wait_until("a report", || !log.0.lock().unwrap().is_empty());
     std::thread::sleep(Duration::from_millis(2500));
-    assert_eq!(*log.0.lock().unwrap(), [ActivityStatus::Working], "done while the shell runs");
+    assert_eq!(*log.0.lock().unwrap(), [ActivityStatus::Working], "done while the file says busy");
     assert_eq!(host.status(), ActivityStatus::Working);
     host.input(b"\n".to_vec());
     wait_until("done once the file says idle", || host.status() == ActivityStatus::Done);

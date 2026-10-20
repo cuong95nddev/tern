@@ -72,7 +72,8 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path)) {
+        if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path))
+        {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         gpui_kit::assets::Assets.load(path)

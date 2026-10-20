@@ -70,13 +70,13 @@ impl SystemStore {
 
     fn take(&mut self, (ticks, mem): (Option<Ticks>, Option<(u64, u64)>), cx: &mut Context<Self>) {
         // A load is the ticks between two samples.
-        if let (Some(old), Some(new)) = (self.ticks, ticks) {
-            if let Some(load) = old.load_until(new) {
-                if self.cpu.len() == HISTORY {
-                    self.cpu.pop_front();
-                }
-                self.cpu.push_back(load);
+        if let (Some(old), Some(new)) = (self.ticks, ticks)
+            && let Some(load) = old.load_until(new)
+        {
+            if self.cpu.len() == HISTORY {
+                self.cpu.pop_front();
             }
+            self.cpu.push_back(load);
         }
         self.ticks = ticks;
         if let Some((used, total)) = mem {
@@ -122,9 +122,7 @@ fn host() -> libc::mach_port_t {
 fn cpu_ticks() -> Option<Ticks> {
     let mut info: libc::host_cpu_load_info = unsafe { std::mem::zeroed() };
     let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
-    let r = unsafe {
-        libc::host_statistics64(host(), libc::HOST_CPU_LOAD_INFO, (&raw mut info).cast(), &mut count)
-    };
+    let r = unsafe { libc::host_statistics64(host(), libc::HOST_CPU_LOAD_INFO, (&raw mut info).cast(), &mut count) };
     if r != libc::KERN_SUCCESS {
         return None;
     }
@@ -167,9 +165,9 @@ fn memory() -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use super::Ticks;
     #[cfg(target_os = "macos")]
     use super::{cpu_ticks, memory};
-    use super::Ticks;
 
     #[test]
     fn load_is_busy_ticks_over_all_ticks_between_samples() {

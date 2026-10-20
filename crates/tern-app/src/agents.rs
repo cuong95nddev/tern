@@ -128,7 +128,10 @@ const GLYPHS: &[(&str, &str)] = &[
         "icons/agent-needs.svg",
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.2" stroke="black" stroke-width="1.8"/><circle cx="8" cy="8" r="3.2" fill="black"/></svg>"#,
     ),
-    ("icons/agent-dot.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.2" fill="black"/></svg>"#),
+    (
+        "icons/agent-dot.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.2" fill="black"/></svg>"#,
+    ),
 ];
 
 /// A state's color: blue while working, amber while waiting for you,

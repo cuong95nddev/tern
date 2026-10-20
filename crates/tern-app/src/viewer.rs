@@ -552,9 +552,9 @@ impl Render for Viewer {
                 ("diff", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_diff(&ToggleDiff, w, cx))).into_any_element()
                 },
-                ("wrap", Framed::Button(b)) => {
-                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_word_wrap(&ToggleWordWrap, w, cx))).into_any_element()
-                },
+                ("wrap", Framed::Button(b)) => b
+                    .on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_word_wrap(&ToggleWordWrap, w, cx)))
+                    .into_any_element(),
                 ("open_external", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.open_external(&OpenExternal, w, cx))).into_any_element()
                 },

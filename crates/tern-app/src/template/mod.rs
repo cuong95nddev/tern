@@ -1256,7 +1256,8 @@ impl Compiler<'_, '_> {
     fn panel(&mut self, s: &Spec, at: &str) -> Panel {
         let fixed = self.flag(&s.fixed, &format!("{at}.fixed")).filter(|c| !c.0.is_empty());
         // A button's `size` is its own.
-        let size = if s.button.is_some() || s.action.is_some() || s.switch.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
+        let size =
+            if s.button.is_some() || s.action.is_some() || s.switch.is_some() { None } else { self.len(&s.size, &format!("{at}.size")) };
         Panel { size, min: self.len(&s.min, &format!("{at}.min")), max: self.len(&s.max, &format!("{at}.max")), fixed }
     }
 
@@ -1280,9 +1281,12 @@ impl Compiler<'_, '_> {
             self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator"));
         }
         if switch {
-            for (field, set) in
-                [("icon", s.icon.is_some()), ("label", s.label.is_some()), ("variant", s.variant.is_some()), ("loading", s.loading.is_some())]
-            {
+            for (field, set) in [
+                ("icon", s.icon.is_some()),
+                ("label", s.label.is_some()),
+                ("variant", s.variant.is_some()),
+                ("loading", s.loading.is_some()),
+            ] {
                 if set {
                     self.problems.push(format!("{at}.{field}: a switch doesn't take it"));
                 }
@@ -1687,8 +1691,14 @@ mod tests {
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
         assert_eq!(problems.len(), 12, "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts, and splits of parts")), "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts, and splits of parts")), "{problems:?}");
+        assert!(
+            problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts, and splits of parts")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts, and splits of parts")),
+            "{problems:?}"
+        );
     }
 
     #[test]

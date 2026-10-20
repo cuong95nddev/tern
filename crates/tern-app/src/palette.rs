@@ -578,9 +578,7 @@ impl Render for Palette {
             Mode::Files => self.hits.len(),
             Mode::Search => self.rows.len(),
         };
-        let list = uniform_list("palette", count, cx.processor(Self::render_rows))
-            .track_scroll(&self.scroll)
-            .flex_1();
+        let list = uniform_list("palette", count, cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1();
         let (status, error) = self.status_text().filter(|_| search).unwrap_or_default();
         let field = Input::new(self.input()).appearance(false);
         let scope = template::Scope::new("palette")

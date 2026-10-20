@@ -115,9 +115,9 @@ pub fn settle(cx: &mut App) {
 }
 
 fn any_working(cx: &mut App) -> bool {
-    crate::main_window::all_workspaces(cx).into_iter().any(|(_, ws)| {
-        ws.read(cx).term_tabs(cx).iter().any(|t| t.agent.is_some() && t.view.read(cx).status() == ActivityStatus::Working)
-    })
+    crate::main_window::all_workspaces(cx)
+        .into_iter()
+        .any(|(_, ws)| ws.read(cx).term_tabs(cx).iter().any(|t| t.agent.is_some() && t.view.read(cx).status() == ActivityStatus::Working))
 }
 
 /// Asks the worker for `command` (`mode` is what a hold becomes), spawning

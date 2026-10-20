@@ -9,8 +9,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::{ActiveTheme, Sizable as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::{ActiveTheme, Sizable as _};
 use gpui_kit::*;
 use tern_fs::git::RepoChanges;
 use tern_fs::{ChangeBatch, GitStatus};
@@ -435,7 +435,9 @@ impl ChangesView {
         self._commit = Some(cx.spawn_in(window, async move |this, cx| {
             let results = cx
                 .background_spawn(async move {
-                    plan.into_iter().map(|(repo, paths)| (repo.clone(), tern_fs::git_log::commit(&repo, &paths, &message, amend))).collect::<Vec<_>>()
+                    plan.into_iter()
+                        .map(|(repo, paths)| (repo.clone(), tern_fs::git_log::commit(&repo, &paths, &message, amend)))
+                        .collect::<Vec<_>>()
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -630,8 +632,12 @@ impl Render for ChangesView {
             scope,
             &mut |name, _, f| match (name, f) {
                 ("panel", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
-                ("amend", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_amend(w, cx))).into_any_element(),
-                ("commit", Framed::Button(b)) => b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.commit(w, cx))).into_any_element(),
+                ("amend", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_amend(w, cx))).into_any_element()
+                },
+                ("commit", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.commit(w, cx))).into_any_element()
+                },
                 (_, f) => f.into_any_element(),
             },
             cx,

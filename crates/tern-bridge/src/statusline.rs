@@ -86,7 +86,11 @@ fn user_command(project: Option<&Path>) -> Option<String> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| PathBuf::from(h).join(".claude")));
     let project = project.map(|p| p.join(".claude"));
-    let files = [project.as_ref().map(|p| p.join("settings.local.json")), project.as_ref().map(|p| p.join("settings.json")), config.map(|c| c.join("settings.json"))];
+    let files = [
+        project.as_ref().map(|p| p.join("settings.local.json")),
+        project.as_ref().map(|p| p.join("settings.json")),
+        config.map(|c| c.join("settings.json")),
+    ];
     files.into_iter().flatten().find_map(|f| command_in(&std::fs::read(f).ok()?))
 }
 

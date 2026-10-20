@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui_kit::component::{ActiveTheme, Sizable as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::{ActiveTheme, Sizable as _};
 use gpui_kit::*;
 use tern_fs::ChangeBatch;
 use tern_fs::git_log::{At, Commit, CommitDetails, CommitFile, GraphRow, LogQuery, Ref, RefKind};
@@ -549,7 +549,8 @@ impl Render for GitLog {
             scope = scope.slot("list", style::el("git_log.list", cx).apply(div().id("git-log-list").flex_1().min_h_0().child(list)));
         }
         if let Some(d) = &self.details {
-            let list = uniform_list("git-log-files", d.files.len(), cx.processor(Self::render_files)).track_scroll(&self.files_scroll).size_full();
+            let list =
+                uniform_list("git-log-files", d.files.len(), cx.processor(Self::render_files)).track_scroll(&self.files_scroll).size_full();
             scope = scope.slot("files", style::el("git_log.files", cx).apply(div().id("git-log-files").size_full().child(list)));
         }
         let focus = &self.focus;
@@ -584,8 +585,11 @@ impl Render for GitLog {
                     let (options, on) = self.options(what);
                     b.dropdown_caret(true)
                         .dropdown_menu(move |m, window, cx| {
-                            let entries =
-                                options.iter().enumerate().map(|(i, o)| template::Scope::default().var("label", o.clone()).var("on", i == on)).collect();
+                            let entries = options
+                                .iter()
+                                .enumerate()
+                                .map(|(i, o)| template::Scope::default().var("label", o.clone()).var("on", i == on))
+                                .collect();
                             let me = me.clone();
                             let items: template::MenuItems = Rc::new(move |name, entry| {
                                 let at = entry.filter(|_| name == "pick")?;

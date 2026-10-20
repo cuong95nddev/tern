@@ -161,7 +161,12 @@ impl HookServer {
 ///
 /// With `exe` (Tern's own binary), Claude Code's status line runs through it
 /// (see [`crate::statusline`]).
-pub fn write_claude_settings(dir: &std::path::Path, token: &str, hook_url: &str, exe: Option<&std::path::Path>) -> std::io::Result<PathBuf> {
+pub fn write_claude_settings(
+    dir: &std::path::Path,
+    token: &str,
+    hook_url: &str,
+    exe: Option<&std::path::Path>,
+) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("claude-settings-{token}.json"));
     let status_line = exe.map(|e| crate::statusline::command(e, &path));
     #[cfg(unix)]

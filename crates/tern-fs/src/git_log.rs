@@ -26,7 +26,9 @@ pub enum RefKind {
     /// `HEAD`: the commit checked out (a detached one has no branch ref).
     Head,
     /// A local branch; `head` marks the one checked out.
-    Branch { head: bool },
+    Branch {
+        head: bool,
+    },
     Remote,
     Tag,
 }
@@ -435,7 +437,8 @@ mod tests {
 
     #[test]
     fn parses_refs_checked_out_branch_first() {
-        let refs = parse_refs("HEAD -> refs/heads/main, tag: refs/tags/v1, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/heads/dev");
+        let refs =
+            parse_refs("HEAD -> refs/heads/main, tag: refs/tags/v1, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/heads/dev");
         let names: Vec<_> = refs.iter().map(|r| (r.kind, r.name.as_str())).collect();
         assert_eq!(
             names,
@@ -469,10 +472,10 @@ mod tests {
         let rows = graph(&commits);
         assert_eq!(rows.iter().map(|r| r.lane).collect::<Vec<_>>(), [0, 1, 0, 0]);
         // The merge sends a line down its own lane and one to lane 1.
-        assert_eq!(rows[0].edges, [
-            Edge { from: (0, At::Middle), to: (0, At::Bottom), color: 0 },
-            Edge { from: (0, At::Middle), to: (1, At::Bottom), color: 1 },
-        ]);
+        assert_eq!(
+            rows[0].edges,
+            [Edge { from: (0, At::Middle), to: (0, At::Bottom), color: 0 }, Edge { from: (0, At::Middle), to: (1, At::Bottom), color: 1 },]
+        );
         // At r both lanes meet; lane 1 ends there.
         assert!(rows[3].edges.contains(&Edge { from: (1, At::Top), to: (0, At::Middle), color: 1 }));
         assert_eq!(rows[3].width, 2);

@@ -153,7 +153,16 @@ fn entries(cx: &mut App) -> Vec<Entry> {
         for t in ws.read(cx).term_tabs(cx) {
             let Some(agent) = t.agent else { continue };
             let status = t.view.read(cx).status();
-            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status, view: t.view });
+            out.push(Entry {
+                handle,
+                ws: ws.clone(),
+                workspace: workspace.clone(),
+                tab: t.id,
+                title: t.title,
+                agent,
+                status,
+                view: t.view,
+            });
         }
     }
     out

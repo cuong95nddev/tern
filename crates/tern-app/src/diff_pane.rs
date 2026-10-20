@@ -70,15 +70,10 @@ impl DiffPane {
                 diff.update(cx, |d, cx| d.set_mode(mode, cx));
             }
         });
-        let mut this = Self {
-            path,
-            commit,
-            diff: None,
-            message: Some("Loading…".into()),
-            focus: cx.focus_handle(),
-            _load: None,
-            _settings: settings,
-        };
+        let mut this =
+            Self {
+                path, commit, diff: None, message: Some("Loading…".into()), focus: cx.focus_handle(), _load: None, _settings: settings
+            };
         this.reload(cx);
         this
     }
@@ -162,9 +157,9 @@ impl Render for DiffPane {
                             "diff_pane.mode",
                             Scope::new("diff_pane.mode").var("split", split),
                             &mut |name, _, f| match (name, f) {
-                                ("mode", Framed::Button(b)) => {
-                                    b.on_click(on_event(&me, |this: &mut Self, _: &ClickEvent, _, cx| this.toggle_split(cx))).into_any_element()
-                                },
+                                ("mode", Framed::Button(b)) => b
+                                    .on_click(on_event(&me, |this: &mut Self, _: &ClickEvent, _, cx| this.toggle_split(cx)))
+                                    .into_any_element(),
                                 (_, f) => f.into_any_element(),
                             },
                             cx,

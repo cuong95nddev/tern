@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
+use gpui_kit::base::PANEL_MIN_SIZE;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::base::PANEL_MIN_SIZE;
 use gpui_kit::component::resizable::ResizablePanel;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
@@ -636,25 +636,26 @@ impl Drawer<'_, '_> {
             arrange::Dir::Column => (arrange::Edge::Bottom, arrange::Edge::Right),
             arrange::Dir::Row => (arrange::Edge::Right, arrange::Edge::Bottom),
         };
-        let strips = [(after, arrange::Drop::After(name.clone())), (beside, arrange::Drop::Edge(name.clone(), beside))].map(|(edge, at)| {
-            let (on_change, dock) = (on_change.clone(), d.name.clone());
-            let mut frames = |button: &str, _: Option<usize>, f: Framed| match (button, f) {
-                ("add", Framed::Button(b)) => {
-                    let (on_change, dock, at) = (on_change.clone(), dock.clone(), at.clone());
-                    b.on_click(move |_, window, cx| on_change(Change::AddGroup { dock: dock.clone(), at: at.clone() }, window, cx))
-                        .into_any_element()
-                },
-                (_, f) => f.into_any_element(),
-            };
-            let id = format!("{}:seam:{edge:?}:{name}", scope.id);
-            let strip = render("panel_group.seam", Scope::new(id), &mut frames, self.cx);
-            let place = div().absolute();
-            let place = match edge {
-                arrange::Edge::Bottom => place.left_0().right_0().bottom_0().h(size),
-                _ => place.top_0().bottom_0().right_0().w(size),
-            };
-            place.child(strip)
-        });
+        let strips =
+            [(after, arrange::Drop::After(name.clone())), (beside, arrange::Drop::Edge(name.clone(), beside))].map(|(edge, at)| {
+                let (on_change, dock) = (on_change.clone(), d.name.clone());
+                let mut frames = |button: &str, _: Option<usize>, f: Framed| match (button, f) {
+                    ("add", Framed::Button(b)) => {
+                        let (on_change, dock, at) = (on_change.clone(), dock.clone(), at.clone());
+                        b.on_click(move |_, window, cx| on_change(Change::AddGroup { dock: dock.clone(), at: at.clone() }, window, cx))
+                            .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                };
+                let id = format!("{}:seam:{edge:?}:{name}", scope.id);
+                let strip = render("panel_group.seam", Scope::new(id), &mut frames, self.cx);
+                let place = div().absolute();
+                let place = match edge {
+                    arrange::Edge::Bottom => place.left_0().right_0().bottom_0().h(size),
+                    _ => place.top_0().bottom_0().right_0().w(size),
+                };
+                place.child(strip)
+            });
         div().relative().size_full().flex().flex_col().child(body).children(strips).into_any_element()
     }
 
