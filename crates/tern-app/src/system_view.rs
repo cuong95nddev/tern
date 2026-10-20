@@ -6,21 +6,13 @@
 use gpui_kit::*;
 
 use crate::system::{self, SystemStore};
-use crate::template::{self, Framed, on_event};
-
-#[derive(Debug, Clone)]
-pub enum SystemEvent {
-    /// The header's close button: hide the panel.
-    Hide,
-}
+use crate::template::{self, Framed};
 
 pub struct SystemView {
     store: Entity<SystemStore>,
     focus: FocusHandle,
     _sub: Subscription,
 }
-
-impl EventEmitter<SystemEvent> for SystemView {}
 
 impl Focusable for SystemView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -51,22 +43,7 @@ impl Render for SystemView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Drawn: someone may be looking, so keep sampling.
         self.store.update(cx, |s, _| s.seen());
-        let me = cx.entity().downgrade();
         let s = self.store.read(cx);
-        let header = crate::dock::panel_header(
-            "system",
-            "system.header",
-            "System",
-            None,
-            template::Scope::new("system.header.buttons"),
-            &mut |name, _, f| match (name, f) {
-                ("hide", Framed::Button(b)) => {
-                    b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(SystemEvent::Hide))).into_any_element()
-                },
-                (_, f) => f.into_any_element(),
-            },
-            cx,
-        );
         // The sparkline always has every bar, empty until sampled.
         let missing = system::HISTORY - s.cpu.len();
         let samples = std::iter::repeat_n(0., missing)
@@ -86,7 +63,6 @@ impl Render for SystemView {
                     String::new()
                 },
             )
-            .slot("header", header)
             .list("cpu", samples);
         scope = percent(scope, s.mem.unwrap_or(0.));
         let focus = &self.focus;

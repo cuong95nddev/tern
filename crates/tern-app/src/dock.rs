@@ -27,6 +27,12 @@ pub enum Change {
     Window { part: SharedString, display: String, rect: arrange::Rect },
     /// `part` is among the panes, on side `edge` of `target` (a pane or a part there).
     Center { part: SharedString, target: crate::panes::Layout, edge: Edge },
+    /// Panel group `group` lays its panels out as `mode`.
+    GroupMode { group: SharedString, mode: arrange::GroupMode },
+    /// Panel group `group` is closed: its panels go back to the docks.
+    CloseGroup { group: SharedString },
+    /// A new, empty panel group at `at` in `dock`.
+    AddGroup { dock: SharedString, at: arrange::Drop },
 }
 
 /// Called with each change.
@@ -60,9 +66,9 @@ pub struct ActiveDrag(pub Option<DraggedPart>);
 impl Global for ActiveDrag {}
 
 /// What starts dragging part `p`: the docks and panes learn what is dragged.
-pub fn start_drag(p: &DraggedPart, grab: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<DraggedPart> {
+pub fn start_drag(p: &DraggedPart, _: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<DraggedPart> {
     cx.set_global(ActiveDrag(Some(p.clone())));
-    track_from(grab, window, cx);
+    track_from(window, cx);
     cx.refresh_windows();
     cx.new(|_| p.clone())
 }
@@ -87,29 +93,28 @@ pub struct Resizing(pub Option<FloatResize>);
 impl Global for Resizing {}
 
 /// What starts resizing a floating part.
-pub fn start_resize(r: &FloatResize, grab: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<FloatResize> {
+pub fn start_resize(r: &FloatResize, _: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<FloatResize> {
     cx.set_global(Resizing(Some(r.clone())));
-    track_from(grab, window, cx);
+    track_from(window, cx);
     cx.new(|_| r.clone())
 }
 
 /// The pointer during a drag, for the floating parts: where the drag started
-/// and where it is now (window coordinates), where the grip was grabbed
-/// (from its top-left), and the area floating parts sit in, once known.
+/// and where it is now (window coordinates), and the area floating parts sit
+/// in, once known.
 #[derive(Default, Clone, Copy)]
 pub struct FloatTrack {
     pub start: Point<Pixels>,
     pub at: Point<Pixels>,
-    pub grab: Point<Pixels>,
     pub area: Option<Bounds<Pixels>>,
 }
 
 impl Global for FloatTrack {}
 
-fn track_from(grab: Point<Pixels>, window: &Window, cx: &mut App) {
+fn track_from(window: &Window, cx: &mut App) {
     let at = window.mouse_position();
     let area = cx.try_global::<FloatTrack>().and_then(|t| t.area);
-    cx.set_global(FloatTrack { start: at, at, grab, area });
+    cx.set_global(FloatTrack { start: at, at, area });
 }
 
 /// Which parts float, are in windows of their own or among the panes, and
@@ -204,13 +209,10 @@ pub fn floats(d: Div, arrangement: Option<Arc<arrange::Arrangement>>, on_change:
         let Some(t) = cx.try_global::<FloatTrack>().copied() else { return };
         let Some(b) = t.area.filter(|_| p.kind != "pane" && !locked && !grounded) else { return };
         let area = area_size(b);
-        let rect = match arrangement.as_ref().and_then(|a| a.floating.get(p.part.as_ref())) {
-            Some(f) => {
-                let (dx, dy) = delta(&t);
-                arrange::moved(f.rect(area), dx, dy, area)
-            },
-            None => float_rect(t.at, t.grab, b, cx),
-        };
+        // Let go outside every zone, a floating part moves; a docked one stays.
+        let Some(f) = arrangement.as_ref().and_then(|a| a.floating.get(p.part.as_ref())) else { return };
+        let (dx, dy) = delta(&t);
+        let rect = arrange::moved(f.rect(area), dx, dy, area);
         on_change(Change::Float { part: p.part.clone(), rect, area }, window, cx);
     })
     .on_drop(move |r: &FloatResize, window, cx| {
@@ -251,6 +253,30 @@ pub fn zone_overlay(area: &str, cx: &App) -> Div {
     div().absolute().inset_0().children(lit)
 }
 
+/// The strips along the sides of an area holding a panel group, each with
+/// its side, for the code to make take drags (`drop_zone`, `size` wide; the
+/// pointer over one lights it as `drop_zone.hover` does for `T`). A drop on
+/// one goes on that side of the group; the group's middle is its own.
+pub fn side_bands<T: 'static>(sides: &[Edge], cx: &App) -> Vec<(Edge, Div)> {
+    let look = style::el("drop_zone", cx);
+    let hover = style::el("drop_zone.hover", cx);
+    let size = look.px("size");
+    sides
+        .iter()
+        .map(|&edge| {
+            let d = look.apply(div().absolute());
+            let d = match edge {
+                Edge::Left => d.top_0().bottom_0().left_0().w(size),
+                Edge::Right => d.top_0().bottom_0().right_0().w(size),
+                Edge::Top => d.left_0().right_0().top_0().h(size),
+                Edge::Bottom => d.left_0().right_0().bottom_0().h(size),
+            };
+            let hover = hover.clone();
+            (edge, d.drag_over::<T>(move |s, _, _, _| hover.apply(s)))
+        })
+        .collect()
+}
+
 /// `overlay` (see `zone_overlay`) taking drags of `T`: on the area's sides
 /// when `edges`, onto it when `center`. A drop goes to `on_drop` with its zone.
 pub fn on_zones<T: 'static>(
@@ -289,8 +315,24 @@ pub fn on_zones<T: 'static>(
 
 /// A part's title where it has none of its own: its name, capitalized.
 pub fn part_title(part: &str) -> SharedString {
+    if arrange::is_group(part) {
+        return "Panel".into();
+    }
     let mut c = part.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default().into()
+}
+
+/// Whether the layout is being edited (View > Edit Layout): only then do
+/// panels drag, panel groups show their title bars, and the seams between
+/// them offer to add one.
+#[derive(Default)]
+pub struct LayoutEdit(pub bool);
+
+impl Global for LayoutEdit {}
+
+/// True while the layout is being edited.
+pub fn editing(cx: &App) -> bool {
+    cx.try_global::<LayoutEdit>().is_some_and(|e| e.0)
 }
 
 /// Whether moving and resizing panels is turned off (`layout.locked`).
@@ -311,7 +353,7 @@ impl Global for PinnedParts {}
 /// when it has one, and its buttons (template `<element>.buttons`, drawn
 /// with `buttons` and `frames`). Dragging it drags `part`.
 pub fn panel_header(
-    part: &'static str,
+    part: impl Into<SharedString>,
     element: &'static str,
     title: impl Into<SharedString>,
     count: Option<usize>,
@@ -325,7 +367,7 @@ pub fn panel_header(
     let buttons = template::render(&format!("{element}.buttons"), buttons, frames, cx);
     // A press on a button is the button's, not the start of a panel drag.
     let buttons = div().flex().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(buttons);
-    let mut scope = template::Scope::new(element).var("part", part).var("title", title).slot("buttons", buttons);
+    let mut scope = template::Scope::new(element).var("part", part.into()).var("title", title).slot("buttons", buttons);
     if let Some(n) = count {
         scope = scope.var("count", n);
     }

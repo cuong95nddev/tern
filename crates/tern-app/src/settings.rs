@@ -955,7 +955,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
-| `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header`, `system.header` | as `panel_header` | as `panel_header` |
+| `explorer.header`, `changes.header`, `scratches.header`, `shells.header`, `usage.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
 | `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error`, `files`, `check_icon`, `check_tooltip` | |
@@ -977,11 +977,16 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `git_log.file` | `selected`, `name`, `name_color`, `dir`, `status` | `icon` |
 | `scratches`, `scratches.empty` | `empty`, `new_key` | `header`, `list` |
 | `shells`, `shells.empty` | `empty` | `header`, `list` |
+| `panel_group` | `empty`, `edit` (the layout is edited) | `header`, `content` |
+| `panel_group.header` | `part` (the group's name, `group-<n>`), `title` | `buttons` |
+| `panel_group.seam` | | |
+| `panel_group.header.buttons` | `grid`, `tabs`, `stack` (the layout it has); buttons `grid`, `tabs`, `stack`, `close` | |
+| `panel_group.empty` | | |
 | `usage`, `usage.empty` | `ready`, `stale`, `message`; list `items` (as `usage.item`, one per service: list `limits`, as `usage.item.limit`) | `header` |
 | `usage.header.buttons` | `reading` | |
 | `usage.item.limit`, `usage.card.limit`, `usage.bar` | `name`, `short`, `used` (0 to 100), `rest`, `used_text`, `left`, `resets`, `warning`, `critical`, `has_pace`, `pace`, `pace_rest`, `pace_text` | `icon` (`usage.item`) |
 | `usage.card` | `title`, `updated`, `plan`, `email`, `error`, `extra`, `reading`; list `limits` (as `usage.card.limit`) | `icon` |
-| `system`, `system.empty` | `ready`, `cpu_text`; the memory's `used` (0 to 100), `rest`, `text`, `warning`, `critical`, `mem_detail` (`12.3 GB of 32.0 GB`); list `cpu` (one per sample, oldest first: `used`, `rest`, `text`, `warning`, `critical`) | `header` |
+| `system`, `system.empty` | `ready`, `cpu_text`; the memory's `used` (0 to 100), `rest`, `text`, `warning`, `critical`, `mem_detail` (`12.3 GB of 32.0 GB`); list `cpu` (one per sample, oldest first: `used`, `rest`, `text`, `warning`, `critical`) | |
 | `tool_strip`, `tool_strip.left`, `tool_strip.right` | list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
 | `drag_chip` | `label`, `icon` | |
@@ -1111,6 +1116,18 @@ between them by their headers. In a template:
   floats it over the workspace again. Hiding the panel (its strip button)
   closes the window until it shows again. `\"window\": false` (or a
   condition) on a `part` keeps it in the main window.
+- **View > New Panel** adds an empty panel (a panel group) floating over
+  the workspace. Like any panel it moves by its header, floats, docks, goes
+  among the panes or into a window of its own, and resizes; panels dragged
+  onto it go in it. Its header's buttons say how it lays them out: `grid`
+  (dropped on a panel's side it splits it, onto it they stack as tabs, as in
+  the editor's panes), `tabs` (all of them as tabs) or `stack` (one under
+  another). Groups go into groups. Closing it puts its panels back: in its
+  place when it sits in a dock's split, else in their default docks. Drawn
+  with the `panel_group` templates.
+- `\"attach\": false` (or a condition) on a `part` keeps other panels from
+  being dropped onto it to stack with it (they still go on its sides). The
+  built-in explorer and changes panels take nothing onto them.
 - `\"layout\": {{\"locked\": true}}` in `{SETTINGS}` turns off moving and
   resizing the panels in docks, floating or in their own windows, and dragging whole panes. Tab
   drags aren't locked.

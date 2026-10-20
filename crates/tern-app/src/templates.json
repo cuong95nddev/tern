@@ -23,6 +23,7 @@
             "children": [
               {
                 "dock": "start",
+                "grouped": true,
                 "split": "column",
                 "accepts": ["panel"],
                 "zones": ["edges", "stack"],
@@ -38,9 +39,19 @@
                   { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 }
                 ]
               },
-              { "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] },
+              {
+                "dock": "main",
+                "grouped": true,
+                "split": "column",
+                "accepts": ["panel"],
+                "zones": ["edges", "stack"],
+                "strip": "right",
+                "fill": true,
+                "children": [{ "part": "panes", "attach": false, "float": false, "window": false }]
+              },
               {
                 "dock": "right",
+                "grouped": true,
                 "split": "column",
                 "accepts": ["panel"],
                 "zones": ["edges", "stack"],
@@ -51,8 +62,8 @@
                 "min": 180,
                 "max": 700,
                 "children": [
-                  { "part": "explorer", "when": "explorer" },
-                  { "part": "changes", "when": "changes", "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
+                  { "part": "explorer", "when": "explorer", "attach": false },
+                  { "part": "changes", "when": "changes", "attach": false, "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
                   { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 },
                   { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height", "min": 90, "max": 800 }
                 ]
@@ -62,6 +73,10 @@
         ]
       }
     ]
+  },
+  "panes": {
+    "fill": true,
+    "children": [{ "dock": "center", "accepts": ["pane"], "zones": ["edges", "stack"] }]
   },
   "panel_header": {
     "element": "$element",
@@ -87,7 +102,6 @@
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "shells.header": { "use": "panel_header", "element": "shells.header" },
   "usage.header": { "use": "panel_header", "element": "usage.header" },
-  "system.header": { "use": "panel_header", "element": "system.header" },
   "explorer.header.buttons": {
     "layout": "row",
     "align": "center",
@@ -220,20 +234,6 @@
         "size": "xsmall",
         "icon": "close",
         "tooltip": "Hide Usage"
-      }
-    ]
-  },
-  "system.header.buttons": {
-    "layout": "row",
-    "align": "center",
-    "style": { "gap": "$system.header.gap" },
-    "children": [
-      {
-        "button": "hide",
-        "element": "system.header.button",
-        "size": "xsmall",
-        "icon": "close",
-        "tooltip": "Hide System"
       }
     ]
   },
@@ -1744,6 +1744,60 @@
     "fill": true,
     "children": [{ "slot": "header" }, { "when": "empty", "use": "shells.empty" }, { "slot": "list" }]
   },
+  "panel_group": {
+    "element": "panel_group",
+    "fill": true,
+    "children": [
+      { "grow": 1, "children": [{ "slot": "content" }] },
+      { "when": "edit", "element": "panel_group.edit", "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 } },
+      {
+        "when": "edit",
+        "position": { "top": 0, "left": 0, "right": 0 },
+        "layout": "row",
+        "justify": "center",
+        "children": [{ "slot": "header" }]
+      }
+    ]
+  },
+  "panel_group.seam": {
+    "group": "seam",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "justify": "center",
+    "children": [
+      {
+        "style": { "opacity": 0 },
+        "states": { "hover:seam": { "opacity": 1 } },
+        "children": [{ "button": "add", "element": "panel_group.seam.button", "size": "xsmall", "icon": "plus", "tooltip": "Add a Panel Here" }]
+      }
+    ]
+  },
+  "panel_group.header": {
+    "element": "panel_group.header",
+    "handle": true,
+    "layout": "row",
+    "align": "center",
+    "children": [{ "icon": "grip-vertical", "element": "panel_group.header.grip" }, { "slot": "buttons" }]
+  },
+  "panel_group.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$panel_group.header.gap" },
+    "children": [
+      { "button": "grid", "element": "panel_group.header.button", "size": "xsmall", "icon": "layout-grid", "selected": "grid", "tooltip": "Split Any Way" },
+      { "button": "tabs", "element": "panel_group.header.button", "size": "xsmall", "icon": "panel-top", "selected": "tabs", "tooltip": "Tabs" },
+      { "button": "stack", "element": "panel_group.header.button", "size": "xsmall", "icon": "rows-3", "selected": "stack", "tooltip": "One Under Another" },
+      { "button": "close", "element": "panel_group.header.button", "size": "xsmall", "icon": "close", "tooltip": "Close Panel (its panels go back)" }
+    ]
+  },
+  "panel_group.empty": {
+    "element": "panel_group.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here by their title bar" }]
+  },
   "shells.empty": {
     "element": "shells.empty",
     "grow": 1,
@@ -1876,7 +1930,6 @@
     "element": "system",
     "fill": true,
     "children": [
-      { "slot": "header" },
       { "when": "!ready", "use": "system.empty" },
       {
         "when": "ready",

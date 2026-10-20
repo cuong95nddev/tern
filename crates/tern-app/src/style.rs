@@ -527,6 +527,41 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "shells.list", about: "The shells panel's list of rows", groups: &[LIST] },
     Element { name: "shells.row", about: "A shell: the command it runs and how long it has run", groups: &[ROW] },
     Element { name: "shells.empty", about: "What the shells panel shows without shells", groups: &[EMPTY] },
+    Element { name: "panel_group", about: "A panel group: a panel the user added, holding the panels dragged onto it", groups: &[PANEL] },
+    Element {
+        name: "panel_group.header",
+        about: "A panel group's bar while the layout is edited, over its top: it drags the group, and holds its layout and close buttons",
+        groups: &[&[
+            ("margin_top", Len, "3"),
+            ("padding_x", Len, "4"),
+            ("height", Len, "24"),
+            ("gap", Len, "2"),
+            ("radius", Len, "$radius"),
+            ("background", Color, "$background"),
+            ("border", Color, "$primary/60"),
+            ("border_width", Len, "1"),
+            ("shadow", Text, "md"),
+            ("title", Text, ""),
+        ]],
+    },
+    Element {
+        name: "panel_group.header.grip",
+        about: "The grip on a panel group's bar",
+        groups: &[&[("width", Len, "14"), ("height", Len, "14"), ("text", Color, "$text_muted")]],
+    },
+    simple!("panel_group.header.button", "A button in a panel group's title bar"),
+    Element { name: "panel_group.empty", about: "What a panel group shows without panels", groups: &[EMPTY] },
+    Element {
+        name: "panel_group.edit",
+        about: "A panel group while the layout is edited",
+        groups: &[&[("border", Color, "$primary/40"), ("border_width", Len, "1")]],
+    },
+    Element {
+        name: "panel_group.seam",
+        about: "The strip along a panel group's bottom while the layout is edited; `size` is how tall it is",
+        groups: &[&[("size", Len, "18")]],
+    },
+    simple!("panel_group.seam.button", "The button on a seam that adds an empty panel group there"),
     Element {
         name: "usage",
         about: "The usage panel: how much of each plan is used, as a status bar",
@@ -627,10 +662,8 @@ pub const ELEMENTS: &[Element] = &[
     Element {
         name: "system",
         about: "The system panel: how busy the machine is (CPU and memory), as a status bar",
-        groups: &[PANEL, &[("start_height", Len, "64")], IMAGE],
+        groups: &[PANEL, &[("start_height", Len, "32")], IMAGE],
     },
-    Element { name: "system.header", about: "The system panel's title bar", groups: &[HEADER] },
-    simple!("system.header.button", "A button in the system panel's title bar"),
     Element { name: "system.empty", about: "What the system panel shows before its first sample", groups: &[EMPTY] },
     Element {
         name: "system.list",

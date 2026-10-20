@@ -152,6 +152,64 @@ impl Drop {
     }
 }
 
+/// How a panel group lays out the panels in it: as cells split any way
+/// (`grid`, drops split on a panel's sides or stack onto it), as tabs, or one
+/// under another (`stack`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupMode {
+    #[default]
+    Grid,
+    Tabs,
+    Stack,
+}
+
+impl GroupMode {
+    pub fn key(self) -> &'static str {
+        match self {
+            GroupMode::Grid => "grid",
+            GroupMode::Tabs => "tabs",
+            GroupMode::Stack => "stack",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "grid" => Some(GroupMode::Grid),
+            "tabs" => Some(GroupMode::Tabs),
+            "stack" => Some(GroupMode::Stack),
+            _ => None,
+        }
+    }
+
+    /// The drop zones its panels show: `edges`/`stack` as a dock declares them.
+    pub fn zones(self) -> &'static [&'static str] {
+        match self {
+            GroupMode::Grid => &["edges", "stack"],
+            GroupMode::Tabs => &["stack"],
+            GroupMode::Stack => &["before", "after"],
+        }
+    }
+}
+
+/// The kind of a panel group, as a part: it goes where panels go.
+pub const GROUP_KIND: &str = "panel";
+
+/// True when `name` names a panel group the user made (`group-<n>`).
+pub fn is_group(name: &str) -> bool {
+    name.strip_prefix("group-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The dock a panel group is to the panels in it.
+pub fn group_dock(name: &str) -> DockInfo {
+    DockInfo {
+        name: name.to_string(),
+        dir: Dir::Column,
+        accepts: vec![GROUP_KIND.to_string()],
+        defaults: Tree::Split(Dir::Column, vec![]),
+        grouped: false,
+    }
+}
+
 /// A dock as the active template declares it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DockInfo {
@@ -160,6 +218,9 @@ pub struct DockInfo {
     /// Part names or kinds the dock takes.
     pub accepts: Vec<String>,
     pub defaults: Tree,
+    /// Its panels are always in panel groups: one dropped in it, or placed in
+    /// it by the template, gets a group of its own around it.
+    pub grouped: bool,
 }
 
 impl DockInfo {
@@ -183,6 +244,10 @@ pub struct Arrangement {
     /// the dock each came from (its strip button stays there, and it docks
     /// back there). Where they sit among the panes is the pane layout's.
     pub center: BTreeMap<String, String>,
+    /// The panel groups the user made, by name, with how each lays out its
+    /// panels. A group is a part (it sits in a dock, floats or is among the
+    /// panes) and a dock: its tree is in `docks` under its name.
+    pub groups: BTreeMap<String, GroupMode>,
 }
 
 /// A part floating over the docks: the dock it came from (its strip button
@@ -504,6 +569,18 @@ fn stack_on(tree: &mut Tree, target: &str, part: &str) -> bool {
     }
 }
 
+/// Puts `with` where `tree` holds part `name` on its own (not in a stack); false when it doesn't.
+fn replace_part(tree: &mut Tree, name: &str, with: &Tree) -> bool {
+    match tree {
+        Tree::Part(n) if n == name => {
+            *tree = with.clone();
+            true
+        },
+        Tree::Split(_, items) => items.iter_mut().any(|(t, _)| replace_part(t, name, with)),
+        _ => false,
+    }
+}
+
 /// Puts `part` into `root` at `at`; false when the drop target isn't there.
 fn place(root: &mut Option<Tree>, dir: Dir, part: &str, at: &Drop) -> bool {
     let new = Tree::Part(part.to_string());
@@ -541,13 +618,198 @@ impl Arrangement {
     /// The arrangement a template's docks start with: a dock without parts is
     /// empty, a split of one part is that part.
     pub fn defaults(key: &str, docks: &[DockInfo]) -> Self {
-        Arrangement {
+        let mut a = Arrangement {
             key: key.to_string(),
             docks: docks.iter().map(|d| (d.name.clone(), prune(&d.defaults, &|_| true))).collect(),
             widths: BTreeMap::new(),
             floating: BTreeMap::new(),
             center: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        };
+        a.wrap_loose(docks);
+        a
+    }
+
+    /// A fresh group's name.
+    fn next_group(&self) -> String {
+        let n = (1..).find(|n| !self.groups.contains_key(&format!("group-{n}"))).unwrap_or(1);
+        format!("group-{n}")
+    }
+
+    /// Puts each part sitting in a `grouped` dock outside a group, or
+    /// floating from one, in a group of its own (parts stacked as tabs go
+    /// together, in a group of tabs).
+    pub fn wrap_loose(&mut self, docks: &[DockInfo]) {
+        fn walk(tree: &mut Tree, a: &mut Arrangement) {
+            let loose = match tree {
+                Tree::Part(p) => !a.groups.contains_key(p),
+                Tree::Stack(..) => true,
+                Tree::Split(_, items) => {
+                    for (t, _) in items.iter_mut() {
+                        walk(t, a);
+                    }
+                    false
+                },
+            };
+            if loose {
+                let g = a.next_group();
+                let mode = if matches!(tree, Tree::Stack(..)) { GroupMode::Tabs } else { GroupMode::Grid };
+                a.groups.insert(g.clone(), mode);
+                let inner = std::mem::replace(tree, Tree::Part(g.clone()));
+                a.docks.insert(g, Some(inner));
+            }
         }
+        for d in docks.iter().filter(|d| d.grouped) {
+            let Some(Some(mut tree)) = self.docks.get(&d.name).cloned() else { continue };
+            walk(&mut tree, self);
+            self.docks.insert(d.name.clone(), Some(tree));
+        }
+        let grouped = |from: &str| docks.iter().any(|d| d.grouped && d.name == from);
+        let loose: Vec<String> =
+            self.floating.iter().filter(|(p, f)| !self.groups.contains_key(*p) && grouped(&f.from)).map(|(p, _)| p.clone()).collect();
+        for p in loose {
+            let Some(f) = self.floating.remove(&p) else { continue };
+            let g = self.next_group();
+            self.groups.insert(g.clone(), GroupMode::Grid);
+            self.docks.insert(g.clone(), Some(Tree::Part(p)));
+            self.floating.insert(g, f);
+        }
+    }
+
+    /// Puts a new, empty panel group at `at` in `dock` (one of the
+    /// template's, or a group); its name, or None when it can't go there.
+    pub fn add_group(&mut self, dock: &str, at: Drop, docks: &[DockInfo]) -> Option<String> {
+        let info = self.dock_info(dock, docks)?;
+        if !info.takes("", GROUP_KIND) {
+            return None;
+        }
+        let g = self.next_group();
+        let mut next = self.clone();
+        next.groups.insert(g.clone(), GroupMode::default());
+        next.docks.insert(g.clone(), None);
+        let root = next.docks.entry(dock.to_string()).or_insert(None);
+        if !place(root, info.dir, &g, &at) {
+            return None;
+        }
+        *self = next;
+        Some(g)
+    }
+
+    /// The dock named `name`: one of the template's, or a panel group.
+    fn dock_info(&self, name: &str, docks: &[DockInfo]) -> Option<DockInfo> {
+        docks.iter().find(|d| d.name == name).cloned().or_else(|| self.groups.contains_key(name).then(|| group_dock(name)))
+    }
+
+    /// True when `inner` is group `outer`, or is somewhere inside it.
+    pub fn group_holds(&self, outer: &str, inner: &str) -> bool {
+        let mut todo = vec![outer.to_string()];
+        let mut seen = BTreeSet::new();
+        while let Some(g) = todo.pop() {
+            if g == inner {
+                return true;
+            }
+            if !seen.insert(g.clone()) {
+                continue;
+            }
+            if let Some(Some(tree)) = self.docks.get(&g) {
+                todo.extend(tree.parts().into_iter().filter(|p| self.groups.contains_key(*p)).map(str::to_owned));
+            }
+        }
+        false
+    }
+
+    /// `parts` with the panels of each panel group after it (those in it,
+    /// floating from it or among the panes from it), at any depth.
+    pub fn with_group_parts(&self, parts: Vec<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut todo: Vec<String> = parts.into_iter().rev().collect();
+        while let Some(p) = todo.pop() {
+            if out.contains(&p) {
+                continue;
+            }
+            if self.groups.contains_key(&p) {
+                let mut inner: Vec<String> =
+                    self.docks.get(&p).cloned().flatten().iter().flat_map(|t| t.parts()).map(str::to_owned).collect();
+                inner.extend(self.floating.iter().filter(|(_, f)| f.from == p).map(|(n, _)| n.clone()));
+                inner.extend(self.center.iter().filter(|(_, from)| **from == p).map(|(n, _)| n.clone()));
+                todo.extend(inner.into_iter().rev());
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    /// Removes panel group `name`. Its panels take its place when it sits
+    /// alone in a dock's split (or is a dock's only part); else each goes back
+    /// to its default dock (`parts`: every part's name and kind). False when
+    /// there is no such group.
+    pub fn close_group(&mut self, name: &str, docks: &[DockInfo], parts: &[(&str, &str)]) -> bool {
+        if self.groups.remove(name).is_none() {
+            return false;
+        }
+        let inner = self.docks.remove(name).flatten();
+        let mut placed = false;
+        if let Some(t) = &inner {
+            for tree in self.docks.values_mut() {
+                if let Some(root) = tree
+                    && replace_part(root, name, t)
+                {
+                    placed = true;
+                    break;
+                }
+            }
+        }
+        self.take_out(name);
+        if !placed && let Some(t) = inner {
+            for part in t.parts() {
+                let kind = parts
+                    .iter()
+                    .find(|(n, _)| *n == part)
+                    .map(|(_, k)| *k)
+                    .or_else(|| self.groups.contains_key(part).then_some(GROUP_KIND));
+                self.send_to_default(part, kind, docks);
+            }
+        }
+        // Parts floating from it dock back to their defaults.
+        for f in self.floating.values_mut().filter(|f| f.from == name) {
+            if let Some(d) = docks.iter().find(|d| d.takes("", GROUP_KIND)) {
+                f.from = d.name.clone();
+            }
+        }
+        for from in self.center.values_mut().filter(|f| *f == name) {
+            if let Some(d) = docks.iter().find(|d| d.takes("", GROUP_KIND)) {
+                *from = d.name.clone();
+            }
+        }
+        self.wrap_loose(docks);
+        true
+    }
+
+    /// Lays group `name`'s panels out as `mode` does: tabs stack them all,
+    /// `stack` puts them one under another, `grid` keeps them where they are.
+    /// False when there is no such group or nothing changes.
+    pub fn set_group_mode(&mut self, name: &str, mode: GroupMode) -> bool {
+        let Some(m) = self.groups.get_mut(name) else {
+            return false;
+        };
+        let was = *m;
+        *m = mode;
+        let tree = self.docks.get_mut(name).and_then(|t| t.as_mut());
+        let mut changed = was != mode;
+        if let Some(tree) = tree {
+            let parts: Vec<String> = tree.parts().into_iter().map(str::to_owned).collect();
+            let next = match mode {
+                _ if parts.len() < 2 => None,
+                GroupMode::Tabs if !matches!(tree, Tree::Stack(..)) => Some(Tree::Stack(parts, 0)),
+                GroupMode::Stack => Some(Tree::Split(Dir::Column, parts.into_iter().map(|p| (Tree::Part(p), Size::Auto)).collect())),
+                _ => None,
+            };
+            if let Some(next) = next.filter(|n| n != tree) {
+                *tree = next;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// The dock `part` sits in.
@@ -564,10 +826,14 @@ impl Arrangement {
     /// Moves `part` into `dock` at `at`; false (and no change) when the dock doesn't accept
     /// `kind`, the dock is unknown, or the move would leave everything as it is.
     pub fn move_part(&mut self, part: &str, kind: &str, dock: &str, at: Drop, docks: &[DockInfo]) -> bool {
-        let Some(info) = docks.iter().find(|d| d.name == dock) else {
+        let Some(info) = self.dock_info(dock, docks) else {
             return false;
         };
         if !info.takes(part, kind) {
+            return false;
+        }
+        // A group doesn't go into itself.
+        if self.groups.contains_key(part) && self.group_holds(part, dock) {
             return false;
         }
         if at.target() == Some(part) {
@@ -576,10 +842,28 @@ impl Arrangement {
         if already_there(self.docks.get(dock).and_then(|t| t.as_ref()), part, &at) {
             return false;
         }
+        // Onto a group: into it.
+        if let Drop::Stack(target) = &at
+            && self.groups.contains_key(target)
+            && target != part
+        {
+            let target = target.clone();
+            return self.move_part(part, kind, &target, Drop::End, docks);
+        }
         let mut next = self.clone();
         next.take_out(part);
+        // A panel in a grouped dock goes in a group of its own, where it was dropped.
+        let wrap = info.grouped && !self.groups.contains_key(part);
+        let placed = if wrap { next.next_group() } else { part.to_string() };
         let root = next.docks.entry(dock.to_string()).or_insert(None);
-        if !place(root, info.dir, part, &at) || next == *self {
+        if !place(root, info.dir, &placed, &at) {
+            return false;
+        }
+        if wrap {
+            next.groups.insert(placed.clone(), GroupMode::default());
+            next.docks.insert(placed, Some(Tree::Part(part.to_string())));
+        }
+        if next == *self {
             return false;
         }
         *self = next;
@@ -663,6 +947,7 @@ impl Arrangement {
         if next.dock_back(part, kind, &from, docks).is_none() {
             return false;
         }
+        next.wrap_loose(docks);
         *self = next;
         true
     }
@@ -670,7 +955,10 @@ impl Arrangement {
     /// Appends `part` to dock `from`, or to its default dock when that one is
     /// gone or doesn't take it; the dock's name.
     fn dock_back(&mut self, part: &str, kind: &str, from: &str, docks: &[DockInfo]) -> Option<String> {
-        match docks.iter().find(|d| d.name == from && d.takes(part, kind)) {
+        match self
+            .dock_info(from, docks)
+            .filter(|d| d.takes(part, kind) && !(self.groups.contains_key(part) && self.group_holds(part, from)))
+        {
             Some(info) => {
                 let root = self.docks.entry(info.name.clone()).or_insert(None);
                 place(root, info.dir, part, &Drop::End);
@@ -732,8 +1020,12 @@ impl Arrangement {
     /// Fits a stored arrangement to the templates in effect (`center`: the
     /// part names and kinds the center dock takes); returns the problems.
     pub fn reconcile(&mut self, docks: &[DockInfo], parts: &[(&str, &str)], center: &[String]) -> Vec<String> {
-        let kind_of = |part: &str| parts.iter().find(|(n, _)| *n == part).map(|(_, k)| *k);
-        let info_of = |name: &str| docks.iter().find(|d| d.name == name);
+        let groups = self.groups.clone();
+        let kind_of = |part: &str| {
+            parts.iter().find(|(n, _)| *n == part).map(|(_, k)| *k).or_else(|| groups.contains_key(part).then_some(GROUP_KIND))
+        };
+        let info_of =
+            |name: &str| docks.iter().find(|d| d.name == name).cloned().or_else(|| groups.contains_key(name).then(|| group_dock(name)));
         let mut problems = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut moved_back: Vec<String> = Vec::new();
@@ -750,7 +1042,7 @@ impl Arrangement {
                     problems.push(format!("layout: \"{part}\" is placed twice"));
                     return false;
                 }
-                match info {
+                match &info {
                     Some(i) if i.takes(part, kind) => true,
                     _ => {
                         moved_back.push(part.to_string());
@@ -759,12 +1051,15 @@ impl Arrangement {
                 }
             };
             let tree = tree.and_then(|t| prune_mut(&t, &mut keep));
-            if let Some(info) = info {
+            if let Some(info) = &info {
                 self.docks.insert(info.name.clone(), tree);
             }
         }
         for info in docks {
             self.docks.entry(info.name.clone()).or_insert(None);
+        }
+        for g in groups.keys() {
+            self.docks.entry(g.clone()).or_insert(None);
         }
 
         // Floating parts keep floating; one whose dock is gone docks back to its default.
@@ -778,7 +1073,7 @@ impl Arrangement {
                 problems.push(format!("layout: \"{part}\" is placed twice"));
                 continue;
             }
-            if !info_of(&f.from).is_some_and(|i| i.takes(&part, kind)) {
+            if !info_of(&f.from).is_some_and(|i| i.takes(&part, kind)) || groups.contains_key(&part) && f.from == part {
                 match default_dock(&part, kind, docks) {
                     Some(info) => f.from = info.name.clone(),
                     None => {
@@ -801,7 +1096,7 @@ impl Arrangement {
                 problems.push(format!("layout: \"{part}\" is placed twice"));
                 continue;
             }
-            let home = info_of(&from).filter(|i| i.takes(&part, kind)).or_else(|| default_dock(&part, kind, docks));
+            let home = info_of(&from).filter(|i| i.takes(&part, kind)).or_else(|| default_dock(&part, kind, docks).cloned());
             if !center.iter().any(|a| *a == part || a == kind) {
                 match self.dock_back(&part, kind, &from, docks) {
                     Some(dock) => problems.push(format!("layout: \"{part}\" moved back to dock \"{dock}\"")),
@@ -825,15 +1120,54 @@ impl Arrangement {
                 None => problems.push(format!("layout: \"{part}\" has no dock")),
             }
         }
-        for (part, kind) in parts {
-            if seen.contains(*part) {
+        let all = parts.iter().copied().chain(groups.keys().map(|g| (g.as_str(), GROUP_KIND)));
+        for (part, kind) in all {
+            if seen.contains(part) {
                 continue;
             }
             if self.send_to_default(part, Some(kind), docks).is_none() {
                 problems.push(format!("layout: \"{part}\" has no dock"));
             }
         }
+        self.free_groups(docks, &mut problems);
+        self.wrap_loose(docks);
         problems
+    }
+
+    /// Groups placed only inside each other (a stored arrangement can say so)
+    /// go back to a template's dock, so every group is drawn once.
+    fn free_groups(&mut self, docks: &[DockInfo], problems: &mut Vec<String>) {
+        loop {
+            let mut reached: BTreeSet<String> = BTreeSet::new();
+            let mut todo: Vec<String> = self.floating.keys().chain(self.center.keys()).cloned().collect();
+            for d in docks {
+                if let Some(Some(t)) = self.docks.get(&d.name) {
+                    todo.extend(t.parts().into_iter().map(str::to_owned));
+                }
+            }
+            while let Some(p) = todo.pop() {
+                if !reached.insert(p.clone()) {
+                    continue;
+                }
+                if self.groups.contains_key(&p)
+                    && let Some(Some(t)) = self.docks.get(&p)
+                {
+                    todo.extend(t.parts().into_iter().map(str::to_owned));
+                }
+            }
+            let Some(lost) = self.groups.keys().find(|g| !reached.contains(*g)).cloned() else {
+                return;
+            };
+            self.take_out(&lost);
+            match self.send_to_default(&lost, Some(GROUP_KIND), docks) {
+                Some(dock) => problems.push(format!("layout: \"{lost}\" moved back to dock \"{dock}\"")),
+                None => {
+                    problems.push(format!("layout: \"{lost}\" has no dock"));
+                    self.groups.remove(&lost);
+                    self.docks.remove(&lost);
+                },
+            }
+        }
     }
 
     /// Appends `part` to its default dock (or the first dock that takes its kind); the dock's name.
@@ -846,7 +1180,8 @@ impl Arrangement {
 
     /// One line: `name=tree` per dock joined by `;`, then `;f:part=dock@x,y,w,h` per floating part
     /// (`;p:part=dock@display@x,y,w,h` for one in its own window), `;c:part=dock` per part in the
-    /// center, then `;w:name=px,...` when widths are stored.
+    /// center, `;g:group=mode` per panel group (its tree is among the docks'), then `;w:name=px,...`
+    /// when widths are stored.
     pub fn encode(&self) -> String {
         let mut out: Vec<String> = self
             .docks
@@ -866,6 +1201,7 @@ impl Arrangement {
             }
         }
         out.extend(self.center.iter().map(|(part, from)| format!("c:{part}={from}")));
+        out.extend(self.groups.iter().map(|(g, mode)| format!("g:{g}={}", mode.key())));
         if !self.widths.is_empty() {
             let widths: Vec<String> = self.widths.iter().map(|(n, w)| format!("{n}={w}")).collect();
             out.push(format!("w:{}", widths.join(",")));
@@ -879,10 +1215,19 @@ impl Arrangement {
         let mut widths = BTreeMap::new();
         let mut floating = BTreeMap::new();
         let mut center = BTreeMap::new();
+        let mut groups = BTreeMap::new();
         let segments: Vec<&str> = text.split(';').collect();
         // Floating parts and those in the center come after the docks, before the widths.
         let mut docks_done = false;
         for (i, seg) in segments.iter().enumerate() {
+            if let Some(entry) = seg.strip_prefix("g:") {
+                docks_done = true;
+                let (group, mode) = entry.split_once('=')?;
+                if !is_group(group) || groups.insert(group.to_string(), GroupMode::parse(mode)?).is_some() {
+                    return None;
+                }
+                continue;
+            }
             if let Some(entry) = seg.strip_prefix("c:") {
                 docks_done = true;
                 let (part, from) = entry.split_once('=')?;
@@ -943,7 +1288,12 @@ impl Arrangement {
                 return None;
             }
         }
-        Some(Arrangement { key: key.to_string(), docks, widths, floating, center })
+        // A group's tree is where its docks are; a tree without its group isn't one.
+        for g in groups.keys() {
+            docks.entry(g.clone()).or_insert(None);
+        }
+        docks.retain(|name, _| !is_group(name) || groups.contains_key(name));
+        Some(Arrangement { key: key.to_string(), docks, widths, floating, center, groups })
     }
 }
 
@@ -1168,8 +1518,9 @@ mod tests {
                 dir: Dir::Column,
                 accepts: vec!["panel".into()],
                 defaults: Tree::Split(Dir::Column, vec![(part("explorer"), Size::Auto), (part("scratches"), Size::Frac(0.3))]),
+                grouped: false,
             },
-            DockInfo { name: "right".into(), dir: Dir::Column, accepts: vec!["panel".into()], defaults: part("changes") },
+            DockInfo { name: "right".into(), dir: Dir::Column, accepts: vec!["panel".into()], defaults: part("changes"), grouped: false },
         ]
     }
 
@@ -1673,5 +2024,125 @@ mod tests {
         let right = Sides { right: true, ..Default::default() };
         assert_eq!(resized(r, right, -1000., 0., (120., 80.), AREA), rect(100., 100., 120., 200.));
         assert_eq!(resized(r, right, 1000., 0., (120., 80.), AREA), rect(100., 100., 900., 200.));
+    }
+
+    #[test]
+    fn a_new_group_is_empty_and_takes_panels() {
+        let d = docks();
+        let mut a = fresh();
+        let g = a.add_group("right", Drop::End, &d).unwrap();
+        assert_eq!(g, "group-1");
+        assert_eq!(a.add_group("right", Drop::End, &d).as_deref(), Some("group-2"));
+        assert!(a.move_part("explorer", "panel", &g, Drop::End, &d));
+        assert!(a.move_part("changes", "panel", &g, Drop::Edge("explorer".into(), Edge::Right), &d));
+        assert_eq!(a.docks[&g], Some(Tree::Split(Dir::Row, vec![(part("explorer"), Size::Auto), (part("changes"), Size::Auto)])));
+        assert_eq!(a.dock_of("changes"), Some("group-1"));
+        assert_eq!(a.docks["right"].as_ref().unwrap().parts(), ["group-1", "group-2"]);
+    }
+
+    #[test]
+    fn a_group_never_goes_into_itself() {
+        let d = docks();
+        let mut a = fresh();
+        let g1 = a.add_group("right", Drop::End, &d).unwrap();
+        let g2 = a.add_group("right", Drop::End, &d).unwrap();
+        assert!(!a.move_part(&g1, "panel", &g1, Drop::End, &d));
+        assert!(a.move_part(&g2, "panel", &g1, Drop::End, &d));
+        assert!(!a.move_part(&g1, "panel", &g2, Drop::End, &d));
+        assert!(a.move_part(&g1, "panel", "left", Drop::End, &d));
+        assert!(a.group_holds(&g1, &g2));
+    }
+
+    #[test]
+    fn group_modes_lay_out_its_panels() {
+        let d = docks();
+        let mut a = fresh();
+        let g = a.add_group("right", Drop::End, &d).unwrap();
+        assert!(a.move_part("explorer", "panel", &g, Drop::End, &d));
+        assert!(a.move_part("changes", "panel", &g, Drop::Edge("explorer".into(), Edge::Right), &d));
+        assert!(a.set_group_mode(&g, GroupMode::Tabs));
+        assert_eq!(a.docks[&g], Some(Tree::Stack(vec!["explorer".into(), "changes".into()], 0)));
+        assert!(a.set_group_mode(&g, GroupMode::Stack));
+        assert_eq!(a.docks[&g], Some(Tree::Split(Dir::Column, vec![(part("explorer"), Size::Auto), (part("changes"), Size::Auto)])));
+        assert!(!a.set_group_mode(&g, GroupMode::Stack));
+        assert_eq!(GroupMode::Stack.zones(), ["before", "after"]);
+    }
+
+    #[test]
+    fn groups_round_trip_and_survive_reconcile() {
+        let d = docks();
+        let mut a = fresh();
+        let g = a.add_group("right", Drop::End, &d).unwrap();
+        assert!(a.move_part("changes", "panel", &g, Drop::End, &d));
+        assert!(a.move_part(&g, "panel", "left", Drop::End, &d));
+        a.set_group_mode(&g, GroupMode::Tabs);
+        let text = a.encode();
+        assert_eq!(text, "group-1=changes;left=[c explorer@- scratches@0.3 group-1@-];right=;g:group-1=tabs");
+        let mut back = Arrangement::decode(&a.key, &text).unwrap();
+        assert_eq!(back, a);
+        assert_eq!(back.reconcile(&d, &PARTS, &[]), Vec::<String>::new());
+        assert_eq!(back, a);
+        // A group's tree without the group isn't kept.
+        assert_eq!(Arrangement::decode("k", "group-3=changes;left=").unwrap().docks.get("group-3"), None);
+    }
+
+    #[test]
+    fn groups_inside_only_each_other_go_back_to_a_dock() {
+        let d = docks();
+        let mut a = Arrangement::decode(
+            "k",
+            "group-1=group-2;group-2=group-1;left=[c explorer@- scratches@-];right=changes;g:group-1=grid;g:group-2=grid",
+        )
+        .unwrap();
+        let problems = a.reconcile(&d, &PARTS, &[]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(a.docks["left"].as_ref().unwrap().has("group-1"));
+        assert!(a.docks["group-1"].as_ref().unwrap().has("group-2"));
+    }
+
+    #[test]
+    fn closing_a_group_puts_its_panels_back() {
+        let d = docks();
+        let mut a = fresh();
+        // In a dock's split: its panels take its place.
+        let g = a.add_group("right", Drop::End, &d).unwrap();
+        assert!(a.move_part("scratches", "panel", &g, Drop::End, &d));
+        assert!(a.close_group(&g, &d, &PARTS));
+        assert!(a.groups.is_empty() && !a.docks.contains_key(&g));
+        assert_eq!(a.docks["right"].as_ref().unwrap().parts(), ["changes", "scratches"]);
+        // In a stack: each goes back to its default dock.
+        let g = a.add_group("right", Drop::Stack("changes".into()), &d).unwrap();
+        assert!(a.move_part("explorer", "panel", &g, Drop::End, &d));
+        assert!(a.close_group(&g, &d, &PARTS));
+        assert!(a.docks["left"].as_ref().unwrap().has("explorer"));
+        assert!(!a.docks["right"].as_ref().unwrap().has(&g));
+    }
+
+    fn grouped_docks() -> Vec<DockInfo> {
+        docks().into_iter().map(|d| DockInfo { grouped: true, ..d }).collect()
+    }
+
+    #[test]
+    fn grouped_docks_hold_only_groups() {
+        let d = grouped_docks();
+        let mut a = Arrangement::defaults("k", &d);
+        assert_eq!(
+            a.docks["left"],
+            Some(Tree::Split(Dir::Column, vec![(part("group-1"), Size::Auto), (part("group-2"), Size::Frac(0.3))]))
+        );
+        assert_eq!(a.docks["group-1"], Some(part("explorer")));
+        // Dropped between groups: in a new group of its own, there.
+        assert!(a.move_part("changes", "panel", "left", Drop::After("group-1".into()), &d));
+        assert_eq!(a.docks["left"].as_ref().unwrap().parts(), ["group-1", "group-4", "group-2"]);
+        assert_eq!(a.docks["group-4"], Some(part("changes")));
+        // The group it left stays, empty.
+        assert_eq!(a.docks["group-3"], None);
+        assert!(a.groups.contains_key("group-3"));
+        // Onto a group: into it.
+        assert!(a.move_part("scratches", "panel", "left", Drop::Stack("group-1".into()), &d));
+        assert!(a.docks["group-1"].as_ref().unwrap().has("scratches"));
+        // An empty group added below another.
+        assert_eq!(a.add_group("left", Drop::After("group-4".into()), &d), Some("group-5".into()));
+        assert_eq!(a.docks["left"].as_ref().unwrap().parts(), ["group-1", "group-4", "group-5", "group-2"]);
     }
 }

@@ -125,7 +125,7 @@ impl Render for PartWindow {
             window.set_window_title(&title);
             self.title = title;
         }
-        let part = template::render_part(&self.part, ws.read(cx).part_scope(), cx);
+        let part = template::render_part(&self.part, ws.read(cx).arranged_scope(self.ws.clone()), cx);
         let body = template::render(
             "part_window",
             template::Scope::new("part_window").slot("part", part),

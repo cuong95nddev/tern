@@ -194,6 +194,13 @@ pub struct Spec {
     /// condition (default `true`). GUI only.
     #[schemars(with = "Option<serde_json::Value>")]
     pub window: Option<serde_json::Value>,
+    /// Whether a part takes other parts dropped onto it, stacked with it as
+    /// tabs: `true`, `false` or a condition (default `true`).
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub attach: Option<serde_json::Value>,
+    /// A dock whose panels are always in panel groups: each the template
+    /// places in it, or the user drops in it, gets a group of its own.
+    pub grouped: bool,
     /// The size a part gets when it arrives in this dock from elsewhere.
     #[schemars(with = "Option<serde_json::Value>")]
     pub part_size: Option<serde_json::Value>,
@@ -395,6 +402,14 @@ impl Templates {
     /// The node a part is drawn with.
     pub(crate) fn part(&self, name: &str) -> Option<&Node> {
         self.parts.get(name).map(|(_, n)| n)
+    }
+
+    /// A part's kind: its node's, or a panel group's.
+    pub fn kind_of(&self, part: &str) -> Option<&str> {
+        match self.parts.get(part) {
+            Some((k, _)) => Some(k),
+            None => crate::arrange::is_group(part).then_some(crate::arrange::GROUP_KIND),
+        }
     }
 
     /// What `template`'s pane dock allows.
@@ -674,6 +689,22 @@ pub(crate) struct DockNode {
     info: DockInfo,
 }
 
+impl DockNode {
+    /// The dock panel group `name` is to the panels in it, laid out as `mode` says.
+    pub(crate) fn group(name: &str, mode: crate::arrange::GroupMode) -> Self {
+        let info = crate::arrange::group_dock(name);
+        DockNode {
+            name: name.to_owned().into(),
+            dir: info.dir,
+            zones: mode.zones().to_vec(),
+            empty_keep: true,
+            strip: None,
+            part_size: None,
+            info,
+        }
+    }
+}
+
 /// A node, its values read.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -720,6 +751,8 @@ pub struct Node {
     float: Option<Cond>,
     /// Whether a part may move to a window of its own; None is always.
     window: Option<Cond>,
+    /// Whether a part takes parts dropped onto it; None is always.
+    attach: Option<Cond>,
     children: Vec<Node>,
 }
 
@@ -764,10 +797,11 @@ const SLOTS: &[&str] = &[
     "part",
     "graph",
     "files",
+    "panes",
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage", "system"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "usage", "system", "panes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1341,6 +1375,7 @@ impl Compiler<'_, '_> {
             drag: self.flag(&s.drag, &format!("{at}.drag")),
             float: self.flag(&s.float, &format!("{at}.float")),
             window: self.flag(&s.window, &format!("{at}.window")),
+            attach: self.flag(&s.attach, &format!("{at}.attach")),
             kind: s.kind.clone(),
             children,
         }
@@ -1412,7 +1447,7 @@ impl Compiler<'_, '_> {
             self.problems.push(format!("{}: a dock holds only parts", c.path));
         }
         let defaults = dock_defaults(dir, children);
-        let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults };
+        let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults, grouped: s.grouped };
         Some(Arc::new(DockNode {
             name: name.clone().into(),
             dir,
@@ -1544,10 +1579,17 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         let docks = t.docks("workspace");
         let names: Vec<&str> = docks.iter().map(|d| d.name.as_str()).collect();
-        // The agents panel on the left, as T3 Code's sidebar; every other panel on the right.
-        assert_eq!(names, ["start", "right"]);
-        let a = crate::arrange::Arrangement::defaults("workspace/right+start", &docks);
-        assert_eq!(a.encode(), "right=[c explorer@- changes@260px scratches@220px shells@180px];start=[c agents@- usage@64px system@64px]");
+        // The agents panel on the left, as T3 Code's sidebar; the panes in the middle; every other panel on the right.
+        assert_eq!(names, ["start", "main", "right"]);
+        let a = crate::arrange::Arrangement::defaults("workspace/main+right+start", &docks);
+        // Each panel in a group of its own.
+        assert_eq!(
+            a.encode(),
+            "group-1=agents;group-2=usage;group-3=system;group-4=panes;group-5=explorer;group-6=changes;group-7=scratches;\
+             group-8=shells;main=group-4;right=[c group-5@- group-6@260px group-7@220px group-8@180px];\
+             start=[c group-1@- group-2@64px group-3@32px];g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
+             g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
+        );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));
     }

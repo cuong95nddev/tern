@@ -317,13 +317,13 @@ impl Drawer<'_, '_> {
     /// What dragging handle `n` drags: the part its scope names, when it may
     /// be dragged (the part's own `drag` was read where its dock draws it).
     fn dragged_part(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<DraggedPart> {
-        if self.locked() || !self.holds(&n.drag, scope, outer) {
+        if self.no_drag() || !self.holds(&n.drag, scope, outer) {
             return None;
         }
         let get = lookup(scope, outer);
         let part = get("part")?.text();
         let templates = self.cx.try_global::<Templates>()?;
-        let (kind, _) = templates.parts.get(part.as_ref())?;
+        let kind = templates.kind_of(part.as_ref())?.to_owned();
         if self.cx.try_global::<PinnedParts>().is_some_and(|p| p.0.contains(part.as_ref())) {
             return None;
         }
@@ -331,7 +331,40 @@ impl Drawer<'_, '_> {
         let floats = self.cx.try_global::<Floats>();
         let floating = floats.is_some_and(|f| f.floating.contains(part.as_ref()));
         let popped = floats.is_some_and(|f| f.popped.contains(part.as_ref()));
-        Some(DraggedPart { part, kind: kind.clone().into(), title, floating, popped })
+        Some(DraggedPart { part, kind: kind.into(), title, floating, popped })
+    }
+
+    /// `part`, or the first panel in it when it is a panel group.
+    fn first_panel(&self, part: &str, scope: &Scope) -> Option<String> {
+        let mut name = part.to_owned();
+        for _ in 0..32 {
+            if !arrange::is_group(&name) {
+                return Some(name);
+            }
+            let tree = scope.arrangement.as_ref().and_then(|a| a.docks.get(&name)).cloned().flatten()?;
+            name = tree.parts().first()?.to_string();
+        }
+        None
+    }
+
+    /// Whether panels can't be dragged now: the layout is locked, or isn't
+    /// being edited. Panes and their tabs aren't panels.
+    fn no_drag(&self) -> bool {
+        self.locked() || !crate::dock::editing(self.cx)
+    }
+
+    /// True when `part` shows: a panel group while it is empty or one of
+    /// its panels shows, any other part while its `when` holds.
+    fn shown(&self, part: &str, scope: &Scope, outer: &[&HashMap<&'static str, Value>], depth: usize) -> bool {
+        let Some(templates) = self.cx.try_global::<Templates>() else { return false };
+        if !arrange::is_group(part) {
+            return templates.part(part).is_some_and(|p| self.holds(&p.when, scope, outer));
+        }
+        let tree = scope.arrangement.as_ref().and_then(|a| a.docks.get(part)).cloned().flatten();
+        match tree {
+            None => true,
+            Some(t) => depth < 32 && t.parts().iter().any(|p| self.shown(p, scope, outer, depth + 1)),
+        }
     }
 
     /// Whether moving and resizing panels is turned off.
@@ -343,7 +376,8 @@ impl Drawer<'_, '_> {
     fn drop_for(&self, d: &DockNode, scope: &Scope) -> Option<(DraggedPart, OnChange)> {
         let p = self.cx.try_global::<ActiveDrag>()?.0.clone()?;
         let on_change = scope.on_change.clone()?;
-        d.info.takes(&p.part, &p.kind).then_some((p, on_change))
+        let own = scope.arrangement.as_ref().is_some_and(|a| a.groups.contains_key(p.part.as_ref()) && a.group_holds(&p.part, &d.name));
+        (d.info.takes(&p.part, &p.kind) && !own).then_some((p, on_change))
     }
 
     /// A box that drops the dragged part at `at` in dock `d`.
@@ -366,13 +400,13 @@ impl Drawer<'_, '_> {
 
     /// What dragging part `part` by a stack's tab drags, when it may be dragged.
     fn part_drag(&self, part: &str) -> Option<DraggedPart> {
-        if self.locked() || self.cx.try_global::<PinnedParts>().is_some_and(|p| p.0.contains(part)) {
+        if self.no_drag() || self.cx.try_global::<PinnedParts>().is_some_and(|p| p.0.contains(part)) {
             return None;
         }
-        let (kind, _) = self.cx.try_global::<Templates>()?.parts.get(part)?;
+        let kind = self.cx.try_global::<Templates>()?.kind_of(part)?.to_owned();
         Some(DraggedPart {
             part: part.to_owned().into(),
-            kind: kind.clone().into(),
+            kind: kind.into(),
             title: crate::dock::part_title(part),
             floating: false,
             popped: false,
@@ -381,9 +415,60 @@ impl Drawer<'_, '_> {
 
     /// Part `name` as its node draws it.
     fn part_body(&mut self, name: &str, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
+        if arrange::is_group(name) {
+            return self.group(name, scope, outer);
+        }
         let cx = self.cx;
         let body = cx.try_global::<Templates>().and_then(|ts| ts.part(name)).and_then(|p| self.draw(p, scope, outer));
         body.unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// Panel group `name` (template `panel_group`): its title bar, with a
+    /// button per layout and one that closes it, over the panels in it (or
+    /// `panel_group.empty` while it has none). It is a dock to them.
+    fn group(&mut self, name: &str, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
+        let mode = scope.arrangement.as_ref().and_then(|a| a.groups.get(name)).copied().unwrap_or_default();
+        let d = DockNode::group(name, mode);
+        let tree = self.dock_tree(&d, scope, outer);
+        let empty = tree.is_none();
+        let content = match tree {
+            Some(t) => self.tree(&d, &t, scope, outer),
+            None => {
+                let hint = render("panel_group.empty", Scope::new(format!("{name}:empty")), &mut |_, _, f| f.into_any_element(), self.cx);
+                // All of it takes a dragged panel.
+                let zone = self.end_zone(&d, scope).map(|z| z.absolute().inset_0());
+                div().relative().size_full().flex().flex_col().child(hint).children(zone).into_any_element()
+            },
+        };
+        let on_change = scope.on_change.clone();
+        let group: SharedString = name.to_owned().into();
+        let mut frames = |button: &str, _: Option<usize>, f: Framed| {
+            let Framed::Button(b) = f else { return f.into_any_element() };
+            let close = button == "close";
+            let mode = arrange::GroupMode::parse(button);
+            let Some(on_change) = on_change.clone().filter(|_| close || mode.is_some()) else { return b.into_any_element() };
+            let group = group.clone();
+            b.on_click(move |_, window, cx| {
+                let change = match mode {
+                    Some(mode) => Change::GroupMode { group: group.clone(), mode },
+                    None => Change::CloseGroup { group: group.clone() },
+                };
+                on_change(change, window, cx);
+            })
+            .into_any_element()
+        };
+        let buttons = Scope::new(format!("{name}:buttons"))
+            .var("grid", mode == arrange::GroupMode::Grid)
+            .var("tabs", mode == arrange::GroupMode::Tabs)
+            .var("stack", mode == arrange::GroupMode::Stack);
+        let header = crate::dock::panel_header(group.clone(), "panel_group.header", "Panel", None, buttons, &mut frames, self.cx);
+        let edit = !self.no_drag();
+        let scope = Scope::new(format!("{}:{name}", scope.id))
+            .var("empty", empty)
+            .var("edit", edit)
+            .slot("header", header)
+            .slot("content", content);
+        render("panel_group", scope, &mut |_, _, f| f.into_any_element(), self.cx)
     }
 
     /// The stack at `path` in dock `d`: a row of tabs (`dock_tabs`) over the
@@ -435,6 +520,10 @@ impl Drawer<'_, '_> {
     /// with `edges` or `stack`, the zone under the pointer; else the
     /// `before`/`after` halves.
     fn leaf(&self, d: &DockNode, parts: &[String], active: usize, body: AnyElement, scope: &Scope) -> AnyElement {
+        let dragging = self.cx.try_global::<ActiveDrag>().is_some_and(|a| a.0.is_some());
+        if !dragging && !self.no_drag() {
+            return self.seam(d, parts.get(active).or(parts.first()), body, scope);
+        }
         let Some((p, on_change)) = self.drop_for(d, scope) else { return body };
         // Next to or onto the part shown, or another of its stack when that one is dragged.
         let shown = parts.get(active).or(parts.first());
@@ -443,7 +532,34 @@ impl Drawer<'_, '_> {
             let stay = div().absolute().inset_0().on_drop(|_: &DraggedPart, _, _| {});
             return div().relative().size_full().flex().flex_col().child(body).child(stay).into_any_element();
         };
-        let (edges, stack) = (d.zones.contains(&"edges"), d.zones.contains(&"stack"));
+        // A panel group takes what is dropped in its middle: the dock only
+        // has its sides.
+        if arrange::is_group(&name) {
+            let sides: &[arrange::Edge] = match (d.zones.contains(&"edges"), d.dir) {
+                (true, _) => &[arrange::Edge::Left, arrange::Edge::Right, arrange::Edge::Top, arrange::Edge::Bottom],
+                (false, arrange::Dir::Row) => &[arrange::Edge::Left, arrange::Edge::Right],
+                (false, arrange::Dir::Column) => &[arrange::Edge::Top, arrange::Edge::Bottom],
+            };
+            let edges = d.zones.contains(&"edges");
+            let bands = crate::dock::side_bands::<DraggedPart>(sides, self.cx).into_iter().map(|(edge, band)| {
+                let (on_change, dock, name) = (on_change.clone(), d.name.clone(), name.clone());
+                band.on_drop(move |p: &DraggedPart, window, cx| {
+                    let at = match (edges, edge.after()) {
+                        (true, _) => arrange::Drop::Edge(name.clone(), edge),
+                        (false, false) => arrange::Drop::Before(name.clone()),
+                        (false, true) => arrange::Drop::After(name.clone()),
+                    };
+                    on_change(Change::Move { part: p.part.clone(), kind: p.kind.clone(), dock: dock.clone(), at }, window, cx);
+                })
+            });
+            return div().relative().size_full().flex().flex_col().child(body).children(bands.collect::<Vec<_>>()).into_any_element();
+        }
+        // A part that doesn't `attach` takes nothing onto it, unless stacking
+        // is all the dock does (a group of tabs: the group takes it).
+        let edges = d.zones.contains(&"edges");
+        let attach =
+            !edges || self.cx.try_global::<Templates>().and_then(|t| t.part(&name)).is_none_or(|n| self.holds(&n.attach, scope, &[]));
+        let stack = d.zones.contains(&"stack") && attach;
         if edges || stack {
             let area = format!("{}:{}:{name}", scope.id, d.name);
             let dock = d.name.clone();
@@ -461,7 +577,8 @@ impl Drawer<'_, '_> {
         for zone in &d.zones {
             let (at, start) = match *zone {
                 "before" => (arrange::Drop::Before(name.clone()), true),
-                _ => (arrange::Drop::After(name.clone()), false),
+                "after" => (arrange::Drop::After(name.clone()), false),
+                _ => continue,
             };
             let z = self.zone(d, at, on_change.clone()).absolute();
             zones.push(match (d.dir, start) {
@@ -472,6 +589,32 @@ impl Drawer<'_, '_> {
             });
         }
         div().relative().size_full().flex().flex_col().child(body).children(zones).into_any_element()
+    }
+
+    /// `body`, the area of panel group `shown` in dock `d`, while the layout
+    /// is edited: along its far side (its bottom in a column) a strip
+    /// (`panel_group.seam`) whose button adds an empty group right after it.
+    fn seam(&self, d: &DockNode, shown: Option<&String>, body: AnyElement, scope: &Scope) -> AnyElement {
+        let (Some(name), Some(on_change)) = (shown.filter(|n| arrange::is_group(n)), scope.on_change.clone()) else { return body };
+        let size = style::el("panel_group.seam", self.cx).px("size");
+        let (dock, after) = (d.name.clone(), name.clone());
+        let mut frames = |button: &str, _: Option<usize>, f: Framed| match (button, f) {
+            ("add", Framed::Button(b)) => {
+                let (on_change, dock, after) = (on_change.clone(), dock.clone(), after.clone());
+                b.on_click(move |_, window, cx| {
+                    on_change(Change::AddGroup { dock: dock.clone(), at: arrange::Drop::After(after.clone()) }, window, cx);
+                })
+                .into_any_element()
+            },
+            (_, f) => f.into_any_element(),
+        };
+        let strip = render("panel_group.seam", Scope::new(format!("{}:seam:{name}", scope.id)), &mut frames, self.cx);
+        let place = div().absolute();
+        let place = match d.dir {
+            arrange::Dir::Column => place.left_0().right_0().bottom_0().h(size),
+            arrange::Dir::Row => place.top_0().bottom_0().right_0().w(size),
+        };
+        div().relative().size_full().flex().flex_col().child(body).child(place.child(strip)).into_any_element()
     }
 
     /// The parts floating over the docks, each in a `floating` box where the
@@ -486,8 +629,7 @@ impl Drawer<'_, '_> {
         let mut boxes = vec![];
         // Those in windows of their own are drawn there.
         for (name, f) in a.floating.iter().filter(|(_, f)| f.window.is_none()) {
-            let Some(node) = cx.try_global::<Templates>().and_then(|t| t.part(name)) else { continue };
-            if !self.holds(&node.when, scope, &[]) {
+            if !self.shown(name, scope, &[], 0) {
                 continue;
             }
             let body = self.part_body(name, scope, &[]);
@@ -582,12 +724,11 @@ impl Drawer<'_, '_> {
     /// The parts of dock `d` to draw: the arrangement's (the template's
     /// defaults without one), less those whose `when` doesn't hold.
     fn dock_tree(&self, d: &DockNode, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<Shown> {
-        let templates = self.cx.try_global::<Templates>()?;
         let tree = match scope.arrangement.as_ref().and_then(|a| a.docks.get(&*d.name)) {
             Some(t) => t.as_ref()?,
             None => &d.info.defaults,
         };
-        let shown = |part: &str| templates.part(part).is_some_and(|p| self.holds(&p.when, scope, outer));
+        let shown = |part: &str| self.shown(part, scope, outer, 0);
         arrange::shown(tree, &shown)
     }
 
@@ -611,7 +752,9 @@ impl Drawer<'_, '_> {
                 Shown::Stack { parts, active, .. } => parts.get(*active),
                 Shown::Split { .. } => None,
             };
-            let part = part.and_then(|name| templates.and_then(|ts| ts.part(name)).map(|p| (name, p)));
+            // A panel group sizes as the first panel in it.
+            let part = part.and_then(|name| self.first_panel(name, scope));
+            let part = part.as_ref().and_then(|name| Some((name, templates?.part(name)?)));
             let own = part.map(|(_, p)| p.panel.clone()).unwrap_or_default();
             let (fixed, size) = match sizes.get(*ix).copied().unwrap_or(Size::Auto) {
                 Size::Px(v) => (true, Some(px(v))),

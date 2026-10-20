@@ -91,6 +91,8 @@ const COMMANDS: &[Command] = &[
     cmd!("Next Tab", "⌘⇧]", workspace::NextTab),
     cmd!("Previous Tab", "⌘⇧[", workspace::PrevTab),
     cmd!("Close Tab", "⌘W", workspace::CloseTab),
+    cmd!("Edit Layout", "", workspace::ToggleEditLayout),
+    cmd!("New Panel", "", workspace::NewPanel),
     cmd!("Reset Layout", "", workspace::ResetLayout),
     cmd!("Clear Terminal", "⌘K", terminal_view::Clear),
     cmd!("Toggle Word Wrap", "⌥Z", crate::viewer::ToggleWordWrap),

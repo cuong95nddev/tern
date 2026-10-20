@@ -39,10 +39,10 @@ use crate::scratches_view::{ScratchesEvent, ScratchesView};
 use crate::settings;
 use crate::shells_view::{ShellRow, ShellsEvent, ShellsView};
 use crate::style;
+use crate::system_view::SystemView;
 use crate::template::{self, Framed, on_event};
 use crate::terminal_view::{ActivityStatus, TerminalConfig, TerminalEvent, TerminalView};
 use crate::theme_picker::OpenSettingsFile;
-use crate::system_view::{SystemEvent, SystemView};
 use crate::usage_view::{UsageEvent, UsageView};
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspace, TabLayout};
@@ -71,6 +71,8 @@ actions!(
         ToggleUsage,
         ToggleSystem,
         ResetLayout,
+        NewPanel,
+        ToggleEditLayout,
         FocusTerminal,
         SplitRight,
         SplitDown,
@@ -91,6 +93,9 @@ actions!(
         Tab9
     ]
 );
+
+/// The template the panes are drawn with: it holds the pane dock.
+const PANES: &str = "panes";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -590,12 +595,6 @@ impl Workspace {
                 this.panels_changed(cx);
             },
         });
-        let system_sub = cx.subscribe(&system, |this, _, ev: &SystemEvent, cx| match ev {
-            SystemEvent::Hide => {
-                this.show_system = false;
-                this.panels_changed(cx);
-            },
-        });
 
         let mut this = Self {
             root,
@@ -641,7 +640,7 @@ impl Workspace {
             float_area: None,
             agents: None,
             part_windows: HashMap::new(),
-            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, system_sub, cx.observe_global::<Panels>(Self::follow_panels)],
+            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, cx.observe_global::<Panels>(Self::follow_panels)],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
         // Saved tab index → the tab it became (some don't come back).
@@ -2135,7 +2134,8 @@ impl Workspace {
                     // A floating part's button stays with the dock it came from, as does one in the center.
                     parts.extend(a.floating.iter().filter(|(_, f)| f.from == *d.name).map(|(p, _)| p.clone()));
                     parts.extend(a.center.iter().filter(|(_, from)| **from == *d.name).map(|(p, _)| p.clone()));
-                    parts
+                    // The panels in a group have their buttons where the group's is.
+                    a.with_group_parts(parts)
                 })
                 .collect(),
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
@@ -2871,7 +2871,7 @@ impl Workspace {
             self.arranged = None;
             let parts = templates.parts();
             let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
-            let center = templates.pane_dock("workspace").parts;
+            let center = templates.pane_dock(PANES).parts;
             self.arrange_problems = self.arrangements.fit(&key, &docks, &parts, &center);
             self.docks_epoch += 1;
         }
@@ -2940,6 +2940,34 @@ impl Workspace {
                 }
                 self.docks_epoch += 1;
             },
+            Change::GroupMode { group, mode } => {
+                if !a.set_group_mode(&group, mode) {
+                    return;
+                }
+                self.docks_epoch += 1;
+            },
+            Change::AddGroup { dock, at } => {
+                let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
+                if a.add_group(&dock, at, &docks).is_none() {
+                    return;
+                }
+                self.docks_epoch += 1;
+            },
+            Change::CloseGroup { group } => {
+                let templates = cx.try_global::<template::Templates>();
+                let docks = templates.map(|t| t.docks("workspace")).unwrap_or_default();
+                let parts = templates.map(|t| t.parts()).unwrap_or_default();
+                let parts: Vec<(&str, &str)> = parts.iter().map(|(n, k)| (*n, k.as_str())).collect();
+                let centered = a.center.contains_key(&*group);
+                if !a.close_group(&group, &docks, &parts) {
+                    return;
+                }
+                if centered {
+                    self.layout.remove_part(&group);
+                    self.layout_epoch += 1;
+                }
+                self.docks_epoch += 1;
+            },
             Change::Center { part, target, edge } => {
                 let leaf = Layout::Part(part.to_string());
                 if target == leaf || !self.layout.has(&target) {
@@ -2978,6 +3006,30 @@ impl Workspace {
         self.arrangement_changed(change, cx);
     }
 
+    /// Adds an empty panel group at the end of the right dock (else the
+    /// first that takes panels), and edits the layout so it shows.
+    fn new_panel(&mut self, _: &NewPanel, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::dock::LayoutLock>().is_some_and(|l| l.0) {
+            return;
+        }
+        let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
+        let takes = |d: &&arrange::DockInfo| d.takes("", arrange::GROUP_KIND);
+        let Some(dock) = docks.iter().filter(takes).find(|d| d.name == "right").or_else(|| docks.iter().find(takes)) else { return };
+        let change = Change::AddGroup { dock: dock.name.clone().into(), at: arrange::Drop::End };
+        self.arrangement_changed(change, cx);
+        if !crate::dock::editing(cx) {
+            self.toggle_edit_layout(&ToggleEditLayout, window, cx);
+        }
+    }
+
+    /// Starts or ends editing the layout: only then do panels drag.
+    fn toggle_edit_layout(&mut self, _: &ToggleEditLayout, _: &mut Window, cx: &mut Context<Self>) {
+        let on = !crate::dock::editing(cx);
+        cx.set_global(crate::dock::LayoutEdit(on));
+        self.docks_epoch += 1;
+        cx.refresh_windows();
+    }
+
     /// Docks floating `part` again, from its header's menu.
     fn dock_part(&mut self, a: &crate::dock::DockPart, _: &mut Window, cx: &mut Context<Self>) {
         self.dock_named(&a.0, cx);
@@ -2985,7 +3037,7 @@ impl Workspace {
 
     /// Docks `part` again, floating or in a window of its own.
     pub fn dock_named(&mut self, part: &str, cx: &mut Context<Self>) {
-        let kind = cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| *n == part).map(|(_, k)| k));
+        let kind = cx.try_global::<template::Templates>().and_then(|t| t.kind_of(part).map(str::to_owned));
         let Some(kind) = kind else { return };
         self.arrangement_changed(Change::Dock { part: part.to_owned().into(), kind: kind.into() }, cx);
     }
@@ -3141,6 +3193,18 @@ impl Workspace {
             .slot("usage", self.usage.clone().cached(cache_layout()))
             .slot("system", self.system.clone().cached(cache_layout()))
             .slot_opt("agents", self.agents.clone())
+    }
+
+    /// `part_scope` with the arrangement, for drawing a part outside the
+    /// docks (among the panes, in a window of its own): a panel group draws
+    /// the panels in it, and takes drops, as in a dock.
+    pub fn arranged_scope(&self, me: WeakEntity<Self>) -> template::Scope {
+        let scope = self.part_scope();
+        let Some(a) = self.arranged.clone() else { return scope };
+        let on_change: OnChange = Rc::new(move |change, _, cx| {
+            let _ = me.update(cx, |this, cx| this.arrangement_changed(change, cx));
+        });
+        scope.docks(a, on_change)
     }
 
     /// The agents panel to draw: its window's.
@@ -3656,7 +3720,7 @@ impl Workspace {
 
     /// What the pane dock allows (`"dock": "center"`).
     fn pane_dock(cx: &App) -> template::PaneDock {
-        cx.try_global::<template::Templates>().map(|t| t.pane_dock("workspace")).unwrap_or_default()
+        cx.try_global::<template::Templates>().map(|t| t.pane_dock(PANES)).unwrap_or_default()
     }
 
     /// While a tab or a pane of this workspace is dragged and the pane dock
@@ -3677,7 +3741,7 @@ impl Workspace {
     /// Part `name` among the panes, drawn as in a dock, with drop zones on
     /// its sides while a tab, a pane or a panel the pane dock takes is dragged.
     fn render_center_part(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
-        let body = template::render_part(name, self.part_scope(), cx);
+        let body = template::render_part(name, self.arranged_scope(cx.entity().downgrade()), cx);
         let d = div().relative().size_full().flex().flex_col().min_w_0().min_h_0().child(body);
         let Some(dock) = self.drops_on_panes(cx).filter(|d| d.edges) else { return d.into_any_element() };
         let own = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| *p.part == *name);
@@ -3685,10 +3749,36 @@ impl Workspace {
             // Let go on its own place: nothing happens (it doesn't float).
             return d.child(div().absolute().inset_0().on_drop(|_: &DraggedPart, _, _| {})).into_any_element();
         }
-        let area = format!("{}:part:{name}", cx.entity_id());
-        let overlay = crate::dock::zone_overlay(&area, cx);
         let ws = cx.entity().downgrade();
         let target = Layout::Part(name.to_owned());
+        if arrange::is_group(name) {
+            // Its middle takes panels into it; its sides go beside it.
+            let sides = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
+            let bands: Vec<Div> = crate::dock::side_bands::<DraggedPart>(&sides, cx)
+                .into_iter()
+                .map(|(edge, band)| {
+                    let (ws, target, dock) = (ws.clone(), target.clone(), dock.clone());
+                    let hover = crate::style::el("drop_zone.hover", cx);
+                    let on_tab = {
+                        let (ws, target) = (ws.clone(), target.clone());
+                        move |t: &DraggedTab, window: &mut Window, cx: &mut App| {
+                            let _ = ws.update(cx, |this, cx| {
+                                this.tab_drag = false;
+                                this.tab_beside(t.tab, &target, edge, window, cx);
+                            });
+                        }
+                    };
+                    band.drag_over::<DraggedTab>(move |s, _, _, _| hover.apply(s)).on_drop(on_tab).on_drop(
+                        move |p: &DraggedPart, window, cx| {
+                            let _ = ws.update(cx, |this, cx| this.drop_part_beside(p, &target, edge, &dock, window, cx));
+                        },
+                    )
+                })
+                .collect();
+            return d.children(bands).into_any_element();
+        }
+        let area = format!("{}:part:{name}", cx.entity_id());
+        let overlay = crate::dock::zone_overlay(&area, cx);
         let on_tab = {
             let (ws, target) = (ws.clone(), target.clone());
             move |t: &DraggedTab, zone: Zone, window: &mut Window, cx: &mut App| {
@@ -4082,6 +4172,25 @@ impl Workspace {
                 self.dock_part(&crate::dock::DockPart(cmd["part-dock ".len()..].trim().to_owned().into()), window, cx);
                 "ok".into()
             },
+            "layout-edit" => {
+                self.toggle_edit_layout(&ToggleEditLayout, window, cx);
+                "ok".into()
+            },
+            "panel-new" => {
+                self.new_panel(&NewPanel, window, cx);
+                "ok".into()
+            },
+            // Lays out GROUP's panels as MODE, or closes it.
+            cmd if cmd.starts_with("panel-mode ") || cmd.starts_with("panel-close ") => {
+                let args: Vec<&str> = cmd.split_whitespace().collect();
+                let change = match (args.first().copied(), args.get(1), args.get(2).and_then(|m| arrange::GroupMode::parse(m))) {
+                    (Some("panel-mode"), Some(g), Some(mode)) => Change::GroupMode { group: (*g).to_owned().into(), mode },
+                    (Some("panel-close"), Some(g), None) => Change::CloseGroup { group: (*g).to_owned().into() },
+                    _ => return "error: panel-mode GROUP grid|tabs|stack, or panel-close GROUP".into(),
+                };
+                self.arrangement_changed(change, cx);
+                "ok".into()
+            },
             "layout-reset" => {
                 self.reset_layout(&ResetLayout, window, cx);
                 "ok".into()
@@ -4100,8 +4209,7 @@ impl Workspace {
                     _ => return "error: part-move PART DOCK before|after|stack|left|right|up|down|end [TARGET]".into(),
                 };
                 let (part, dock) = (args[0], args[1]);
-                let kind =
-                    cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| *n == part).map(|(_, k)| k));
+                let kind = cx.try_global::<template::Templates>().and_then(|t| t.kind_of(part).map(str::to_owned));
                 let Some(kind) = kind else { return format!("error: no part {part:?}") };
                 let change = Change::Move { part: part.to_owned().into(), kind: kind.into(), dock: dock.to_owned().into(), at };
                 self.arrangement_changed(change, cx);
@@ -4121,8 +4229,7 @@ impl Workspace {
                 let (Some(part), Some(target), Some(edge)) = (args.first(), target, args.get(2).and_then(|e| Edge::parse(e))) else {
                     return "error: part-center PART PANE|PART left|right|up|down".into();
                 };
-                let kind =
-                    cx.try_global::<template::Templates>().and_then(|t| t.parts().into_iter().find(|(n, _)| n == part).map(|(_, k)| k));
+                let kind = cx.try_global::<template::Templates>().and_then(|t| t.kind_of(part).map(str::to_owned));
                 let Some(kind) = kind else { return format!("error: no part {part:?}") };
                 let p =
                     DraggedPart { part: (*part).to_owned().into(), kind: kind.into(), title: "".into(), floating: false, popped: false };
@@ -4237,7 +4344,9 @@ impl Render for Workspace {
         if let Some(a) = arrangement.clone() {
             scope = scope.docks(a, on_change.clone());
         }
-        let scope = scope.slot("left_strip", left_strip).slot("center", center);
+        // The panes are a panel of their own (template `panes`), so they move as the others do.
+        let panes = template::render(PANES, template::Scope::new(PANES).slot("center", center), &mut |_, _, d| d.into_any_element(), cx);
+        let scope = scope.slot("left_strip", left_strip).slot("panes", panes);
         // The panels draw their headers after this: a pinned part's header doesn't drag.
         let pinned = cx.try_global::<template::Templates>().map(|t| t.pinned(&scope)).unwrap_or_default();
         if cx.try_global::<crate::dock::PinnedParts>().is_none_or(|p| p.0 != pinned) {
@@ -4267,6 +4376,8 @@ impl Render for Workspace {
             .size_full()
             .relative()
             .on_action(cx.listener(Self::float_part))
+            .on_action(cx.listener(Self::new_panel))
+            .on_action(cx.listener(Self::toggle_edit_layout))
             .on_action(cx.listener(Self::dock_part))
             .on_action(cx.listener(Self::pop_out))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
