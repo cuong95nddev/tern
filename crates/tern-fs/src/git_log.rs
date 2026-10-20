@@ -11,6 +11,15 @@ use crate::git::{GitStatus, git, rel_slash};
 const FIELD: char = '\x1f';
 const RECORD: char = '\x1e';
 
+/// [`git`] for reading history: repo config can turn on `log.showSignature`
+/// and name the program that checks signatures (`gpg.program`), which `log`
+/// and `show` would then run on every signed commit. Never check them.
+fn read(repo: &Path) -> std::process::Command {
+    let mut c = git(repo);
+    c.args(["-c", "log.showSignature=false"]);
+    c
+}
+
 /// What a ref decorating a commit is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefKind {
@@ -56,7 +65,7 @@ pub struct LogQuery {
 /// The newest commits `query` asks for, children before parents.
 pub fn log(repo: &Path, query: &LogQuery) -> Result<Vec<Commit>, String> {
     let format = format!("--format=%H{FIELD}%P{FIELD}%an{FIELD}%ae{FIELD}%at{FIELD}%ad{FIELD}%D{FIELD}%s{RECORD}");
-    let mut cmd = git(repo);
+    let mut cmd = read(repo);
     cmd.args(["log", "--date-order", "--decorate=full", "--no-color", "--date=format-local:%Y-%m-%d %H:%M"])
         .arg(format)
         .arg(format!("-n{}", query.limit.max(1)));
@@ -177,7 +186,7 @@ pub struct CommitDetails {
 
 pub fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
     let format = format!("--format=%H{FIELD}%P{FIELD}%an{FIELD}%ae{FIELD}%ad{FIELD}%cn{FIELD}%cd{FIELD}%B");
-    let out = git(repo)
+    let out = read(repo)
         .args(["show", "-s", "--no-color", "--date=format-local:%Y-%m-%d %H:%M"])
         .arg(format)
         .args(["--end-of-options", hash, "--"])
@@ -241,7 +250,7 @@ fn parse_name_status(raw: &[u8]) -> Vec<CommitFile> {
 /// first parent (against nothing for a root commit). External diff drivers
 /// and textconv are off, as in [`crate::git::diff_vs_head`].
 pub fn commit_diff(repo: &Path, hash: &str, path: &str, from: Option<&str>) -> Option<String> {
-    let out = git(repo)
+    let out = read(repo)
         .args(["--literal-pathspecs", "show", "--format=", "-M", "--no-ext-diff", "--no-textconv", "--no-color", "-U3"])
         .args(["--end-of-options", hash, "--"])
         .args(from)
@@ -300,7 +309,7 @@ pub fn commit(repo: &Path, paths: &[PathBuf], message: &str, amend: bool) -> Res
 
 /// The last commit's message (to edit when amending).
 pub fn last_message(repo: &Path) -> Option<String> {
-    let out = git(repo).args(["log", "-1", "--format=%B", "--no-color"]).output().ok()?;
+    let out = read(repo).args(["log", "-1", "--format=%B", "--no-color"]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
 }
 
@@ -475,6 +484,49 @@ mod tests {
         let commits = [commit("c", &["b"]), commit("x", &["y"]), commit("y", &[]), commit("b", &[]), commit("z", &[])];
         let rows = graph(&commits);
         assert_eq!(rows.iter().map(|r| r.lane).collect::<Vec<_>>(), [0, 1, 1, 0, 0]);
+    }
+
+    /// A repo whose config asks every `log` to check signatures with a
+    /// program of its own: listing its history must not run it.
+    #[cfg(unix)]
+    #[test]
+    fn never_runs_the_repos_signature_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(r).output().unwrap().status.success(), "{args:?}");
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "T"]);
+        run(&["config", "user.email", "t@x"]);
+        // Signs anything (so the commit is signed) and, asked to verify, leaves a mark.
+        let program = r.join("gpg.sh");
+        let mark = r.join("pwned");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ncase \"$*\" in *--verify*) touch '{}';; esac\n\
+                 echo '-----BEGIN PGP SIGNATURE-----'; echo x; echo '-----END PGP SIGNATURE-----'\n\
+                 echo '[GNUPG:] SIG_CREATED ' >&2\n",
+                mark.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(&["config", "gpg.program", program.to_str().unwrap()]);
+        std::fs::write(r.join("a.txt"), "1\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-S", "-m", "signed"]);
+        run(&["config", "log.showSignature", "true"]);
+        // The trap works: plain `git log` runs the program.
+        run(&["log", "-1"]);
+        assert!(mark.exists(), "the repo's program should run for a plain git log");
+        std::fs::remove_file(&mark).unwrap();
+        let log = log(r, &LogQuery { limit: 10, ..Default::default() }).unwrap();
+        details(r, &log[0].hash).unwrap();
+        commit_diff(r, &log[0].hash, "a.txt", None).unwrap();
+        last_message(r).unwrap();
+        assert!(!mark.exists(), "reading the log ran the repo's gpg.program");
     }
 
     #[test]
