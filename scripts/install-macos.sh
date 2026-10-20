@@ -25,10 +25,14 @@ APP=$("$ROOT/scripts/bundle-macos.sh" "$STAGE" | tail -1)
 
 # macOS keeps privacy permissions per signing identity: a different one
 # (say Developer ID after Apple Development) means granting them again.
+# Turning a permission back on in System Settings keeps the old identity's
+# record, so it only holds until the next build: reset it, then grant anew.
 req() { codesign -d -r- "$1" 2>/dev/null | sed -n 's/^designated => //p'; }
 OLD_REQ=$(req "$APP_DIR/Tern.app")
 if [ -n "$OLD_REQ" ] && [ "$OLD_REQ" != "$(req "$APP")" ]; then
     echo "warning: signed by a different identity than the installed Tern; macOS will ask for its permissions again" >&2
+    echo "  clear the old grants first, or they never stick:" >&2
+    echo "  for s in ScreenCapture Accessibility SystemPolicyAllFiles; do tccutil reset \$s dev.tern; done" >&2
 fi
 
 mkdir -p "$APP_DIR"
