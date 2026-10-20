@@ -315,12 +315,21 @@ pub struct SavedWorkspace {
 }
 
 /// The side panels, the same in every workspace.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedPanels {
     /// Side panels the user hid: `explorer`, `changes`, `scratches`, `shells`.
     pub hidden: Vec<String>,
     /// Panel arrangements as `(key, Arrangement::encode text)`, kept opaque here.
     pub arrangements: Vec<(String, String)>,
+}
+
+/// The panels hidden until the user shows them.
+const HIDDEN_AT_FIRST: &[&str] = &["explorer", "changes", "scratches", "shells"];
+
+impl Default for SavedPanels {
+    fn default() -> Self {
+        Self { hidden: HIDDEN_AT_FIRST.iter().map(|p| (*p).to_owned()).collect(), arrangements: vec![] }
+    }
 }
 
 impl SavedWorkspace {
@@ -368,9 +377,8 @@ fn field(s: &str) -> String {
 /// before shared panels kept `hidden` and `arrange` per workspace.
 fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
     let mut out = String::new();
-    if !panels.hidden.is_empty() {
-        out.push_str(&format!("hidden\t{}\n", field(&panels.hidden.join(" "))));
-    }
+    // Always written: without it, the panels start as `HIDDEN_AT_FIRST`.
+    out.push_str(&format!("hidden\t{}\n", field(&panels.hidden.join(" "))));
     for (key, encoded) in &panels.arrangements {
         out.push_str(&format!("arrange\t{}\t{}\n", field(key), field(encoded)));
     }
@@ -738,7 +746,7 @@ mod tests {
         };
         let windows = vec![SavedWindow { placement: None, workspaces: vec![with_tabs, SavedWorkspace::fresh("/b".into())], active: 0 }];
         let text = encode_session(&windows, &panels);
-        assert!(text.starts_with("arrange\t"));
+        assert!(text.starts_with("hidden\t\narrange\t"));
         assert_eq!(decode_session(&text), (windows, panels));
     }
 

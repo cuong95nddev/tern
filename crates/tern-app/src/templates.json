@@ -34,9 +34,7 @@
                 "min": 160,
                 "max": 480,
                 "children": [
-                  { "part": "agents" },
-                  { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 },
-                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 32, "max": 600 }
+                  { "part": "agents" }
                 ]
               },
               {
@@ -47,7 +45,18 @@
                 "zones": ["edges", "stack"],
                 "strip": "right",
                 "fill": true,
-                "children": [{ "part": "panes", "attach": false, "float": false, "window": false }]
+                "children": [
+                  { "part": "panes", "attach": false, "float": false, "window": false },
+                  {
+                    "split": "row",
+                    "fixed": true,
+                    "size": "$usage.start_height",
+                    "children": [
+                      { "part": "usage", "when": "usage", "min": 32 },
+                      { "part": "system", "when": "system", "min": 32 }
+                    ]
+                  }
+                ]
               },
               {
                 "dock": "right",

@@ -1484,8 +1484,8 @@ impl Compiler<'_, '_> {
                 None
             },
         };
-        for c in children.iter().filter(|c| !matches!(c.what, What::Part(_))) {
-            self.problems.push(format!("{}: a dock holds only parts", c.path));
+        for c in children.iter().filter(|c| !dock_item(c)) {
+            self.problems.push(format!("{}: a dock holds only parts, and splits of parts", c.path));
         }
         let defaults = dock_defaults(dir, children);
         let info = DockInfo { name: name.clone(), dir, accepts: s.accepts.clone(), defaults, grouped: s.grouped };
@@ -1506,20 +1506,41 @@ impl Compiler<'_, '_> {
 /// leaves it to share what's left. A dock without parts has an empty split,
 /// which `prune` reads as nothing.
 fn dock_defaults(dir: Dir, children: &[Node]) -> Tree {
-    let mut names = BTreeSet::new();
+    defaults_in(dir, children, &mut BTreeSet::new())
+}
+
+/// True when `node` may sit in a dock: a part, or a split of parts.
+fn dock_item(node: &Node) -> bool {
+    match node.what {
+        What::Part(_) => true,
+        What::Box => node.split.is_some() && node.dock.is_none() && node.children.iter().all(dock_item),
+        _ => false,
+    }
+}
+
+/// The tree `children` start a split along `dir` with; `names` are the parts
+/// placed so far, so each goes in once.
+fn defaults_in(dir: Dir, children: &[Node], names: &mut BTreeSet<&'static str>) -> Tree {
     let mut items: Vec<(Tree, Size)> = children
         .iter()
         .filter_map(|c| {
-            let What::Part(p) = c.what else { return None };
-            if !names.insert(p) {
-                return None;
-            }
+            let tree = match (&c.what, c.split) {
+                (What::Part(p), _) => names.insert(p).then(|| Tree::Part((*p).to_owned()))?,
+                (What::Box, Some(axis)) if c.dock.is_none() => {
+                    let inner = if axis == Axis::Horizontal { Dir::Row } else { Dir::Column };
+                    match defaults_in(inner, &c.children, names) {
+                        Tree::Split(_, items) if items.is_empty() => return None,
+                        t => t,
+                    }
+                },
+                _ => return None,
+            };
             let fixed = c.panel.fixed.is_some();
             let size = match c.panel.size {
                 Some(AbsoluteLength::Pixels(px)) if fixed => Size::Px(f32::from(px)),
                 _ => Size::Auto,
             };
-            Some((Tree::Part(p.to_owned()), size))
+            Some((tree, size))
         })
         .collect();
     match items.len() {
@@ -1620,15 +1641,16 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         let docks = t.docks("workspace");
         let names: Vec<&str> = docks.iter().map(|d| d.name.as_str()).collect();
-        // The agents panel on the left, as T3 Code's sidebar; the panes in the middle; every other panel on the right.
+        // The agents panel on the left, as T3 Code's sidebar; the panes in the middle, usage and system in a row
+        // under them; every other panel on the right.
         assert_eq!(names, ["start", "main", "right"]);
         let a = crate::arrange::Arrangement::defaults("workspace/main+right+start", &docks);
         // Each panel in a group of its own.
         assert_eq!(
             a.encode(),
-            "group-1=agents;group-2=system;group-3=usage;group-4=panes;group-5=explorer;group-6=changes;group-7=scratches;\
-             group-8=shells;main=group-4;right=[c group-5@- group-6@260px group-7@220px group-8@180px];\
-             start=[c group-1@- group-2@32px group-3@32px];g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
+            "group-1=agents;group-2=panes;group-3=usage;group-4=system;group-5=explorer;group-6=changes;group-7=scratches;\
+             group-8=shells;main=[c group-2@- [r group-3@- group-4@-]@32px];\
+             right=[c group-5@- group-6@260px group-7@220px group-8@180px];start=group-1;g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
              g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
         );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
@@ -1664,8 +1686,8 @@ mod tests {
         let mut problems = vec![];
         compile(&specs, &props, &mut problems);
         assert_eq!(problems.len(), 12, "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts")), "{problems:?}");
-        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.0: a dock holds only parts, and splits of parts")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.ends_with("children.7.children.1: a dock holds only parts, and splits of parts")), "{problems:?}");
     }
 
     #[test]
