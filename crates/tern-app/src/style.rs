@@ -1526,9 +1526,16 @@ pub fn token_px(over: &Overrides, name: &str, rem: Pixels) -> Option<Pixels> {
 /// Problems with the names in `over`: elements, properties and tokens that
 /// don't exist, and tokens that can't be read.
 pub fn check_names(over: &Overrides, theme: &ThemeColor, problems: &mut Vec<String>) {
+    // An element's properties come one after another: one that doesn't
+    // exist is told once, not once per property.
+    let mut unknown = None;
     for &(name, prop) in over.elements.keys() {
         match element(name) {
-            None => problems.push(format!("elements: no element \"{name}\"")),
+            None if unknown == Some(name) => {},
+            None => {
+                problems.push(format!("elements: no element \"{name}\""));
+                unknown = Some(name);
+            },
             Some(e) if e.prop(prop).is_none() => {
                 let have: Vec<&str> = e.props().map(|p| p.0).collect();
                 problems.push(format!("elements.{name}: no property \"{prop}\" (there are: {})", have.join(", ")));
@@ -2107,6 +2114,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_unknown_element_is_told_once() {
+        let mut over = Overrides::default();
+        over.elements.insert(("gone.tab", "border"), "#000000".into());
+        over.elements.insert(("gone.tab", "text"), "#000000".into());
+        over.elements.insert(("explorer.row", "nope"), "1".into());
+        let (_, problems) = looks(&over);
+        assert_eq!(problems.iter().filter(|p| p.contains("no element \"gone.tab\"")).count(), 1, "{problems:?}");
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 
     #[test]

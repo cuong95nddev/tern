@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeConfig, ThemeConfigColors, ThemeRegistry, try_parse_color};
 use gpui_kit::*;
 use schemars::JsonSchema;
@@ -386,13 +387,22 @@ fn load(cx: &mut App) {
         },
     };
     let palette = terminal_palette(&theme, &settings.terminal.colors, &mut problems);
-    if let Err(e) = write_if_changed(&tern_mux::paths::palette_path(), &palette.to_text()) {
+    // The daemon's directory, made as the daemon wants it: one this made
+    // with the default mode would keep it from starting.
+    let written = tern_mux::paths::ensure_private_dir(&tern_mux::paths::mux_dir())
+        .and_then(|()| write_if_changed(&tern_mux::paths::palette_path(), &palette.to_text()));
+    if let Err(e) = written {
         log::warn!("settings: can't write the daemon's palette: {e}");
     }
 
     let editor_font: SharedString = settings.editor.font_family.clone().map_or_else(|| mono_font.clone(), Into::into);
     let editor_size = settings.editor.font_size;
     Theme::update(cx, |t| {
+        // `apply_config` keeps the highlight colors a theme leaves out: a
+        // theme without `highlight` would get the last theme's editor.
+        if ui.highlight.is_none() {
+            t.highlight_theme = if ui.mode.is_dark() { HighlightTheme::default_dark() } else { HighlightTheme::default_light() };
+        }
         t.apply_config(&Rc::new(ui.clone()));
         t.mode = ui.mode;
         // The theme's default barely shows on a black window.
