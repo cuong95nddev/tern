@@ -70,6 +70,25 @@ pub fn foreground_programs(tty: &File) -> Vec<String> {
     names
 }
 
+/// Whether process `pid` runs Claude Code: its executable, or the script an
+/// interpreter runs, is `claude` or comes from the `claude-code` package.
+/// False when its arguments can't be read.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn is_claude(pid: u32) -> bool {
+    let Some(argv) = libc::pid_t::try_from(pid).ok().and_then(|p| argv(p, 3)) else { return false };
+    let mut names = Vec::new();
+    for arg in argv.iter().take(1).chain(argv.iter().skip(1).find(|a| !a.starts_with('-'))) {
+        push_stem(&mut names, arg);
+    }
+    names.iter().any(|n| n == "claude") || argv.iter().take(2).any(|a| a.contains("claude-code"))
+}
+
+/// Unknown here: assumed so.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn is_claude(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn group_argvs(pgid: libc::pid_t) -> Vec<Vec<String>> {
     group_pids(pgid).into_iter().filter_map(|p| argv(p, 2)).collect()
@@ -236,13 +255,15 @@ pub fn agent_shells(tty: &File) -> Vec<AgentShell> {
 /// terminal) of its own, as does a session parked on a job.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn claude_job_pids(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
-    let Some(dir) = crate::status::claude_sessions_dir() else { return Vec::new() };
+    let dirs = crate::status::claude_sessions_dirs();
     pids.iter()
         .filter_map(|&pid| {
-            let job = argv(pid, 3)
-                .and_then(|a| attached_job(&a))
-                .or_else(|| crate::status::claude_parked_job(&dir, pid as u32))?;
-            libc::pid_t::try_from(crate::status::claude_job_pid(&dir, &job)?).ok()
+            let job = argv(pid, 3).and_then(|a| attached_job(&a)).or_else(|| {
+                let dir = dirs.iter().find(|d| d.join(format!("{pid}.json")).is_file())?;
+                crate::status::claude_parked_job(dir, pid as u32)
+            })?;
+            let job_pid = dirs.iter().find_map(|d| crate::status::claude_job_pid(d, &job))?;
+            libc::pid_t::try_from(job_pid).ok()
         })
         .collect()
 }

@@ -122,7 +122,7 @@ impl Overlay {
             return;
         }
         if ev.click_count == 2 && self.inside(q) && self.tool.is_none() {
-            return self.add(window, cx);
+            return self.done(window, cx);
         }
         // Window mode: a click picks a window, or another one while nothing
         // is drawn.
@@ -272,7 +272,7 @@ impl Overlay {
         match ks.key.as_str() {
             "escape" if self.drag.is_some() => self.drag = None,
             "escape" => return super::cancel(cx),
-            "enter" if self.sel.is_some() => return self.add(window, cx),
+            "enter" if self.sel.is_some() => return self.done(window, cx),
             "z" if m.secondary() && m.shift => {
                 self.doc.redo();
             },
@@ -321,6 +321,11 @@ impl Overlay {
                 self.doc.push(Shape::Text { at, text, style: self.style });
             }
         }
+    }
+
+    /// Enter's action: add to the tray when it keeps captures, else copy.
+    fn done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if super::keeps(cx) { self.add(window, cx) } else { self.copy(cx) }
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -496,7 +501,7 @@ impl Overlay {
     /// The toolbar under the region `(lo, hi)` (above it, or inside, when
     /// there is no room), the style bar by it while a drawing tool is
     /// picked, and the text box being typed in.
-    fn bars(&self, scope: Scope, (lo, hi): (P, P), (w, h): (f32, f32), cx: &App) -> Scope {
+    fn bars(&self, scope: Scope, (lo, hi): (P, P), (w, h): (f32, f32), cx: &mut App) -> Scope {
         let bar_h = style::el("shot_overlay.toolbar", cx).px("height").as_f32();
         let style_h = style::el("shot_overlay.style_bar", cx).px("height").as_f32();
         let styled = self.tool.is_some_and(|t| t != Tool::Mosaic);
@@ -519,6 +524,7 @@ impl Overlay {
             .collect();
         let mut scope = scope
             .var("toolbar", true)
+            .var("keep", super::keeps(cx))
             .var("bar_top", f64::from(bar_y))
             .var("bar_right", f64::from(right))
             .list("tools", tools)

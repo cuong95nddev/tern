@@ -356,16 +356,16 @@ impl Ticker {
                 // session file, when it runs.
                 let found = cx
                     .background_spawn(async move {
-                        let sessions = tern_term::status::claude_sessions_dir();
+                        let sessions = tern_term::status::claude_sessions_dirs();
                         fgs.into_iter()
                             .map(|(f, shell, agent)| {
                                 let Some(f) = f else { return Default::default() };
                                 let programs = f.programs();
                                 let shells = if agent { f.agent_shells() } else { Vec::new() };
-                                let claude = (Agent::detect(&programs) == Some(Agent::Claude))
-                                    .then(|| sessions.as_deref().zip(f.pid()))
-                                    .flatten()
-                                    .and_then(|(dir, pid)| tern_term::status::claude_session_status(dir, pid));
+                                let claude = (Agent::detect(&programs) == Some(Agent::Claude)).then(|| f.pid()).flatten().and_then(|pid| {
+                                    let dir = sessions.iter().find(|d| d.join(format!("{pid}.json")).is_file())?;
+                                    tern_term::status::claude_session_status(dir, pid)
+                                });
                                 (programs, shell.then(|| f.cwd()).flatten(), shells, claude)
                             })
                             .collect::<Vec<_>>()

@@ -529,22 +529,22 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "shells.empty", about: "What the shells panel shows without shells", groups: &[EMPTY] },
     Element {
         name: "usage",
-        about: "The usage panel: how much of each plan is used, as a status bar",
-        groups: &[PANEL, &[("start_height", Len, "64")], IMAGE],
-    },
-    Element { name: "usage.header", about: "The usage panel's title bar", groups: &[HEADER] },
-    simple!("usage.header.button", "A button in the usage panel's title bar"),
-    Element { name: "usage.empty", about: "What the usage panel shows without numbers: why", groups: &[EMPTY] },
-    Element {
-        name: "usage.list",
-        about: "The usage panel's services in one row: those that don't fit are hidden",
-        groups: &[&[("height", Len, "$row_height"), ("margin_x", Len, "8"), ("margin_y", Len, "4"), ("gap", Len, "4")]],
+        about: "The bar under the window's panes: the Claude account the shown tab runs as (the first one turned on when \
+                it isn't a Claude tab) and how much of its plan is used",
+        groups: &[&[
+            ("height", Len, "26"),
+            ("padding_x", Len, "6"),
+            ("gap", Len, "4"),
+            ("background", Color, "$bar_background"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+        ]],
     },
     Element {
         name: "usage.item",
-        about: "A service in the usage panel: its icon and limits. Hovering it shows `usage.card`",
+        about: "The account in the usage bar: its name and limits. Clicking it opens `usage.card`",
         groups: &[&[
-            ("height", Len, "$row_height"),
+            ("height", Len, "22"),
             ("padding_x", Len, "6"),
             ("gap", Len, "6"),
             ("radius", Len, "$radius"),
@@ -554,6 +554,7 @@ pub const ELEMENTS: &[Element] = &[
             ("hover_background", Color, "$row_hover"),
         ]],
     },
+    Element { name: "usage.item.name", about: "An account's name in the usage bar", groups: &[&[("font_weight", Num, "600")]] },
     Element {
         name: "usage.item.limits",
         about: "A service's limits in the usage panel, in one row: those that don't fit are hidden",
@@ -589,9 +590,10 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element {
         name: "usage.card",
-        about: "What hovering a service in the usage panel shows: the plan, every limit with its pace, extra usage, links",
+        about: "What clicking the usage bar's account opens: its plan, every limit with its pace, extra usage, links, and every \
+                account, to switch to, open a tab as, rename, turn on or off, add or remove",
         groups: &[&[
-            ("width", Len, "300"),
+            ("width", Len, "340"),
             ("padding_y", Len, "4"),
             ("radius", Len, "$radius_lg"),
             ("background", Color, "$popover"),
@@ -623,7 +625,23 @@ pub const ELEMENTS: &[Element] = &[
         about: "Why the usage card's numbers could not be read",
         groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$danger")]],
     },
-    simple!("usage.card.link", "A link at the bottom of the usage card (refresh, dashboard, status page)"),
+    simple!("usage.card.link", "A link in the usage card (refresh, dashboard, status page, add account)"),
+    Element {
+        name: "usage.card.account",
+        about: "An account in the usage card: clicking it runs the shown Claude tab as it (opens a Claude tab as it when \
+                the shown tab isn't one); `shown` is the one the card is about",
+        groups: &[&[
+            ("padding_x", Len, "6"),
+            ("padding_y", Len, "4"),
+            ("gap", Len, "6"),
+            ("radius", Len, "$radius"),
+            ("hover_background", Color, "$row_hover"),
+            ("shown_background", Color, "$row_selected"),
+        ]],
+    },
+    simple!("usage.card.switch", "Turns an account in the usage card on or off: an account turned off is dimmed and \
+                can't be run as"),
+    Element { name: "usage.card.account.name", about: "An account's name in the usage card", groups: &[&[("font_weight", Num, "600")]] },
     Element {
         name: "system",
         about: "The system panel: how busy the machine is (CPU and memory), as a status bar",
@@ -1071,6 +1089,33 @@ pub const ELEMENTS: &[Element] = &[
         groups: &[&[("padding_top", Len, "0.5rem"), ("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
     },
     Element { name: "dialog.footer", about: "A dialog's buttons", groups: &[&[("gap", Len, "0.5rem")]] },
+    Element {
+        name: "dialog.pick_account.list",
+        about: "The accounts a new Claude tab may run as, in the dialog that asks which",
+        groups: &[&[("gap", Len, "2")]],
+    },
+    Element {
+        name: "dialog.pick_account.item",
+        about: "An account to run a new Claude tab as: its key, name, email and usage",
+        groups: &[&[
+            ("padding_x", Len, "8"),
+            ("padding_y", Len, "6"),
+            ("gap", Len, "10"),
+            ("radius", Len, "$radius"),
+            ("hover_background", Color, "$row_hover"),
+        ]],
+    },
+    Element {
+        name: "dialog.pick_account.key",
+        about: "The number key that picks an account",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element { name: "dialog.pick_account.name", about: "An account's name", groups: &[&[("font_weight", Num, "600")]] },
+    Element {
+        name: "dialog.pick_account.detail",
+        about: "An account's email and usage",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
     Element {
         name: "palette",
         about: "The command palette (⌘⇧P), Go to File (⌘P) and Search in Files (⌘⇧F), in a dialog `dialog_width` wide",

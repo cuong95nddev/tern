@@ -34,7 +34,6 @@
                 "max": 480,
                 "children": [
                   { "part": "agents" },
-                  { "part": "usage", "when": "usage", "fixed": true, "size": "$usage.start_height", "min": 40, "max": 600 },
                   { "part": "system", "when": "system", "fixed": true, "size": "$system.start_height", "min": 40, "max": 600 }
                 ]
               },
@@ -60,7 +59,8 @@
             ]
           }
         ]
-      }
+      },
+      { "slot": "usage" }
     ]
   },
   "panel_header": {
@@ -86,7 +86,6 @@
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "shells.header": { "use": "panel_header", "element": "shells.header" },
-  "usage.header": { "use": "panel_header", "element": "usage.header" },
   "system.header": { "use": "panel_header", "element": "system.header" },
   "explorer.header.buttons": {
     "layout": "row",
@@ -198,28 +197,6 @@
         "size": "xsmall",
         "icon": "close",
         "tooltip": "Hide Shells"
-      }
-    ]
-  },
-  "usage.header.buttons": {
-    "layout": "row",
-    "align": "center",
-    "style": { "gap": "$usage.header.gap" },
-    "children": [
-      {
-        "button": "refresh",
-        "element": "usage.header.button",
-        "size": "xsmall",
-        "icon": "refresh-cw",
-        "loading": "reading",
-        "tooltip": "Refresh"
-      },
-      {
-        "button": "hide",
-        "element": "usage.header.button",
-        "size": "xsmall",
-        "icon": "close",
-        "tooltip": "Hide Usage"
       }
     ]
   },
@@ -899,6 +876,7 @@
         "align": "center",
         "shrink": 0,
         "style": { "text": "{status_color}" },
+        "states": { "hover:stab": { "opacity": 0 } },
         "children": [
           { "when": "status_icon", "icon": "{status_icon}", "style": { "width": 12, "height": 12 } },
           { "text": "{status}" }
@@ -906,8 +884,10 @@
       },
       {
         "when": "buttons",
-        "shrink": 0,
-        "style": { "opacity": 0 },
+        "position": { "top": 0, "right": 0, "bottom": 0 },
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_right": 4, "opacity": 0 },
         "states": { "hover:stab": { "opacity": 1 } },
         "children": [
           {
@@ -1209,6 +1189,29 @@
       { "button": "revoke", "variant": "outline", "size": "small", "label": "Revoke", "tooltip": "Unpair this device", "disabled": "busy" }
     ]
   },
+  "editor.wrap": {
+    "layout": "row",
+    "align": "center",
+    "children": [
+      {
+        "when": "wrap",
+        "button": "wrap",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "selected": true,
+        "icon": "text-wrap",
+        "tooltip": "Word wrap: on ({wrap_key})"
+      },
+      {
+        "when": "!wrap",
+        "button": "wrap",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "icon": "text-wrap",
+        "tooltip": "Word wrap: off ({wrap_key})"
+      }
+    ]
+  },
   "file_header": {
     "element": "file_header",
     "layout": "row",
@@ -1222,25 +1225,40 @@
         "element": "file_header.button",
         "size": "xsmall",
         "selected": true,
-        "label": "Edit",
-        "tooltip": "Toggle Markdown preview ({preview_key})"
+        "icon": "eye",
+        "tooltip": "Markdown preview: on ({preview_key})"
       },
       {
         "when": "markdown && !preview",
         "button": "preview",
         "element": "file_header.button",
         "size": "xsmall",
-        "label": "Preview",
-        "tooltip": "Toggle Markdown preview ({preview_key})"
+        "icon": "eye",
+        "tooltip": "Markdown preview: off ({preview_key})"
       },
-      { "when": "!image && diff && !markdown", "button": "diff", "element": "file_header.button", "size": "xsmall", "selected": true, "label": "Edit" },
-      { "when": "!image && diff && markdown", "button": "diff", "element": "file_header.button", "size": "xsmall", "selected": true, "label": "Diff" },
-      { "when": "!image && !diff", "button": "diff", "element": "file_header.button", "size": "xsmall", "label": "Diff" },
+      {
+        "when": "!image && diff",
+        "button": "diff",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "selected": true,
+        "icon": "file-diff",
+        "tooltip": "Diff vs HEAD: on ({diff_key})"
+      },
+      {
+        "when": "!image && !diff",
+        "button": "diff",
+        "element": "file_header.button",
+        "size": "xsmall",
+        "icon": "file-diff",
+        "tooltip": "Diff vs HEAD: off ({diff_key})"
+      },
+      { "when": "!image && !diff && !preview", "use": "editor.wrap" },
       {
         "button": "open_external",
         "element": "file_header.button",
         "size": "xsmall",
-        "label": "VS Code",
+        "icon": "square-arrow-out-up-right",
         "tooltip": "Open in VS Code ({open_external_key})"
       }
     ]
@@ -1411,6 +1429,15 @@
     "fill": true,
     "style": { "background": "$background" },
     "children": [
+      {
+        "element": "file_header",
+        "layout": "row",
+        "align": "center",
+        "children": [
+          { "grow": 1, "truncate": true, "style": { "text_transform": "$file_header.text_transform" }, "text": "{name}" },
+          { "use": "editor.wrap" }
+        ]
+      },
       { "when": "message", "style": { "padding_x": 8, "padding_y": 4, "font_size": "$text_sm", "text": "$danger" }, "text": "{message}" },
       { "grow": 1, "slot": "editor" }
     ]
@@ -1752,21 +1779,10 @@
     "children": [{ "text": "No shells running" }, { "style": { "font_size": "$text_xs" }, "text": "Commands agents run show here" }]
   },
   "usage": {
-    "frame": "panel",
     "element": "usage",
-    "fill": true,
-    "children": [
-      { "slot": "header" },
-      { "when": "!ready", "use": "usage.empty" },
-      { "when": "ready", "each": "items", "element": "usage.list", "layout": "fit", "item": { "use": "usage.item" } }
-    ]
-  },
-  "usage.empty": {
-    "element": "usage.empty",
-    "grow": 1,
+    "layout": "row",
     "align": "center",
-    "justify": "center",
-    "children": [{ "wrap": true, "text": "{message}" }]
+    "children": [{ "use": "usage.item" }, { "grow": 1 }]
   },
   "usage.item": {
     "frame": "item",
@@ -1774,9 +1790,11 @@
     "layout": "row",
     "align": "center",
     "style": { "min_width": 0 },
-    "states": { "hover": { "background": "$usage.item.hover_background" } },
+    "states": { "open": { "background": "$usage.item.hover_background" }, "hover": { "background": "$usage.item.hover_background" } },
     "children": [
       { "slot": "icon", "shrink": 0 },
+      { "nowrap": true, "element": "usage.item.name", "text": "{name}" },
+      { "when": "note", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "{note}" },
       { "each": "limits", "element": "usage.item.limits", "layout": "fit", "item": { "use": "usage.item.limit" } }
     ]
   },
@@ -1852,7 +1870,53 @@
           { "button": "dashboard", "element": "usage.card.link", "size": "small", "icon": "chart-pie", "label": "Usage Dashboard" },
           { "button": "status", "element": "usage.card.link", "size": "small", "icon": "external-link", "label": "Status Page" }
         ]
+      },
+      {
+        "element": "usage.card.section",
+        "style": { "border_top_width": 1, "padding_x": 6, "gap": 2 },
+        "children": [
+          { "element": "usage.card.heading", "style": { "padding_x": 6 }, "text": "Claude Accounts" },
+          { "each": "accounts", "item": { "use": "usage.card.account" } },
+          { "layout": "row", "children": [{ "button": "add", "element": "usage.card.link", "size": "small", "icon": "user-plus", "label": "Add Account…" }] }
+        ]
       }
+    ]
+  },
+  "usage.card.account": {
+    "frame": "account",
+    "group": "uaccount",
+    "element": "usage.card.account",
+    "layout": "row",
+    "align": "center",
+    "states": {
+      "shown": { "background": "$usage.card.account.shown_background" },
+      "hover && !shown && active": { "background": "$usage.card.account.hover_background" }
+    },
+    "children": [
+      { "when": "shown", "icon": "check", "shrink": 0, "style": { "width": 14, "height": 14 } },
+      { "when": "!shown", "shrink": 0, "style": { "width": 14 } },
+      {
+        "grow": 1,
+        "style": { "min_width": 0 },
+        "states": { "!active": { "opacity": 0.5 } },
+        "children": [
+          { "truncate": true, "element": "usage.card.account.name", "text": "{name}" },
+          { "when": "detail", "truncate": true, "element": "usage.card.detail", "text": "{detail}" }
+        ]
+      },
+      {
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "style": { "opacity": 0 },
+        "states": { "hover:uaccount": { "opacity": 1 } },
+        "children": [
+          { "when": "active", "button": "new_tab", "size": "xsmall", "icon": "plus", "tooltip": "New Claude Tab" },
+          { "button": "rename", "size": "xsmall", "icon": "pencil", "tooltip": "Rename…" },
+          { "when": "removable", "button": "remove", "size": "xsmall", "icon": "trash", "tooltip": "Remove Account…" }
+        ]
+      },
+      { "switch": "enable", "element": "usage.card.switch", "tooltip": "{switch_tip}", "selected": "active", "disabled": "last" }
     ]
   },
   "usage.card.limit": {
@@ -2044,9 +2108,10 @@
       { "button": "redo", "size": "small", "icon": "shot-redo", "disabled": "!can_redo", "tooltip": "Redo ({redo_key})" },
       { "element": "shot.separator" },
       { "button": "cancel", "size": "small", "icon": "shot-close", "tooltip": "Cancel (Esc)" },
-      { "button": "copy", "size": "small", "icon": "shot-copy", "tooltip": "Copy ({copy_key})" },
+      { "when": "keep", "button": "copy", "size": "small", "icon": "shot-copy", "tooltip": "Copy ({copy_key})" },
       { "button": "save", "size": "small", "icon": "shot-save", "tooltip": "Save As… ({save_key})" },
-      { "button": "add", "variant": "primary", "size": "small", "icon": "shot-done", "label": "Add", "tooltip": "Add to the tray (↵)" }
+      { "when": "keep", "button": "add", "variant": "primary", "size": "small", "icon": "shot-done", "label": "Add", "tooltip": "Add to the tray (↵)" },
+      { "when": "!keep", "button": "copy", "variant": "primary", "size": "small", "icon": "shot-copy", "label": "Copy", "tooltip": "Copy (↵ or {copy_key})" }
     ]
   },
   "shot_overlay.style_bar": {
@@ -2327,7 +2392,12 @@
       { "slot": "thumb" },
       {
         "position": { "top": 1, "right": 1 },
-        "children": [{ "button": "remove", "variant": "secondary", "size": "xsmall", "icon": "shot-close", "tooltip": "Remove" }]
+        "layout": "row",
+        "style": { "gap": 1 },
+        "children": [
+          { "button": "copy", "variant": "secondary", "size": "xsmall", "icon": "shot-copy", "tooltip": "Copy" },
+          { "button": "remove", "variant": "secondary", "size": "xsmall", "icon": "shot-close", "tooltip": "Remove" }
+        ]
       }
     ]
   },
@@ -2374,6 +2444,19 @@
       { "button": "ok", "variant": "danger", "label": "Delete" }
     ]
   },
+  "dialog.remove_account": {
+    "element": "dialog.body",
+    "children": [{ "text": "Remove \"{name}\"? Its sign-in goes; its folder goes to the Trash. Conversations stay." }]
+  },
+  "dialog.remove_account.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "danger", "label": "Remove" }
+    ]
+  },
   "dialog.diff_preview": { "element": "dialog.body", "style": { "height": "{height}" }, "children": [{ "slot": "diff" }] },
   "dialog.diff_preview.footer": {
     "element": "dialog.footer",
@@ -2405,6 +2488,39 @@
     ]
   },
   "dialog.theme": { "element": "dialog.body", "children": [{ "slot": "list" }] },
+  "dialog.pick_account": {
+    "frame": "body",
+    "element": "dialog.body",
+    "children": [
+      { "element": "dialog.pick_account.list", "each": "accounts", "item": { "use": "dialog.pick_account.item" } },
+      { "when": "note", "element": "dialog.note", "text": "{note}" }
+    ]
+  },
+  "dialog.pick_account.item": {
+    "frame": "account",
+    "element": "dialog.pick_account.item",
+    "layout": "row",
+    "align": "center",
+    "states": { "hover": { "background": "$dialog.pick_account.item.hover_background" } },
+    "children": [
+      { "element": "dialog.pick_account.key", "text": "{key}" },
+      {
+        "grow": 1,
+        "style": { "min_width": 0 },
+        "children": [
+          { "truncate": true, "element": "dialog.pick_account.name", "text": "{name}" },
+          { "when": "detail", "truncate": true, "element": "dialog.pick_account.detail", "text": "{detail}" }
+        ]
+      },
+      { "when": "usage", "shrink": 0, "element": "dialog.pick_account.detail", "text": "{usage}" }
+    ]
+  },
+  "dialog.pick_account.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [{ "button": "cancel", "variant": "secondary", "label": "Cancel" }]
+  },
   "menu.explorer": {
     "children": [
       { "action": "file_tree::NewFile", "label": "New File…" },

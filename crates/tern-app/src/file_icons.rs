@@ -51,8 +51,11 @@ gpui_kit::assets::icon_assets!(
         SquareCheck,
         SquareMinus,
         Minimize2,
+        Pencil,
         StickyNote,
         TextWrap,
+        Trash,
+        UserPlus,
         WholeWord,
     ]
 );

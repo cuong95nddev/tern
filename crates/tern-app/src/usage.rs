@@ -1,15 +1,16 @@
-//! How much of the Claude plan's limits is used, read with Claude Code's own
-//! sign-in (the login keychain's `Claude Code-credentials`, else
-//! `~/.claude/.credentials.json`) from the endpoint behind its `/usage`.
-//! The endpoint isn't documented: an answer it doesn't recognize shows as
-//! an error rather than as numbers.
+//! How much of each active Claude account's plan limits is used, read with
+//! that account's Claude Code sign-in (its login keychain item, else its
+//! folder's `.credentials.json`; see [`crate::accounts`]) from the endpoint
+//! behind Claude Code's `/usage`. The endpoint isn't documented: an answer
+//! it doesn't recognize shows as an error rather than as numbers.
 //!
-//! One store for the app ([`Usage`]); the usage panels only draw it. It reads
-//! while a panel was drawn lately, every [`REFRESH`], and backs off when the
-//! service says no. The last answer and when to ask next are kept in the
-//! cache folder, shared by every Tern running, so a restart or a second
-//! Tern doesn't ask again before it is due.
+//! One store for the app ([`Usage`]); the usage bars only draw it. It reads
+//! while a bar was drawn lately, every [`REFRESH`] per account, and backs
+//! off when the service says no. Each account's last answer and when to
+//! ask next are kept in the cache folder, shared by every Tern running, so
+//! a restart or a second Tern doesn't ask again before it is due.
 
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -18,11 +19,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+use crate::accounts;
+
 const URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// The endpoint serves Claude Code's OAuth clients.
 const BETA: &str = "oauth-2025-04-20";
 const AGENT: &str = "claude-code/2.1.0";
-const KEYCHAIN: &str = "Claude Code-credentials";
 
 pub const DASHBOARD: &str = "https://claude.ai/settings/usage";
 pub const STATUS_PAGE: &str = "https://status.anthropic.com";
@@ -150,7 +152,8 @@ struct Cached {
 
 impl Cached {
     fn outcome(&self) -> Outcome {
-        let report = self.body.as_deref().and_then(|b| parse(b).ok()).map(|r| Report { plan: self.plan.clone(), email: self.email.clone(), ..r });
+        let report =
+            self.body.as_deref().and_then(|b| parse(b).ok()).map(|r| Report { plan: self.plan.clone(), email: self.email.clone(), ..r });
         Outcome {
             read_at: report.as_ref().map(|_| UNIX_EPOCH + Duration::from_secs(self.read_at)),
             report,
@@ -160,16 +163,26 @@ impl Cached {
     }
 }
 
-fn cache_path() -> PathBuf {
-    crate::dirs::cache().join("claude-usage.json")
+fn cache_path(account: &str) -> PathBuf {
+    match account {
+        accounts::DEFAULT => crate::dirs::cache().join("claude-usage.json"),
+        id => crate::dirs::cache().join(format!("claude-usage-{id}.json")),
+    }
 }
 
-fn load() -> Option<Cached> {
-    serde_json::from_slice(&std::fs::read(cache_path()).ok()?).ok()
+/// Deletes removed account `account`'s numbers.
+pub fn forget_cached(account: &str) {
+    if account != accounts::DEFAULT {
+        let _ = std::fs::remove_file(cache_path(account));
+    }
 }
 
-fn save(c: &Cached) {
-    let path = cache_path();
+fn load(account: &str) -> Option<Cached> {
+    serde_json::from_slice(&std::fs::read(cache_path(account)).ok()?).ok()
+}
+
+fn save(account: &str, c: &Cached) {
+    let path = cache_path(account);
     let Ok(text) = serde_json::to_vec(c) else { return };
     // Whole or not at all: another Tern may read it meanwhile.
     let tmp = path.with_extension(format!("json.{}", std::process::id()));
@@ -189,17 +202,43 @@ pub struct Usage(pub Entity<UsageStore>);
 impl Global for Usage {}
 
 pub struct UsageStore {
+    accounts: HashMap<String, AccountUsage>,
+    seen: Option<Instant>,
+    _task: Task<()>,
+}
+
+/// One account's numbers.
+pub struct AccountUsage {
     pub report: Option<Report>,
     /// Why the last read failed; the report, if any, is older.
     pub error: Option<String>,
     pub updated: Option<SystemTime>,
     pub reading: bool,
+    /// The service (or the cache) answered once: without numbers or an
+    /// error, the account isn't signed in.
+    pub checked: bool,
     due: Instant,
     /// A click asked for this read.
     forced: bool,
     manual: Option<Instant>,
-    seen: Option<Instant>,
-    _task: Task<()>,
+}
+
+impl AccountUsage {
+    /// The last answer at once, from the cache; the first read asks the
+    /// service only if it is due.
+    fn new(account: &str) -> Self {
+        let cached = load(account).map(|c| c.outcome());
+        Self {
+            report: cached.as_ref().and_then(|c| c.report.clone()),
+            error: cached.as_ref().and_then(|c| c.error.clone()),
+            checked: cached.is_some(),
+            updated: cached.and_then(|c| c.read_at),
+            reading: false,
+            due: Instant::now(),
+            forced: false,
+            manual: None,
+        }
+    }
 }
 
 /// The usage store, made on first use.
@@ -217,18 +256,33 @@ impl UsageStore {
         let task = cx.spawn(async move |this, cx| {
             loop {
                 let go = this.update(cx, |this, cx| {
-                    let go = this.should_read(Instant::now()).then_some(this.forced);
-                    if go.is_some() {
-                        this.reading = true;
-                        this.forced = false;
-                        cx.notify();
+                    let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
+                    let now = Instant::now();
+                    let looked = this.seen.is_some_and(|s| now.duration_since(s) < UNSEEN);
+                    // One account a tick: the service is asked one at a time.
+                    // One a click asked for first, then the longest due.
+                    if !looked {
+                        return None;
                     }
-                    go
+                    let id = active
+                        .into_iter()
+                        .filter_map(|id| {
+                            let a = this.account(&id);
+                            a.should_read(now).then_some(((a.forced, std::cmp::Reverse(a.due)), id))
+                        })
+                        .max_by(|a, b| a.0.cmp(&b.0))?
+                        .1;
+                    let a = this.account(&id);
+                    a.reading = true;
+                    let forced = std::mem::take(&mut a.forced);
+                    cx.notify();
+                    Some((id, forced))
                 });
                 match go {
-                    Ok(Some(forced)) => {
-                        let outcome = cx.background_executor().spawn(async move { read(forced) }).await;
-                        if this.update(cx, |this, cx| this.take(outcome, cx)).is_err() {
+                    Ok(Some((id, forced))) => {
+                        let account = id.clone();
+                        let outcome = cx.background_executor().spawn(async move { read(&account, forced) }).await;
+                        if this.update(cx, |this, cx| this.take(&id, outcome, cx)).is_err() {
                             break;
                         }
                     },
@@ -238,65 +292,72 @@ impl UsageStore {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
         });
-        // The last answer at once, from the cache; the first read asks the
-        // service only if it is due.
-        let cached = load().map(|c| c.outcome());
-        Self {
-            report: cached.as_ref().and_then(|c| c.report.clone()),
-            error: cached.as_ref().and_then(|c| c.error.clone()),
-            updated: cached.and_then(|c| c.read_at),
-            reading: false,
-            due: Instant::now(),
-            forced: false,
-            manual: None,
-            seen: None,
-            _task: task,
-        }
+        Self { accounts: HashMap::new(), seen: None, _task: task }
     }
 
-    fn should_read(&self, now: Instant) -> bool {
-        !self.reading && now >= self.due && self.seen.is_some_and(|s| now.duration_since(s) < UNSEEN)
+    fn account(&mut self, id: &str) -> &mut AccountUsage {
+        self.accounts.entry(id.to_owned()).or_insert_with(|| AccountUsage::new(id))
     }
 
-    /// A panel shows the numbers: keep them fresh.
+    /// Drops removed account `id`'s numbers.
+    pub fn forget(&mut self, id: &str) {
+        self.accounts.remove(id);
+    }
+
+    /// Account `id`'s numbers, read from the cache the first time.
+    pub fn get(&mut self, id: &str) -> &AccountUsage {
+        self.account(id)
+    }
+
+    /// A bar shows the numbers: keep them fresh.
     pub fn seen(&mut self) {
         self.seen = Some(Instant::now());
     }
 
-    /// Read now, unless a click just did (the service's own limits and
-    /// backoff still hold: see [`read`]).
-    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+    /// Read account `id` now, unless a click just did (the service's own
+    /// limits and backoff still hold: see [`read`]).
+    pub fn refresh(&mut self, id: &str, cx: &mut Context<Self>) {
         let now = Instant::now();
-        if self.manual.is_some_and(|m| now.duration_since(m) < MANUAL_SPACING) {
+        self.seen = Some(now);
+        let a = self.account(id);
+        if a.manual.is_some_and(|m| now.duration_since(m) < MANUAL_SPACING) {
             return;
         }
-        self.manual = Some(now);
-        self.forced = true;
-        self.due = now;
-        self.seen = Some(now);
+        a.manual = Some(now);
+        a.forced = true;
+        a.due = now;
         cx.notify();
     }
 
-    fn take(&mut self, o: Outcome, cx: &mut Context<Self>) {
-        self.reading = false;
-        self.report = o.report;
-        self.error = o.error;
-        self.updated = o.read_at;
+    fn take(&mut self, id: &str, o: Outcome, cx: &mut Context<Self>) {
+        // Removed meanwhile.
+        let Some(a) = self.accounts.get_mut(id) else { return };
+        a.reading = false;
+        a.checked = true;
+        a.report = o.report;
+        a.error = o.error;
+        a.updated = o.read_at;
         let wait = o.next_at.duration_since(SystemTime::now()).unwrap_or_default();
         // Not before the next tick: a cache another Tern keeps stale must
         // not make this one spin.
-        self.due = Instant::now() + wait.max(MANUAL_SPACING);
+        a.due = Instant::now() + wait.max(MANUAL_SPACING);
         cx.notify();
     }
 }
 
-/// Reads the usage once, blocking. The service is asked only when the
-/// cache (shared with other Terns) says it is due; a click (`forced`) asks
-/// sooner, but not within [`FORCED_FRESH`] of the last answer nor while
-/// the service said to wait.
-fn read(forced: bool) -> Outcome {
+impl AccountUsage {
+    fn should_read(&self, now: Instant) -> bool {
+        !self.reading && now >= self.due
+    }
+}
+
+/// Reads account `account`'s usage once, blocking. The service is asked
+/// only when the cache (shared with other Terns) says it is due; a click
+/// (`forced`) asks sooner, but not within [`FORCED_FRESH`] of the last
+/// answer nor while the service said to wait.
+fn read(account: &str, forced: bool) -> Outcome {
     let now = SystemTime::now();
-    let cached = load().unwrap_or_default();
+    let cached = load(account).unwrap_or_default();
     let next_at = UNIX_EPOCH + Duration::from_secs(cached.next_at);
     let fresh = UNIX_EPOCH + Duration::from_secs(cached.read_at) + FORCED_FRESH > now;
     let waiting = cached.error.is_some() && next_at > now;
@@ -304,7 +365,7 @@ fn read(forced: bool) -> Outcome {
         return cached.outcome();
     }
     let mut c = cached;
-    let result = ask();
+    let result = ask(account);
     let now = SystemTime::now();
     let wait = match result {
         Ask::Done { body, plan, email } => {
@@ -330,14 +391,18 @@ fn read(forced: bool) -> Outcome {
         },
     };
     c.next_at = secs(now + wait);
-    save(&c);
+    save(account, &c);
     c.outcome()
 }
 
 /// What the service answered.
 enum Ask {
-    Done { body: String, plan: Option<String>, email: Option<String> },
-    /// No Claude Code sign-in on this machine (or an API-key one).
+    Done {
+        body: String,
+        plan: Option<String>,
+        email: Option<String>,
+    },
+    /// The account has no Claude Code sign-in (or an API-key one).
     SignedOut,
     RateLimited,
     /// The service refused the sign-in (it expired; Claude Code renews it
@@ -346,9 +411,9 @@ enum Ask {
     Failed(String),
 }
 
-/// Asks the service, blocking: the sign-in, then the endpoint.
-fn ask() -> Ask {
-    let Some(credentials) = credentials() else { return Ask::SignedOut };
+/// Asks the service, blocking: the account's sign-in, then the endpoint.
+fn ask(account: &str) -> Ask {
+    let Some(credentials) = credentials(account) else { return Ask::SignedOut };
     let Some(oauth) = credentials.claude_ai_oauth else { return Ask::SignedOut };
     let Some(token) = oauth.access_token.filter(|t| !t.is_empty()) else { return Ask::SignedOut };
     let (status, body) = match get(&token) {
@@ -361,7 +426,7 @@ fn ask() -> Ask {
             Ok(_) => Ask::Done {
                 body,
                 plan: plan(oauth.subscription_type.as_deref(), oauth.rate_limit_tier.as_deref()),
-                email: email(),
+                email: accounts::email(account),
             },
             Err(e) => Ask::Failed(e),
         },
@@ -385,29 +450,23 @@ struct OAuth {
     rate_limit_tier: Option<String>,
 }
 
-fn claude_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| dirs_home().map(|h| h.join(".claude")))
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Claude Code's sign-in: the keychain on a Mac, else its credentials file.
-fn credentials() -> Option<Credentials> {
-    let from_file = || std::fs::read(claude_dir()?.join(".credentials.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    keychain().or_else(from_file)
+/// Account `account`'s Claude Code sign-in: its keychain item on a Mac,
+/// else its credentials file.
+fn credentials(account: &str) -> Option<Credentials> {
+    let from_file =
+        || std::fs::read(accounts::claude_dir(account)?.join(".credentials.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    keychain(&accounts::keychain_service(account)).or_else(from_file)
 }
 
 /// Claude Code keeps its sign-in under the user's account name. Asked by
 /// service alone, `security` may answer with another account's item first
 /// (one `sudo claude` left under `root`), so the user's own is asked first.
 #[cfg(target_os = "macos")]
-fn keychain() -> Option<Credentials> {
+fn keychain(service: &str) -> Option<Credentials> {
     let user = std::env::var("USER").ok();
     [user.as_deref(), None].into_iter().find_map(|account| {
         let mut c = Command::new("/usr/bin/security");
-        c.args(["find-generic-password", "-s", KEYCHAIN]);
+        c.args(["find-generic-password", "-s", service]);
         if let Some(a) = account {
             c.args(["-a", a]);
         }
@@ -419,18 +478,8 @@ fn keychain() -> Option<Credentials> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain() -> Option<Credentials> {
+fn keychain(_service: &str) -> Option<Credentials> {
     None
-}
-
-/// The account's email, from Claude Code's settings.
-fn email() -> Option<String> {
-    let mut paths: Vec<PathBuf> = claude_dir().map(|d| d.join(".claude.json")).into_iter().collect();
-    paths.extend(dirs_home().map(|h| h.join(".claude.json")));
-    paths.iter().find_map(|p| {
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
-        v["oauthAccount"]["emailAddress"].as_str().map(str::to_owned)
-    })
 }
 
 /// GETs the endpoint with the system's curl. The token goes in on stdin, so

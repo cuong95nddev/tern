@@ -4,6 +4,8 @@
 //! is attached).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -33,21 +35,53 @@ pub fn next_status(prev: ActivityStatus, sig: &OscSignal) -> Option<ActivityStat
 }
 
 /// Where Claude Code keeps a file per running process, `<pid>.json`, with
-/// its `status` (`busy`, `shell`, `waiting`, `idle`).
-pub fn claude_sessions_dir() -> Option<PathBuf> {
-    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    if let Some(d) = var("CLAUDE_CONFIG_DIR") {
-        return Some(d.join("sessions"));
+/// its `status` (`busy`, `shell`, `waiting`, `idle`): its own folder's
+/// `sessions`, and those of the Claude accounts Tern added (each runs
+/// with a `CLAUDE_CONFIG_DIR` of its own).
+pub fn claude_sessions_dirs() -> Vec<PathBuf> {
+    // Asked per tab per tick: the accounts folder is listed again only
+    // once the last listing is this old.
+    const TTL: Duration = Duration::from_secs(2);
+    static LISTED: Mutex<Option<(Instant, Vec<PathBuf>)>> = Mutex::new(None);
+    let mut slot = LISTED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, dirs)) = &*slot
+        && at.elapsed() < TTL
+    {
+        return dirs.clone();
     }
-    let home = var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })?;
-    Some(home.join(".claude").join("sessions"))
+    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None });
+    let own = var("CLAUDE_CONFIG_DIR").or_else(|| Some(home?.join(".claude")));
+    let mut dirs: Vec<PathBuf> = own.map(|d| d.join("sessions")).into_iter().collect();
+    if let Some(Ok(entries)) = ACCOUNTS_DIR.get().map(std::fs::read_dir) {
+        dirs.extend(entries.flatten().map(|e| e.path().join("sessions")));
+    }
+    *slot = Some((Instant::now(), dirs.clone()));
+    dirs
+}
+
+/// The folder the Claude accounts Tern added live in, one folder each
+/// (see [`claude_sessions_dirs`]); set once at start.
+static ACCOUNTS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Sets where the Claude accounts Tern added live; set once, before any
+/// [`claude_sessions_dirs`].
+pub fn set_claude_accounts_dir(dir: PathBuf) {
+    let _ = ACCOUNTS_DIR.set(dir);
+}
+
+/// The folder (of [`claude_sessions_dirs`]) with Claude Code process
+/// `pid`'s file.
+pub fn claude_sessions_dir_of(pid: u32) -> Option<PathBuf> {
+    claude_sessions_dirs().into_iter().find(|d| d.join(format!("{pid}.json")).is_file())
 }
 
 /// What Claude Code process `pid` is doing, from its file in `dir` (see
-/// [`claude_sessions_dir`]): richer than its OSC 7501 reports, which say
-/// done while it waits for a background shell (`shell`) and nothing at all
-/// while it shows a session parked on a background job. `None` when there
-/// is no file or no status it knows.
+/// [`claude_sessions_dir_of`]): richer than its OSC 7501 reports, which say
+/// nothing at all while it shows a session parked on a background job.
+/// `shell` is idle with a background shell still running (a dev server, a
+/// watcher): nothing waits on it, so it is not working. `None` when there is
+/// no file or no status it knows.
 pub fn claude_session_status(dir: &Path, pid: u32) -> Option<ActivityStatus> {
     let mut file = read_json(&dir.join(format!("{pid}.json")))?;
     // Parked: the conversation runs in a background job's process.
@@ -55,9 +89,9 @@ pub fn claude_session_status(dir: &Path, pid: u32) -> Option<ActivityStatus> {
         file = job_file(dir, &job)?;
     }
     Some(match file.get("status")?.as_str()? {
-        "busy" | "shell" => ActivityStatus::Working,
+        "busy" => ActivityStatus::Working,
         "waiting" => ActivityStatus::Blocked,
-        "idle" => ActivityStatus::None,
+        "idle" | "shell" => ActivityStatus::None,
         _ => return None,
     })
 }
@@ -128,10 +162,10 @@ mod tests {
         write(5, r#"{"pid":5,"status":"later"}"#);
         // Parked on a background job: the job's status counts, not its own.
         write(6, r#"{"pid":6,"status":"idle","parkedJobId":"j1"}"#);
-        write(7, r#"{"pid":7,"kind":"bg","jobId":"j1","status":"shell"}"#);
+        write(7, r#"{"pid":7,"kind":"bg","jobId":"j1","status":"busy"}"#);
         write(8, r#"{"pid":8,"status":"idle","parkedJobId":"gone"}"#);
         assert_eq!(claude_session_status(&dir, 1), Some(Working));
-        assert_eq!(claude_session_status(&dir, 2), Some(Working));
+        assert_eq!(claude_session_status(&dir, 2), Some(None));
         assert_eq!(claude_session_status(&dir, 3), Some(Blocked));
         assert_eq!(claude_session_status(&dir, 4), Some(None));
         assert_eq!(claude_session_status(&dir, 5), Option::None);

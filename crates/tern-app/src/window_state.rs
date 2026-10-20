@@ -264,8 +264,17 @@ pub fn toggle_flag(args: &str, flag: &str) -> String {
 /// as new processes, and a Claude tab resumes its conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SavedTab {
-    Claude { name: Option<String>, session: Option<String>, mux: Option<u64> },
-    Shell { name: Option<String>, mux: Option<u64> },
+    /// `account`: the Claude account it runs as; `None` is the default one.
+    Claude {
+        name: Option<String>,
+        session: Option<String>,
+        mux: Option<u64>,
+        account: Option<String>,
+    },
+    Shell {
+        name: Option<String>,
+        mux: Option<u64>,
+    },
     File(PathBuf),
     Diff(PathBuf),
     Scratch(PathBuf),
@@ -391,8 +400,11 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
             for (i, tab) in ws.tabs.iter().enumerate() {
                 let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
                 let line = match tab {
-                    SavedTab::Claude { name, session, mux } => {
-                        format!("claude\t{}\t{}\t{}", opt(session), opt(name), mux.map(|m| m.to_string()).unwrap_or_default())
+                    SavedTab::Claude { name, session, mux, account } => {
+                        let mux = mux.map(|m| m.to_string()).unwrap_or_default();
+                        // The field after `mux` is a one-workspace build's folder.
+                        let account = account.as_ref().map(|a| format!("\t\t{}", field(a))).unwrap_or_default();
+                        format!("claude\t{}\t{}\t{mux}{account}", opt(session), opt(name))
                     },
                     SavedTab::Shell { name, mux } => format!("shell\t{}\t{}", opt(name), mux.map(|m| m.to_string()).unwrap_or_default()),
                     SavedTab::File(p) => format!("file\t{}", path(p)),
@@ -418,7 +430,9 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "claude" => {
             let session = next();
             let name = next();
-            SavedTab::Claude { session, name, mux: next().and_then(|m| m.parse().ok()) }
+            let mux = next().and_then(|m| m.parse().ok());
+            let _folder = next();
+            SavedTab::Claude { session, name, mux, account: next() }
         },
         "shell" => {
             let name = next();
@@ -457,10 +471,7 @@ struct Merged {
 /// diff), else to the first. Tab groups follow their tabs; a split center
 /// does not come back. Also returns the index of the one with the active tab.
 fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usize) {
-    let mut out: Vec<SavedWorkspace> = std::iter::once(ws.folder.clone())
-        .chain(merged.folders)
-        .map(SavedWorkspace::fresh)
-        .collect();
+    let mut out: Vec<SavedWorkspace> = std::iter::once(ws.folder.clone()).chain(merged.folders).map(SavedWorkspace::fresh).collect();
     let folders: Vec<PathBuf> = out.iter().map(|w| w.folder.clone()).collect();
     let home = |p: &std::path::Path| {
         (0..folders.len()).filter(|&i| p.starts_with(&folders[i])).max_by_key(|&i| folders[i].components().count()).unwrap_or(0)
@@ -618,7 +629,10 @@ pub fn load_session() -> (Vec<SavedWindow>, SavedPanels) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SavedGroup, SavedPanels, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag, toggle_flag};
+    use super::{
+        SavedGroup, SavedPanels, SavedTab, SavedWindow, SavedWorkspace, decode, decode_session, encode, encode_session, has_flag,
+        toggle_flag,
+    };
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
     use std::path::PathBuf;
 
@@ -657,8 +671,8 @@ mod tests {
                     SavedWorkspace {
                         folder: PathBuf::from("/a b/c"),
                         tabs: vec![
-                            SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42) },
-                            SavedTab::Claude { name: Some("api work".into()), session: None, mux: None },
+                            SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None },
+                            SavedTab::Claude { name: Some("api work".into()), session: None, mux: None, account: Some("account-2".into()) },
                             SavedTab::Shell { name: None, mux: Some(7) },
                             SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
                             SavedTab::Diff(PathBuf::from("/a b/c/d.rs")),
@@ -683,10 +697,8 @@ mod tests {
             },
             SavedWindow { placement: None, workspaces: vec![], active: 0 },
         ];
-        let panels = SavedPanels {
-            hidden: vec!["explorer".into(), "scratches".into()],
-            arrangements: vec![("k".into(), "left=explorer".into())],
-        };
+        let panels =
+            SavedPanels { hidden: vec!["explorer".into(), "scratches".into()], arrangements: vec![("k".into(), "left=explorer".into())] };
         assert_eq!(decode_session(&encode_session(&windows, &panels)), (windows, panels));
     }
 
@@ -704,7 +716,7 @@ mod tests {
             a.tabs,
             [SavedTab::Shell { name: None, mux: Some(7) }, SavedTab::Scratch("/s/n.txt".into()), SavedTab::Shell { name: None, mux: None }]
         );
-        assert_eq!(b.tabs, [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42) }]);
+        assert_eq!(b.tabs, [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None }]);
         assert_eq!(sub.tabs, [SavedTab::File("/b/sub/x.rs".into())]);
         assert_eq!((&a.tab_groups[..], &b.tab_groups[..], &sub.tab_groups[..]), (&[None, None, None][..], &[Some(0)][..], &[Some(0)][..]));
         assert!(a.groups.is_empty() && sub.groups[0].name == "api");
@@ -769,7 +781,7 @@ mod tests {
         assert_eq!(
             w[0].workspaces[0].tabs,
             vec![
-                SavedTab::Claude { name: Some("name".into()), session: Some("s-1".into()), mux: None },
+                SavedTab::Claude { name: Some("name".into()), session: Some("s-1".into()), mux: None, account: None },
                 SavedTab::Shell { name: None, mux: None },
                 SavedTab::Shell { name: Some("n".into()), mux: None },
             ]
