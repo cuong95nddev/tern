@@ -38,9 +38,6 @@ impl ContextUse {
         let percent = w.get("used_percentage").and_then(serde_json::Value::as_f64).unwrap_or(0.);
         Some(Self { percent: percent.clamp(0., 100.) as f32, size })
     }
-
-    /// From this percent on, the ring warns that the window is filling up.
-    const HIGH: f32 = 80.;
 }
 
 /// The size of a context window, short: `200k`, `1M`.
@@ -52,61 +49,86 @@ pub fn tokens_label(n: u64) -> String {
     }
 }
 
-/// An agent row's ring (template `agents.tab`), as Harp's sidebar draws its
-/// states: how full its context window is (`ring`, empty when unknown),
-/// turning a step each second while it works (`spin`), in amber with a dot
-/// while it waits for you, with a tick once its turn is done; `time`, how
-/// long it has been working or since its turn ended; `tip`, all of it in
-/// words.
+/// An agent row's state icon (template `agents.tab`), as Harp's sidebar
+/// draws it: an arc turning on its track while it works (`working`), an amber
+/// ring around a dot while it waits for you (`needs`), a filled disc with the
+/// tick cut out and the title in bold once its turn is done (`done`), a quiet
+/// tick once its tab has been seen (`seen`), an empty ring before its first
+/// turn (`pending`), an amber dot after a bell rang in it unseen (`rang`); a
+/// dot on its corner once its turn is done while it left shells running in
+/// the background (`shell_dot`). `time`, how long it has been working or
+/// since its turn ended; `tip`, all of it in words, with how full its
+/// context window is.
 pub fn ring_vars(
     scope: crate::template::Scope,
-    status: ActivityStatus,
+    view: &crate::terminal_view::TerminalView,
     rang: bool,
-    since: std::time::Duration,
     context: Option<ContextUse>,
     theme: &Theme,
 ) -> crate::template::Scope {
+    let (status, shells) = (view.status(), view.shells().len());
+    let seen = view.seen_done() && status == ActivityStatus::None;
+    let since = view.status_since().elapsed();
     let (word, _, _) = status_look(status, rang, since, theme);
-    let (color, glyph) = match (status, rang) {
-        (ActivityStatus::Working, _) => (theme.foreground, None),
-        (ActivityStatus::Blocked, _) => (theme.warning, Some(("agent-dot", theme.warning))),
-        (ActivityStatus::Done, _) => (theme.foreground, Some(("agent-tick", theme.foreground))),
-        (ActivityStatus::None, true) => (theme.muted_foreground, Some(("agent-dot", theme.warning))),
-        (ActivityStatus::None, false) => (theme.muted_foreground, None),
-    };
-    let high = context.is_some_and(|c| c.percent >= ContextUse::HIGH);
+    let word = if seen && !rang { "Done".to_owned() } else { word };
     let time = match status {
         ActivityStatus::Working => working_label(since),
         _ => ago_label(since),
     };
-    let tip = match context {
+    // Only a finished turn: while it works its shells are its work.
+    let shell_dot = shells > 0 && (status == ActivityStatus::Done || seen);
+    let mut tip = match context {
         Some(c) => format!("{word} · context {:.0}% of {}", c.percent, tokens_label(c.size)),
         None => word,
     };
-    let spin = match status {
-        ActivityStatus::Working => (since.as_secs() % 12) as f64 / 12.,
-        _ => 0.,
-    };
-    let mut scope = scope
-        .var("ring", context.map(|c| format!("{:.1}", c.percent)).unwrap_or_default())
-        .var("ring_color", if high { theme.danger } else { color })
-        .var("spin", spin)
+    if shell_dot {
+        tip += &format!(" · {shells} background shell{}", if shells == 1 { "" } else { "s" });
+    }
+    let idle = status == ActivityStatus::None;
+    scope
         .var("time", time)
         .var("tip", tip)
-        .var("working", status == ActivityStatus::Working);
-    if let Some((icon, color)) = glyph {
-        scope = scope.var("ring_icon", icon).var("ring_icon_color", color);
-    }
-    scope
+        .var("working", status == ActivityStatus::Working)
+        .var("needs", status == ActivityStatus::Blocked)
+        .var("done", status == ActivityStatus::Done)
+        .var("rang", idle && rang)
+        .var("seen", idle && !rang && seen)
+        .var("pending", idle && !rang && !seen)
+        .var("shell_dot", shell_dot)
 }
 
-/// The glyphs drawn in a ring (16×16, in the text color).
+/// What a workspace's line says of its agents that wait for you, in place
+/// of its dot: "1 needs you".
+pub fn needs_label(n: usize) -> String {
+    format!("{n} need{} you", if n == 1 { "s" } else { "" })
+}
+
+/// The glyphs of an agent's state (Harp's sidebar icons, 16×16, drawn in
+/// the text color).
 const GLYPHS: &[(&str, &str)] = &[
+    // A disc with the tick cut out of it; `-cut` also cuts room for the
+    // background-shell dot on its corner.
+    (
+        "icons/agent-done.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><mask id="m"><rect width="16" height="16" fill="white"/><path d="M5.1 8.2l2 2 3.8-4.1" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="8" cy="8" r="7.2" fill="black" mask="url(#m)"/></svg>"#,
+    ),
+    (
+        "icons/agent-done-cut.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><mask id="m"><rect width="16" height="16" fill="white"/><path d="M5.1 8.2l2 2 3.8-4.1" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15.5" cy="0.5" r="4" fill="black"/></mask><circle cx="8" cy="8" r="7.2" fill="black" mask="url(#m)"/></svg>"#,
+    ),
     (
         "icons/agent-tick.svg",
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="black" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 8.2l1.7 1.7 3.3-3.6"/></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="M4.2 8.4l2.6 2.6 5-5.4" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"#,
     ),
-    ("icons/agent-dot.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.8" fill="black"/></svg>"#),
+    (
+        "icons/agent-ring.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.6" stroke="black" stroke-width="1.3"/></svg>"#,
+    ),
+    (
+        "icons/agent-needs.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.2" stroke="black" stroke-width="1.8"/><circle cx="8" cy="8" r="3.2" fill="black"/></svg>"#,
+    ),
+    ("icons/agent-dot.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.2" fill="black"/></svg>"#),
 ];
 
 /// A state's color: blue while working, amber while waiting for you,

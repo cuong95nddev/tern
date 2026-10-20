@@ -142,8 +142,7 @@ struct Entry {
     title: String,
     agent: Agent,
     status: ActivityStatus,
-    /// When a reported turn started working, for its timer.
-    since: Option<Instant>,
+    view: Entity<crate::terminal_view::TerminalView>,
 }
 
 /// Every agent, by window, workspace and tab order (so rows stay put).
@@ -153,9 +152,8 @@ fn entries(cx: &mut App) -> Vec<Entry> {
         let workspace = ws.read(cx).name();
         for t in ws.read(cx).term_tabs(cx) {
             let Some(agent) = t.agent else { continue };
-            let view = t.view.read(cx);
-            let (status, since) = (view.status(), Some(view.status_since()));
-            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status, since });
+            let status = t.view.read(cx).status();
+            out.push(Entry { handle, ws: ws.clone(), workspace: workspace.clone(), tab: t.id, title: t.title, agent, status, view: t.view });
         }
     }
     out
@@ -262,6 +260,10 @@ impl Render for Monitor {
                 // As in the agents panel (`agents.folder`), without its buttons.
                 let top = entries.iter().filter(|o| o.ws == e.ws).map(|o| o.status).max_by_key(|s| crate::agents::priority(*s));
                 let mut item = Scope::new("workspace").var("folder", true).var("name", e.workspace.as_str()).var("open", true);
+                let needs = entries.iter().filter(|o| o.ws == e.ws && o.status == ActivityStatus::Blocked).count();
+                if needs > 0 {
+                    item = item.var("needs", crate::agents::needs_label(needs));
+                }
                 if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
                     item = item.var("dot", true).var("dot_color", dot_color(s, phase, crate::agents::status_color(s, &theme)));
                 }
@@ -269,18 +271,11 @@ impl Render for Monitor {
                 rows.push(Row::Workspace(e.handle, e.ws.clone()));
             }
             // As in the agents panel (`agents.tab`).
-            let since = e.since.map(|t| t.elapsed()).unwrap_or_default();
-            let (label, icon, color) = crate::agents::status_look(e.status, false, since, &theme);
-            let mut item = Scope::new("agent")
+            let item = Scope::new("agent")
                 .var("label", crate::agents::display_name(&e.title, e.agent))
                 .var("shown", true)
-                .var("working", e.status == ActivityStatus::Working)
-                .var("status", label)
-                .var("status_color", color)
                 .slot("icon", e.agent.icon(&theme));
-            if !icon.is_empty() {
-                item = item.var("status_icon", icon);
-            }
+            let item = crate::agents::ring_vars(item, e.view.read(cx), false, None, &theme);
             items.push(item);
             rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
         }

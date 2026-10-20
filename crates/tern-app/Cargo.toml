@@ -33,6 +33,10 @@ tern-mux = { path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
 tern-web = { path = "../tern-web" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+raw-window-handle = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }

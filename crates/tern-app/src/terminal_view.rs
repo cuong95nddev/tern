@@ -248,6 +248,9 @@ pub struct TerminalView {
     status_from_file: bool,
     /// When `status` last changed.
     status_since: Instant,
+    /// Its last turn ended and its tab has been seen since: no longer
+    /// `Done`, but done.
+    seen_done: bool,
     /// Reads in a row that found a working agent not working.
     quiet_reads: u8,
     exited: Option<Option<i32>>,
@@ -423,6 +426,7 @@ impl TerminalView {
             reports_status: false,
             status_from_file: false,
             status_since: Instant::now(),
+            seen_done: false,
             quiet_reads: 0,
             exited: None,
             spawn_error: None,
@@ -616,6 +620,12 @@ impl TerminalView {
         self.status_since
     }
 
+    /// Whether its last turn ended and has been seen (see
+    /// [`Self::clear_done_status`]).
+    pub fn seen_done(&self) -> bool {
+        self.seen_done
+    }
+
     pub fn agent(&self) -> Option<Agent> {
         self.agent
     }
@@ -805,6 +815,7 @@ impl TerminalView {
                 if self.status != status {
                     self.status = status;
                     self.status_since = Instant::now();
+                    self.seen_done = false;
                 }
                 self.reports_status |= status != ActivityStatus::None;
                 self.reattaching = false;
@@ -877,6 +888,7 @@ impl TerminalView {
         if self.status != status {
             self.status = status;
             self.status_since = Instant::now();
+            self.seen_done = false;
             cx.emit(TerminalEvent::StatusChanged(status));
         }
     }
@@ -947,9 +959,10 @@ impl TerminalView {
     }
 
     pub fn clear_done_status(&mut self, cx: &mut Context<Self>) {
+        // Still done, since the turn ended: only no longer news.
         if self.status == ActivityStatus::Done {
             self.status = ActivityStatus::None;
-            self.status_since = Instant::now();
+            self.seen_done = true;
             cx.emit(TerminalEvent::StatusChanged(ActivityStatus::None));
         }
     }
@@ -1546,7 +1559,8 @@ impl Render for TerminalView {
         }
         self.watch_focus(window, cx);
         let look = crate::style::el("terminal", cx);
-        let bg = rgb_to_hsla(self.sync_look(cx).background).opacity(look.num("background_opacity").clamp(0., 1.));
+        let opacity = look.num("background_opacity").clamp(0., 1.) * crate::style::window_opacity(&crate::style::looks(cx));
+        let bg = rgb_to_hsla(self.sync_look(cx).background).opacity(opacity);
         let scope = crate::template::Scope::new("terminal").var("background", bg).slot("grid", TerminalElement { view: cx.entity() });
         let mut frames = |name: &str, _, f: crate::template::Framed| match (name, f) {
             ("terminal", crate::template::Framed::Box(d)) => d

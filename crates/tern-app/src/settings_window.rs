@@ -70,6 +70,7 @@ pub fn open(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions { title: Some("Settings".into()), ..Default::default() }),
             window_min_size: Some(size(px(640.), px(420.))),
+            window_background: crate::style::backdrop(cx).appearance,
             app_id: Some("dev.tern.Tern".into()),
             ..Default::default()
         },
@@ -244,6 +245,8 @@ pub struct SettingsView {
     file: serde_json::Value,
     generation: u64,
     remote: Remote,
+    /// What the desktop does behind the window, as last set.
+    backdrop: crate::style::Backdrop,
     _refresh: Task<()>,
 }
 
@@ -266,6 +269,7 @@ impl SettingsView {
             file: settings::file_value(cx),
             generation: generation(cx),
             remote: Remote::default(),
+            backdrop: crate::style::Backdrop::default(),
             _refresh: refresh,
         }
     }
@@ -328,6 +332,13 @@ impl SettingsView {
         Control::Stepper(Stepper { path, value, default, step, min, max, decimals })
     }
 
+    /// A number of the `window` element at `path`: its default is the
+    /// theme's when it sets one, else `builtin`.
+    fn window_number(&mut self, path: &'static [&'static str], builtin: f64, step: f64, range: (f64, f64), cx: &App) -> Control {
+        let default = settings::theme_element("window", path[path.len() - 1], cx).and_then(|v| v.as_f64()).unwrap_or(builtin);
+        self.number(path, default, step, range, cx)
+    }
+
     fn flag(&mut self, path: &'static [&'static str], default: bool, cx: &App) -> (bool, Handler) {
         let on = self.get(path, cx).and_then(|v| v.as_bool()).unwrap_or(default);
         // Back to the default leaves the key out.
@@ -381,6 +392,21 @@ impl SettingsView {
                     Row {
                         control: self.number(&["ui", "font_size"], 16., 1., (10., 24.), cx),
                         ..Row::new("Text size", "Panels, tabs, menus and dialogs.")
+                    },
+                    Row {
+                        control: self.window_number(&["elements", "window", "background_opacity"], 1., 0.05, (0., 1.), cx),
+                        ..Row::new("Window opacity", "Below 1 the desktop shows through the window. Menus and dialogs stay opaque.")
+                    },
+                    Row {
+                        control: self.window_number(&["elements", "window", "background_blur"], 20., 5., (0., 100.), cx),
+                        ..Row::new(
+                            "Background blur",
+                            if cfg!(target_os = "macos") {
+                                "How much what shows through the window is blurred, in points; 0 doesn't blur."
+                            } else {
+                                "Blurs what shows through the window (the system's blur); 0 doesn't blur."
+                            },
+                        )
                     },
                     Row::new("Lock layout", "Panels can't be moved or resized.").switch(locked, move |v, w, cx| lock(v, w, cx)),
                 ]
@@ -699,7 +725,8 @@ fn qr_code(url: &str, cx: &App) -> AnyElement {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let rows = self.rows(cx);
         let &(_, title, _, subtitle) = SECTIONS.iter().find(|s| s.0 == self.section).expect("every section is listed");
         let sections = SECTIONS

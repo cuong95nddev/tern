@@ -34,7 +34,7 @@
                 "min": 160,
                 "max": 480,
                 "children": [
-                  { "part": "agents" }
+                  { "part": "agents", "when": "agents" }
                 ]
               },
               {
@@ -755,6 +755,13 @@
         "size": "xsmall",
         "icon": "folder-plus",
         "tooltip": "Open Workspace… ({open_key})"
+      },
+      {
+        "button": "close",
+        "element": "agents.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Agents"
       }
     ]
   },
@@ -828,15 +835,24 @@
             ]
           },
           {
-            "when": "dot",
+            "when": "dot || needs",
             "position": { "top": 0, "right": 0, "bottom": 0 },
             "layout": "row",
             "align": "center",
-            "style": { "padding_right": 6 },
+            "style": { "padding_right": "$agents.status.padding_x" },
             "states": { "hover:sfolder": { "opacity": 0 } },
             "children": [
+              { "when": "needs", "element": "agents.folder.needs", "text": "{needs}" },
               {
-                "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+                "when": "!needs",
+                "align": "center",
+                "justify": "center",
+                "style": { "width": "$agents.ring.width", "height": "$agents.ring.height" },
+                "children": [
+                  {
+                    "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+                  }
+                ]
               }
             ]
           }
@@ -855,7 +871,8 @@
       "active": { "background": "$agents.tab.selected_background", "text": "$agents.tab.selected_text" },
       "hover && !active": { "background": "$agents.tab.hover_background" },
       "!shown && !active": { "text": "$agents.tab.hidden_text" },
-      "working && !active": { "opacity": "$agents.tab.working_opacity" }
+      "working && !active": { "opacity": "$agents.tab.working_opacity" },
+      "done": { "font_weight": "$agents.tab.done_weight" }
     },
     "children": [
       { "slot": "icon" },
@@ -870,15 +887,24 @@
         "children": [
           { "text": "{time}" },
           {
+            "element": "agents.state",
             "shrink": 0,
-            "style": { "width": "$agents.ring.width", "height": "$agents.ring.height" },
+            "align": "center",
+            "justify": "center",
+            "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
             "children": [
-              { "element": "agents.ring", "fill": true, "ring": "{ring}", "style": { "text": "{ring_color}", "rotate": "{spin}" } },
+              { "when": "working", "element": "agents.ring", "ring": "75" },
+              { "when": "needs", "icon": "agent-needs", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.needs" } },
+              { "when": "rang", "icon": "agent-dot", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.bell" } },
+              { "when": "done && !shell_dot", "icon": "agent-done", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+              { "when": "done && shell_dot", "icon": "agent-done-cut", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+              { "when": "seen", "icon": "agent-tick", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.seen" } },
+              { "when": "pending", "icon": "agent-ring", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.pending" } },
               {
-                "when": "ring_icon",
-                "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
-                "icon": "{ring_icon}",
-                "style": { "text": "{ring_icon_color}" }
+                "when": "shell_dot",
+                "element": "agents.shell_dot",
+                "position": { "top": -1.5, "right": -1.5 },
+                "style": { "width": "$agents.shell_dot.size", "height": "$agents.shell_dot.size", "radius": 9999 }
               }
             ]
           }
@@ -2021,6 +2047,7 @@
     "frame": "panel",
     "element": "system",
     "fill": true,
+    "justify": "center",
     "children": [
       { "when": "!ready", "use": "system.empty" },
       {

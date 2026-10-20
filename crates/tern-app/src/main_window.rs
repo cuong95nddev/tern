@@ -19,7 +19,7 @@ use gpui_kit::*;
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
 use crate::theme_picker::{self, OpenSettings, OpenSettingsFile, SelectTheme};
-use crate::workspace::{Panels, Workspace, WorkspaceEvent, confirm_close};
+use crate::workspace::{Panels, ToggleAgents, Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 use tern_term::status::ActivityStatus;
 
@@ -328,6 +328,7 @@ pub fn open_window(content: Content, at: Option<(DisplayId, WindowBounds)>, cx: 
             // The window draws its own title bar (`render_title_bar`).
             titlebar: Some(TitlebarOptions { title: Some("Tern".into()), ..gpui_kit::component::TitleBar::title_bar_options() }),
             app_owns_titlebar_drag: true,
+            window_background: crate::style::backdrop(cx).appearance,
             // Matches the Linux desktop entry (packaging/linux), for its icon.
             app_id: Some("dev.tern.Tern".into()),
             ..Default::default()
@@ -488,6 +489,8 @@ pub struct MainWindow {
     tab_scroll: ScrollHandle,
     revealed: Option<usize>,
     title: String,
+    /// What the desktop does behind the window, as last set.
+    backdrop: crate::style::Backdrop,
     /// Where the window is, for the saved session.
     placement: Option<(String, WindowBounds)>,
     focus: FocusHandle,
@@ -574,6 +577,7 @@ impl MainWindow {
             tab_scroll: ScrollHandle::new(),
             revealed: None,
             title: String::new(),
+            backdrop: crate::style::Backdrop::default(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
             _subs: vec![bounds_sub, activation_sub],
@@ -824,6 +828,10 @@ impl MainWindow {
             if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
                 folder = folder.var("dot", true).var("dot_color", crate::agents::status_color(s, cx.theme()));
             }
+            let needs = tabs.iter().filter(|(_, _, s)| *s == ActivityStatus::Blocked).count();
+            if needs > 0 {
+                folder = folder.var("needs", crate::agents::needs_label(needs));
+            }
             items.push(folder);
             if open {
                 for (id, scope, _) in tabs {
@@ -860,6 +868,8 @@ impl MainWindow {
         {
             buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
         }
+        // The close button hides the panel in the workspace it shows.
+        let active = self.active_ws().map(|w| w.downgrade());
         let header = crate::dock::panel_header(
             "agents",
             "agents.header",
@@ -871,6 +881,13 @@ impl MainWindow {
                     b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)).into_any_element()
                 },
                 ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
+                ("close", Framed::Button(b)) => {
+                    let ws = active.clone();
+                    b.on_click(move |_, window, cx| {
+                        let _ = ws.as_ref().map(|w| w.update(cx, |w, cx| w.toggle_agents(&ToggleAgents, window, cx)));
+                    })
+                    .into_any_element()
+                },
                 #[cfg(any(target_os = "macos", windows))]
                 ("screenshots", Framed::Button(b)) => b.on_click(|_, _, cx| crate::shot::toggle_panel(cx)).into_any_element(),
                 (_, f) => f.into_any_element(),
@@ -1272,6 +1289,7 @@ impl Render for MainWindow {
             window.set_window_title(&title);
             self.title = title;
         }
+        crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let ws = self.active_ws().cloned();
         let title_bar = self.render_title_bar(ws.as_ref(), cx);
         let scope = template::Scope::new("window").var("workspace", ws.is_some()).slot("title_bar", title_bar);

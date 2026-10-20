@@ -142,8 +142,9 @@ pub fn box_prop(name: &str) -> Option<&'static Prop> {
 }
 
 /// A template `ring`: its track's color, the width of its track and arc, and
-/// how far it is turned (in turns). Its arc takes its `text` color.
-pub const RING: &[Prop] = &[("track", Color, ""), ("stroke_width", Len, ""), ("rotate", Num, "")];
+/// how many seconds it takes to turn once (0 keeps it still). Its arc takes
+/// its `text` color.
+pub const RING: &[Prop] = &[("track", Color, ""), ("stroke_width", Len, ""), ("spin", Num, "")];
 
 /// A container that can show an image behind its content: the file
 /// (absolute, `~/…`, or relative to the config folder), how it fits
@@ -239,6 +240,10 @@ macro_rules! simple {
     };
 }
 
+/// Elements drawn over other content, not in the window's flow: in a
+/// see-through window they keep a background the color of the window's.
+const OVER_CONTENT: &[&str] = &["floating", "drag_chip", "settings.switch.knob"];
+
 /// Properties only the GUI front end draws; others ignore them.
 pub const GUI_ONLY: &[&str] = &[
     "radius",
@@ -251,10 +256,18 @@ pub const GUI_ONLY: &[&str] = &[
     "background_image",
     "background_image_fit",
     "background_image_opacity",
+    "background_opacity",
+    "background_blur",
 ];
 
 pub const ELEMENTS: &[Element] = &[
-    Element { name: "window", about: "The whole window, behind everything", groups: &[&[("background", Color, "$background")], IMAGE] },
+    Element {
+        name: "window",
+        about: "The whole window, behind everything. A `background_opacity` below 1 lets the desktop show through every \
+                part's background (the window's, the panels', the tab bars', the terminals'; not menus or dialogs), \
+                blurred by `background_blur` points (0: not blurred; on Windows and Linux, the system's blur)",
+        groups: &[&[("background", Color, "$background"), ("background_opacity", Num, "1"), ("background_blur", Num, "20")], IMAGE],
+    },
     Element {
         name: "agents",
         about: "The agents panel: each workspace of the window with the terminals running an agent",
@@ -287,6 +300,11 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element {
+        name: "agents.folder.needs",
+        about: "How many of a workspace's agents wait for you (\"1 needs you\"), in place of its dot",
+        groups: &[&[("font_weight", Num, "400"), ("text", Color, "$warning.background")]],
+    },
+    Element {
         name: "agents.tab",
         about: "A terminal running an agent, under its workspace. `hidden_text` colors one its pane doesn't show",
         groups: &[&[
@@ -299,6 +317,7 @@ pub const ELEMENTS: &[Element] = &[
             ("text", Color, "$text"),
             ("hidden_text", Color, "$text_muted"),
             ("working_opacity", Num, "0.7"),
+            ("done_weight", Num, "600"),
             ("hover_background", Color, "$row_hover"),
             ("selected_background", Color, "$row_selected"),
             ("selected_text", Color, ""),
@@ -306,13 +325,38 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element {
         name: "agents.status",
-        about: "An agent's state: how long it has been working or since its turn ended, and its ring",
+        about: "An agent's state: how long it has been working or since its turn ended, and its icon",
         groups: &[&[("gap", Len, "6"), ("padding_x", Len, "4"), ("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
     },
     Element {
+        name: "agents.state",
+        about: "An agent's state icon, as Harp's sidebar draws it (each color for its state): a filled tick once its turn is done (`done`), a quiet one once seen (`seen`), an amber ring and dot while it waits for you (`needs`), an amber dot after a bell (`bell`), an empty ring before its first turn (`pending`); `glyph` is the icons' size in it",
+        groups: &[&[
+            ("size", Len, "16"),
+            ("glyph", Len, "15"),
+            ("done", Color, "$foreground"),
+            ("seen", Color, "$muted.foreground"),
+            ("needs", Color, "$warning.background"),
+            ("bell", Color, "$warning.background"),
+            ("pending", Color, "$muted.foreground/25"),
+        ]],
+    },
+    Element {
         name: "agents.ring",
-        about: "An agent's ring: how full its context window is, turning while it works, amber with a dot while it waits for you, with a tick once its turn is done",
-        groups: &[&[("width", Len, "16"), ("height", Len, "16"), ("stroke_width", Len, "1.8"), ("track", Color, "$muted.foreground/25")]],
+        about: "An agent's working ring: its arc (`text`) turning on its track",
+        groups: &[&[
+            ("width", Len, "13.3"),
+            ("height", Len, "13.3"),
+            ("stroke_width", Len, "1.7"),
+            ("text", Color, "$foreground"),
+            ("track", Color, "$muted.foreground/25"),
+            ("spin", Num, "1"),
+        ]],
+    },
+    Element {
+        name: "agents.shell_dot",
+        about: "The dot on an agent's state icon once its turn is done while it left shells running in the background",
+        groups: &[&[("size", Len, "5"), ("background", Color, "$muted.foreground")]],
     },
     simple!("agents.button", "The buttons on a workspace or agent row (new tab, close)"),
     Element { name: "workspace", about: "One workspace: its panels and tabs", groups: &[&[("background", Color, "$background")], IMAGE] },
@@ -501,7 +545,11 @@ pub const ELEMENTS: &[Element] = &[
         about: "The selected commit's first line",
         groups: &[&[("font_size", Len, "$text_sm"), ("font_weight", Num, "600")]],
     },
-    Element { name: "git_log.details.body", about: "The rest of the selected commit's message", groups: &[&[("font_size", Len, "$text_sm")]] },
+    Element {
+        name: "git_log.details.body",
+        about: "The rest of the selected commit's message",
+        groups: &[&[("font_size", Len, "$text_sm")]],
+    },
     Element {
         name: "git_log.details.meta",
         about: "The selected commit's author, dates",
@@ -582,13 +630,16 @@ pub const ELEMENTS: &[Element] = &[
         name: "usage",
         about: "The usage panel: the Claude account the shown tab runs as (the first one turned on when it isn't a \
                 Claude tab) and how much of its plan is used, as a status bar",
-        groups: &[PANEL, &[
-            ("start_height", Len, "32"),
-            ("padding_x", Len, "6"),
-            ("gap", Len, "4"),
-            ("font_size", Len, "$text_xs"),
-            ("text", Color, "$text"),
-        ]],
+        groups: &[
+            PANEL,
+            &[
+                ("start_height", Len, "32"),
+                ("padding_x", Len, "6"),
+                ("gap", Len, "4"),
+                ("font_size", Len, "$text_xs"),
+                ("text", Color, "$text"),
+            ],
+        ],
     },
     Element {
         name: "usage.item",
@@ -689,8 +740,11 @@ pub const ELEMENTS: &[Element] = &[
             ("shown_background", Color, "$row_selected"),
         ]],
     },
-    simple!("usage.card.switch", "Turns an account in the usage card on or off: an account turned off is dimmed and \
-                can't be run as"),
+    simple!(
+        "usage.card.switch",
+        "Turns an account in the usage card on or off: an account turned off is dimmed and \
+                can't be run as"
+    ),
     Element { name: "usage.card.account.name", about: "An account's name in the usage card", groups: &[&[("font_weight", Num, "600")]] },
     Element {
         name: "system",
@@ -706,18 +760,9 @@ pub const ELEMENTS: &[Element] = &[
     Element {
         name: "system.item",
         about: "CPU or memory in the system panel: its label, a graph and the percent",
-        groups: &[&[
-            ("height", Len, "$row_height"),
-            ("gap", Len, "6"),
-            ("font_size", Len, "$text_xs"),
-            ("text", Color, "$text"),
-        ]],
+        groups: &[&[("height", Len, "$row_height"), ("gap", Len, "6"), ("font_size", Len, "$text_xs"), ("text", Color, "$text")]],
     },
-    Element {
-        name: "system.label",
-        about: "The name before a system graph: `CPU`, `MEM`",
-        groups: &[&[("text", Color, "$text_muted")]],
-    },
+    Element { name: "system.label", about: "The name before a system graph: `CPU`, `MEM`", groups: &[&[("text", Color, "$text_muted")]] },
     Element {
         name: "system.spark",
         about: "The CPU's sparkline: a bar per sample, oldest first",
@@ -1424,6 +1469,9 @@ pub struct LooksData {
     tokens: HashMap<&'static str, Val>,
     /// What 1rem is: the UI font size.
     rem: Pixels,
+    /// In a see-through window, the background under everything: the
+    /// theme's, at the window's opacity.
+    base: Option<Hsla>,
 }
 
 /// [`LooksData`], cheap to clone, so an [`El`] holds it without borrowing
@@ -1509,7 +1557,9 @@ pub fn resolve(over: &Overrides, theme: &ThemeColor, rem: Pixels, config_dir: &P
             [Color, Len, Num].into_iter().find_map(|k| r.value(&raw, k, 0).ok()).map(|v| (name, v))
         })
         .collect();
-    Looks(std::sync::Arc::new(LooksData { props, tokens, rem }))
+    let see_through = matches!(props.get(&("window", "background_opacity")), Some(Val::Num(n)) if *n < 1.);
+    let base = see_through.then_some(theme.background);
+    Looks(std::sync::Arc::new(LooksData { props, tokens, rem, base }))
 }
 
 /// Token `name` as a size, when `over` sets it (it can't name a color).
@@ -1758,7 +1808,7 @@ pub fn el(name: &'static str, cx: &App) -> El {
 }
 
 /// The looks in effect.
-fn looks(cx: &App) -> Looks {
+pub fn looks(cx: &App) -> Looks {
     static EMPTY: std::sync::LazyLock<Looks> = std::sync::LazyLock::new(|| {
         let theme = ThemeColor::default();
         resolve(&Overrides::default(), &theme, px(16.), Path::new(""), &mut vec![])
@@ -1790,6 +1840,20 @@ impl El {
         }
         debug_assert!(element(self.name).is_some_and(|e| e.prop(prop).is_some()), "no property {}.{prop}", self.name);
         self.looks.props.get(&(self.name, prop))
+    }
+
+    /// Whether a `background` of `c` would only paint the see-through
+    /// window's base over itself. The window already paints it under
+    /// everything (gpui-component's root), and a second layer would add up
+    /// to a more opaque one; with an opaque window it changes nothing.
+    /// Elements that float over other content keep theirs.
+    fn repaints_base(&self, c: Hsla) -> bool {
+        let Some(base) = self.looks.base else { return false };
+        let rgba = |c: Hsla| {
+            let c = c.to_rgb();
+            [c.r, c.g, c.b, c.a].map(|v| (v * 255.).round() as u8)
+        };
+        !OVER_CONTENT.contains(&self.name) && rgba(c) == rgba(base)
     }
 
     /// Whether `prop` has a value (a default or the user's).
@@ -1954,7 +2018,7 @@ impl El {
         if let Some(c) = self.color_opt("border") {
             st.border_color = Some(c);
         }
-        if let Some(c) = self.color_opt("background") {
+        if let Some(c) = self.color_opt("background").filter(|c| !self.repaints_base(*c)) {
             st.background = Some(c.into());
         }
         if let Some(o) = self.num_opt("opacity") {
@@ -2064,6 +2128,56 @@ pub fn drag_chip(label: SharedString, icon: Option<&'static str>, cx: &App) -> A
     crate::template::render_plain("drag_chip", scope, cx)
 }
 
+/// How opaque the window's backgrounds are, 0 to 1: the `window` element's
+/// `background_opacity`.
+pub fn window_opacity(looks: &Looks) -> f32 {
+    match looks.props.get(&("window", "background_opacity")) {
+        Some(Val::Num(n)) => n.clamp(0., 1.),
+        _ => 1.,
+    }
+}
+
+/// What the desktop does behind a window: hidden, or showing through
+/// once the window's backgrounds are see-through, blurred by `blur` points.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Backdrop {
+    pub appearance: WindowBackgroundAppearance,
+    pub blur: u32,
+}
+
+/// The [`Backdrop`] the `window` element asks for: see-through below a
+/// `background_opacity` of 1, blurred by its `background_blur`. macOS blurs
+/// by that radius; Windows and Linux blur as the system does, any radius
+/// but 0.
+pub fn backdrop(cx: &App) -> Backdrop {
+    let looks = looks(cx);
+    if window_opacity(&looks) >= 1. {
+        return Backdrop::default();
+    }
+    let blur = match looks.props.get(&("window", "background_blur")) {
+        Some(Val::Num(n)) => n.max(0.).round() as u32,
+        _ => 0,
+    };
+    let appearance =
+        if blur > 0 && !cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Transparent };
+    Backdrop { appearance, blur }
+}
+
+/// Gives `window` the [`backdrop`] when it changed from `last`, what it
+/// was given before.
+pub fn sync_backdrop(last: &mut Backdrop, window: &Window, cx: &App) {
+    let now = backdrop(cx);
+    if now == *last {
+        return;
+    }
+    if now.appearance != last.appearance {
+        window.set_background_appearance(now.appearance);
+    }
+    #[cfg(target_os = "macos")]
+    crate::platform::set_blur_radius(window, now.blur);
+    *last = now;
+}
+
 /// The tint of a file name with this git status, the same in every panel.
 pub fn git_color(status: GitStatus, cx: &App) -> Hsla {
     let token = match status {
@@ -2086,7 +2200,7 @@ mod tests {
     use gpui_kit::{px, rems};
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{ELEMENTS, Looks, Overrides, Val, check_names, resolve, theme_color, theme_colors};
+    use super::{ELEMENTS, El, Looks, Overrides, Val, check_names, resolve, theme_color, theme_colors, window_opacity};
 
     fn looks(over: &Overrides) -> (Looks, Vec<String>) {
         let mut problems = vec![];
@@ -2125,6 +2239,25 @@ mod tests {
         let (_, problems) = looks(&over);
         assert_eq!(problems.iter().filter(|p| p.contains("no element \"gone.tab\"")).count(), 1, "{problems:?}");
         assert_eq!(problems.len(), 2, "{problems:?}");
+    }
+
+    #[test]
+    fn a_see_through_window_paints_its_background_once() {
+        let el = |l: &Looks, name| El { name, looks: l.clone(), inline: None };
+        let mut theme = ThemeColor::default();
+        theme.background.a = 0.5;
+        let (opaque, _) = looks(&Overrides::default());
+        assert_eq!(window_opacity(&opaque), 1.);
+        assert!(!el(&opaque, "workspace").repaints_base(theme.background));
+
+        let mut over = Overrides::default();
+        over.elements.insert(("window", "background_opacity"), "0.5".into());
+        let l = resolve(&over, &theme, px(16.), Path::new("/cfg"), &mut vec![]);
+        assert_eq!(window_opacity(&l), 0.5);
+        assert!(el(&l, "workspace").repaints_base(theme.background));
+        assert!(!el(&l, "workspace").repaints_base(theme.title_bar));
+        // It floats over other content.
+        assert!(!el(&l, "floating").repaints_base(theme.background));
     }
 
     #[test]

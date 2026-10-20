@@ -74,6 +74,7 @@ actions!(
         ToggleShells,
         ToggleSystem,
         ToggleUsage,
+        ToggleAgents,
         ResetLayout,
         NewPanel,
         ToggleEditLayout,
@@ -369,6 +370,7 @@ pub struct Workspace {
     show_shells: bool,
     show_system: bool,
     show_usage: bool,
+    show_agents: bool,
     /// How the center is split into panes, like VS Code's editor groups.
     layout: Layout,
     /// The pane each tab is in.
@@ -623,6 +625,7 @@ impl Workspace {
             show_shells: shown("shells"),
             show_system: shown("system"),
             show_usage: shown("usage"),
+            show_agents: shown("agents"),
             layout: Layout::Pane(0),
             tab_pane: HashMap::new(),
             pane_active: HashMap::new(),
@@ -763,6 +766,7 @@ impl Workspace {
             ("shells", self.show_shells),
             ("system", self.show_system),
             ("usage", self.show_usage),
+            ("agents", self.show_agents),
         ]
         .into_iter()
         .filter(|(_, shown)| !shown)
@@ -779,8 +783,15 @@ impl Workspace {
         }
         self.panels_rev = p.rev;
         let shown = |name: &str| !p.saved.hidden.iter().any(|h| h == name);
-        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system, self.show_usage) =
-            (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"), shown("usage"));
+        (self.show_explorer, self.show_changes, self.show_scratches, self.show_shells, self.show_system, self.show_usage, self.show_agents) = (
+            shown("explorer"),
+            shown("changes"),
+            shown("scratches"),
+            shown("shells"),
+            shown("system"),
+            shown("usage"),
+            shown("agents"),
+        );
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -2153,7 +2164,6 @@ impl Workspace {
                 let Some(t) = self.tabs[i].term() else { unreachable!("filtered to terminals") };
                 let v = t.view.read(cx);
                 let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
-                let since = v.status_since().elapsed();
                 let label = crate::agents::display_name(&label, agent);
                 let mut scope = template::Scope::new(format!("side-tab-{}", id.as_u64()))
                     .var("label", label)
@@ -2162,7 +2172,7 @@ impl Workspace {
                     .var("close_key", close_key.clone())
                     .var("buttons", true)
                     .slot_opt("icon", self.tab_icon(i, None, cx));
-                scope = crate::agents::ring_vars(scope, now, t.rang, since, t.context, cx.theme());
+                scope = crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme());
                 (id, scope, now)
             })
             .collect()
@@ -2319,6 +2329,7 @@ impl Workspace {
             "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
             "system" => ("cpu", self.show_system, "System".to_owned()),
             "usage" => ("chart-pie", self.show_usage, "Usage".to_owned()),
+            "agents" => ("bot", self.show_agents, "Agents".to_owned()),
             _ => return None,
         })
     }
@@ -2370,6 +2381,7 @@ impl Workspace {
             "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
             "system" => |this, w, cx| this.toggle_system(&ToggleSystem, w, cx),
             "usage" => |this, w, cx| this.toggle_usage(&ToggleUsage, w, cx),
+            "agents" => |this, w, cx| this.toggle_agents(&ToggleAgents, w, cx),
             _ => |this, w, cx| this.toggle_changes(&ToggleChanges, w, cx),
         }
     }
@@ -3158,6 +3170,7 @@ impl Workspace {
                     "shells" => self.show_shells = true,
                     "system" => self.show_system = true,
                     "usage" => self.show_usage = true,
+                    "agents" => self.show_agents = true,
                     _ => {},
                 }
             },
@@ -3242,6 +3255,7 @@ impl Workspace {
                     "shells" => self.show_shells = true,
                     "system" => self.show_system = true,
                     "usage" => self.show_usage = true,
+                    "agents" => self.show_agents = true,
                     _ => {},
                 }
             },
@@ -3427,6 +3441,7 @@ impl Workspace {
             "shells" => self.show_shells,
             "system" => self.show_system,
             "usage" => self.show_usage,
+            "agents" => self.show_agents,
             _ => true,
         }
     }
@@ -3440,6 +3455,7 @@ impl Workspace {
             .var("shells", self.show_shells)
             .var("system", self.show_system)
             .var("usage", self.show_usage)
+            .var("agents", self.show_agents)
             .var("path", self.root.display().to_string())
             .slot("explorer", self.tree.clone().cached(cache_layout()))
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
@@ -3554,6 +3570,11 @@ impl Workspace {
 
     fn toggle_usage(&mut self, _: &ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
         self.show_usage = !self.show_usage;
+        self.panels_changed(cx);
+    }
+
+    pub fn toggle_agents(&mut self, _: &ToggleAgents, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_agents = !self.show_agents;
         self.panels_changed(cx);
     }
 
@@ -4680,6 +4701,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_shells))
             .on_action(cx.listener(Self::toggle_system))
             .on_action(cx.listener(Self::toggle_usage))
+            .on_action(cx.listener(Self::toggle_agents))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(|this, _: &FocusTerminal, w, cx| this.focus_active(w, cx)))
             // Reached only when focus is outside the file tab (it handles these itself).

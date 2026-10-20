@@ -62,7 +62,8 @@ pub struct Spec {
     /// A ring `"{name}"` percent full (0 to 100): an arc clockwise from the
     /// top over its track, which is dashed while the value is empty. Its
     /// `text` colors the arc, `track` the track, `stroke_width` both;
-    /// `rotate` turns it (in turns, 0 to 1). Size it with `width` and `height`.
+    /// `spin` turns it once every that many seconds (0 keeps it still). Size
+    /// it with `width` and `height`.
     pub ring: Option<String>,
     /// A button; the code attaches what it does by this name, as for `frame`.
     /// It takes `icon`, `label`, `tooltip`, `variant`, `size`, `selected`,

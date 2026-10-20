@@ -4,11 +4,13 @@ use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::base::PANEL_MIN_SIZE;
 use gpui_kit::component::resizable::ResizablePanel;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::*;
 
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -222,7 +224,8 @@ impl Drawer<'_, '_> {
             },
             What::Ring(parts) => {
                 let full = fill(parts, &lookup(scope, outer)).trim().parse::<f32>().ok();
-                kids.push(ring(full, &look).into_any_element());
+                let id = ElementId::NamedInteger(format!("{}:ring", scope.id).into(), scope.index.unwrap_or(0) as u64);
+                kids.push(ring(id, full, &look));
             },
             What::Button(b) => return Some(self.button(n, b, &look, scope, outer)),
             What::Each(list, item) => {
@@ -714,7 +717,7 @@ impl Drawer<'_, '_> {
             }
             let body = if shown { self.draw(c, scope, outer) } else { None };
             let locked = c.dock.is_some() && self.locked();
-            let panel = self.panel(&c.panel, fixed, size, locked).visible(shown);
+            let panel = self.panel(self.range(&c.panel), fixed, size, locked).visible(shown);
             group = group.child(match body {
                 Some(b) => panel.child(b),
                 None => panel,
@@ -734,24 +737,52 @@ impl Drawer<'_, '_> {
         group.into_any_element()
     }
 
-    /// A split's panel with `p`'s range, `size` and, when `fixed`, kept at
-    /// its size; `locked` keeps it at `size` whatever the user drags.
-    fn panel(&self, p: &Panel, fixed: bool, size: Option<Pixels>, locked: bool) -> ResizablePanel {
-        let px = |l: Option<AbsoluteLength>| l.map(|l| l.to_pixels(self.rem));
-        let mut panel = resizable_panel();
+    /// A split's panel kept in `range`, with `size` and, when `fixed`, kept
+    /// at its size; `locked` keeps it at `size` whatever the user drags.
+    fn panel(&self, range: Range<Pixels>, fixed: bool, size: Option<Pixels>, locked: bool) -> ResizablePanel {
+        let mut panel = resizable_panel().size_range(range);
         if fixed {
             panel = panel.flex_none();
         }
         if let Some(size) = size {
             panel = panel.size(size);
         }
-        if p.min.is_some() || p.max.is_some() {
-            panel = panel.size_range(px(p.min).unwrap_or(px_(20.))..px(p.max).unwrap_or(px_(100_000.)));
-        }
         if let Some(size) = size.filter(|_| locked) {
             panel = panel.size_range(size..size);
         }
         panel
+    }
+
+    /// The range `p` keeps its panel in; without one, the split's own.
+    fn range(&self, p: &Panel) -> Range<Pixels> {
+        if p.min.is_none() && p.max.is_none() {
+            return PANEL_MIN_SIZE..Pixels::MAX;
+        }
+        let px = |l: Option<AbsoluteLength>| l.map(|l| l.to_pixels(self.rem));
+        px(p.min).unwrap_or(px_(20.))..px(p.max).unwrap_or(px_(100_000.))
+    }
+
+    /// The range `t`, shown in a dock, keeps along a split in `dir`: a part's
+    /// own (a stack's as the part it shows, a panel group's as the first
+    /// panel in it); a split across `dir` as its tightest child, one along
+    /// it as its children's together.
+    fn extent(&self, t: &Shown, dir: arrange::Dir, scope: &Scope) -> Range<Pixels> {
+        let part = match t {
+            Shown::Part(name) => Some(name),
+            Shown::Stack { parts, active, .. } => parts.get(*active),
+            Shown::Split { dir: along, items, .. } => {
+                let ranges = items.iter().map(|(_, c)| self.extent(c, dir, scope));
+                let r = if *along == dir {
+                    ranges.fold(px_(0.)..px_(0.), |a, r| a.start + r.start..(a.end + r.end).min(Pixels::MAX))
+                } else {
+                    ranges.fold(px_(0.)..Pixels::MAX, |a, r| a.start.max(r.start)..a.end.min(r.end))
+                };
+                return r.start..r.end.max(r.start);
+            },
+        };
+        let templates = self.cx.try_global::<Templates>();
+        let own = part.and_then(|name| self.first_panel(name, scope)).and_then(|name| Some(templates?.part(&name)?.panel.clone()));
+        self.range(&own.unwrap_or_default())
     }
 
     /// True when `n` is a dock with no part shown that hides when empty.
@@ -793,7 +824,7 @@ impl Drawer<'_, '_> {
             // A panel group sizes as the first panel in it.
             let part = part.and_then(|name| self.first_panel(name, scope));
             let part = part.as_ref().and_then(|name| Some((name, templates?.part(name)?)));
-            let own = part.map(|(_, p)| p.panel.clone()).unwrap_or_default();
+            let range = self.extent(child, *dir, scope);
             let (fixed, size) = match sizes.get(*ix).copied().unwrap_or(Size::Auto) {
                 Size::Px(v) => (true, Some(px(v))),
                 Size::Auto | Size::Frac(_) => match part {
@@ -810,7 +841,7 @@ impl Drawer<'_, '_> {
                 },
             };
             let body = self.tree(d, child, scope, outer);
-            cells.push((own, fixed, size, body));
+            cells.push((range, fixed, size, body));
         }
         if self.locked() {
             return self.locked_tree(*dir, cells);
@@ -822,8 +853,8 @@ impl Drawer<'_, '_> {
             arrange::Dir::Column => v_resizable(id),
         };
         let fixed_by_kept: Vec<bool> = cells.iter().map(|c| c.1).collect();
-        for (own, fixed, size, body) in cells {
-            group = group.child(self.panel(&own, fixed, size, false).child(body));
+        for (range, fixed, size, body) in cells {
+            group = group.child(self.panel(range, fixed, size, false).child(body));
         }
         if let Some(on_change) = scope.on_change.clone() {
             let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
@@ -840,7 +871,7 @@ impl Drawer<'_, '_> {
 
     /// A dock's split while the layout is locked: the same parts in a plain
     /// row or column, with nothing to drag. Parts with a size keep it.
-    fn locked_tree(&self, dir: arrange::Dir, cells: Vec<(Panel, bool, Option<Pixels>, AnyElement)>) -> AnyElement {
+    fn locked_tree(&self, dir: arrange::Dir, cells: Vec<(Range<Pixels>, bool, Option<Pixels>, AnyElement)>) -> AnyElement {
         use gpui_kit::component::ActiveTheme as _;
         let line = self.cx.theme().border;
         let row = dir == arrange::Dir::Row;
@@ -1160,11 +1191,24 @@ impl Node {
 }
 
 /// A ring `full` percent full, as [`super::Spec::ring`] says, in the box
-/// it is drawn in.
-fn ring(full: Option<f32>, look: &style::El) -> impl IntoElement {
+/// it is drawn in; one that spins turns smoothly, every ring in step.
+fn ring(id: ElementId, full: Option<f32>, look: &style::El) -> AnyElement {
     let (arc, track) = (look.color("text"), look.color("track"));
     let width = look.px("stroke_width").max(px(1.));
-    let turn = look.num("rotate");
+    let spin = look.num("spin");
+    if spin <= 0. {
+        return ring_at(0., full, arc, track, width).into_any_element();
+    }
+    div()
+        .size_full()
+        .with_animation(id, Animation::new(std::time::Duration::from_secs_f32(spin)).repeat_synced(), move |d, turn| {
+            d.child(ring_at(turn, full, arc, track, width))
+        })
+        .into_any_element()
+}
+
+/// A ring `full` percent full, turned `turn` turns.
+fn ring_at(turn: f32, full: Option<f32>, arc: Hsla, track: Hsla, width: Pixels) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
