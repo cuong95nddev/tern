@@ -487,18 +487,27 @@ function room() {
   const cs = getComputedStyle(wrap);
   const w = wrap.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const h = wrap.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-  return { w, h };
+  // The on-screen keyboard takes most of a phone's height, for as long as
+  // one types: the grid is sized for the height without it (the most seen
+  // at this width), so the program isn't squeezed to a few rows each time.
+  if (w !== tall.w) tall = { w, h };
+  else tall.h = Math.max(tall.h, h);
+  return { w, h, tallH: tall.h };
 }
 
+// The terminal's height without the on-screen keyboard, at this width.
+let tall = { w: 0, h: 0 };
+
 // Draw the session's grid as large as fits the screen, at most FONT_SIZE;
-// scaled down past MIN_FONT, so nothing ever scrolls or is cut off.
+// scaled down past MIN_FONT. With the on-screen keyboard up, its bottom
+// rows (the prompt) show, above the keyboard.
 function layout() {
   if (!term || $("term-view").hidden) return;
-  const { w, h } = room();
+  const { w, h, tallH } = room();
   let fs = 0;
   for (let f = FONT_SIZE; f >= MIN_FONT; f -= 0.5) {
     const c = cellAt(f);
-    if (size.cols * c.w <= w && size.rows * c.h <= h) {
+    if (size.cols * c.w <= w && size.rows * c.h <= tallH) {
       fs = f;
       break;
     }
@@ -507,16 +516,19 @@ function layout() {
   if (!fs) {
     fs = MIN_FONT;
     const c = cellAt(fs);
-    scale = Math.min(w / (size.cols * c.w), h / (size.rows * c.h));
+    scale = Math.min(1, w / (size.cols * c.w), tallH / (size.rows * c.h));
   }
   if (term.options.fontSize !== fs) term.options.fontSize = fs;
-  $("term").style.transform = scale < 1 ? `scale(${scale})` : "";
+  const drawn = size.rows * cellAt(fs).h * scale;
+  const up = Math.max(0, drawn - h);
+  const t = [up ? `translateY(${-up}px)` : "", scale < 1 ? `scale(${scale})` : ""].join(" ").trim();
+  $("term").style.transform = t;
 }
 
 // The grid that fits the screen at FONT_SIZE, and the size of its cell in
 // device pixels.
 function fitting() {
-  const { w, h } = room();
+  const { w, tallH: h } = room();
   const c = cellAt(FONT_SIZE);
   const dpr = window.devicePixelRatio || 1;
   return {
