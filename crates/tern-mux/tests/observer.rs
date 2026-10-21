@@ -37,13 +37,16 @@ fn watcher_reveal_reports_delivery() {
     assert!(!w.reveal(5));
     let got = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
     let g = got.clone();
-    let _ui = tern_mux::client::MuxClient::connect(
+    let ui = tern_mux::client::MuxClient::connect(
         &d.dir,
         false,
         std::sync::Arc::new(|_, _| {}),
         std::sync::Arc::new(move |id| g.lock().unwrap().push(id)),
     )
     .unwrap();
+    // `connect` returns once its Hello is sent; an answer on that connection
+    // means the daemon took the Hello, so it knows the UI.
+    ui.list().unwrap();
     assert!(w.reveal(5));
     wait_until("ui got it", || *got.lock().unwrap() == [5]);
 }
