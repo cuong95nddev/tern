@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
 
@@ -1249,15 +1249,7 @@ impl MainWindow {
                     let click = click.clone();
                     b.on_click(move |_, w, cx| click(w, cx)).into_any_element()
                 },
-                ("caffeine", Framed::Button(b), _) => b
-                    .on_click(|_, _, cx| crate::caffeine::toggle(cx))
-                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                        cx.stop_propagation();
-                        if let Err(e) = crate::caffeine::toggle_until_agents_finish(cx) {
-                            window.push_notification(e, cx);
-                        }
-                    })
-                    .into_any_element(),
+                ("caffeine", Framed::Button(b), _) => b.dropdown_menu(crate::caffeine::menu).into_any_element(),
                 ("settings", Framed::Button(b), _) => {
                     b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
                 },

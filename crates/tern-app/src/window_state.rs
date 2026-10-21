@@ -174,6 +174,19 @@ pub fn set_claude_args(args: &str) {
     write(&claude_args_file(), &format!("{}\n", one_line(args)));
 }
 
+fn caffeine_file() -> PathBuf {
+    file().with_file_name("caffeine")
+}
+
+/// What keeps the computer awake (`on`, `agents` or `off`), as last chosen.
+pub fn caffeine_mode() -> String {
+    one_line(&std::fs::read_to_string(caffeine_file()).unwrap_or_default())
+}
+
+pub fn set_caffeine_mode(mode: &str) {
+    write(&caffeine_file(), &format!("{mode}\n"));
+}
+
 /// How a workspace shows its tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabLayout {

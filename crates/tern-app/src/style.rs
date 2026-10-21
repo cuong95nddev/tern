@@ -377,6 +377,16 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     simple!("title_bar.button", "A button in the title bar: a panel's, or Settings"),
+    Element {
+        name: "caffeine.mode",
+        about: "A mode in the title bar cup's menu (keep the computer awake): its name over what it does",
+        groups: &[&[
+            ("gap", Len, "2"),
+            ("padding_y", Len, "2"),
+            ("detail_font_size", Len, "$text_xs"),
+            ("detail_text", Color, "$text_muted"),
+        ]],
+    },
     simple!("title_bar.update", "The button in the title bar that offers a new version of Tern, left of the others"),
     Element {
         name: "tool_strip.left",

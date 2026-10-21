@@ -239,6 +239,7 @@ fn main() {
         if let Some(id) = open_session {
             main_window::reveal_session(id, cx);
         }
+        caffeine::init(cx);
         if !scripted {
             restart::check_at_launch(cx);
             settings_window::start_remote_at_launch(cx);

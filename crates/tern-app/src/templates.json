@@ -1680,6 +1680,26 @@
       { "shrink": 0, "text": "{status}", "style": { "font_size": "$git_log.file.detail_font_size", "text": "{name_color}" } }
     ]
   },
+  "menu.caffeine": {
+    "children": [
+      { "text": "Keep computer awake · {status}" },
+      { "separator": true },
+      {
+        "each": "modes",
+        "item": {
+          "button": "mode",
+          "label": "{label}",
+          "selected": "on",
+          "element": "caffeine.mode",
+          "layout": "column",
+          "children": [
+            { "text": "{label}" },
+            { "text": "{detail}", "style": { "font_size": "$caffeine.mode.detail_font_size", "text": "$caffeine.mode.detail_text" } }
+          ]
+        }
+      }
+    ]
+  },
   "menu.git_log_filter": {
     "children": [{ "each": "options", "item": { "button": "pick", "label": "{label}", "selected": "on" } }]
   },

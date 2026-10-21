@@ -1,6 +1,7 @@
-//! Keeps the machine and its display awake on request, like the Caffeine
-//! menu-bar app (as in herdr-gpui). The title bar's cup turns it on and off;
-//! a right click holds it only until no agent is working.
+//! Keeps the machine and its display awake, like the Caffeine menu-bar app
+//! (as in herdr-gpui) and Orca's status-bar cup. Clicking the title bar's
+//! cup picks a mode: On holds it awake, Agents holds it only while an agent
+//! is working, Off lets it sleep. The mode is kept for the next launch.
 //!
 //! The hold is a `keepawake` guard: IOKit power assertions on macOS, the
 //! thread execution state on Windows, inhibitors over D-Bus on Linux. Each
@@ -12,30 +13,58 @@
 //! the thread that set it, and Linux makes blocking D-Bus calls that must
 //! stay off the UI thread.
 
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, SyncSender};
 
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::*;
 
+use crate::template;
 use crate::terminal_view::ActivityStatus;
+use crate::window_state;
 
-/// How long a hold lasts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Until the cup is clicked again.
-    Indefinite,
-    /// Until no agent is working.
-    UntilAgentsFinish,
-}
-
-/// What the cup shows.
+/// When the computer is kept awake.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Cup {
+pub enum Mode {
+    /// Always.
+    On,
+    /// While an agent is working.
+    Agents,
     #[default]
     Off,
-    /// A hold or release is in flight; clicks wait for it.
-    Pending,
-    On(Mode),
+}
+
+impl Mode {
+    const ALL: [Mode; 3] = [Mode::On, Mode::Agents, Mode::Off];
+
+    fn key(self) -> &'static str {
+        match self {
+            Mode::On => "on",
+            Mode::Agents => "agents",
+            Mode::Off => "off",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.key() == s)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Mode::On => "On",
+            Mode::Agents => "Agents",
+            Mode::Off => "Off",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Mode::On => "Keep this computer awake continuously",
+            Mode::Agents => "Stay awake while an agent is working",
+            Mode::Off => "Allow normal system sleep",
+        }
+    }
 }
 
 /// What the worker thread does.
@@ -52,66 +81,87 @@ struct Request {
 
 #[derive(Default)]
 struct Caffeine {
-    cup: Cup,
+    mode: Mode,
+    /// Whether the worker holds the computer awake.
+    held: bool,
+    /// A hold or release is in flight; the next waits for it.
+    pending: bool,
     /// Dropping it ends the worker, which releases any hold on its own thread.
     worker: Option<SyncSender<Request>>,
 }
 
 impl Global for Caffeine {}
 
-pub fn cup(cx: &App) -> Cup {
-    cx.try_global::<Caffeine>().map_or(Cup::Off, |c| c.cup)
+fn state(cx: &App) -> (Mode, bool) {
+    cx.try_global::<Caffeine>().map_or((Mode::Off, false), |c| (c.mode, c.held))
 }
 
-/// The cup's icon, tooltip and whether it is lit, for the title bar.
-pub fn button(cx: &App) -> (&'static str, &'static str, bool) {
-    match cup(cx) {
-        Cup::On(Mode::Indefinite) => ("coffee-full", "Keeping the display awake · Click to stop", true),
-        Cup::On(Mode::UntilAgentsFinish) => ("coffee-full", "Keeping the display awake until agents finish · Click to stop", true),
-        Cup::Pending => ("coffee", "Keep the display awake", false),
-        Cup::Off => ("coffee", "Keep the display awake · Right-click: until agents finish", false),
-    }
+/// Takes up the mode chosen last time.
+pub fn init(cx: &mut App) {
+    let mode = Mode::parse(&window_state::caffeine_mode()).unwrap_or_default();
+    cx.default_global::<Caffeine>().mode = mode;
+    reconcile(cx);
 }
 
-/// Starts keeping the display awake until the cup is clicked again, or stops
-/// any hold.
-pub fn toggle(cx: &mut App) {
-    match cup(cx) {
-        Cup::Pending => {},
-        Cup::Off => send(cx, Command::Hold, Mode::Indefinite),
-        Cup::On(_) => send(cx, Command::Release, Mode::Indefinite),
-    }
+/// The cup's icon, tooltip and whether it is lit (a mode other than Off), for
+/// the title bar. The cup is full while it holds.
+pub fn button(cx: &App) -> (&'static str, String, bool) {
+    let (mode, held) = state(cx);
+    let icon = if held { "coffee-full" } else { "coffee" };
+    (icon, format!("Keep computer awake · {}", status(mode, held)), mode != Mode::Off)
 }
 
-/// Starts keeping the display awake until every agent finishes, turns an
-/// indefinite hold into one, or stops one. With no agent working there is
-/// nothing to wait for: an error to show.
-pub fn toggle_until_agents_finish(cx: &mut App) -> Result<(), &'static str> {
-    match cup(cx) {
-        Cup::Pending => {},
-        Cup::On(Mode::UntilAgentsFinish) => send(cx, Command::Release, Mode::Indefinite),
-        _ if !any_working(cx) => return Err("No agent is working, so there is nothing to wait for"),
-        Cup::On(Mode::Indefinite) => {
-            cx.global_mut::<Caffeine>().cup = Cup::On(Mode::UntilAgentsFinish);
-            cx.refresh_windows();
-        },
-        Cup::Off => send(cx, Command::Hold, Mode::UntilAgentsFinish),
-    }
-    Ok(())
+fn status(mode: Mode, held: bool) -> String {
+    format!("{} · {}", mode.label(), if held { "Active" } else { "Inactive" })
 }
 
-/// Ends a hold until agents finish once none is working. Called when an
+/// Fills the cup's menu: the modes to pick from.
+pub fn menu(menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let (mode, held) = state(cx);
+    let modes = Mode::ALL
+        .iter()
+        .map(|m| template::Scope::default().var("label", m.label()).var("detail", m.detail()).var("on", *m == mode))
+        .collect();
+    let scope = template::Scope::new("caffeine").var("status", status(mode, held)).list("modes", modes);
+    let items: template::MenuItems = Rc::new(|name, entry| {
+        let mode = *Mode::ALL.get(entry.filter(|_| name == "mode")?)?;
+        Some(Rc::new(move |_, _, cx| set_mode(mode, cx)))
+    });
+    template::menu("menu.caffeine", scope, menu, items, window, cx)
+}
+
+/// Switches to `mode`, kept for the next launch.
+pub fn set_mode(mode: Mode, cx: &mut App) {
+    window_state::set_caffeine_mode(mode.key());
+    cx.default_global::<Caffeine>().mode = mode;
+    cx.refresh_windows();
+    reconcile(cx);
+}
+
+/// Holds or releases as the agents now need, in Agents mode. Called when an
 /// agent's status changes and when tabs or windows close, often from inside
 /// a workspace's update, so it looks at the agents once that is over.
 pub fn settle(cx: &mut App) {
-    if cup(cx) != Cup::On(Mode::UntilAgentsFinish) {
+    if state(cx).0 == Mode::Agents {
+        cx.defer(reconcile);
+    }
+}
+
+/// Starts or ends the hold to match the mode, unless one is in flight:
+/// `finish` comes back here.
+fn reconcile(cx: &mut App) {
+    let Some(&Caffeine { mode, held, pending, .. }) = cx.try_global::<Caffeine>() else { return };
+    if pending {
         return;
     }
-    cx.defer(|cx| {
-        if cup(cx) == Cup::On(Mode::UntilAgentsFinish) && !any_working(cx) {
-            send(cx, Command::Release, Mode::Indefinite);
-        }
-    });
+    let want = match mode {
+        Mode::On => true,
+        Mode::Agents => any_working(cx),
+        Mode::Off => false,
+    };
+    if want != held {
+        send(cx, if want { Command::Hold } else { Command::Release });
+    }
 }
 
 fn any_working(cx: &mut App) -> bool {
@@ -120,30 +170,28 @@ fn any_working(cx: &mut App) -> bool {
         .any(|(_, ws)| ws.read(cx).term_tabs(cx).iter().any(|t| t.agent.is_some() && t.view.read(cx).status() == ActivityStatus::Working))
 }
 
-/// Asks the worker for `command` (`mode` is what a hold becomes), spawning
-/// the worker on the first hold.
-fn send(cx: &mut App, command: Command, mode: Mode) {
+/// Asks the worker for `command`, spawning it on the first hold.
+fn send(cx: &mut App, command: Command) {
     let caffeine = cx.default_global::<Caffeine>();
     let worker = match caffeine.worker.take() {
         Some(worker) => Ok(worker),
         None if command == Command::Release => {
             // No worker holds nothing.
-            caffeine.cup = Cup::Off;
+            caffeine.held = false;
             cx.refresh_windows();
             return;
         },
         None => spawn(),
     };
     let (reply, replies) = std::sync::mpsc::sync_channel(1);
-    // Never blocks: `Pending` keeps at most one request in the slot.
+    // Never blocks: `pending` keeps at most one request in the slot.
     let sent = worker.and_then(|w| w.send(Request { command, reply }).map(|()| w).map_err(|_| "the keep-awake thread stopped".to_owned()));
     let caffeine = cx.global_mut::<Caffeine>();
     match sent {
         Ok(worker) => caffeine.worker = Some(worker),
-        Err(e) => return report(&e, cx),
+        Err(e) => return fail(&e, cx),
     }
-    caffeine.cup = Cup::Pending;
-    cx.refresh_windows();
+    caffeine.pending = true;
     let wait = cx.background_executor().spawn(async move { replies.recv() });
     cx.spawn(async move |cx| {
         // A dropped reply means the worker died.
@@ -151,27 +199,34 @@ fn send(cx: &mut App, command: Command, mode: Mode) {
             Ok(result) => result.map_err(|e| e.to_string()),
             Err(_) => Err("the keep-awake thread stopped".to_owned()),
         };
-        cx.update(|cx| finish(cx, command, mode, result));
+        cx.update(|cx| finish(cx, command, result));
     })
     .detach();
 }
 
-fn finish(cx: &mut App, command: Command, mode: Mode, result: Result<(), String>) {
+fn finish(cx: &mut App, command: Command, result: Result<(), String>) {
     let caffeine = cx.global_mut::<Caffeine>();
-    caffeine.cup = match (command, &result) {
-        (Command::Hold, Ok(())) => Cup::On(mode),
-        // A failed hold holds nothing.
-        (Command::Hold, Err(_)) | (Command::Release, _) => Cup::Off,
-    };
-    if result.is_err() {
-        caffeine.worker = None;
-    }
-    cx.refresh_windows();
+    caffeine.pending = false;
     match result {
-        Err(e) => report(&e, cx),
-        // The agents may have finished while the hold was being made.
-        Ok(()) => settle(cx),
+        Ok(()) => {
+            caffeine.held = command == Command::Hold;
+            cx.refresh_windows();
+            // The mode or the agents may have changed while it was in flight.
+            reconcile(cx);
+        },
+        Err(e) => fail(&e, cx),
     }
+}
+
+/// A failed hold or release holds nothing: back to Off for this run (the
+/// mode chosen stays for the next launch), and the failure shown.
+fn fail(error: &str, cx: &mut App) {
+    let caffeine = cx.global_mut::<Caffeine>();
+    caffeine.worker = None;
+    caffeine.held = false;
+    caffeine.mode = Mode::Off;
+    cx.refresh_windows();
+    report(error, cx);
 }
 
 /// Shows a failure in the window in front.
