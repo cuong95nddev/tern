@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,15 +43,11 @@ pub fn load(cmd: &Command, payload: &[u8]) -> Result<Image, Error> {
     let data = BASE64.decode(payload).map_err(|_| Error::new("EINVAL", "bad base64 data"))?;
     let bytes = match cmd.medium {
         Medium::Direct => return decode(cmd, &data),
-        Medium::File => read_file(&path_of(&data)?, cmd),
-        Medium::TempFile => {
-            let path = path_of(&data)?;
-            let bytes = read_file(&path, cmd);
-            if bytes.is_ok() {
-                let _ = std::fs::remove_file(&path);
-            }
+        Medium::File => read_file(&path_of(&data)?, cmd).map(|(bytes, _)| bytes),
+        Medium::TempFile => read_file(&path_of(&data)?, cmd).map(|(bytes, read)| {
+            read.remove();
             bytes
-        },
+        }),
         Medium::SharedMemory => read_shm(&data, cmd),
     };
     // The program may be on another machine (ssh), or be a file someone
@@ -95,7 +91,7 @@ fn window(cmd: &Command, len: u64) -> Result<u64, Error> {
 /// Reads a file the program wrote for us. Any program's output can name a
 /// file, so only one plainly meant for this protocol is read (and a `t=t`
 /// one deleted): ours, in a temporary folder, its name marked.
-fn read_file(path: &Path, cmd: &Command) -> Result<Vec<u8>, Error> {
+fn read_file(path: &Path, cmd: &Command) -> Result<(Vec<u8>, ReadFile), Error> {
     let real = path.canonicalize().map_err(io_error)?;
     if !temp_dirs().iter().any(|d| real.starts_with(d)) {
         return Err(Error::new("EPERM", "not a temporary file"));
@@ -120,7 +116,25 @@ fn read_file(path: &Path, cmd: &Command) -> Result<Vec<u8>, Error> {
     file.seek(SeekFrom::Start(cmd.offset)).map_err(io_error)?;
     let mut buf = Vec::with_capacity(want as usize);
     file.take(want).read_to_end(&mut buf).map_err(io_error)?;
-    Ok(buf)
+    Ok((buf, ReadFile { path: real, dev: meta.dev(), ino: meta.ino() }))
+}
+
+/// The file [`read_file`] read: its resolved path and identity.
+struct ReadFile {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl ReadFile {
+    /// Deletes it (`t=t`), but only while that path is still the file read,
+    /// not one swapped in since.
+    fn remove(&self) {
+        let same = std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.is_file() && m.dev() == self.dev && m.ino() == self.ino);
+        if same {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// The directories image files may be read from, resolved.
@@ -130,7 +144,6 @@ fn temp_dirs() -> Vec<PathBuf> {
 
 /// Owned by the user Tern runs as.
 fn owned(meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
     // SAFETY: `geteuid` has no preconditions.
     meta.uid() == unsafe { libc::geteuid() }
 }
@@ -141,18 +154,23 @@ fn valid_shm_name(name: &[u8]) -> bool {
 }
 
 /// Whether an object `len` bytes long is one written for this image: for
-/// raw pixels, no longer than they need rounded up to a page (the system
-/// may round the object up). A PNG's length can't be told in advance.
+/// raw pixels, exactly them from its start, the object no longer than they
+/// need rounded up to a page (the system may round it up). Told from the
+/// image's size alone: `S` and `O` could stretch it to fit any object. A
+/// PNG's length can't be told in advance.
 fn sized_for(cmd: &Command, len: u64) -> bool {
     let bpp = match cmd.format {
         Format::Png => return true,
         Format::Rgb => 3,
         Format::Rgba => 4,
     };
-    let need = cmd.offset + if cmd.size != 0 { cmd.size } else { u64::from(cmd.width) * u64::from(cmd.height) * bpp };
+    let need = u64::from(cmd.width) * u64::from(cmd.height) * bpp;
+    if cmd.offset != 0 || (cmd.size != 0 && cmd.size != need) {
+        return false;
+    }
     // SAFETY: `sysconf` has no preconditions.
     let page = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(1) as u64;
-    len <= need.div_ceil(page) * page
+    need <= len && len <= need.div_ceil(page) * page
 }
 
 /// Reads the image from a shared-memory object the program wrote for us:
@@ -436,6 +454,38 @@ mod tests {
             libc::shm_unlink(cname.as_ptr());
         }
         assert_eq!(load(&cmd("t=s,f=24,s=1,v=1"), &b64(b"no-slash")).unwrap_err().code, "EBADF");
+    }
+
+    #[test]
+    fn a_temp_file_swapped_after_reading_is_kept() {
+        let path = temp("tty-graphics-protocol-swap");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        let (_, read) = read_file(&path, &cmd("t=t,f=24,s=1,v=1")).unwrap();
+        // Another file takes its name before it is deleted (the one read
+        // stays, so its inode can't be reused for the new one).
+        let moved = temp("tty-graphics-protocol-swap-moved");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, [4, 5, 6]).unwrap();
+        read.remove();
+        assert!(path.exists(), "deleted a file it never read");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&moved).unwrap();
+    }
+
+    #[test]
+    fn shared_memory_sizes_follow_the_image() {
+        // SAFETY: `sysconf` has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        let c = |control: &str| cmd(control);
+        assert!(sized_for(&c("f=24,s=1,v=1"), 3));
+        assert!(sized_for(&c("f=24,s=1,v=1"), page), "rounded up to a page");
+        assert!(sized_for(&c("f=32,s=2,v=1,S=8"), 8));
+        assert!(!sized_for(&c("f=24,s=1,v=1"), page + 1));
+        assert!(!sized_for(&c("f=24,s=1,v=1"), 2), "too short");
+        // `S` and `O` can't stretch a small image over a big object.
+        assert!(!sized_for(&c("f=24,s=1,v=1,S=999999"), 999_999));
+        assert!(!sized_for(&c("f=24,s=1,v=1,O=999996"), 999_999));
+        assert!(sized_for(&c("f=100"), 1 << 30));
     }
 
     #[test]
