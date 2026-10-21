@@ -670,7 +670,12 @@ pub fn kill_process(pid: u32) -> io::Result<()> {
 
 #[cfg(windows)]
 pub fn kill_process(pid: u32) -> io::Result<()> {
-    let status = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status()?;
+    use std::os::windows::process::CommandExt;
+    // A GUI app's console children would each flash a console window.
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .status()?;
     if status.success() { Ok(()) } else { Err(io::Error::other(format!("taskkill exited with {status}"))) }
 }
 

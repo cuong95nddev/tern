@@ -52,6 +52,8 @@ mod usage_view;
 mod viewer;
 mod window_grip;
 mod window_state;
+#[cfg(windows)]
+mod winhttp;
 mod workspace;
 
 use std::path::PathBuf;

@@ -109,7 +109,16 @@ fn command_in(s: &[u8]) -> Option<String> {
 /// Run `cmd` in a shell with `input` on its stdin, its output Claude Code's.
 fn run_user(cmd: &str, input: &[u8]) -> i32 {
     let shell = if cfg!(windows) { "bash" } else { "sh" };
-    let Ok(mut child) = Command::new(shell).arg("-c").arg(cmd).stdin(Stdio::piped()).spawn() else { return 1 };
+    let mut c = Command::new(shell);
+    c.arg("-c").arg(cmd).stdin(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // Tern is a GUI app with no console to share: bash would open a
+        // console window (or a Windows Terminal tab) on every redraw.
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let Ok(mut child) = c.spawn() else { return 1 };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input);
     }

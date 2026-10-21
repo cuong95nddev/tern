@@ -11,9 +11,10 @@
 //! certificate against the thumbprints in `TERN_WINDOWS_SIGNER` (set at build
 //! time; without them Tern
 //! only points to the release page) and starts it: once Tern quits it
-//! installs silently over the installed copy and starts Tern again (the
-//! system's `curl.exe`, and PowerShell for the signature). On Linux Tern
-//! only points to the release page.
+//! installs silently over the installed copy and starts Tern again
+//! (WinHTTP, and WinVerifyTrust for the signature: no helper process, as an
+//! unsigned app's hidden curl or PowerShell is what antivirus software
+//! flags). On Linux Tern only points to the release page.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -215,8 +216,8 @@ fn prompt(level: PromptLevel, msg: &str, detail: &str, answers: &[&str], cx: &mu
     window.update(cx, |_, window, cx| window.prompt(level, msg, Some(detail), answers, cx)).ok()
 }
 
-/// SHA-1 thumbprints (comma separated, as `Get-AuthenticodeSignature` shows
-/// them) of the certificates the Windows installer may be signed with, set
+/// SHA-1 thumbprints (comma separated, hex as `Get-AuthenticodeSignature`
+/// shows them) of the certificates the Windows installer may be signed with, set
 /// at build time. Without them Tern can't verify a downloaded installer, so
 /// it doesn't run one.
 const WINDOWS_SIGNER: &str = match option_env!("TERN_WINDOWS_SIGNER") {
@@ -242,29 +243,10 @@ fn installation() -> Option<PathBuf> {
     }
 }
 
-/// `program` without a console window of its own (on Windows a GUI app's
-/// console children would each flash one).
-fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    #[allow(unused_mut)]
-    let mut c = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    c
-}
-
-/// The system's curl: macOS and Windows 10+ ship one.
+/// The system's curl (Windows asks through WinHTTP instead).
+#[cfg(not(windows))]
 fn curl_path() -> PathBuf {
-    if cfg!(windows) {
-        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-        PathBuf::from(root).join(r"System32\curl.exe")
-    } else if cfg!(target_os = "macos") {
-        "/usr/bin/curl".into()
-    } else {
-        "curl".into()
-    }
+    if cfg!(target_os = "macos") { "/usr/bin/curl".into() } else { "curl".into() }
 }
 
 /// The release asset this platform installs from.
@@ -320,10 +302,10 @@ fn bundle_of(exe: &Path) -> Option<PathBuf> {
     ok.then(|| bundle.to_owned())
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn curl() -> Command {
-    let mut c = command(curl_path());
-    c.args(["-fsSL", "--connect-timeout", "15", "-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))]);
+    let mut c = Command::new(curl_path());
+    c.args(["-fsSL", "--connect-timeout", "15", "-A", AGENT]);
     // HTTPS only, also after redirects; give up on a stalled download (under
     // 1 KB/s for 30 s) or one that takes over 15 minutes.
     c.args(["--proto", "=https", "--proto-redir", "=https", "--speed-limit", "1024", "--speed-time", "30", "--max-time", "900"]);
@@ -347,9 +329,27 @@ fn fetch_latest() -> Result<Option<Release>, String> {
     Ok(Some(Release { version, asset_url, page_url }))
 }
 
+const AGENT: &str = concat!("Tern/", env!("CARGO_PKG_VERSION"));
+
 /// The HTTP status of `url` and where it redirects, without following it.
+#[cfg(windows)]
 fn head(url: &str) -> Result<(u16, String), String> {
-    let out = command(curl_path())
+    let req = crate::winhttp::Request {
+        method: "HEAD",
+        url,
+        agent: AGENT,
+        headers: &[],
+        follow_redirects: false,
+        max_time: Duration::from_secs(30),
+    };
+    let answer = crate::winhttp::send(&req, &mut std::io::sink()).map_err(|e| format!("Couldn't reach GitHub: {e}"))?;
+    Ok((answer.status, answer.location.unwrap_or_default()))
+}
+
+/// The HTTP status of `url` and where it redirects, without following it.
+#[cfg(not(windows))]
+fn head(url: &str) -> Result<(u16, String), String> {
+    let out = Command::new(curl_path())
         .args([
             "-sSI",
             "-o",
@@ -362,7 +362,7 @@ fn head(url: &str) -> Result<(u16, String), String> {
             "30",
         ])
         .args(["--proto", "=https"])
-        .args(["-A", concat!("Tern/", env!("CARGO_PKG_VERSION"))])
+        .args(["-A", AGENT])
         .arg(url)
         .output()
         .map_err(|e| format!("curl: {e}"))?;
@@ -385,7 +385,7 @@ fn parse_latest_redirect((code, location): &(u16, String)) -> Result<Option<Stri
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn run(cmd: &mut Command) -> Result<(), String> {
     let out = cmd.output().map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
     if out.status.success() {
@@ -415,12 +415,32 @@ fn stage(url: &str, _install_dir: &Path) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let setup = tmp.join("Tern-setup.exe");
-    let verified = run(curl().arg("-o").arg(&setup).arg(url)).and_then(|()| verify_signature(&setup));
+    let verified = download(url, &setup).and_then(|()| verify_signature(&setup));
     if let Err(e) = verified {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
     Ok(setup)
+}
+
+/// Download `url` (following its redirects) to `file`.
+#[cfg(windows)]
+fn download(url: &str, file: &Path) -> Result<(), String> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(file).map_err(|e| e.to_string())?);
+    let req = crate::winhttp::Request {
+        method: "GET",
+        url,
+        agent: AGENT,
+        headers: &[],
+        follow_redirects: true,
+        max_time: Duration::from_secs(15 * 60),
+    };
+    let answer = crate::winhttp::send(&req, &mut out)?;
+    std::io::Write::flush(&mut out).map_err(|e| e.to_string())?;
+    match answer.status {
+        200 => Ok(()),
+        s => Err(format!("GitHub answered HTTP {s}.")),
+    }
 }
 
 /// Require a valid Authenticode signature on `file` by one of the
@@ -430,28 +450,64 @@ fn verify_signature(file: &Path) -> Result<(), String> {
     if WINDOWS_SIGNER.is_empty() {
         return Err("this Tern can't verify installers: download the update from the release page.".to_owned());
     }
-    // A plain -Command (never -EncodedCommand, which antivirus software
-    // flags) without double quotes, so the C runtime's quoting has nothing
-    // to escape; a path can't hold a `"`.
-    let script = format!(
-        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; $s.Status.ToString(); $s.SignerCertificate.Thumbprint",
-        file.to_string_lossy().replace('\'', "''")
-    );
-    let out = command(crate::platform::windows_powershell())
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| format!("powershell: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines().map(str::trim);
-    match (lines.next(), lines.next()) {
-        (Some("Valid"), Some(thumb)) if !thumb.is_empty() && WINDOWS_SIGNER.split(',').any(|t| t.trim().eq_ignore_ascii_case(thumb)) => {
-            Ok(())
-        },
-        (status, thumb) => Err(format!(
-            "the downloaded installer isn't signed by Tern's certificate (status {}, signer {})",
-            status.unwrap_or("unknown"),
-            thumb.filter(|s| !s.is_empty()).unwrap_or("none")
-        )),
+    match authenticode_signer(file) {
+        Ok(thumb) if WINDOWS_SIGNER.split(',').any(|t| t.trim().eq_ignore_ascii_case(&thumb)) => Ok(()),
+        Ok(thumb) => Err(format!("the downloaded installer isn't signed by Tern's certificate (signer {thumb})")),
+        Err(status) => Err(format!("the downloaded installer isn't signed by Tern's certificate (status {status})")),
+    }
+}
+
+/// The SHA-1 thumbprint of the certificate that signed `file`, once
+/// WinVerifyTrust finds its signature valid; else why not.
+#[cfg(windows)]
+fn authenticode_signer(file: &Path) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Cryptography::{CERT_SHA1_HASH_PROP_ID, CertGetCertificateContextProperty};
+    use windows_sys::Win32::Security::WinTrust::*;
+
+    let path: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut info =
+        WINTRUST_FILE_INFO { cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32, pcwszFilePath: path.as_ptr(), ..Default::default() };
+    let mut data = WINTRUST_DATA {
+        cbStruct: size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    data.Anonymous.pFile = &mut info;
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    // SAFETY: `data` and `info` outlive both calls; the provider data is
+    // read before the second call closes it.
+    unsafe {
+        let status = WinVerifyTrust(std::ptr::null_mut(), &mut action, (&raw mut data).cast());
+        let signer = match status {
+            0 => {
+                let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+                let signer = if provider.is_null() { std::ptr::null_mut() } else { WTHelperGetProvSignerFromChain(provider, 0, 0, 0) };
+                let cert = match signer.as_ref() {
+                    Some(s) if s.csCertChain > 0 && !s.pasCertChain.is_null() => (*s.pasCertChain).pCert,
+                    _ => std::ptr::null(),
+                };
+                let mut hash = [0u8; 20];
+                let mut size = hash.len() as u32;
+                match !cert.is_null()
+                    && CertGetCertificateContextProperty(cert, CERT_SHA1_HASH_PROP_ID, hash.as_mut_ptr().cast(), &mut size) != 0
+                {
+                    true => Ok(hash[..size as usize].iter().map(|b| format!("{b:02X}")).collect()),
+                    false => Err("no signer".to_owned()),
+                }
+            },
+            // TRUST_E_NOSIGNATURE, TRUST_E_BAD_DIGEST, CERT_E_UNTRUSTEDROOT.
+            -2146762496 => Err("NotSigned".to_owned()),
+            -2146869232 => Err("HashMismatch".to_owned()),
+            -2146762487 => Err("UntrustedRoot".to_owned()),
+            s => Err(format!("{:#010X}", s as u32)),
+        };
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(std::ptr::null_mut(), &mut action, (&raw mut data).cast());
+        signer
     }
 }
 
@@ -584,6 +640,16 @@ mod tests {
     fn finds_the_app_bundle() {
         assert_eq!(bundle_of(Path::new("/Applications/Tern.app/Contents/MacOS/tern")), Some(PathBuf::from("/Applications/Tern.app")));
         assert_eq!(bundle_of(Path::new("/x/target/release/tern-app")), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn an_unsigned_file_has_no_signer() {
+        let file = std::env::temp_dir().join(format!("tern-unsigned-{}.exe", std::process::id()));
+        std::fs::write(&file, b"MZ not really a program").unwrap();
+        let signer = super::authenticode_signer(&file);
+        let _ = std::fs::remove_file(&file);
+        assert!(signer.is_err());
     }
 
     #[test]

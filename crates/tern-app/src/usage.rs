@@ -11,8 +11,10 @@
 //! a restart or a second Tern doesn't ask again before it is due.
 
 use std::collections::HashMap;
+#[cfg(not(windows))]
 use std::io::Write as _;
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -482,8 +484,27 @@ fn keychain(_service: &str) -> Option<Credentials> {
     None
 }
 
+/// GETs the endpoint with WinHTTP: a hidden curl.exe handed a sign-in is
+/// what antivirus software flags.
+#[cfg(windows)]
+fn get(token: &str) -> Result<(u16, String), String> {
+    let mut body = vec![];
+    let auth = format!("Bearer {token}");
+    let req = crate::winhttp::Request {
+        method: "GET",
+        url: URL,
+        agent: AGENT,
+        headers: &[("Authorization", &auth), ("anthropic-beta", BETA)],
+        follow_redirects: false,
+        max_time: Duration::from_secs(30),
+    };
+    let answer = crate::winhttp::send(&req, &mut body)?;
+    Ok((answer.status, String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// GETs the endpoint with the system's curl. The token goes in on stdin, so
 /// it never shows in the process list.
+#[cfg(not(windows))]
 fn get(token: &str) -> Result<(u16, String), String> {
     let curl = if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" };
     let mut child = Command::new(curl)
