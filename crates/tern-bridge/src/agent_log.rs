@@ -5,6 +5,7 @@
 //! what that tool gave back), then follows the file as the sub-agent goes
 //! on, as `tail -F` would.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -113,8 +114,8 @@ fn header(file: &Path) -> Option<String> {
     let text = |k: &str| meta.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let what = text("description").or(text("agentType"))?;
     Some(match text("agentType") {
-        Some(kind) if kind != what => format!("{BOLD}{what}{RESET} {DIM}· {kind}{RESET}"),
-        _ => format!("{BOLD}{what}{RESET}"),
+        Some(kind) if kind != what => format!("{BOLD}{}{RESET} {DIM}· {}{RESET}", inert(what), inert(kind)),
+        _ => format!("{BOLD}{}{RESET}", inert(what)),
     })
 }
 
@@ -150,6 +151,7 @@ pub fn render(line: &str, seen: &mut Seen, out: &mut String) {
                 if text.is_empty() || text.starts_with("<system-reminder>") {
                     continue;
                 }
+                let text = inert(text);
                 if kind == Some("user") {
                     out.push_str(&format!("{CYAN}❯{RESET} {text}\n\n"));
                 } else {
@@ -158,16 +160,17 @@ pub fn render(line: &str, seen: &mut Seen, out: &mut String) {
             },
             (Some("assistant"), Some("tool_use")) => {
                 let name = field("name").unwrap_or("tool");
+                let shown = inert(name);
                 let report = block.pointer("/input/message").and_then(Value::as_str).filter(|_| name == HANDBACK);
                 if let Some(report) = report {
                     if let Some(id) = field("id") {
                         seen.quiet.insert(id.to_owned());
                     }
-                    out.push_str(&format!("{}\n\n", report.trim()));
+                    out.push_str(&format!("{}\n\n", inert(report.trim())));
                     continue;
                 }
                 let summary = block.get("input").map(summary).unwrap_or_default();
-                out.push_str(&format!("{BOLD}⏺ {name}{RESET}{}\n", if summary.is_empty() { String::new() } else { format!(" {summary}") }));
+                out.push_str(&format!("{BOLD}⏺ {shown}{RESET}{}\n", if summary.is_empty() { String::new() } else { format!(" {summary}") }));
             },
             (Some("user"), Some("tool_result")) => {
                 if field("tool_use_id").is_some_and(|id| seen.quiet.remove(id)) {
@@ -195,6 +198,7 @@ fn summary(input: &Value) -> String {
         None => input.to_string(),
     };
     let line = text.lines().next().unwrap_or_default();
+    let line = inert(line);
     let mut short: String = line.chars().take(SUMMARY_CHARS).collect();
     if short.len() < line.len() || text.lines().nth(1).is_some() {
         short.push('…');
@@ -219,6 +223,30 @@ fn result_text(content: &Value) -> String {
     }
 }
 
+/// `text` with its control characters (but newlines and tabs) shown, not
+/// acted on: what a log holds came from programs and the web, and an escape
+/// sequence in it must not drive the terminal it is read in. C0 controls and
+/// DEL show in caret notation (`^[`), C1 controls as U+FFFD.
+fn inert(text: &str) -> Cow<'_, str> {
+    let acts = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !text.chars().any(acts) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            c if !acts(c) => out.push(c),
+            '\x7f' => out.push_str("^?"),
+            c if (c as u32) < 0x20 => {
+                out.push('^');
+                out.push(char::from(c as u8 + b'@'));
+            },
+            _ => out.push('\u{fffd}'),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// A tool's output, indented under its call: its first lines, and how many
 /// more there are.
 fn output(text: &str, error: bool) -> String {
@@ -227,7 +255,7 @@ fn output(text: &str, error: bool) -> String {
     let mut out = String::new();
     for (i, line) in lines.iter().take(OUTPUT_LINES).enumerate() {
         let lead = if i == 0 { "  ⎿ " } else { "    " };
-        out.push_str(&format!("{color}{lead}{line}{RESET}\n"));
+        out.push_str(&format!("{color}{lead}{}{RESET}\n", inert(line)));
     }
     if lines.len() > OUTPUT_LINES {
         out.push_str(&format!("{DIM}    … {} more lines{RESET}\n", lines.len() - OUTPUT_LINES));
@@ -296,6 +324,24 @@ mod tests {
              All done.\n\n\
              ok\n\n"
         );
+    }
+
+    #[test]
+    fn control_characters_are_shown_not_sent() {
+        assert_eq!(inert("a\x1b]52;c;eA==\x07b\r\x7f\u{9b}2J\tc\n"), "a^[]52;c;eA==^Gb^M^?\u{fffd}2J\tc\n");
+        assert!(matches!(inert("plain\ttext\n"), Cow::Borrowed(_)));
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x\u001b[2Jy"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"B\u001bash","input":{"command":"ls\u0007"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"out\u001b]0;t\u0007"}]}}"#,
+        ];
+        let (mut raw, mut seen) = (String::new(), Seen::default());
+        for l in lines {
+            render(l, &mut seen, &mut raw);
+        }
+        // Only the log's own colors are escape sequences.
+        assert!(!raw.contains('\x07') && !raw.contains("\x1b[2J") && !raw.contains("\x1b]"));
+        assert_eq!(rendered(&lines), "x^[[2Jy\n\n⏺ B^[ash ls^G\n  ⎿ out^[]0;t^G\n\n");
     }
 
     #[test]
