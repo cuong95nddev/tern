@@ -829,16 +829,6 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     Element {
-        name: "pane",
-        about: "A pane of the center: its tabs and what the active one shows. `focused_border` is its border color while \
-                it has focus, `focus_line_*` the line along its top while it has focus with more than one pane",
-        groups: &[
-            &[("focused_border", Color, ""), ("focus_line_height", Len, "2"), ("focus_line_color", Color, "$primary.background")],
-            IMAGE,
-        ],
-    },
-    Element {
-    Element {
         name: "resources.card",
         about: "What clicking the system panel opens: what each workspace's terminals, the background sessions and \
                 Tern itself use",
@@ -932,6 +922,16 @@ pub const ELEMENTS: &[Element] = &[
         about: "Under the list: End Background Sessions, when there are any",
         groups: &[&[("gap", Len, "8"), ("padding_x", Len, "6")]],
     },
+    Element {
+        name: "pane",
+        about: "A pane of the center: its tabs and what the active one shows. `focused_border` is its border color while \
+                it has focus, `focus_line_*` the line along its top while it has focus with more than one pane",
+        groups: &[
+            &[("focused_border", Color, ""), ("focus_line_height", Len, "2"), ("focus_line_color", Color, "$primary.background")],
+            IMAGE,
+        ],
+    },
+    Element {
         name: "pane.body",
         about: "What a pane's active tab shows, under (or beside) its tabs. `focused_border` is its border color while the \
                 pane has focus",

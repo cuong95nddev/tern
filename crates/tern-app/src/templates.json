@@ -2152,6 +2152,7 @@
       { "when": "!ready", "use": "system.empty" },
       {
         "when": "ready",
+        "frame": "item",
         "element": "system.list",
         "layout": "fit",
         "children": [
@@ -2201,7 +2202,6 @@
                     "style": { "grow": "{used}" },
                     "states": {
                       "warning": { "background": "$system.bar.fill.warning" },
-        "frame": "item",
                       "critical": { "background": "$system.bar.fill.critical" }
                     }
                   },
@@ -2222,55 +2222,6 @@
     "justify": "center",
     "children": [{ "text": "Reading…" }]
   },
-  "drag_chip": {
-    "element": "drag_chip",
-    "layout": "row",
-    "align": "center",
-    "children": [{ "when": "icon", "icon": "{icon}", "style": { "width": 12, "height": 12 } }, { "text": "{label}" }]
-  },
-  "dock_tabs": {
-    "fill": true,
-    "children": [
-      {
-        "layout": "row",
-        "shrink": 0,
-        "style": { "border_bottom_width": 1, "border": "$border" },
-        "children": [{ "each": "tabs", "layout": "row", "item": { "use": "dock_tabs.tab" } }]
-      },
-      { "grow": 1, "children": [{ "slot": "content" }] }
-    ]
-  },
-  "dock_tabs.tab": {
-    "frame": "tab",
-    "layout": "row",
-    "align": "center",
-    "style": { "padding_x": 10, "height": 26, "text": "$muted_foreground", "border_bottom_width": 2, "border": "transparent" },
-    "states": {
-      "on": { "text": "$foreground", "border": "$primary" },
-      "hover && !on": { "text": "$foreground" }
-    },
-    "children": [{ "truncate": true, "text": "{title}" }]
-  },
-  "drag_group": {
-    "children": [
-      {
-        "when": "!text",
-        "style": { "width": 10, "height": 10, "margin_x": 4, "radius": 99, "background": "{group_color}", "shadow": "md" }
-      },
-      {
-        "when": "text",
-        "element": "pane_tab_bar.group",
-        "layout": "row",
-        "align": "center",
-        "nowrap": true,
-        "text": "{text}",
-        "style": { "background": "{group_color}", "shadow": "md" }
-      }
-    ]
-  },
-  "shot_overlay": {
-    "frame": "overlay",
-    "element": "shot_overlay",
   "resources.card": {
     "element": "resources.card",
     "layout": "column",
@@ -2400,6 +2351,55 @@
       }
     ]
   },
+  "drag_chip": {
+    "element": "drag_chip",
+    "layout": "row",
+    "align": "center",
+    "children": [{ "when": "icon", "icon": "{icon}", "style": { "width": 12, "height": 12 } }, { "text": "{label}" }]
+  },
+  "dock_tabs": {
+    "fill": true,
+    "children": [
+      {
+        "layout": "row",
+        "shrink": 0,
+        "style": { "border_bottom_width": 1, "border": "$border" },
+        "children": [{ "each": "tabs", "layout": "row", "item": { "use": "dock_tabs.tab" } }]
+      },
+      { "grow": 1, "children": [{ "slot": "content" }] }
+    ]
+  },
+  "dock_tabs.tab": {
+    "frame": "tab",
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_x": 10, "height": 26, "text": "$muted_foreground", "border_bottom_width": 2, "border": "transparent" },
+    "states": {
+      "on": { "text": "$foreground", "border": "$primary" },
+      "hover && !on": { "text": "$foreground" }
+    },
+    "children": [{ "truncate": true, "text": "{title}" }]
+  },
+  "drag_group": {
+    "children": [
+      {
+        "when": "!text",
+        "style": { "width": 10, "height": 10, "margin_x": 4, "radius": 99, "background": "{group_color}", "shadow": "md" }
+      },
+      {
+        "when": "text",
+        "element": "pane_tab_bar.group",
+        "layout": "row",
+        "align": "center",
+        "nowrap": true,
+        "text": "{text}",
+        "style": { "background": "{group_color}", "shadow": "md" }
+      }
+    ]
+  },
+  "shot_overlay": {
+    "frame": "overlay",
+    "element": "shot_overlay",
     "fill": true,
     "children": [
       { "slot": "picture" },
