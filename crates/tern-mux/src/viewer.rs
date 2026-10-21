@@ -1,7 +1,8 @@
 //! A remote viewer's side (the web server): an observer connection that
 //! follows the session list and views sessions beside the UI that owns them.
-//! It types into them and may resize them, but never takes them over, never
-//! starts the daemon and doesn't keep it alive.
+//! It types into them and resizes them, which takes them from the UI until
+//! it takes them back (see `ClientMsg::Drive`), but never attaches to them,
+//! never starts the daemon and doesn't keep it alive.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -15,7 +16,7 @@ use tern_term::snapshot::Snapshot;
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, Controller, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -44,6 +45,11 @@ pub enum ViewEvent {
     /// No such session.
     NotFound {
         id: u64,
+    },
+    /// Who has the session viewed: after `Viewing`, and when it changes.
+    Control {
+        id: u64,
+        by: Controller,
     },
 }
 
@@ -112,6 +118,12 @@ impl Viewer {
         self.send(&ClientMsg::Resize { id, size })
     }
 
+    /// Take session `id`: the PTY takes this viewer's size, and the owner's
+    /// typing is dropped until it takes it back.
+    pub fn drive(&self, id: u64) -> io::Result<()> {
+        self.send(&ClientMsg::Drive { id })
+    }
+
     /// End the connection; the stream's `next` returns `None`.
     pub fn shutdown(&self) {
         let _ = self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
@@ -144,6 +156,7 @@ impl ViewStream {
                 ServerMsg::Marker { id, marker } => ViewEvent::Marker { id, marker },
                 ServerMsg::Detached { id } => ViewEvent::Lagged { id },
                 ServerMsg::NotFound { id, .. } => ViewEvent::NotFound { id },
+                ServerMsg::Control { id, by } => ViewEvent::Control { id, by },
                 _ => continue,
             });
         }

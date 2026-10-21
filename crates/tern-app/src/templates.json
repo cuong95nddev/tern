@@ -1296,7 +1296,36 @@
     "element": "terminal",
     "fill": true,
     "style": { "background": "{background}" },
-    "children": [{ "slot": "grid" }, { "when": "find", "use": "terminal.find" }]
+    "children": [
+      { "slot": "grid" },
+      { "when": "find", "use": "terminal.find" },
+      { "when": "remote", "use": "terminal.remote" }
+    ]
+  },
+  "terminal.remote": {
+    "element": "terminal.remote",
+    "layout": "row",
+    "align": "center",
+    "position": { "bottom": "$terminal.remote.bottom", "right": "$terminal.remote.right" },
+    "z": 1,
+    "children": [
+      {
+        "icon": "smartphone",
+        "style": {
+          "width": "$terminal.remote.icon_size",
+          "height": "$terminal.remote.icon_size",
+          "text": "$terminal.remote.icon_color"
+        }
+      },
+      { "text": "Your phone has this terminal: typing here is paused" },
+      {
+        "button": "take_back",
+        "variant": "primary",
+        "size": "xsmall",
+        "label": "Take Back",
+        "tooltip": "Size the terminal for this window and type here again"
+      }
+    ]
   },
   "terminal.find": {
     "frame": "find",

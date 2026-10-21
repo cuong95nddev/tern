@@ -38,7 +38,7 @@ use tern_term::{SpawnConfig, TermSize};
 use crate::host::Paused;
 use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, Controller, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 #[cfg(unix)]
 use crate::proto::{HANDOFF_VERSION, HandedSession, HandoffMsg};
 use crate::{UnixListener, UnixStream};
@@ -153,10 +153,17 @@ struct Session {
     owner: Option<Weak<Conn>>,
     /// Connections viewing it.
     viewers: Vec<Weak<Conn>>,
-    /// The size each connection wants it at, the one used last at the end:
-    /// the PTY takes that one's (tmux's `window-size latest`), so a phone
-    /// viewing it gets its own size until the desktop types again.
+    /// The size each connection wants it at, the one that asked last at the
+    /// end.
     sizes: Vec<(Weak<Conn>, TermSize)>,
+    /// The viewer that has it (a phone): the PTY takes its size and the
+    /// owner's typing is dropped, until the owner takes it back (`Drive`)
+    /// or the viewer leaves. `None`: the owner has it.
+    driver: Option<Weak<Conn>>,
+    /// The owner took it back: a viewer's size alone (it refits as it
+    /// comes back to the front) no longer takes it, only its typing or a
+    /// `Drive`.
+    held: bool,
     /// Hook requests that came while no one was attached.
     hooks: VecDeque<Vec<u8>>,
     /// `session_id` of its latest Claude hook event.
@@ -168,40 +175,114 @@ struct Session {
     policy: Policy,
 }
 
+/// The program wasn't typed to: focus reports (DECSET 1004), which a
+/// terminal sends as its window comes and goes.
+fn untyped(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.chunks(3).all(|c| c == b"\x1b[I" || c == b"\x1b[O")
+}
+
 impl Session {
-    /// `conn` wants the PTY at `size`, and was used last.
-    fn want(&mut self, conn: &Arc<Conn>, size: TermSize) {
-        self.forget(Arc::as_ptr(conn));
-        self.sizes.push((Arc::downgrade(conn), size));
+    fn is_viewer(&self, conn: *const Conn) -> bool {
+        self.viewers.iter().any(|v| v.as_ptr() == conn)
     }
 
-    /// `conn` was used: the size it wants, when that becomes the PTY's.
-    fn used(&mut self, conn: &Arc<Conn>) -> Option<TermSize> {
-        let i = self.sizes.iter().position(|(c, _)| c.as_ptr() == Arc::as_ptr(conn))?;
-        if i + 1 == self.sizes.len() {
-            return None;
+    /// The viewer that has it, while it is there.
+    fn driver(&self) -> Option<*const Conn> {
+        self.driver.as_ref().filter(|d| d.strong_count() > 0).map(Weak::as_ptr)
+    }
+
+    fn size_of(&self, conn: *const Conn) -> Option<TermSize> {
+        self.sizes.iter().find(|(c, _)| c.as_ptr() == conn).map(|e| e.1)
+    }
+
+    /// The PTY's size: the driver's, else the owner's, else the one that
+    /// asked last.
+    fn target(&self) -> Option<TermSize> {
+        let owner = self.owner.as_ref().map(Weak::as_ptr);
+        self.driver()
+            .and_then(|d| self.size_of(d))
+            .or_else(|| owner.and_then(|o| self.size_of(o)))
+            .or_else(|| self.sizes.iter().rev().find(|(c, _)| c.strong_count() > 0).map(|e| e.1))
+    }
+
+    /// Who has it, as told to `conn`.
+    fn controller(&self, conn: *const Conn) -> Controller {
+        match self.driver() {
+            Some(d) if d == conn => Controller::You,
+            Some(_) => Controller::Viewer,
+            None if self.owner.as_ref().is_some_and(|o| o.as_ptr() == conn) => Controller::You,
+            None => Controller::Desktop,
         }
-        let e = self.sizes.remove(i);
-        let size = e.1;
-        self.sizes.push(e);
-        Some(size)
     }
 
-    /// `conn` let go of it: when it was used last, the size of the one used
-    /// before it.
-    fn forget(&mut self, conn: *const Conn) -> Option<TermSize> {
-        let last = self.sizes.last().is_some_and(|(c, _)| c.as_ptr() == conn);
-        self.sizes.retain(|(c, _)| c.as_ptr() != conn && c.strong_count() > 0);
-        if last { self.sizes.last().map(|e| e.1) } else { None }
-    }
-
-    /// `forget`, resizing the PTY to the size that takes over.
-    fn let_go(&mut self, conn: *const Conn) {
-        if let Some(size) = self.forget(conn)
+    /// Change it with `f`, then resize the PTY to the size that has it, and
+    /// tell its owner and viewers when someone else has it.
+    fn update(&mut self, id: u64, f: impl FnOnce(&mut Self)) {
+        let was = self.driver();
+        f(self);
+        if let Some(size) = self.target()
             && size != self.host.size()
         {
             self.host.resize(size);
         }
+        if self.driver() != was {
+            self.tell_control(id);
+        }
+    }
+
+    fn tell_control(&self, id: u64) {
+        for c in self.owner.iter().chain(&self.viewers).filter_map(Weak::upgrade) {
+            c.send(ServerMsg::Control { id, by: self.controller(Arc::as_ptr(&c)) });
+        }
+    }
+
+    /// `conn` wants the PTY at `size`. A viewer takes it then, unless the
+    /// owner took it back.
+    fn want(&mut self, conn: &Arc<Conn>, size: TermSize) {
+        let p = Arc::as_ptr(conn);
+        match self.sizes.iter_mut().find(|(c, _)| c.as_ptr() == p) {
+            Some(e) => e.1 = size,
+            None => self.sizes.push((Arc::downgrade(conn), size)),
+        }
+        if self.is_viewer(p) && (!self.held || self.owner.is_none()) {
+            self.drive(conn);
+        }
+    }
+
+    /// `conn` takes it: a viewer has it, or the owner takes it back.
+    fn drive(&mut self, conn: &Arc<Conn>) {
+        if self.is_viewer(Arc::as_ptr(conn)) {
+            self.driver = Some(Arc::downgrade(conn));
+            self.held = false;
+        } else if self.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(conn)) {
+            self.driver = None;
+            self.held = true;
+        }
+    }
+
+    /// `conn` typed `bytes`: whether they go to the program. A viewer
+    /// typing takes it; the owner's typing is dropped while a viewer has it.
+    fn typed(&mut self, conn: &Arc<Conn>, bytes: &[u8]) -> bool {
+        if self.is_viewer(Arc::as_ptr(conn)) {
+            if !untyped(bytes) {
+                self.drive(conn);
+            }
+            return true;
+        }
+        self.driver().is_none()
+    }
+
+    /// `conn` let go of it: the owner has it again when it was the driver.
+    fn forget(&mut self, conn: *const Conn) {
+        self.sizes.retain(|(c, _)| c.as_ptr() != conn && c.strong_count() > 0);
+        if self.driver.as_ref().is_some_and(|d| d.as_ptr() == conn || d.strong_count() == 0) {
+            self.driver = None;
+        }
+    }
+
+    /// `forget`, resizing the PTY to the size that takes over.
+    fn let_go(&mut self, id: u64, conn: *const Conn) {
+        self.update(id, |s| s.forget(conn));
     }
 }
 
@@ -580,7 +661,7 @@ impl Server {
             st.observers.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
         }
         let sub: Arc<dyn Subscriber> = conn.clone();
-        for s in st.sessions.values_mut() {
+        for (&id, s) in st.sessions.iter_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {
                 s.owner = None;
                 s.host.detach(&sub);
@@ -589,7 +670,7 @@ impl Server {
                 s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(&conn));
                 s.host.unview(&sub);
             }
-            s.let_go(Arc::as_ptr(&conn));
+            s.let_go(id, Arc::as_ptr(&conn));
         }
         Self::update_idle(&mut st);
         result
@@ -620,23 +701,29 @@ impl Server {
                 {
                     s.owner = None;
                     s.host.detach(&(conn.clone() as Arc<dyn Subscriber>));
-                    s.let_go(Arc::as_ptr(conn));
+                    s.let_go(id, Arc::as_ptr(conn));
                 }
             },
             ClientMsg::Input { id, bytes } => {
                 let mut st = self.state.lock().unwrap();
                 if let Some(s) = st.sessions.get_mut(&id) {
-                    if let Some(size) = s.used(conn) {
-                        s.host.resize(size);
+                    let mut go = false;
+                    s.update(id, |s| go = s.typed(conn, &bytes));
+                    if go {
+                        s.host.input(bytes);
                     }
-                    s.host.input(bytes);
                 }
             },
             ClientMsg::Resize { id, size } => {
                 let mut st = self.state.lock().unwrap();
                 if let Some(s) = st.sessions.get_mut(&id) {
-                    s.want(conn, size);
-                    s.host.resize(size);
+                    s.update(id, |s| s.want(conn, size));
+                }
+            },
+            ClientMsg::Drive { id } => {
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
+                    s.update(id, |s| s.drive(conn));
                 }
             },
             ClientMsg::View { req, id } => self.view(conn, req, id),
@@ -645,7 +732,7 @@ impl Server {
                 if let Some(s) = st.sessions.get_mut(&id) {
                     s.viewers.retain(|v| v.as_ptr() != Arc::as_ptr(conn));
                     s.host.unview(&(conn.clone() as Arc<dyn Subscriber>));
-                    s.let_go(Arc::as_ptr(conn));
+                    s.let_go(id, Arc::as_ptr(conn));
                 }
             },
             ClientMsg::Close { id } => self.close(id),
@@ -796,6 +883,8 @@ impl Server {
                     owner: None,
                     viewers: Vec::new(),
                     sizes: vec![(Arc::downgrade(conn), cfg.size)],
+                    driver: None,
+                    held: false,
                     hooks: VecDeque::new(),
                     claude_session: None,
                     guard: Guard::default(),
@@ -817,7 +906,7 @@ impl Server {
     /// Attach `conn` to session `id`; with `size`, make the program repaint
     /// at that size.
     fn attach_host(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, id: u64, size: Option<TermSize>) {
-        let (host, token, previous, hooks) = {
+        let (host, token, previous, hooks, size) = {
             let mut st = self.state.lock().unwrap();
             let Some(s) = st.sessions.get_mut(&id) else { return conn.send(ServerMsg::NotFound { req, id }) };
             let previous = s.owner.replace(Arc::downgrade(conn)).and_then(|w| w.upgrade()).filter(|p| !Arc::ptr_eq(p, conn));
@@ -827,7 +916,9 @@ impl Server {
             if let Some(size) = size {
                 s.want(conn, size);
             }
-            (s.host.clone(), s.token.clone(), previous, std::mem::take(&mut s.hooks))
+            // While a viewer has it, the program repaints at the viewer's size.
+            let size = size.and(s.target());
+            (s.host.clone(), s.token.clone(), previous, std::mem::take(&mut s.hooks), size)
         };
         if let Some(p) = previous {
             p.send(ServerMsg::Detached { id });
@@ -857,6 +948,7 @@ impl Server {
                 conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
             }
         });
+        self.tell_control(conn, id);
         // After `Attached`; changes from here on reach it too.
         host.send_images(&**conn);
         for body in hooks {
@@ -897,11 +989,20 @@ impl Server {
                 conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
             }
         });
+        self.tell_control(conn, id);
         host.send_images(&**conn);
         // The snapshot misses the scroll region and charsets: a full-screen
         // program repaints at its own size (the owner sees the same bytes).
         if exited.is_none() && !host.shell_in_foreground() {
             host.jiggle(host.size());
+        }
+    }
+
+    /// Tell `conn`, after `Attached`, who has session `id`.
+    fn tell_control(&self, conn: &Arc<Conn>, id: u64) {
+        let by = self.state.lock().unwrap().sessions.get(&id).map(|s| s.controller(Arc::as_ptr(conn)));
+        if let Some(by) = by {
+            conn.send(ServerMsg::Control { id, by });
         }
     }
 
@@ -1230,6 +1331,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                     owner: None,
                     viewers: Vec::new(),
                     sizes: Vec::new(),
+                    driver: None,
+                    held: false,
                     hooks,
                     claude_session: s.claude_session,
                     guard: Guard::default(),
@@ -1480,7 +1583,17 @@ fn writer(
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote;
+    use super::{shell_quote, untyped};
+
+    #[test]
+    fn focus_reports_are_not_typing() {
+        assert!(untyped(b"\x1b[I"));
+        assert!(untyped(b"\x1b[O\x1b[I"));
+        assert!(!untyped(b""));
+        assert!(!untyped(b"a"));
+        assert!(!untyped(b"\x1b[Ia"));
+        assert!(!untyped(b"\x1b[A"));
+    }
 
     #[test]
     #[cfg(unix)]

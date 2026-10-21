@@ -1035,7 +1035,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
 | `shells.row` | `indent`, `selected`, `command`, `agent` (with several agents), `age` | `icon` |
 | `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
-| `terminal` | `background` (the palette's, with `terminal.background_opacity`), `find` (the find bar is open) | `grid` |
+| `terminal` | `background` (the palette's, with `terminal.background_opacity`), `find` (the find bar is open), `remote` (a phone has it) | `grid` |
 | `terminal.find` | `count`, `error`, `case`, `word`, `regex` | `input` |
 | `viewer` | as `file_header`; `message` | `diff`, `image`, `preview`, `editor` (the one it shows) |
 | `diff_pane` | `message` | `diff` |

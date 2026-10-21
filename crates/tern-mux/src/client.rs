@@ -20,7 +20,7 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// What the client asks who runs in a session's foreground with: the PTY
 /// the daemon passed, on Windows the shell's pid.
@@ -934,6 +934,12 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                     let _ = tx.send(list);
                 }
             },
+            ServerMsg::Control { id, by } => {
+                let slot = inner.sessions.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    (slot.sink)(TermEvent::RemoteControl(by == Controller::Viewer));
+                }
+            },
             ServerMsg::HandOffFailed { req, message } => {
                 if let Some(tx) = inner.handoffs.lock().unwrap().remove(&req) {
                     let _ = tx.send(message);
@@ -1075,6 +1081,14 @@ impl RemoteSession {
     /// See [`tern_term::procs::foreground_cwd`].
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
         self.foreground().cwd()
+    }
+
+    /// Take the session back from the viewer that has it: its size and
+    /// typing are this one's again.
+    pub fn take_back(&self) {
+        if let Some(id) = self.id() {
+            let _ = self.inner.send(ClientMsg::Drive { id });
+        }
     }
 
     /// End the program and forget the session.

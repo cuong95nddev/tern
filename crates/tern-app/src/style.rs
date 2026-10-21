@@ -242,7 +242,7 @@ macro_rules! simple {
 
 /// Elements drawn over other content, not in the window's flow: in a
 /// see-through window they keep a background the color of the window's.
-const OVER_CONTENT: &[&str] = &["floating", "drag_chip", "settings.switch.knob", "terminal.find"];
+const OVER_CONTENT: &[&str] = &["floating", "drag_chip", "settings.switch.knob", "terminal.find", "terminal.remote"];
 
 /// Properties only the GUI front end draws; others ignore them.
 pub const GUI_ONLY: &[&str] = &[
@@ -1095,6 +1095,27 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     simple!("terminal.find.button", "The bar's options, previous, next and close buttons"),
+    Element {
+        name: "terminal.remote",
+        about: "The note over a terminal's bottom right corner while a phone has it (its size, its typing), with \
+                Take Back",
+        groups: &[&[
+            ("bottom", Len, "8"),
+            ("right", Len, "16"),
+            ("padding_x", Len, "8"),
+            ("padding_y", Len, "4"),
+            ("gap", Len, "8"),
+            ("radius", Len, "$radius"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+            ("background", Color, "$popover"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+            ("shadow", Text, "md"),
+            ("icon_size", Len, "14"),
+            ("icon_color", Color, "$text_muted"),
+        ]],
+    },
     Element {
         name: "drag_chip",
         about: "What follows the pointer while dragging files, tabs or workspaces",

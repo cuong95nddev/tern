@@ -52,6 +52,7 @@ gpui_kit::assets::icon_assets!(
         Rows3,
         Search,
         Server,
+        Smartphone,
         SquareArrowOutUpRight,
         SquareCheck,
         SquareMinus,

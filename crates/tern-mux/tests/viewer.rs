@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use tern_mux::client::{Open, RemoteSession};
+use tern_mux::proto::Controller;
 use tern_mux::viewer::{ViewEvent, Viewer};
 use tern_term::snapshot::Snapshot;
 use tern_term::vt::grid::Dimensions;
@@ -124,40 +125,84 @@ fn viewer_does_not_keep_the_daemon_alive() {
     t.join().unwrap().unwrap();
 }
 
+/// Who has session `id`, as the viewer was told last (once it changes).
+fn control_until(rx: &mpsc::Receiver<ViewEvent>, id: u64, want: Controller) {
+    next_until(rx, &format!("control {want:?}"), |e| matches!(e, ViewEvent::Control { id: v, by } if v == id && by == want).then_some(()));
+}
+
+/// Whether the owner was told last that a viewer has it.
+fn remote(ev: &Events) -> Option<bool> {
+    ev.lock().unwrap().iter().rev().find_map(|e| match e {
+        tern_term::TermEvent::RemoteControl(on) => Some(*on),
+        _ => None,
+    })
+}
+
 #[test]
-fn the_pty_takes_the_size_of_whoever_used_it_last() {
+fn a_viewer_has_the_session_until_the_owner_takes_it_back() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
     let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("output", || screen(&s).contains("before"));
     let id = s.id().unwrap();
     let cols = |s: &RemoteSession| s.term().lock().grid().columns();
     wait_until("the owner's size", || cols(&s) == SIZE.cols as usize);
 
     let (viewer, stream) = Viewer::connect(&d.dir).unwrap();
-    let _rx = events(stream);
+    let rx = events(stream);
     viewer.view(id).unwrap();
+    control_until(&rx, id, Controller::Desktop);
     let phone = TermSize { cols: 40, rows: 20, ..SIZE };
     viewer.resize(id, phone).unwrap();
     wait_until("the viewer's size", || cols(&s) == 40);
+    control_until(&rx, id, Controller::You);
+    wait_until("the owner told", || remote(&ev) == Some(true));
 
-    // The owner types: its size again.
-    s.write(b"a".to_vec());
-    wait_until("the owner's size back", || cols(&s) == SIZE.cols as usize);
+    // The owner's window comes and goes, it resizes, it types: all dropped.
+    s.write(b"\x1b[I".to_vec());
+    let wide = TermSize { cols: 100, ..SIZE };
+    s.resize(wide);
+    s.write(b"x\r".to_vec());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(cols(&s), 40);
+    assert!(!screen(&s).contains("after:"), "{}", screen(&s));
 
-    // The viewer types: its size again.
-    viewer.input(id, b"b".to_vec()).unwrap();
-    wait_until("the viewer's size back", || cols(&s) == 40);
+    // Taken back: the owner's size (the one it asked for last), its typing.
+    s.take_back();
+    wait_until("the owner's size back", || cols(&s) == 100);
+    control_until(&rx, id, Controller::Desktop);
+    wait_until("the owner told", || remote(&ev) == Some(false));
 
-    // The viewer leaves: the owner's size.
+    // The viewer refits (back to the front) and its window comes and goes:
+    // the owner keeps it.
+    viewer.resize(id, TermSize { rows: 21, ..phone }).unwrap();
+    viewer.input(id, b"\x1b[O\x1b[I".to_vec()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(cols(&s), 100);
+
+    // The viewer types: it has it again, at its size.
+    viewer.input(id, b"y".to_vec()).unwrap();
+    wait_until("the viewer's size again", || cols(&s) == 40);
+    control_until(&rx, id, Controller::You);
+
+    // And asked for, after the owner took it back.
+    s.take_back();
+    control_until(&rx, id, Controller::Desktop);
+    viewer.drive(id).unwrap();
+    control_until(&rx, id, Controller::You);
+    wait_until("the viewer's size on asking", || cols(&s) == 40);
+
+    // The viewer leaves: the owner has it.
     viewer.unview(id).unwrap();
-    wait_until("the owner's size once the viewer left", || cols(&s) == SIZE.cols as usize);
+    wait_until("the owner's size once the viewer left", || cols(&s) == 100);
+    wait_until("the owner told", || remote(&ev) == Some(false));
 
-    // And when it goes away while used last.
+    // And when it goes away while it has it.
     viewer.view(id).unwrap();
     viewer.resize(id, phone).unwrap();
-    wait_until("the viewer's size again", || cols(&s) == 40);
+    wait_until("the viewer's size on coming back", || cols(&s) == 40);
     viewer.shutdown();
-    wait_until("the owner's size once the viewer is gone", || cols(&s) == SIZE.cols as usize);
+    wait_until("the owner's size once the viewer is gone", || cols(&s) == 100);
 }

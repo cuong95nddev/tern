@@ -344,6 +344,9 @@ pub struct TerminalView {
     spawned: bool,
     /// Whether the program was last told it has focus (DECSET 1004).
     reported_focus: bool,
+    /// A phone viewing the session has it: the PTY takes its size and
+    /// typing here is dropped (by the daemon) until taken back.
+    remote: bool,
     /// The window the focus listeners are registered with.
     focus_window: Option<AnyWindowHandle>,
     _focus_subs: Vec<Subscription>,
@@ -532,6 +535,7 @@ impl TerminalView {
             started: Instant::now(),
             spawned: false,
             reported_focus: false,
+            remote: false,
             focus_window: None,
             _focus_subs: vec![],
             _resize: None,
@@ -606,6 +610,7 @@ impl TerminalView {
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.spawned = true;
         self.reported_focus = false;
+        self.remote = false;
         let (tx, rx) = flume::unbounded::<TermEvent>();
         let sink = Arc::new(move |e| {
             let _ = tx.send(e);
@@ -987,7 +992,12 @@ impl TerminalView {
                 self.spawn_error = Some(err);
                 cx.notify();
             },
+            TermEvent::RemoteControl(on) => {
+                self.remote = on;
+                cx.notify();
+            },
             TermEvent::ServerLost => {
+                self.remote = false;
                 // The connection went (the daemon dropped it, died, or handed
                 // its sessions to a new one): try the same session again once.
                 let session = self.session.take();
@@ -1928,6 +1938,7 @@ impl Render for TerminalView {
         let mut scope = crate::template::Scope::new("terminal")
             .var("background", bg)
             .var("find", self.find.is_some())
+            .var("remote", self.remote)
             .slot("grid", TerminalElement { view: cx.entity() });
         if let Some(find) = &self.find {
             let q = &find.query;
@@ -1995,6 +2006,13 @@ impl Render for TerminalView {
             ("regex", crate::template::Framed::Button(b)) => {
                 b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.search(|q| q.regex ^= true, cx))).into_any_element()
             },
+            ("take_back", crate::template::Framed::Button(b)) => b
+                .on_click(cx.listener(|v, _: &ClickEvent, _, _| {
+                    if let Some(s) = &v.session {
+                        s.take_back();
+                    }
+                }))
+                .into_any_element(),
             (_, f) => f.into_any_element(),
         };
         crate::template::render("terminal", scope, &mut frames, cx)

@@ -9,9 +9,9 @@ const $ = (id) => document.getElementById(id);
 const FONT = 'Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
 const LINE_HEIGHT = 1.15;
 // The page asks for the grid that fits its screen at this font size; the
-// session takes it while the page is the one used last (see bridge.rs).
-// Until it does, or once the desktop takes it back, the page draws the grid
-// it has at this size or smaller until it fits.
+// session takes it while the page has the session (see bridge.rs). Until it
+// does, or once the desktop takes it back, the page draws the grid it has at
+// this size or smaller until it fits.
 const FONT_SIZE = 13;
 const MIN_FONT = 7;
 
@@ -24,8 +24,9 @@ let sessions = [];
 let current = null;
 let pending = null;
 let size = { cols: 80, rows: 24 };
-// A screen this wide shows the agents beside the terminal.
-const wideScreen = matchMedia("(min-width: 900px)");
+// A screen this big shows the agents beside the terminal: a tablet or a
+// computer, not a phone turned sideways (as wide, not as tall).
+const wideScreen = matchMedia("(min-width: 900px) and (min-height: 600px)");
 // The view asked for: "list-view", "term-view" or "message-view".
 let view = "list-view";
 let term = null;
@@ -120,6 +121,7 @@ function onText(m) {
       term.resize(m.cols, m.rows);
       snapshotNext = true;
       setBanner(null);
+      setControl("you");
       layout();
       fit(true);
       break;
@@ -128,6 +130,9 @@ function onText(m) {
       size = { cols: m.cols, rows: m.rows };
       if (term) term.resize(m.cols, m.rows);
       layout();
+      break;
+    case "control":
+      setControl(m.by);
       break;
     case "exited":
       setBanner(m.code == null ? "The program ended." : `The program ended (exit code ${m.code}).`);
@@ -664,6 +669,18 @@ $("compose").onsubmit = (e) => {
   text.value = "";
   text.style.height = "auto";
 };
+
+// Who has the session shown: "you" (its size is this page's), "desktop"
+// or "viewer" (another page).
+function setControl(by) {
+  $("control").hidden = by === "you";
+  $("control-text").textContent = by === "desktop" ? "Shown at the desktop's size." : "Another device has this terminal.";
+  layout();
+  fit();
+}
+
+// Take the session: the terminal fits this screen (typing does too).
+$("drive").onclick = () => send({ t: "drive" });
 
 function setBanner(textValue) {
   $("banner").hidden = !textValue;

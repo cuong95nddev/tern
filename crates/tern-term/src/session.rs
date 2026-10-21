@@ -51,6 +51,9 @@ pub enum TermEvent {
     NotFound,
     /// The connection to the daemon is gone.
     ServerLost,
+    /// A viewer (a phone) has the session: the PTY takes its size and
+    /// typing here is dropped until taken back (`true`); or this has it.
+    RemoteControl(bool),
 }
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;

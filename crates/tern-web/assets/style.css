@@ -180,6 +180,21 @@ body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--l
   color: var(--muted);
 }
 
+#control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--raised);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+#control[hidden] { display: none; }
+#control-text { flex: 1; min-width: 0; }
+#control button { flex: none; padding: 4px 10px; color: var(--accent); }
+
 #keys {
   flex: none;
   display: flex;

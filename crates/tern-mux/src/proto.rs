@@ -30,12 +30,13 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 6;
+pub const MINOR: u32 = 7;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
 pub const GUARD_MINOR: u32 = 5;
 // MINOR 6: the daemon sends `Image` and `ImagesGone` (older clients skip them).
+// MINOR 7: the daemon sends `Control` and takes `Drive`.
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 2;
@@ -134,6 +135,24 @@ pub enum ClientMsg {
         limit: u8,
         auto_switch: bool,
     },
+    /// Take session `id`: from a viewer, the PTY takes its size and the
+    /// owner's typing is dropped until the owner takes it back; from the
+    /// owner, that (MINOR 7).
+    Drive {
+        id: u64,
+    },
+}
+
+/// Who has a session, as told to one connection: whose size the PTY takes
+/// and whose typing goes to the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Controller {
+    /// The connection told.
+    You,
+    /// The UI attached to it (or no one).
+    Desktop,
+    /// Another viewer.
+    Viewer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +234,12 @@ pub enum ServerMsg {
     Revealed {
         req: u64,
         delivered: bool,
+    },
+    /// Who has session `id` now: sent to its owner and viewers when that
+    /// changes, and after `Attached` (MINOR 7).
+    Control {
+        id: u64,
+        by: Controller,
     },
     /// The `HandOff` didn't happen; the daemon serves on.
     HandOffFailed {

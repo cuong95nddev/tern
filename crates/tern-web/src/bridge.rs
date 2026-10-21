@@ -4,12 +4,14 @@
 //! To the page: `hello` (the theme), `sessions` (the list, when it
 //! changes), `view` (a view began: the session's size; the bytes that paint
 //! its snapshot follow as one binary message), binary messages (the
-//! session's output), `resize`, `exited`, `gone` and `error`. From the page:
-//! `view`, `leave` (back to the list), `input` and `resize` (the size that
-//! fits its screen). The daemon
-//! gives the PTY the size of whoever used it last: the page's while it is
-//! viewed and typed into, the desktop's once that types again or the page
-//! leaves. Session ids go as strings: they don't fit a JavaScript number.
+//! session's output), `resize`, `control` (who has the session: `you`,
+//! `desktop` or `viewer`), `exited`, `gone` and `error`. From the page:
+//! `view`, `leave` (back to the list), `input`, `resize` (the size that fits
+//! its screen) and `drive` (take the session). The page has the session once
+//! it sends its size, types or asks: the PTY takes its size and the desktop's
+//! typing is dropped, until the desktop takes it back (then only typing or
+//! asking takes it again) or the page leaves. Session ids go as strings: they
+//! don't fit a JavaScript number.
 
 use std::io::BufReader;
 use std::net::TcpStream;
@@ -18,6 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::json;
+use tern_mux::proto::Controller;
 use tern_mux::viewer::{ViewEvent, Viewer};
 use tern_term::TermSize;
 use tern_term::mirror::Marker;
@@ -34,6 +37,7 @@ enum FromPage {
         id: u64,
     },
     Leave,
+    Drive,
     Input {
         d: String,
     },
@@ -119,6 +123,11 @@ pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Pa
                 let _ = viewer.view(id);
             },
             FromPage::Leave => st.leave(&viewer),
+            FromPage::Drive => {
+                if let Some(id) = st.id {
+                    let _ = viewer.drive(id);
+                }
+            },
             FromPage::Input { d } => {
                 if let Some(id) = st.id {
                     let _ = viewer.input(id, d.into_bytes());
@@ -179,6 +188,15 @@ fn on_event(event: ViewEvent, viewer: &Viewer, sender: &Sender, state: &Mutex<St
         ViewEvent::Lagged { id } if st.id == Some(id) => {
             let _ = viewer.view(id);
             Ok(())
+        },
+        ViewEvent::Control { id, by } if st.id == Some(id) => {
+            drop(st);
+            let by = match by {
+                Controller::You => "you",
+                Controller::Desktop => "desktop",
+                Controller::Viewer => "viewer",
+            };
+            sender.text(&json!({ "t": "control", "by": by }).to_string())
         },
         ViewEvent::NotFound { id } if st.id == Some(id) => {
             st.id = None;
@@ -243,6 +261,7 @@ mod tests {
         let m: FromPage = serde_json::from_str(r#"{"t":"view","id":"9223372036854775807"}"#).unwrap();
         assert!(matches!(m, FromPage::View { id: 9223372036854775807 }));
         assert!(matches!(serde_json::from_str(r#"{"t":"leave"}"#).unwrap(), FromPage::Leave));
+        assert!(matches!(serde_json::from_str(r#"{"t":"drive"}"#).unwrap(), FromPage::Drive));
         let m: FromPage = serde_json::from_str(r#"{"t":"input","d":"ls\r"}"#).unwrap();
         assert!(matches!(m, FromPage::Input { d } if d == "ls\r"));
         let m: FromPage = serde_json::from_str(r#"{"t":"resize","cols":45,"rows":30,"cell_width":24,"cell_height":45}"#).unwrap();
