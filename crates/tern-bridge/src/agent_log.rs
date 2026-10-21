@@ -170,7 +170,10 @@ pub fn render(line: &str, seen: &mut Seen, out: &mut String) {
                     continue;
                 }
                 let summary = block.get("input").map(summary).unwrap_or_default();
-                out.push_str(&format!("{BOLD}⏺ {shown}{RESET}{}\n", if summary.is_empty() { String::new() } else { format!(" {summary}") }));
+                out.push_str(&format!(
+                    "{BOLD}⏺ {shown}{RESET}{}\n",
+                    if summary.is_empty() { String::new() } else { format!(" {summary}") }
+                ));
             },
             (Some("user"), Some("tool_result")) => {
                 if field("tool_use_id").is_some_and(|id| seen.quiet.remove(id)) {
@@ -306,7 +309,7 @@ mod tests {
             r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"Run sleep 30 with Bash, then reply ok"}}"#,
             r#"{"type":"attachment","attachment":{}}"#,
             r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<system-reminder>x"}}"#,
-            r#"{"type":"api-request-blob","message":{"role":"user","content":[{"type":"text","text":"hidden"}]}}"#,
+            r#"{"type":"api-request-blob","message":{"role":"user","content":[{"type":"text","text":"not for the reader"}]}}"#,
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}"#,
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 30","description":"Sleep"}}]}}"#,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"<tool_use_error>Blocked</tool_use_error>","is_error":true}]}}"#,
