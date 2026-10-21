@@ -216,12 +216,15 @@ impl Session {
     }
 
     /// Change it with `f`, then resize the PTY to the size that has it, and
-    /// tell its owner and viewers when someone else has it.
+    /// tell its owner and viewers when someone else has it. The host
+    /// resizes on its own thread, so `host.size()` may not yet hold a
+    /// resize just asked for: a change of target always resizes.
     fn update(&mut self, id: u64, f: impl FnOnce(&mut Self)) {
         let was = self.driver();
+        let before = self.target();
         f(self);
         if let Some(size) = self.target()
-            && size != self.host.size()
+            && (Some(size) != before || size != self.host.size())
         {
             self.host.resize(size);
         }

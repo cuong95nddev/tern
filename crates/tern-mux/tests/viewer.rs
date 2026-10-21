@@ -101,8 +101,10 @@ fn viewer_watches_and_types_beside_the_owner() {
     assert!(!ev.lock().unwrap().iter().any(|e| matches!(e, tern_term::TermEvent::Exit(_))));
 
     // A viewer going away leaves the owner alone.
+    // Its typing took the session: the owner types again once it is back.
     viewer.shutdown();
     drop(rx);
+    wait_until("the owner told", || remote(&ev) == Some(false));
     s.write(b"\r".to_vec());
     wait_until("exit", || ev.lock().unwrap().iter().any(|e| matches!(e, tern_term::TermEvent::Exit(_))));
 }
