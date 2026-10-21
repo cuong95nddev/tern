@@ -25,6 +25,8 @@ mod palette;
 mod panes;
 mod part_window;
 mod platform;
+mod resources;
+mod resources_view;
 mod restart;
 mod scratch;
 mod scratches_view;

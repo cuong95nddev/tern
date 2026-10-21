@@ -73,6 +73,7 @@ actions!(
         SearchInFiles,
         ToggleShells,
         ToggleSystem,
+        ShowResources,
         ToggleUsage,
         ToggleAgents,
         ResetLayout,
@@ -3658,6 +3659,15 @@ impl Workspace {
         self.panels_changed(cx);
     }
 
+    /// Show the system panel with its Resources card open.
+    fn show_resources(&mut self, _: &ShowResources, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_system {
+            self.show_system = true;
+            self.panels_changed(cx);
+        }
+        self.system.update(cx, |s, cx| s.open_card(cx));
+    }
+
     fn toggle_usage(&mut self, _: &ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
         self.show_usage = !self.show_usage;
         self.panels_changed(cx);
@@ -4561,6 +4571,10 @@ impl Workspace {
                 self.reset_layout(&ResetLayout, window, cx);
                 "ok".into()
             },
+            "resources" => {
+                self.show_resources(&ShowResources, window, cx);
+                "ok".into()
+            },
             // What dropping PART in DOCK does: before, after, onto or on a side of TARGET, or at its end.
             cmd if cmd.starts_with("part-move ") => {
                 let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
@@ -4801,6 +4815,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::toggle_shells))
             .on_action(cx.listener(Self::toggle_system))
+            .on_action(cx.listener(Self::show_resources))
             .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::toggle_agents))
             .on_action(cx.listener(Self::reset_layout))

@@ -1,17 +1,24 @@
 //! System panel: how busy the machine is, as a status bar (template
 //! `system`): the CPU's load as a sparkline of its last samples and the
 //! memory in use as a bar. The numbers come from the app's one store
-//! ([`crate::system`]).
+//! ([`crate::system`]). A click opens the Resources card over it: what
+//! each terminal uses ([`crate::resources_view`]).
 
+use gpui_kit::component::popover::Popover;
 use gpui_kit::*;
 
+use crate::resources_view::{self, ResourcesView};
 use crate::system::{self, SystemStore};
 use crate::template::{self, Framed};
+use crate::usage_view::Trigger;
 
 pub struct SystemView {
     store: Entity<SystemStore>,
+    card: Entity<ResourcesView>,
+    /// The card is open.
+    open: bool,
     focus: FocusHandle,
-    _sub: Subscription,
+    _subs: Vec<Subscription>,
 }
 
 impl Focusable for SystemView {
@@ -23,8 +30,21 @@ impl Focusable for SystemView {
 impl SystemView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let store = system::store(cx);
-        let sub = cx.observe(&store, |_, _, cx| cx.notify());
-        Self { store, focus: cx.focus_handle(), _sub: sub }
+        let card = cx.new(ResourcesView::new);
+        let subs = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.subscribe(&card, |this, _, _: &resources_view::Done, cx| {
+                this.open = false;
+                cx.notify();
+            }),
+        ];
+        Self { store, card, open: false, focus: cx.focus_handle(), _subs: subs }
+    }
+
+    /// Open the Resources card (Show Resources).
+    pub fn open_card(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        cx.notify();
     }
 }
 
@@ -66,11 +86,28 @@ impl Render for SystemView {
             .list("cpu", samples);
         scope = percent(scope, s.mem.unwrap_or(0.));
         let focus = &self.focus;
+        let (me, card, open) = (cx.entity().downgrade(), self.card.clone(), self.open);
         template::render(
             "system",
             scope,
             &mut |name, _, f| match (name, f) {
                 ("panel", Framed::Box(d)) => d.track_focus(focus).into_any_element(),
+                ("item", Framed::Box(d)) => {
+                    let (me, card) = (me.clone(), card.clone());
+                    Popover::new("resources-card")
+                        .anchor(Anchor::BottomLeft)
+                        .appearance(false)
+                        .open(open)
+                        .on_open_change(move |open, _, cx| {
+                            let _ = me.update(cx, |this, cx| {
+                                this.open = *open;
+                                cx.notify();
+                            });
+                        })
+                        .trigger(Trigger::new(d.id("system-item").cursor_pointer()))
+                        .content(move |_, _, _| card.clone())
+                        .into_any_element()
+                },
                 (_, f) => f.into_any_element(),
             },
             cx,

@@ -305,13 +305,13 @@ impl Render for UsageView {
 
 /// A box that opens a popover when clicked, as a button does.
 #[derive(IntoElement)]
-struct Trigger {
+pub(crate) struct Trigger {
     base: Stateful<Div>,
     selected: bool,
 }
 
 impl Trigger {
-    fn new(base: Stateful<Div>) -> Self {
+    pub(crate) fn new(base: Stateful<Div>) -> Self {
         Self { base, selected: false }
     }
 }

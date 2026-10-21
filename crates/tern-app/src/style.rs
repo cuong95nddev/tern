@@ -838,6 +838,100 @@ pub const ELEMENTS: &[Element] = &[
         ],
     },
     Element {
+    Element {
+        name: "resources.card",
+        about: "What clicking the system panel opens: what each workspace's terminals, the background sessions and \
+                Tern itself use",
+        groups: &[&[
+            ("width", Len, "440"),
+            ("padding", Len, "8"),
+            ("gap", Len, "6"),
+            ("radius", Len, "$radius_lg"),
+            ("background", Color, "$popover"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+            ("shadow", Text, "lg"),
+            ("font_size", Len, "$text_sm"),
+            ("text", Color, "$text"),
+        ]],
+    },
+    Element {
+        name: "resources.title",
+        about: "The Resources card's title",
+        groups: &[&[("padding_x", Len, "6"), ("font_weight", Num, "600")]],
+    },
+    Element {
+        name: "resources.empty",
+        about: "What the Resources card shows before its first sample",
+        groups: &[EMPTY, &[("height", Len, "120")]],
+    },
+    Element {
+        name: "resources.totals",
+        about: "The Resources card's line of totals",
+        groups: &[&[("gap", Len, "12"), ("padding_x", Len, "6")]],
+    },
+    Element {
+        name: "resources.total",
+        about: "A total: its label and value",
+        groups: &[&[("gap", Len, "6"), ("font_size", Len, "$text_sm"), ("font_weight", Num, "600")]],
+    },
+    Element {
+        name: "resources.total.label",
+        about: "A total's label: `CPU`, `Memory`",
+        groups: &[&[("text", Color, "$text_muted"), ("font_weight", Num, "400")]],
+    },
+    Element {
+        name: "resources.machine",
+        about: "The whole machine's CPU and memory, after the totals",
+        groups: &[&[("font_size", Len, "$text_xs"), ("text", Color, "$text_muted")]],
+    },
+    Element {
+        name: "resources.columns",
+        about: "The column titles over the list; clicking one sorts by it",
+        groups: &[&[
+            ("padding_left", Len, "6"),
+            ("padding_right", Len, "8"),
+            ("gap", Len, "4"),
+            ("border_bottom_width", Len, "1"),
+            ("border", Color, "$border"),
+            ("font_size", Len, "$text_xs"),
+        ]],
+    },
+    simple!("resources.sort", "A column title: the column it sorts by is `selected`"),
+    Element {
+        name: "resources.list",
+        about: "The Resources card's list of rows: as tall as its rows, up to `max_height`",
+        groups: &[&[("max_height", Len, "308")]],
+    },
+    Element {
+        name: "resources.row",
+        about: "A row of the Resources card: a workspace, a terminal, a background session or a part of Tern",
+        groups: &[ROW, &[("heading_weight", Num, "600"), ("busy_text", Color, "$warning.background")]],
+    },
+    Element { name: "resources.cpu", about: "The CPU column", groups: &[&[("width", Len, "52"), ("font_size", Len, "$text_xs")]] },
+    Element { name: "resources.mem", about: "The memory column", groups: &[&[("width", Len, "60"), ("font_size", Len, "$text_xs")]] },
+    Element {
+        name: "resources.actions",
+        about: "The buttons over a row's end, shown under the pointer",
+        groups: &[&[("gap", Len, "2"), ("padding_x", Len, "4"), ("radius", Len, "$radius"), ("background", Color, "$popover")]],
+    },
+    simple!("resources.button", "A button at a row's end: show, close, end"),
+    Element {
+        name: "resources.spark",
+        about: "A workspace's memory over the last minute: a bar per sample, oldest first",
+        groups: &[&[("width", Len, "36"), ("height", Len, "12"), ("gap", Len, "1"), ("margin_right", Len, "4")]],
+    },
+    Element { name: "resources.spark.bar", about: "A sample of a memory sparkline: the room it may fill", groups: &[&[]] },
+    Element {
+        name: "resources.spark.fill",
+        about: "A memory sample, as a share of the most in the sparkline",
+        groups: &[&[("min_height", Len, "1"), ("radius", Len, "1"), ("background", Color, "$text_muted")]],
+    },
+    Element {
+        name: "resources.footer",
+        about: "Under the list: End Background Sessions, when there are any",
+        groups: &[&[("gap", Len, "8"), ("padding_x", Len, "6")]],
+    },
         name: "pane.body",
         about: "What a pane's active tab shows, under (or beside) its tabs. `focused_border` is its border color while the \
                 pane has focus",

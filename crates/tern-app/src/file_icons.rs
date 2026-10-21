@@ -11,6 +11,7 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        AppWindow,
         Bell,
         Bot,
         CaseSensitive,
@@ -50,6 +51,7 @@ gpui_kit::assets::icon_assets!(
         Regex,
         Rows3,
         Search,
+        Server,
         SquareArrowOutUpRight,
         SquareCheck,
         SquareMinus,

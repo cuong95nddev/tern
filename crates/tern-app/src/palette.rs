@@ -83,6 +83,7 @@ const COMMANDS: &[Command] = &[
     cmd!("Git Log", "", workspace::OpenGitLog),
     cmd!("Toggle Scratches", "⌘⇧S", workspace::ToggleScratches),
     cmd!("Toggle System", "", workspace::ToggleSystem),
+    cmd!("Show Resources", "", workspace::ShowResources),
     cmd!("Toggle Usage", "", workspace::ToggleUsage),
     cmd!("Toggle Agents", "", workspace::ToggleAgents),
     cmd!("Focus Terminal", "⌘J", workspace::FocusTerminal),

@@ -23,6 +23,7 @@
 //!   pane-layout COLS ROWS, pane-tile, pane-zoom, pane-focus PANE|EDGE,
 //!   pane-close PANE   split panes (indices as `state` lists them)
 //!   layout-reset                                    put the side panels back (View > Reset Layout)
+//!   resources        open the Resources card (Show Resources)
 //!   part-move PART DOCK before|after|end [TARGET]   drop a side panel in a dock
 //!                    (as dragging its header does); `state` ends with `arrange …`
 //!   part-center PART PANE|PART left|right|up|down   drop a side panel beside a pane or a

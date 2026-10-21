@@ -2201,6 +2201,7 @@
                     "style": { "grow": "{used}" },
                     "states": {
                       "warning": { "background": "$system.bar.fill.warning" },
+        "frame": "item",
                       "critical": { "background": "$system.bar.fill.critical" }
                     }
                   },
@@ -2270,6 +2271,135 @@
   "shot_overlay": {
     "frame": "overlay",
     "element": "shot_overlay",
+  "resources.card": {
+    "element": "resources.card",
+    "layout": "column",
+    "children": [
+      { "element": "resources.title", "text": "Resources" },
+      { "when": "!ready", "use": "resources.empty" },
+      {
+        "when": "ready",
+        "element": "resources.totals",
+        "layout": "row",
+        "align": "center",
+        "children": [
+          {
+            "element": "resources.total",
+            "layout": "row",
+            "align": "center",
+            "children": [{ "element": "resources.total.label", "text": "CPU" }, { "text": "{cpu}" }]
+          },
+          {
+            "element": "resources.total",
+            "layout": "row",
+            "align": "center",
+            "children": [{ "element": "resources.total.label", "text": "Memory" }, { "text": "{mem}" }]
+          },
+          { "grow": 1 },
+          { "when": "machine", "element": "resources.machine", "nowrap": true, "text": "{machine}" }
+        ]
+      },
+      {
+        "when": "ready",
+        "element": "resources.columns",
+        "layout": "row",
+        "align": "center",
+        "children": [
+          { "grow": 1, "layout": "row", "children": [{ "button": "sort_name", "element": "resources.sort", "size": "xsmall", "label": "{name_label}", "selected": "by_name" }] },
+          {
+            "element": "resources.cpu",
+            "layout": "row",
+            "justify": "end",
+            "children": [{ "button": "sort_cpu", "element": "resources.sort", "size": "xsmall", "label": "{cpu_label}", "selected": "by_cpu", "tooltip": "A share of one core: over 100% is more than one core busy" }]
+          },
+          {
+            "element": "resources.mem",
+            "layout": "row",
+            "justify": "end",
+            "children": [{ "button": "sort_mem", "element": "resources.sort", "size": "xsmall", "label": "{mem_label}", "selected": "by_mem" }]
+          }
+        ]
+      },
+      { "when": "ready", "slot": "list" },
+      {
+        "when": "ready && background > 0",
+        "element": "resources.footer",
+        "layout": "row",
+        "align": "center",
+        "justify": "end",
+        "children": [
+          {
+            "button": "end_background",
+            "variant": "danger",
+            "size": "small",
+            "label": "{end_background_label}"
+          }
+        ]
+      }
+    ]
+  },
+  "resources.empty": {
+    "element": "resources.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "Reading…" }]
+  },
+  "resources.row": {
+    "frame": "row",
+    "group": "rrow",
+    "element": "resources.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "heading": { "font_weight": "$resources.row.heading_weight" },
+      "hover": { "background": "$resources.row.hover_background" }
+    },
+    "children": [
+      { "when": "folder && open", "icon": "chevron-down", "style": { "width": "$resources.row.chevron_size", "height": "$resources.row.chevron_size", "text": "$resources.row.chevron_color" } },
+      { "when": "folder && !open", "icon": "chevron-right", "style": { "width": "$resources.row.chevron_size", "height": "$resources.row.chevron_size", "text": "$resources.row.chevron_color" } },
+      { "when": "!folder", "shrink": 0, "style": { "width": "$resources.row.chevron_size", "height": "$resources.row.chevron_size" } },
+      { "icon": "{icon}", "shrink": 0, "style": { "width": "$resources.row.icon_size", "height": "$resources.row.icon_size", "text": "$resources.row.detail_text" } },
+      { "grow": 1, "truncate": true, "text": "{label}" },
+      { "when": "count", "shrink": 0, "text": "{count}", "style": { "font_size": "$resources.row.detail_font_size", "text": "$resources.row.detail_text" } },
+      {
+        "when": "spark",
+        "element": "resources.spark",
+        "layout": "row",
+        "align": "end",
+        "each": "spark",
+        "item": {
+          "element": "resources.spark.bar",
+          "layout": "column",
+          "grow": 1,
+          "children": [{ "style": { "grow": "{rest}" } }, { "element": "resources.spark.fill", "style": { "grow": "{used}" } }]
+        }
+      },
+      {
+        "element": "resources.cpu",
+        "layout": "row",
+        "justify": "end",
+        "children": [{ "nowrap": true, "text": "{cpu}", "states": { "busy": { "text": "$resources.row.busy_text" } } }]
+      },
+      { "element": "resources.mem", "layout": "row", "justify": "end", "children": [{ "nowrap": true, "text": "{mem}" }] },
+      {
+        "element": "resources.actions",
+        "position": { "top": 0, "right": 0, "bottom": 0 },
+        "layout": "row",
+        "align": "center",
+        "justify": "end",
+        "style": { "opacity": 0 },
+        "states": { "hover:rrow": { "opacity": 1 } },
+        "children": [
+          { "when": "show", "button": "show", "element": "resources.button", "size": "xsmall", "icon": "external-link", "tooltip": "{show_tip}" },
+          { "when": "close", "button": "close", "element": "resources.button", "size": "xsmall", "icon": "close", "tooltip": "Close Tab" },
+          { "when": "end", "button": "end", "element": "resources.button", "size": "xsmall", "icon": "trash", "tooltip": "End Session" }
+        ]
+      }
+    ]
+  },
     "fill": true,
     "children": [
       { "slot": "picture" },
