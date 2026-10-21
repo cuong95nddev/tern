@@ -258,7 +258,7 @@ fn decode(cmd: &Command, bytes: &[u8]) -> Result<Image, Error> {
                 return Err(Error::new("ENODATA", format!("need {need} bytes, got {}", bytes.len())));
             }
             let px = &bytes[..need];
-            let rgba = if bpp == 4 { px.to_vec() } else { px.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect() };
+            let rgba = if bpp == 4 { px.to_vec() } else { px.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect() };
             (w, h, rgba)
         },
     };
@@ -272,7 +272,6 @@ fn decode(cmd: &Command, bytes: &[u8]) -> Result<Image, Error> {
 mod tests {
     use std::io::Cursor;
 
-    use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
     use super::*;

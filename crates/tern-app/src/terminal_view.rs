@@ -2145,7 +2145,7 @@ impl DrawnImages {
 /// GPUI wants BGRA.
 fn render_image(img: &ShownImage) -> Option<Arc<RenderImage>> {
     let mut bgra = img.rgba.to_vec();
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     let buf = image::RgbaImage::from_raw(img.width, img.height, bgra)?;
