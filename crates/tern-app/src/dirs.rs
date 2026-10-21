@@ -57,6 +57,13 @@ pub fn cache() -> PathBuf {
     }
 }
 
+/// [`cache`], unless it falls in the temporary folder (no home folder),
+/// which other users may share.
+pub fn private_cache() -> Option<PathBuf> {
+    let dir = cache();
+    (!dir.starts_with(std::env::temp_dir())).then_some(dir)
+}
+
 /// An XDG base directory: the variable when it holds an absolute path, else
 /// `fallback` under the home folder.
 #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]

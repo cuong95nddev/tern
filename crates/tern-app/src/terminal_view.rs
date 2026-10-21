@@ -1668,7 +1668,9 @@ impl TerminalView {
         let (width, height, rgba, generation) = img;
         // The user's own cache, not a shared temp folder another user could
         // have taken the name in first.
-        let dir = crate::dirs::cache().join("images");
+        let Some(dir) = crate::dirs::private_cache().map(|d| d.join("images")) else {
+            return log::warn!("no home folder to write image {id} in");
+        };
         let name = format!("{}-{}-{id}-{generation}", std::process::id(), self.session_serial);
         let task = cx.background_executor().spawn(async move { save_png(width, height, &rgba, &dir, &name) });
         cx.spawn(async move |this, cx| match task.await {
@@ -2745,11 +2747,23 @@ fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir)?;
+    // A folder that is ours, not a link to another one.
+    let meta = std::fs::symlink_metadata(dir)?;
+    #[cfg(unix)]
+    // SAFETY: `geteuid` has no preconditions.
+    let ours = std::os::unix::fs::MetadataExt::uid(&meta) == unsafe { libc::geteuid() };
+    #[cfg(not(unix))]
+    let ours = true;
+    if !meta.is_dir() || !ours {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the images folder isn't a folder of ours"));
+    }
     #[cfg(unix)]
     std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    // Only images written here go.
     for entry in std::fs::read_dir(dir)?.flatten() {
+        let named = entry.file_name().to_str().is_some_and(is_saved_image_name);
         let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SAVED_IMAGE_TTL));
-        if old {
+        if named && old {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -2763,8 +2777,10 @@ fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std
     buf.write_to(&mut png, image::ImageFormat::Png).map_err(io::Error::other)?;
     // Written under a temporary name and renamed, so a half-written file is never opened.
     let tmp = dir.join(format!(".{name}.png.part"));
+    // One left by a crash goes; a new one is created, never opened as found.
+    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     io::Write::write_all(&mut opts.open(&tmp)?, png.get_ref())?;
@@ -2772,11 +2788,25 @@ fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std
     Ok(path)
 }
 
+/// A file name [`TerminalView::open_image`] gives: `<pid>-<serial>-<id>-<generation>.png`.
+fn is_saved_image_name(name: &str) -> bool {
+    name.strip_suffix(".png")
+        .is_some_and(|stem| stem.split('-').count() == 4 && stem.split('-').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape_path, image_at, sanitize_paste, save_png, strip_spinner};
+    use super::{escape_path, image_at, is_saved_image_name, sanitize_paste, save_png, strip_spinner};
     use gpui_kit::{Bounds, point, px, size};
     use std::path::Path;
+
+    #[test]
+    fn saved_image_names() {
+        assert!(is_saved_image_name("123-1-42-7.png"));
+        for other in ["notes.png", "1-2-3.png", "1-2-3-x.png", "1-2-3-4.jpg", "1--3-4.png"] {
+            assert!(!is_saved_image_name(other), "{other}");
+        }
+    }
 
     #[test]
     fn image_at_finds_the_run_under_the_pointer() {
@@ -2794,8 +2824,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("tern-save-png-{}", std::process::id()));
         let dir = base.join("images");
         let rgba = [1, 2, 3, 255, 4, 5, 6, 128];
-        let path = save_png(2, 1, &rgba, &dir, "7-1").unwrap();
-        assert_eq!(path, dir.join("7-1.png"));
+        let path = save_png(2, 1, &rgba, &dir, "1-2-7-1").unwrap();
+        assert_eq!(path, dir.join("1-2-7-1.png"));
         let back = image::open(&path).unwrap().into_rgba8();
         assert_eq!((back.width(), back.height(), back.into_raw()), (2, 1, rgba.to_vec()));
         #[cfg(unix)]
@@ -2806,14 +2836,26 @@ mod tests {
         }
         // Already written: kept as is.
         std::fs::write(&path, b"marker").unwrap();
-        save_png(2, 1, &rgba, &dir, "7-1").unwrap();
+        save_png(2, 1, &rgba, &dir, "1-2-7-1").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"marker");
         assert!(save_png(3, 1, &rgba, &dir, "bad").is_err(), "too few pixels");
-        // One written over a day ago goes at the next write.
-        let old = std::fs::File::options().write(true).open(&path).unwrap();
-        old.set_modified(std::time::SystemTime::now() - super::SAVED_IMAGE_TTL * 2).unwrap();
-        save_png(2, 1, &rgba, &dir, "8-1").unwrap();
-        assert!(!path.exists() && dir.join("8-1.png").exists());
+        // One written over a day ago goes at the next write; other files stay.
+        let other = dir.join("notes.png");
+        std::fs::write(&other, b"x").unwrap();
+        let a_day_ago = std::time::SystemTime::now() - super::SAVED_IMAGE_TTL * 2;
+        for p in [&path, &other] {
+            std::fs::File::options().write(true).open(p).unwrap().set_modified(a_day_ago).unwrap();
+        }
+        save_png(2, 1, &rgba, &dir, "1-2-8-1").unwrap();
+        assert!(!path.exists() && other.exists() && dir.join("1-2-8-1.png").exists());
+        #[cfg(unix)]
+        {
+            // A link in place of the folder is refused.
+            let link = base.join("link");
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            assert!(save_png(2, 1, &rgba, &link, "1-2-9-1").is_err());
+            assert!(!dir.join("1-2-9-1.png").exists());
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 
