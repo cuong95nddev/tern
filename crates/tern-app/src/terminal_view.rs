@@ -1666,7 +1666,9 @@ impl TerminalView {
         let Some(s) = &self.session else { return };
         let Some(img) = s.images().get(&id).map(|i| (i.width, i.height, i.rgba.clone(), i.generation)) else { return };
         let (width, height, rgba, generation) = img;
-        let dir = std::env::temp_dir().join("tern-images");
+        // The user's own cache, not a shared temp folder another user could
+        // have taken the name in first.
+        let dir = crate::dirs::cache().join("images");
         let name = format!("{}-{}-{id}-{generation}", std::process::id(), self.session_serial);
         let task = cx.background_executor().spawn(async move { save_png(width, height, &rgba, &dir, &name) });
         cx.spawn(async move |this, cx| match task.await {
@@ -2730,9 +2732,12 @@ fn image_at(hits: &[(Bounds<Pixels>, u32)], pos: Point<Pixels>) -> Option<u32> {
     hits.iter().find(|(b, _)| b.contains(&pos)).map(|(_, id)| *id)
 }
 
+/// Images written out for viewing are deleted after this long.
+const SAVED_IMAGE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Writes RGBA pixels to `<dir>/<name>.png` unless that file exists, and
-/// returns its path. The directory and file are private: the image may show
-/// anything the program displayed.
+/// returns its path; images written there over a day ago go. The directory
+/// and file are private: the image may show anything the program displayed.
 fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     use std::io;
     let mut builder = std::fs::DirBuilder::new();
@@ -2740,6 +2745,14 @@ fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SAVED_IMAGE_TTL));
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     let path = dir.join(format!("{name}.png"));
     if path.exists() {
         return Ok(path);
@@ -2796,6 +2809,11 @@ mod tests {
         save_png(2, 1, &rgba, &dir, "7-1").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"marker");
         assert!(save_png(3, 1, &rgba, &dir, "bad").is_err(), "too few pixels");
+        // One written over a day ago goes at the next write.
+        let old = std::fs::File::options().write(true).open(&path).unwrap();
+        old.set_modified(std::time::SystemTime::now() - super::SAVED_IMAGE_TTL * 2).unwrap();
+        save_png(2, 1, &rgba, &dir, "8-1").unwrap();
+        assert!(!path.exists() && dir.join("8-1.png").exists());
         std::fs::remove_dir_all(base).unwrap();
     }
 
