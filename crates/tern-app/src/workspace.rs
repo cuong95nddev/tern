@@ -175,6 +175,8 @@ struct TermTab {
     context: Option<crate::agents::ContextUse>,
     /// How it keeps that window in bounds (set from the usage bar's ring).
     guard: crate::agents::ContextGuard,
+    /// Its Claude's sub-agents at work, and what woke it last (from hooks).
+    children: Box<crate::subagents::Children>,
     _subs: Vec<Subscription>,
 }
 
@@ -1210,6 +1212,7 @@ impl Workspace {
             follows: None,
             context: None,
             guard: Default::default(),
+            children: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1264,6 +1267,47 @@ impl Workspace {
             follows: Some(output),
             context: None,
             guard: Default::default(),
+            children: Default::default(),
+            _subs: vec![sub],
+        };
+        let ix = self.push_tab(CenterTab::Term(tab));
+        self.activate(ix, window, cx);
+    }
+
+    /// Show the log of sub-agent `agent` of the Claude in tab `tab`: a tab
+    /// following it (the one already open, else a new one), or the agent's
+    /// own tab when its log isn't known.
+    pub fn open_subagent_log(&mut self, tab: EntityId, agent: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let sub = self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view.entity_id() == tab).and_then(|t| {
+            let a = t.children.agents.iter().find(|a| a.id == agent)?;
+            Some((a.log.clone()?, a.label.clone()))
+        });
+        let Some((log, label)) = sub else { return self.show_tab(tab, window, cx) };
+        if let Some(ix) = self.tabs.iter().position(|t| t.term().is_some_and(|t| t.follows.as_ref() == Some(&log))) {
+            return self.activate(ix, window, cx);
+        }
+        let Ok(exe) = std::env::current_exe() else { return self.show_tab(tab, window, cx) };
+        let (mut cfg, _) = self.spawn_config(TabKind::Shell, None, accounts::DEFAULT, cx);
+        // Run directly, not through a shell.
+        cfg.program = Some(exe.to_string_lossy().into_owned());
+        cfg.args = vec!["--agent-log".to_owned(), log.to_string_lossy().into_owned()];
+        let (config, connector) = (self.services.terminal.clone(), self.services.mux.clone());
+        let view = cx.new(|cx| TerminalView::new(cfg, false, None, label.clone(), config, connector, cx));
+        let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
+        let tab = TermTab {
+            view,
+            rename: Some(label.into()),
+            kind: TabKind::Shell,
+            token: None,
+            session: None,
+            account: accounts::DEFAULT.into(),
+            resuming: false,
+            notified: None,
+            rang: false,
+            follows: Some(log),
+            context: None,
+            guard: Default::default(),
+            children: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -2063,6 +2107,10 @@ impl Workspace {
                 }
             },
             TerminalEvent::Exited { code, quick, live } => {
+                // Its sub-agents ended with it.
+                if let Some(t) = self.term_tab_mut(view) {
+                    *t.children = Default::default();
+                }
                 // Claude ended on purpose (/exit): the tab goes on as a
                 // shell, as if Claude had been started from one.
                 if *live
@@ -2124,9 +2172,17 @@ impl Workspace {
                     view.update(cx, |v, cx| v.clear_done_status(cx));
                 }
                 if !window.is_window_active() || !self.is_shown(view) {
+                    // A turn that left work in the background isn't the end:
+                    // Claude goes on once that work is done.
+                    let agents = self.term_tab_mut(view).map_or(0, |t| t.children.background());
+                    let shells = view.read(cx).shells().len();
+                    let done = match shells + agents {
+                        0 => "The turn is complete".to_owned(),
+                        _ => format!("Still running: {}", crate::agents::background_label(shells, agents)),
+                    };
                     let (title, body) = match status {
                         ActivityStatus::Blocked => ("Claude needs your input", "Waiting for permission or an answer"),
-                        ActivityStatus::Done => ("Claude finished", "The turn is complete"),
+                        ActivityStatus::Done => ("Claude finished", done.as_str()),
                         _ => ("", ""),
                     };
                     if !title.is_empty() {
@@ -2198,6 +2254,9 @@ impl Workspace {
                 cx.notify();
             }
         }
+        if tab.children.on_hook(&ev.raw, Instant::now()) {
+            cx.notify();
+        }
         if ev.session_id.is_some() && tab.session != ev.session_id {
             tab.session = ev.session_id.clone();
             // Should Claude have to start again (Enter, its daemon
@@ -2242,10 +2301,11 @@ impl Workspace {
     }
 
     /// The terminal tabs running an agent, as the window's agents panel lists
-    /// them under this workspace's folder, in tab order: each one's entity
-    /// and its `sidebar.tab` values. `here` is whether this workspace is the
-    /// shown one.
-    pub fn sidebar_tabs(&self, here: bool, cx: &App) -> Vec<(EntityId, template::Scope, ActivityStatus)> {
+    /// them under this workspace's folder, in tab order: each one's entity,
+    /// its `sidebar.tab` values, its state, and the `agents.child` values of
+    /// its sub-agents at work. `here` is whether this workspace is the shown
+    /// one.
+    pub fn sidebar_tabs(&self, here: bool, cx: &App) -> Vec<(EntityId, template::Scope, ActivityStatus, Vec<template::Scope>)> {
         let close_key = crate::platform::shortcut("⌘W").to_string();
         (0..self.tabs.len())
             .filter(|&i| self.tabs[i].term().is_some_and(|t| t.kind == TabKind::Claude || t.view.read(cx).agent().is_some()))
@@ -2263,8 +2323,21 @@ impl Workspace {
                     .var("close_key", close_key.clone())
                     .var("buttons", true)
                     .slot_opt("icon", self.tab_icon(i, None, cx));
-                scope = crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme());
-                (id, scope, now)
+                scope = crate::agents::ring_vars(scope, v, t.rang, t.context, Some(&t.children), cx.theme());
+                let children = t
+                    .children
+                    .agents
+                    .iter()
+                    .map(|a| {
+                        template::Scope::new(format!("side-child-{}-{}", id.as_u64(), a.id))
+                            .var("child", true)
+                            .var("agent", a.id.as_str())
+                            .var("label", a.label.as_str())
+                            .var("time", crate::agents::working_label(a.started.elapsed()))
+                            .var("background", a.background)
+                    })
+                    .collect();
+                (id, scope, now, children)
             })
             .collect()
     }

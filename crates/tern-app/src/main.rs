@@ -37,6 +37,7 @@ mod shells_view;
 mod shot;
 mod shot_icons;
 mod style;
+mod subagents;
 mod system;
 mod system_view;
 mod template;
@@ -78,6 +79,12 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--hook") {
         let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
         std::process::exit(tern_bridge::relay::run(&settings));
+    }
+    // A Claude sub-agent's log, in the tab its row opens (see
+    // `Workspace::open_subagent_log`).
+    if std::env::args().nth(1).as_deref() == Some("--agent-log") {
+        let file = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
+        std::process::exit(tern_bridge::agent_log::run(&file));
     }
     env_logger::init();
     // The UI and the daemon both read the added Claude accounts' sessions.

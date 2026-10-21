@@ -271,6 +271,15 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
             libc::signal(libc::SIGTERM, libc::SIG_DFL);
             libc::signal(libc::SIGALRM, libc::SIG_DFL);
 
+            // Tern: and with no signal blocked. The mask outlives exec, and
+            // the thread spawning may block them all (a GCD worker does, as
+            // does the daemon an app's worker started): a program run
+            // directly, not by a shell that clears it, then ignored Ctrl-C
+            // and outlived its terminal.
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut empty);
+            libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+
             Ok(())
         });
     }
