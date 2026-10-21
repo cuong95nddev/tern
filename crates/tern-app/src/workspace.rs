@@ -1836,6 +1836,50 @@ impl Workspace {
         });
     }
 
+    /// An image from a terminal in a popup centered on the window, like a
+    /// diff preview, with a button to open it in a center tab.
+    fn preview_image(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_all_dialogs(cx);
+        let ws = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let vp = window.viewport_size();
+            let open = path.clone();
+            let ws = ws.clone();
+            let footer = template::render(
+                "dialog.image_preview.footer",
+                template::Scope::new("image-preview"),
+                &mut |n, _, f| match (n, f) {
+                    ("open_in_tab", Framed::Button(b)) => {
+                        let (open, ws) = (open.clone(), ws.clone());
+                        b.on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = ws.update(cx, |this, cx| this.open_file(open.clone(), true, window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            let shown = path.clone();
+            dialog
+                .w(vp.width * 0.8)
+                .margin_top(vp.height * 0.06)
+                .title("Image")
+                .content(move |c, window, cx| {
+                    let height = f64::from(f32::from(window.viewport_size().height * 0.7));
+                    let muted = cx.theme().muted_foreground;
+                    let image = img(shown.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::ScaleDown)
+                        .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element());
+                    let scope = template::Scope::new("image-preview").var("height", height).slot("image", image);
+                    c.child(template::render_plain("dialog.image_preview", scope, cx))
+                })
+                .footer(footer)
+        });
+    }
+
     /// Show `pane` as a center tab; a tab already showing that file is
     /// reused instead.
     fn open_diff_tab(&mut self, pane: Entity<DiffPane>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2116,6 +2160,7 @@ impl Workspace {
                 }
                 cx.notify();
             },
+            TerminalEvent::PreviewImage(path) => self.preview_image(path.clone(), window, cx),
             TerminalEvent::OpenPath { path, line, col } => {
                 if path.is_dir() && !path.starts_with(&self.root) {
                     return cx.reveal_path(path);

@@ -116,6 +116,9 @@ pub struct TerminalSettings {
     /// Windows: Ctrl+V pastes (default true). False sends ^V to the
     /// program instead (Vim's block selection); Ctrl+Shift+V still pastes.
     pub ctrl_v_paste: Option<bool>,
+    /// Programs may read the clipboard through OSC 52 (default false);
+    /// copying to it is always allowed.
+    pub clipboard_read: bool,
     /// Terminal colors over the theme's.
     pub colors: TerminalColors,
 }
@@ -460,6 +463,7 @@ fn load(cx: &mut App) {
         line_height: t.line_height.filter(|v| *v > 0.).unwrap_or(1.25),
         palette: Arc::new(palette),
         ctrl_v_paste: t.ctrl_v_paste.unwrap_or(true),
+        clipboard_read: t.clipboard_read,
     });
 
     set_error((!problems.is_empty()).then(|| problems.join("; ")), cx);
@@ -1031,7 +1035,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
 | `shells.row` | `indent`, `selected`, `command`, `agent` (with several agents), `age` | `icon` |
 | `file_header` | `name`, `dirty`, `markdown`, `image`, `preview`, `diff`, `preview_key`, `open_external_key` | |
-| `terminal` | `background` (the palette's, with `terminal.background_opacity`) | `grid` |
+| `terminal` | `background` (the palette's, with `terminal.background_opacity`), `find` (the find bar is open) | `grid` |
+| `terminal.find` | `count`, `error`, `case`, `word`, `regex` | `input` |
 | `viewer` | as `file_header`; `message` | `diff`, `image`, `preview`, `editor` (the one it shows) |
 | `diff_pane` | `message` | `diff` |
 | `diff_pane.mode` (after the file name in its header) | `split` | |
@@ -1078,6 +1083,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `dialog.delete_scratch` | `name` | |
 | `dialog.remove_account` | `name` | |
 | `dialog.diff_preview` | `height` | `diff` |
+| `dialog.image_preview` | `height` | `image` |
 | `dialog.name`, `dialog.claude_args` | | `field` |
 | `dialog.theme` | | `list` |
 | `dialog.pick_account` | `note`; list `accounts` (as `dialog.pick_account.item`: `key`, `name`, `detail`, `usage`) | |

@@ -12,6 +12,7 @@
 //! Telex, CJK) and dead keys work via marked text.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,8 +20,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
-use tern_mux::client::{Connector, Foreground, Open, RemoteSession};
-use tern_term::keys::{self, Key, KeyEventKind, Mods};
+use tern_mux::client::{Connector, Foreground, Open, RemoteSession, ShownImage};
+use tern_term::graphics::placeholder::{self, PLACEHOLDER, PlaceholderCell};
+use tern_term::keys::{self, Key, KeyEventKind, LineEdit, ModifierKey, Mods};
 use tern_term::mirror::MirrorTerm;
 use tern_term::mouse::{self, MouseAction, MouseMods};
 use tern_term::osc::OscSignal;
@@ -36,11 +38,38 @@ use tern_term::vt::term::cell::Flags;
 use tern_term::vt::vte::ansi::{ClearMode, CursorShape, Handler, Rgb};
 use tern_term::{SpawnConfig, TermEvent, TermSize};
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+
 use crate::agents::Agent;
 use crate::links::{self, Link};
 use crate::platform::bind;
+use crate::terminal_find::{Matches, Query};
 
-actions!(terminal, [Copy, Paste, Clear, ScrollPageUp, ScrollPageDown, SelectAll, CopyOrInterrupt, PasteOrQuote]);
+actions!(
+    terminal,
+    [
+        Copy,
+        Paste,
+        Clear,
+        ScrollPageUp,
+        ScrollPageDown,
+        SelectAll,
+        CopyOrInterrupt,
+        PasteOrQuote,
+        LineStart,
+        LineEnd,
+        WordLeft,
+        WordRight,
+        DeleteWordLeft,
+        DeleteToLineStart,
+        DeleteToLineEnd,
+        Find,
+        FindNext,
+        FindPrevious,
+        CloseFind
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -48,6 +77,9 @@ pub fn bind_keys(cx: &mut App) {
         bind("cmd-v", Paste, Some("Terminal")),
         bind("cmd-k", Clear, Some("Terminal")),
         bind("cmd-a", SelectAll, Some("Terminal")),
+        bind("cmd-f", Find, Some("Terminal")),
+        bind("cmd-g", FindNext, Some("Terminal")),
+        bind("cmd-shift-g", FindPrevious, Some("Terminal")),
         bind("shift-pageup", ScrollPageUp, Some("Terminal")),
         bind("shift-pagedown", ScrollPageDown, Some("Terminal")),
         // The root binds tab / shift-tab to move focus, and bindings run
@@ -56,6 +88,20 @@ pub fn bind_keys(cx: &mut App) {
         bind("tab", NoAction, Some("Terminal")),
         bind("shift-tab", NoAction, Some("Terminal")),
     ]);
+    // macOS text editing (⌘←, ⌥←, ⌘⌫, …) as readline keys. Off macOS
+    // Ctrl+←/→ and Ctrl+Backspace already reach the program as keys.
+    if cfg!(target_os = "macos") {
+        let ctx = Some("Terminal");
+        cx.bind_keys([
+            KeyBinding::new("cmd-left", LineStart, ctx),
+            KeyBinding::new("cmd-right", LineEnd, ctx),
+            KeyBinding::new("alt-left", WordLeft, ctx),
+            KeyBinding::new("alt-right", WordRight, ctx),
+            KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, ctx),
+            KeyBinding::new("cmd-delete", DeleteToLineEnd, ctx),
+        ]);
+    }
     if !cfg!(target_os = "macos") {
         cx.bind_keys([bind("ctrl-insert", Copy, Some("Terminal")), bind("shift-insert", Paste, Some("Terminal"))]);
     }
@@ -67,6 +113,35 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub use tern_term::status::ActivityStatus;
+
+/// Find in the terminal (⌘F): see [`crate::terminal_find`].
+struct FindBar {
+    input: Entity<InputState>,
+    query: Query,
+    matches: Matches,
+    /// Searching again after output, at most every [`FIND_REFRESH`].
+    _refresh: Option<Task<()>>,
+    _input: Subscription,
+}
+
+/// How long output waits before the open find bar searches again.
+const FIND_REFRESH: Duration = Duration::from_millis(200);
+
+/// What the grid marks for the find bar: its matches on screen.
+struct FindPaint {
+    matches: Vec<tern_term::vt::term::search::Match>,
+    current: Option<tern_term::vt::term::search::Match>,
+    background: Hsla,
+    current_background: Hsla,
+}
+
+/// Decoded images not drawn for this long are released from the GPU atlas.
+const IMAGE_CACHE_TTL: Duration = Duration::from_secs(10);
+/// Most bytes of GPU-ready images kept per tab.
+const IMAGE_CACHE_CAP: usize = 256 * 1024 * 1024;
+
+/// The shortest time between two redraws for output.
+const OUTPUT_FRAME: Duration = Duration::from_millis(16);
 
 /// How many of an agent's bottom lines tell what it is doing.
 const AGENT_SCREEN_LINES: usize = 15;
@@ -97,6 +172,8 @@ pub enum TerminalEvent {
     /// The program starts again after its daemon was lost, in its last
     /// folder and below what it showed.
     Restored,
+    /// A click on an inline image, written out as this PNG.
+    PreviewImage(PathBuf),
     /// ⌘-click on a path that exists; absolute.
     OpenPath {
         path: PathBuf,
@@ -165,6 +242,8 @@ pub struct TerminalLook {
     pub palette: Arc<Palette>,
     /// Ctrl+V pastes (Windows); off, the terminal gets ^V.
     pub ctrl_v_paste: bool,
+    /// Programs may read the clipboard (OSC 52).
+    pub clipboard_read: bool,
 }
 
 impl Global for TerminalLook {}
@@ -225,6 +304,8 @@ pub struct TerminalView {
     lost: Option<(Arc<FairMutex<MirrorTerm>>, TermSize)>,
     /// The folder the shell was last seen in.
     last_cwd: Option<PathBuf>,
+    /// The folder the shell last told (OSC 7).
+    reported_cwd: Option<PathBuf>,
     /// Reattaching after the connection to the daemon was lost: if the
     /// session is gone, say so rather than start a new program.
     reattaching: bool,
@@ -293,6 +374,9 @@ pub struct TerminalView {
     resolving: Option<(String, Task<()>)>,
     /// ⌘ is held (as of the last `update_hover`).
     cmd_held: bool,
+    /// The modifiers down as of the last change: a lone press or release
+    /// is a key event to a program that wants all keys (Kitty flag 8).
+    mods_down: Modifiers,
     /// [`Ticker`] ticks since the program last wrote (after a quiet 10s).
     idle_ticks: u32,
     /// The coding agent running in the foreground, if any.
@@ -301,6 +385,20 @@ pub struct TerminalView {
     shells: Vec<AgentShell>,
     /// When the program last wrote something.
     last_output: Instant,
+    /// When the grid was last drawn, and the redraw held back to keep
+    /// output at [`OUTPUT_FRAME`] (see `on_term_event`).
+    last_draw: Instant,
+    _redraw: Option<Task<()>>,
+    /// The find bar, while it is open.
+    find: Option<FindBar>,
+    /// GPU-ready copies of the images on screen (kitty graphics).
+    images: DrawnImages,
+    /// Tells this tab's sessions apart: a new one reuses image ids.
+    session_serial: u64,
+    /// Where images show in the last frame, and which.
+    image_hits: Vec<(Bounds<Pixels>, u32)>,
+    /// The mouse is over an image a click would open.
+    hover_image: bool,
     _pump: Option<Task<()>>,
     /// Connecting to the daemon, before the session opens.
     _connect: Option<Task<()>>,
@@ -414,6 +512,7 @@ impl TerminalView {
             attach_asked: None,
             lost: None,
             last_cwd: None,
+            reported_cwd: None,
             reattaching: false,
             attaching: false,
             output_since_ready: false,
@@ -450,10 +549,18 @@ impl TerminalView {
             unresolved: RefCell::new(None),
             resolving: None,
             cmd_held: false,
+            mods_down: Modifiers::default(),
             idle_ticks: 0,
             agent: None,
             shells: Vec::new(),
             last_output: Instant::now(),
+            last_draw: Instant::now(),
+            _redraw: None,
+            find: None,
+            images: DrawnImages::new(IMAGE_CACHE_CAP),
+            session_serial: 0,
+            image_hits: Vec::new(),
+            hover_image: false,
             _pump: None,
             _connect: None,
             _watch: Task::ready(()),
@@ -509,6 +616,7 @@ impl TerminalView {
             s.close();
         }
         self.started = Instant::now();
+        self.session_serial += 1;
         self.attaching = self.attach.is_some();
         self.attach_asked = self.attach;
         // A shell starts in its last folder, below what it showed; a Claude
@@ -662,7 +770,7 @@ impl TerminalView {
     pub fn debug_info(&self) -> String {
         let size = self.session.as_ref().map(|s| s.size());
         format!(
-            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={} status={:?} from_file={}",
+            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={} status={:?} from_file={} find={:?} offset={}",
             self.reported_focus,
             self.mode().contains(TermMode::FOCUS_IN_OUT),
             self.exited,
@@ -670,6 +778,8 @@ impl TerminalView {
             self.session.as_ref().map_or(0, |s| s.term().lock().grid().history_size()),
             self.status,
             self.status_from_file,
+            self.find.as_ref().map(|f| (f.query.text.clone(), f.matches.count(), f.matches.current_match().cloned())),
+            self.session.as_ref().map_or(0, |s| s.term().lock().grid().display_offset()),
         )
     }
 
@@ -772,7 +882,24 @@ impl TerminalView {
                 if self.hover_link.is_some() {
                     self.update_hover(true, cx);
                 }
-                cx.notify()
+                self.refresh_find_soon(cx);
+                // As Warp: output redraws at most every OUTPUT_FRAME. The
+                // first after a pause draws at once (an echoed key shows
+                // with no delay); a flood draws at 60 fps, not at a 120 Hz
+                // display's rate.
+                let since = self.last_draw.elapsed();
+                if since >= OUTPUT_FRAME {
+                    cx.notify();
+                } else if self._redraw.is_none() {
+                    let wait = OUTPUT_FRAME - since;
+                    self._redraw = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = this.update(cx, |view, cx| {
+                            view._redraw = None;
+                            cx.notify();
+                        });
+                    }));
+                }
             },
             TermEvent::Title(t) => {
                 if *t != *self.raw_title {
@@ -783,6 +910,17 @@ impl TerminalView {
             TermEvent::ResetTitle => self.set_title(self.default_title.clone(), cx),
             TermEvent::Bell => cx.emit(TerminalEvent::Bell),
             TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            // Off by default, as in Warp: what was copied (a password, a
+            // token) is the program's only if the user said so. A refused
+            // read gets no answer, as in xterm.
+            TermEvent::ClipboardLoad(reply) => {
+                if cx.try_global::<TerminalLook>().is_some_and(|l| l.clipboard_read)
+                    && let Some(s) = &self.session
+                {
+                    let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+                    s.write((reply.0)(&text).into_bytes());
+                }
+            },
             // Ended by a restart on purpose: wait for the connection to go,
             // then start again on the new daemon (`ServerLost`).
             TermEvent::Exit(_) if crate::restart::ended_by_restart(self.started, cx) => {},
@@ -808,7 +946,15 @@ impl TerminalView {
             TermEvent::Signal(OscSignal::Notify { title, body }) => {
                 cx.emit(TerminalEvent::Notify { title, body });
             },
-            TermEvent::Signal(OscSignal::ProgramStatusProbe | OscSignal::ColorSchemeReports(_) | OscSignal::ColorSchemeQuery) => {},
+            // The shell's folder as it tells it (OSC 7): known where the
+            // process's can't be read (Windows), and where links resolve.
+            TermEvent::Signal(OscSignal::Cwd(dir)) => {
+                self.last_cwd = Some(dir.clone());
+                self.reported_cwd = Some(dir);
+            },
+            TermEvent::Signal(
+                OscSignal::ProgramStatusProbe | OscSignal::ColorSchemeReports(_) | OscSignal::ColorSchemeQuery | OscSignal::VersionQuery,
+            ) => {},
             TermEvent::Ready { token, status, .. } => {
                 // The status it had while no one watched (e.g. Done): shown,
                 // not notified again.
@@ -999,12 +1145,19 @@ impl TerminalView {
         self.session.as_ref().map_or(TermMode::empty(), RemoteSession::mode)
     }
 
+    /// The program speaks the Kitty keyboard protocol: ⌘ chords no binding
+    /// took are keys to it (with the Super bit), as in kitty and Warp.
+    fn kitty_keys(&self) -> bool {
+        self.mode().intersects(TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC)
+    }
+
     // ---- keyboard -------------------------------------------------------
 
     /// The key a keystroke encodes as, or `None` for text that goes
     /// through the input handler (IMEs, dead keys).
     fn map_key(ks: &Keystroke, meta: bool, all_keys: bool) -> Option<Key> {
         let m = ks.modifiers;
+        let all_keys = all_keys || m.platform;
         match ks.key.as_str() {
             "enter" => Some(Key::Enter),
             "tab" => Some(Key::Tab),
@@ -1028,9 +1181,13 @@ impl TerminalView {
         }
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys typed in the find bar are the bar's.
+        if !self.focus.is_focused(window) {
+            return;
+        }
         let ks = &ev.keystroke;
-        if ks.modifiers.platform || self.marked_text.is_some() {
+        if (ks.modifiers.platform && !self.kitty_keys()) || self.marked_text.is_some() {
             return;
         }
         // AltGr (Ctrl+Alt on Windows) or a dead key makes a character: let
@@ -1049,9 +1206,12 @@ impl TerminalView {
         }
     }
 
-    fn key_up(&mut self, ev: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_up(&mut self, ev: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            return;
+        }
         let ks = &ev.keystroke;
-        if ks.modifiers.platform || self.marked_text.is_some() || self.exited.is_some() {
+        if (ks.modifiers.platform && !self.kitty_keys()) || self.marked_text.is_some() || self.exited.is_some() {
             return;
         }
         if self.mode().contains(TermMode::REPORT_EVENT_TYPES) {
@@ -1062,10 +1222,14 @@ impl TerminalView {
     fn send_key(&mut self, ks: &Keystroke, kind: KeyEventKind, cx: &mut Context<Self>) -> bool {
         let m = ks.modifiers;
         let meta = m.alt && self.config.option_as_meta.applies();
-        let mods = Mods { shift: m.shift, alt: meta, ctrl: m.control, meta: false };
         let mode = self.mode();
         let Some(key) = Self::map_key(ks, meta, mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)) else { return false };
-        let text = ks.key_char.as_deref().filter(|_| !meta);
+        // "Option as Meta" only decides what Option does to text keys (a
+        // composed char or Meta); on the others (⌥↑, ⌥Enter, ⌥F1) Option is
+        // always the Alt modifier, as in Warp and Ghostty.
+        let alt = if matches!(key, Key::Char(_)) { meta } else { m.alt };
+        let mods = Mods { shift: m.shift, alt, ctrl: m.control, meta: m.platform };
+        let text = ks.key_char.as_deref().filter(|_| !meta && !m.platform);
         match keys::encode_event(key, mods, text, mode, kind) {
             Some(bytes) => {
                 self.write_input(bytes, cx);
@@ -1073,6 +1237,118 @@ impl TerminalView {
             },
             None => false,
         }
+    }
+
+    // ---- find -----------------------------------------------------------
+
+    /// ⌘F: open the find bar (with the selection, if one line, as the
+    /// query), or go back to its field.
+    fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        let selected =
+            self.session.as_ref().and_then(|s| s.term().lock().selection_to_string()).filter(|t| !t.is_empty() && !t.contains('\n'));
+        if self.find.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+            let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| match ev {
+                // Enter reports a change too: search again only for new text.
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+                    if this.find.as_ref().is_some_and(|f| f.query.text != text) {
+                        this.search(|q| q.text = text, cx);
+                    }
+                },
+                InputEvent::PressEnter { shift, .. } => this.find_step(!*shift, cx),
+                _ => {},
+            });
+            self.find = Some(FindBar { input, query: Query::default(), matches: Matches::default(), _refresh: None, _input: sub });
+        }
+        let find = self.find.as_ref().unwrap();
+        if let Some(text) = selected {
+            find.input.update(cx, |i, cx| i.set_value(text, window, cx));
+        }
+        find.input.update(cx, |i, cx| i.focus(window, cx));
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Change the query and search again, showing the match nearest the
+    /// bottom of the screen.
+    fn search(&mut self, change: impl FnOnce(&mut Query), cx: &mut Context<Self>) {
+        let (Some(find), Some(s)) = (&mut self.find, &self.session) else { return };
+        change(&mut find.query);
+        let mut term = s.term().lock();
+        let bottom = GridPoint::new(Line(term.screen_lines() as i32 - 1 - term.grid().display_offset() as i32), term.last_column());
+        find.matches = Matches::find(&term, &find.query, bottom);
+        if let Some(m) = find.matches.current_match() {
+            term.scroll_to_point(*m.start());
+        }
+        cx.notify();
+    }
+
+    /// Enter / ⌘G go up (older output), as in iTerm2: a search starts at the
+    /// bottom.
+    fn find_step(&mut self, up: bool, cx: &mut Context<Self>) {
+        let (Some(find), Some(s)) = (&mut self.find, &self.session) else { return };
+        if let Some(m) = find.matches.step(up) {
+            s.term().lock().scroll_to_point(*m.start());
+            cx.notify();
+        }
+    }
+
+    /// New output moves and adds text: search again soon, on the same match.
+    fn refresh_find_soon(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else { return };
+        if find.query.text.is_empty() || find._refresh.is_some() {
+            return;
+        }
+        find._refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIND_REFRESH).await;
+            let _ = this.update(cx, |view, cx| {
+                let (Some(find), Some(s)) = (&mut view.find, &view.session) else { return };
+                find._refresh = None;
+                let at = find.matches.current_match().map(|m| *m.start());
+                let term = s.term().lock();
+                let bottom = GridPoint::new(Line(term.screen_lines() as i32 - 1), term.last_column());
+                find.matches = Matches::find(&term, &find.query, bottom);
+                if let Some(at) = at {
+                    find.matches.keep_near(at);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The find bar's matches on screen, for the grid to mark.
+    fn find_paint(&self, cx: &App) -> Option<FindPaint> {
+        let find = self.find.as_ref()?;
+        let s = self.session.as_ref()?;
+        let (top, bottom) = {
+            let term = s.term().lock();
+            let offset = term.grid().display_offset() as i32;
+            (Line(-offset), Line(term.screen_lines() as i32 - 1 - offset))
+        };
+        let shown = |m: &&tern_term::vt::term::search::Match| m.end().line >= top && m.start().line <= bottom;
+        let look = crate::style::el("terminal.find", cx);
+        Some(FindPaint {
+            matches: find.matches.all.iter().filter(shown).cloned().collect(),
+            current: find.matches.current_match().cloned(),
+            background: look.color("match_background"),
+            current_background: look.color("current_background"),
+        })
+    }
+
+    /// A macOS text-editing chord. While an IME composes, or with no live
+    /// program, the key goes on as usual.
+    fn line_edit(&mut self, edit: LineEdit, cx: &mut Context<Self>) {
+        if self.session.is_none() || self.marked_text.is_some() || self.exited.is_some() {
+            return cx.propagate();
+        }
+        self.write_input(edit.bytes().to_vec(), cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1233,6 +1509,13 @@ impl TerminalView {
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         if ev.button == MouseButton::Left
+            && ev.click_count == 1
+            && let Some(id) = self.clickable_image(ev.position, ev.modifiers.secondary())
+        {
+            self.open_image(id, cx);
+            return;
+        }
+        if ev.button == MouseButton::Left
             && ev.modifiers.secondary()
             && let Some(link) = self.link_at(ev.position, true)
         {
@@ -1254,8 +1537,18 @@ impl TerminalView {
             return;
         }
         let Some((col, row, side)) = self.grid_point(ev.position) else { return };
+        // As Warp: a double click on a URL or path takes all of it, not the
+        // word between its slashes and colons.
+        let link = if ev.click_count == 2 { self.link_text_at(ev.position) } else { None };
         let Some(s) = &self.session else { return };
         let mut term = s.term().lock();
+        if let Some((start, end, _)) = link {
+            let mut sel = Selection::new(SelectionType::Simple, start, Side::Left);
+            sel.update(end, Side::Right);
+            term.selection = Some(sel);
+            self.selecting = false;
+            return cx.notify();
+        }
         let offset = term.grid().display_offset() as i32;
         let point = GridPoint::new(Line(row as i32 - offset), Column(col));
         let ty = match ev.click_count {
@@ -1319,7 +1612,33 @@ impl TerminalView {
         }
     }
 
-    fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (old, new) = (std::mem::replace(&mut self.mods_down, ev.modifiers), ev.modifiers);
+        let mode = self.mode();
+        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+            && self.marked_text.is_none()
+            && self.exited.is_none()
+            && self.focus.is_focused(window)
+        {
+            let mods = Mods { shift: new.shift, alt: new.alt, ctrl: new.control, meta: new.platform };
+            for (key, was, is) in [
+                (ModifierKey::Shift, old.shift, new.shift),
+                (ModifierKey::Ctrl, old.control, new.control),
+                (ModifierKey::Alt, old.alt, new.alt),
+                (ModifierKey::Super, old.platform, new.platform),
+            ] {
+                let kind = match (was, is) {
+                    (false, true) => KeyEventKind::Press,
+                    (true, false) => KeyEventKind::Release,
+                    _ => continue,
+                };
+                // Straight to the program: holding ⌘ to copy keeps the
+                // selection and the scroll position.
+                if let (Some(bytes), Some(s)) = (keys::encode_event(Key::Modifier(key), mods, None, mode, kind), &self.session) {
+                    s.write(bytes);
+                }
+            }
+        }
         if ev.modifiers.secondary() && self.hover_link.is_none() {
             self.resolved.borrow_mut().clear();
         }
@@ -1333,9 +1652,40 @@ impl TerminalView {
         }
     }
 
+    /// The image at `pos` a click opens: on ⌘-click, or on a plain click
+    /// when the program doesn't take the mouse.
+    fn clickable_image(&self, pos: Point<Pixels>, cmd: bool) -> Option<u32> {
+        if !cmd && self.mode().intersects(TermMode::MOUSE_MODE) {
+            return None;
+        }
+        image_at(&self.image_hits, pos)
+    }
+
+    /// Shows image `id` full size in a popup, written out as a PNG first.
+    fn open_image(&mut self, id: u32, cx: &mut Context<Self>) {
+        let Some(s) = &self.session else { return };
+        let Some(img) = s.images().get(&id).map(|i| (i.width, i.height, i.rgba.clone(), i.generation)) else { return };
+        let (width, height, rgba, generation) = img;
+        let dir = std::env::temp_dir().join("tern-images");
+        let name = format!("{}-{}-{id}-{generation}", std::process::id(), self.session_serial);
+        let task = cx.background_executor().spawn(async move { save_png(width, height, &rgba, &dir, &name) });
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(path) => {
+                let _ = this.update(cx, |_, cx| cx.emit(TerminalEvent::PreviewImage(path)));
+            },
+            Err(e) => log::warn!("cannot write image {id}: {e}"),
+        })
+        .detach();
+    }
+
     /// Underline the link under the mouse while `cmd` is held.
     fn update_hover(&mut self, cmd: bool, cx: &mut Context<Self>) {
         self.cmd_held = cmd;
+        let image = self.mouse_pos.is_some_and(|p| self.clickable_image(p, cmd).is_some());
+        if image != self.hover_image {
+            self.hover_image = image;
+            cx.notify();
+        }
         let link = if cmd { self.mouse_pos.and_then(|p| self.link_at(p, false)) } else { None };
         if link != self.hover_link {
             self.hover_link = link;
@@ -1384,7 +1734,9 @@ impl TerminalView {
     /// or folder that exists. Text wrapped over several rows counts as one
     /// line. A path not looked up yet is looked up now if `wait`, else left
     /// in `unresolved` (no link for now).
-    fn link_at(&self, pos: Point<Pixels>, wait: bool) -> Option<HoverLink> {
+    /// The link written at `pos` (an OSC 8 hyperlink, a URL or a path),
+    /// found or not: its first and last cells and what it says.
+    fn link_text_at(&self, pos: Point<Pixels>) -> Option<(GridPoint, GridPoint, Link)> {
         let (col, row, _) = self.grid_point(pos)?;
         let s = self.session.as_ref()?;
         let (text, points, hyperlinks, ix) = {
@@ -1424,6 +1776,12 @@ impl TerminalView {
             },
             None => links::find_at(&text, ix)?,
         };
+        Some((points[range.start], points[range.end - 1], link))
+    }
+
+    fn link_at(&self, pos: Point<Pixels>, wait: bool) -> Option<HoverLink> {
+        let s = self.session.as_ref()?;
+        let (start, end, link) = self.link_text_at(pos)?;
         let target = match link {
             Link::Url(url) => Target::Url(url),
             Link::Path { path, line, col } => {
@@ -1431,7 +1789,8 @@ impl TerminalView {
                 let found = match cached {
                     Some(found) => found,
                     None if wait => {
-                        let bases: Vec<PathBuf> = s.foreground_cwd().into_iter().chain(self.spawn_cfg.cwd.clone()).collect();
+                        let bases: Vec<PathBuf> =
+                            s.foreground_cwd().into_iter().chain(self.reported_cwd.clone()).chain(self.spawn_cfg.cwd.clone()).collect();
                         let found = links::resolve(&path, &bases);
                         self.remember(path, found.clone());
                         found
@@ -1444,7 +1803,7 @@ impl TerminalView {
                 Target::Path { path: found?, line, col }
             },
         };
-        Some(HoverLink { start: points[range.start], end: points[range.end - 1], target })
+        Some(HoverLink { start, end, target })
     }
 
     fn open_link(&mut self, target: Target, cx: &mut Context<Self>) {
@@ -1557,11 +1916,26 @@ impl Render for TerminalView {
         if let Some(s) = &self.session {
             s.take_wakeup();
         }
+        self.last_draw = Instant::now();
         self.watch_focus(window, cx);
         let look = crate::style::el("terminal", cx);
         let opacity = look.num("background_opacity").clamp(0., 1.) * crate::style::window_opacity(&crate::style::looks(cx));
         let bg = rgb_to_hsla(self.sync_look(cx).background).opacity(opacity);
-        let scope = crate::template::Scope::new("terminal").var("background", bg).slot("grid", TerminalElement { view: cx.entity() });
+        let mut scope = crate::template::Scope::new("terminal")
+            .var("background", bg)
+            .var("find", self.find.is_some())
+            .slot("grid", TerminalElement { view: cx.entity() });
+        if let Some(find) = &self.find {
+            let q = &find.query;
+            let m = &find.matches;
+            scope = scope
+                .var("count", if m.error { "Invalid".to_owned() } else { m.count() })
+                .var("error", m.error)
+                .var("case", q.case_sensitive)
+                .var("word", q.whole_word)
+                .var("regex", q.regex)
+                .slot("input", Input::new(&find.input).appearance(false).small());
+        }
         let mut frames = |name: &str, _, f: crate::template::Framed| match (name, f) {
             ("terminal", crate::template::Framed::Box(d)) => d
                 .id("terminal")
@@ -1577,6 +1951,17 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::select_all))
                 .on_action(cx.listener(|v, _: &ScrollPageUp, _, cx| v.scroll_page(true, cx)))
                 .on_action(cx.listener(|v, _: &ScrollPageDown, _, cx| v.scroll_page(false, cx)))
+                .on_action(cx.listener(Self::open_find))
+                .on_action(cx.listener(|v, _: &FindNext, _, cx| v.find_step(true, cx)))
+                .on_action(cx.listener(|v, _: &FindPrevious, _, cx| v.find_step(false, cx)))
+                .on_action(cx.listener(|v, _: &CloseFind, window, cx| v.close_find(window, cx)))
+                .on_action(cx.listener(|v, _: &LineStart, _, cx| v.line_edit(LineEdit::LineStart, cx)))
+                .on_action(cx.listener(|v, _: &LineEnd, _, cx| v.line_edit(LineEdit::LineEnd, cx)))
+                .on_action(cx.listener(|v, _: &WordLeft, _, cx| v.line_edit(LineEdit::WordLeft, cx)))
+                .on_action(cx.listener(|v, _: &WordRight, _, cx| v.line_edit(LineEdit::WordRight, cx)))
+                .on_action(cx.listener(|v, _: &DeleteWordLeft, _, cx| v.line_edit(LineEdit::DeleteWordLeft, cx)))
+                .on_action(cx.listener(|v, _: &DeleteToLineStart, _, cx| v.line_edit(LineEdit::DeleteToLineStart, cx)))
+                .on_action(cx.listener(|v, _: &DeleteToLineEnd, _, cx| v.line_edit(LineEdit::DeleteToLineEnd, cx)))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
                 .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
                 .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
@@ -1591,8 +1976,21 @@ impl Render for TerminalView {
                 .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
                 .on_drop(cx.listener(Self::drop_paths))
                 .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-                .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
+                .cursor(if self.hover_link.is_some() || self.hover_image { CursorStyle::PointingHand } else { CursorStyle::IBeam })
                 .into_any_element(),
+            // The field lets Escape through when it has nothing to undo.
+            ("find", crate::template::Framed::Box(d)) => {
+                d.on_action(cx.listener(|v, _: &Escape, window, cx| v.close_find(window, cx))).into_any_element()
+            },
+            ("case", crate::template::Framed::Button(b)) => {
+                b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.search(|q| q.case_sensitive ^= true, cx))).into_any_element()
+            },
+            ("word", crate::template::Framed::Button(b)) => {
+                b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.search(|q| q.whole_word ^= true, cx))).into_any_element()
+            },
+            ("regex", crate::template::Framed::Button(b)) => {
+                b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.search(|q| q.regex ^= true, cx))).into_any_element()
+            },
             (_, f) => f.into_any_element(),
         };
         crate::template::render("terminal", scope, &mut frames, cx)
@@ -1663,6 +2061,75 @@ impl EntityInputHandler for TerminalView {
 
 // ---- element ------------------------------------------------------------
 
+struct DrawnImage {
+    generation: u64,
+    data: Arc<RenderImage>,
+    bytes: usize,
+    used: Instant,
+}
+
+/// GPU-ready images by session and image id: one generation each (a
+/// replaced image's old copy goes at once), released when unused for a
+/// while or over the cap.
+struct DrawnImages {
+    entries: HashMap<(u64, u32), DrawnImage>,
+    bytes: usize,
+    cap: usize,
+}
+
+impl DrawnImages {
+    fn new(cap: usize) -> Self {
+        Self { entries: HashMap::new(), bytes: 0, cap }
+    }
+
+    /// The copy of image `id` at `img`'s generation; released copies go
+    /// to `dropped`.
+    fn get(&mut self, id: (u64, u32), img: &ShownImage, now: Instant, dropped: &mut Vec<Arc<RenderImage>>) -> Option<Arc<RenderImage>> {
+        if let Some(e) = self.entries.get_mut(&id)
+            && e.generation == img.generation
+        {
+            e.used = now;
+            return Some(e.data.clone());
+        }
+        self.release(id, dropped);
+        let data = render_image(img)?;
+        self.bytes += img.rgba.len();
+        self.entries.insert(id, DrawnImage { generation: img.generation, data: data.clone(), bytes: img.rgba.len(), used: now });
+        Some(data)
+    }
+
+    /// Releases copies unused for [`IMAGE_CACHE_TTL`], then the least
+    /// recently used while over the cap.
+    fn sweep(&mut self, now: Instant, dropped: &mut Vec<Arc<RenderImage>>) {
+        let expired: Vec<_> =
+            self.entries.iter().filter(|(_, e)| now.duration_since(e.used) >= IMAGE_CACHE_TTL).map(|(id, _)| *id).collect();
+        for id in expired {
+            self.release(id, dropped);
+        }
+        while self.bytes > self.cap {
+            let Some(id) = self.entries.iter().min_by_key(|(_, e)| e.used).map(|(id, _)| *id) else { break };
+            self.release(id, dropped);
+        }
+    }
+
+    fn release(&mut self, id: (u64, u32), dropped: &mut Vec<Arc<RenderImage>>) {
+        if let Some(e) = self.entries.remove(&id) {
+            self.bytes -= e.bytes;
+            dropped.push(e.data);
+        }
+    }
+}
+
+/// GPUI wants BGRA.
+fn render_image(img: &ShownImage) -> Option<Arc<RenderImage>> {
+    let mut bgra = img.rgba.to_vec();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let buf = image::RgbaImage::from_raw(img.width, img.height, bgra)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buf)])))
+}
+
 fn rgb_to_hsla(c: Rgb) -> Hsla {
     Rgba { r: c.r as f32 / 255., g: c.g as f32 / 255., b: c.b as f32 / 255., a: 1. }.into()
 }
@@ -1684,8 +2151,28 @@ struct TextSegment {
     line: ShapedLine,
 }
 
+struct FrameImage {
+    /// The placeholder cells' area: what of the image shows.
+    clip: Bounds<Pixels>,
+    /// Where the whole fitted image would be.
+    bounds: Bounds<Pixels>,
+    data: Arc<RenderImage>,
+}
+
+/// Consecutive placeholder cells of one image on one row.
+struct PlaceholderRun {
+    row: i32,
+    start: usize,
+    end: usize,
+    first: PlaceholderCell,
+    last: PlaceholderCell,
+}
+
 struct Frame {
     rects: Vec<PaintQuad>,
+    images: Vec<FrameImage>,
+    /// Cached images to release from the GPU atlas.
+    dropped: Vec<Arc<RenderImage>>,
     text: Vec<TextSegment>,
     cursor: Option<PaintQuad>,
     marked: Option<(PaintQuad, TextSegment)>,
@@ -1837,7 +2324,8 @@ impl Element for TerminalElement {
             let cell = |p: Pixels| (f32::from(p) * scale).round() as u16;
             let size = TermSize { cols, rows, cell_width: cell(m.width), cell_height: cell(m.height) };
             view.resize(size, cx);
-            build_frame(view, &palette, bounds, m, window)
+            let find = view.find_paint(cx);
+            build_frame(view, &palette, bounds, m, find.as_ref(), window)
         })
     }
 
@@ -1853,9 +2341,15 @@ impl Element for TerminalElement {
     ) {
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
+        for data in frame.dropped.drain(..) {
+            let _ = window.drop_image(data);
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for q in frame.rects.drain(..) {
                 window.paint_quad(q);
+            }
+            for img in &frame.images {
+                let _ = window.paint_image(img.clip, img.bounds, Corners::default(), img.data.clone(), 0, false);
             }
             if let Some(c) = frame.cursor.take() {
                 window.paint_quad(c);
@@ -1875,7 +2369,14 @@ impl Element for TerminalElement {
     }
 }
 
-fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels>, m: CellMetrics, window: &mut Window) -> Frame {
+fn build_frame(
+    view: &mut TerminalView,
+    palette: &Palette,
+    bounds: Bounds<Pixels>,
+    m: CellMetrics,
+    find: Option<&FindPaint>,
+    window: &mut Window,
+) -> Frame {
     let base_font = font(view.config.font_family.clone());
     let fonts: [Font; 4] = std::array::from_fn(|i| {
         let mut f = base_font.clone();
@@ -1890,7 +2391,16 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
     let font_size = view.config.font_size;
     let focused = view.focus.is_focused(window);
     let ts = window.text_system().clone();
-    let mut frame = Frame { rects: vec![], text: vec![], cursor: None, marked: None, overlay: None, line_height: m.height };
+    let mut frame = Frame {
+        rects: vec![],
+        images: vec![],
+        dropped: vec![],
+        text: vec![],
+        cursor: None,
+        marked: None,
+        overlay: None,
+        line_height: m.height,
+    };
 
     let Some(session) = &view.session else {
         view.last_cursor = None;
@@ -1930,6 +2440,7 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
     let mut last_fg: Option<(Rgb, Hsla)> = None;
     let mut last_bg: Option<(Rgb, Hsla)> = None;
     let mut buf = String::new();
+    let mut placeholders: Vec<PlaceholderRun> = Vec::new();
     for indexed in content.display_iter {
         let vp_line = indexed.point.line.0 + offset;
         let col = indexed.point.column.0;
@@ -1976,8 +2487,17 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         let is_cursor = block_cursor && vp_line == cursor_vp_line && col == cursor.point.column.0;
 
         // Backgrounds.
+        let found = find.and_then(|f| {
+            if f.current.as_ref().is_some_and(|c| c.contains(&indexed.point)) {
+                Some(f.current_background)
+            } else {
+                f.matches.iter().any(|r| r.contains(&indexed.point)).then_some(f.background)
+            }
+        });
         let cell_bg = if selected {
             Some(sel_bg)
+        } else if found.is_some() {
+            found
         } else if bg != default_bg {
             Some(match last_bg {
                 Some((rgb, h)) if rgb == bg => h,
@@ -2002,6 +2522,28 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
 
         if is_cursor {
             fg_h = rgb_to_hsla(default_bg);
+        }
+        // A kitty graphics placeholder: part of an image, not text.
+        if cell.c == PLACEHOLDER {
+            let prev = placeholders.last().filter(|r| r.row == vp_line && r.end == col).map(|r| r.last);
+            let marks = cell.zerowidth().unwrap_or(&[]);
+            if let Some(ph) = PlaceholderCell::decode(cell.fg, cell.underline_color(), marks, prev.as_ref()) {
+                match placeholders.last_mut() {
+                    Some(r)
+                        if r.row == vp_line
+                            && r.end == col
+                            && r.last.image_id == ph.image_id
+                            && r.last.placement_id == ph.placement_id
+                            && r.last.row == ph.row
+                            && r.last.col + 1 == ph.col =>
+                    {
+                        r.end = col + 1;
+                        r.last = ph;
+                    },
+                    _ => placeholders.push(PlaceholderRun { row: vp_line, start: col, end: col + 1, first: ph, last: ph }),
+                }
+            }
+            continue;
         }
         let linked = link.as_ref().is_some_and(|r| r.contains(&indexed.point));
         let lined = flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) || linked;
@@ -2055,6 +2597,31 @@ fn build_frame(view: &mut TerminalView, palette: &Palette, bounds: Bounds<Pixels
         });
     }
     drop(term);
+
+    // Placeholder runs: the part of each image they show.
+    view.image_hits.clear();
+    if !placeholders.is_empty() {
+        let shown = session.images();
+        let (cw, ch) = (f32::from(m.width), f32::from(m.height));
+        let now = Instant::now();
+        for run in &placeholders {
+            let Some(img) = shown.get(&run.first.image_id) else { continue };
+            let (cols, rows) = img.placement(run.first.placement_id);
+            let (cols, rows) = placeholder::box_cells(cols, rows, img.width, img.height, cw, ch);
+            let (x, y, w, h) = placeholder::fit(cols, rows, cw, ch, img.width, img.height);
+            let run_origin = point(bounds.origin.x + m.width * run.start as f32, bounds.origin.y + m.height * run.row as f32);
+            let box_x = run_origin.x - m.width * run.first.col as f32;
+            let box_y = run_origin.y - m.height * run.first.row as f32;
+            let clip = Bounds::new(run_origin, size(m.width * (run.end - run.start) as f32, m.height));
+            let at = Bounds::new(point(box_x + px(x), box_y + px(y)), size(px(w), px(h)));
+            if let Some(data) = view.images.get((view.session_serial, run.first.image_id), img, now, &mut frame.dropped) {
+                frame.images.push(FrameImage { clip, bounds: at, data });
+                view.image_hits.push((clip, run.first.image_id));
+            }
+        }
+    }
+    view.images.sweep(Instant::now(), &mut frame.dropped);
+
     frame.text = pending
         .into_iter()
         .map(|p| TextSegment { origin: p.origin, line: ts.shape_line(p.text.into(), font_size, &p.runs, Some(m.width)) })
@@ -2158,10 +2725,79 @@ pub(crate) fn escape_path(path: &Path) -> String {
     out
 }
 
+/// The image shown at `pos`, from a frame's image areas.
+fn image_at(hits: &[(Bounds<Pixels>, u32)], pos: Point<Pixels>) -> Option<u32> {
+    hits.iter().find(|(b, _)| b.contains(&pos)).map(|(_, id)| *id)
+}
+
+/// Writes RGBA pixels to `<dir>/<name>.png` unless that file exists, and
+/// returns its path. The directory and file are private: the image may show
+/// anything the program displayed.
+fn save_png(width: u32, height: u32, rgba: &[u8], dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    use std::io;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let path = dir.join(format!("{name}.png"));
+    if path.exists() {
+        return Ok(path);
+    }
+    let buf = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "pixel buffer does not match the size"))?;
+    let mut png = io::Cursor::new(Vec::new());
+    buf.write_to(&mut png, image::ImageFormat::Png).map_err(io::Error::other)?;
+    // Written under a temporary name and renamed, so a half-written file is never opened.
+    let tmp = dir.join(format!(".{name}.png.part"));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    io::Write::write_all(&mut opts.open(&tmp)?, png.get_ref())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape_path, sanitize_paste, strip_spinner};
+    use super::{escape_path, image_at, sanitize_paste, save_png, strip_spinner};
+    use gpui_kit::{Bounds, point, px, size};
     use std::path::Path;
+
+    #[test]
+    fn image_at_finds_the_run_under_the_pointer() {
+        let hits = [
+            (Bounds::new(point(px(10.), px(0.)), size(px(20.), px(10.))), 7),
+            (Bounds::new(point(px(10.), px(10.)), size(px(20.), px(10.))), 9),
+        ];
+        assert_eq!(image_at(&hits, point(px(12.), px(15.))), Some(9));
+        assert_eq!(image_at(&hits, point(px(12.), px(2.))), Some(7));
+        assert_eq!(image_at(&hits, point(px(5.), px(2.))), None);
+    }
+
+    #[test]
+    fn writes_a_private_png_once() {
+        let base = std::env::temp_dir().join(format!("tern-save-png-{}", std::process::id()));
+        let dir = base.join("images");
+        let rgba = [1, 2, 3, 255, 4, 5, 6, 128];
+        let path = save_png(2, 1, &rgba, &dir, "7-1").unwrap();
+        assert_eq!(path, dir.join("7-1.png"));
+        let back = image::open(&path).unwrap().into_rgba8();
+        assert_eq!((back.width(), back.height(), back.into_raw()), (2, 1, rgba.to_vec()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Already written: kept as is.
+        std::fs::write(&path, b"marker").unwrap();
+        save_png(2, 1, &rgba, &dir, "7-1").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"marker");
+        assert!(save_png(3, 1, &rgba, &dir, "bad").is_err(), "too few pixels");
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn strips_agent_spinners() {

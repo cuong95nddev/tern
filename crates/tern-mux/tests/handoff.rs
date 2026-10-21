@@ -141,6 +141,38 @@ fn ended_sessions_and_claude_tabs_carry_over() {
 }
 
 #[test]
+fn kitty_images_carry_over() {
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = sink();
+    // A 1x1 RGB image with a virtual placement, then one known by number only.
+    let script = r"printf '\033_Ga=T,U=1,i=7,f=24,s=1,v=1,c=2,r=1,q=2;AAAA\033\\\033_Ga=t,I=3,f=24,s=1,v=1,q=2;AAAA\033\\'; echo sent; read x; printf '\033_Ga=p,I=3,U=1,c=4,r=2\033\\'; echo placed; read y";
+    let s = c.open(Open::Spawn { cfg: sh(script), hook: false, seed: None }, SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    wait_until("images", || s.images().len() == 2);
+    let id = s.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let c = client(&p.dir);
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("reattached", || ready_id(&ev2) == Some(id));
+    wait_until("images again", || s.images().len() == 2);
+    {
+        let images = s.images();
+        let img = &images[&7];
+        assert_eq!((img.width, img.height, img.rgba.len()), (1, 1, 4));
+        assert_eq!(img.placements, [(0, 2, 1)]);
+    }
+    // The new daemon still knows image number 3.
+    s.write(b"\r".to_vec());
+    wait_until("placed", || screen(&s).contains("placed"));
+    wait_until("placement", || s.images().values().any(|i| i.placements == [(0, 4, 2)]));
+}
+
+#[test]
 fn a_failed_adoption_leaves_the_old_daemon_serving() {
     // The new daemon reads the first message, then dies.
     let p = daemon_with_adopter(|_, stream| {

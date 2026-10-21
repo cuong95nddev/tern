@@ -32,3 +32,17 @@ few half-transparent backgrounds over each other came out fully opaque: a
 panel at 30% over the window at 30% over the workspace at 30% was solid. The
 destination's alpha now goes by `OneMinusSourceAlpha`, the usual "over", as
 the wgpu renderer (Linux) already does with `PREMULTIPLIED_ALPHA_BLENDING`.
+
+## alacritty_terminal 0.26.0
+
+Left out: `tests/` (46 MB of reference recordings) and its `[[test]]` entry.
+
+`src/term/mod.rs`, `Term::input` / `Term::widen_for_emoji`: a character that
+is one cell wide alone but has an emoji presentation (☁, ❤, ✔) followed by
+VS16 (U+FE0F) stayed one cell wide, with VS16 kept as a zero-width char, so
+the two-cell emoji glyph covered the next character. Programs that measure
+text with Unicode's emoji rules (Claude Code through Node's `string-width`)
+count it as two cells, so their cursor also drifted. It now becomes a wide
+char with its spacer, as in kitty, WezTerm, Ghostty and Warp; only when the
+cursor still sits right after it (not one in the last column). Test:
+`vs16_widens_text_emoji`.

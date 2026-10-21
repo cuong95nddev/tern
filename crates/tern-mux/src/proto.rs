@@ -30,14 +30,15 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 5;
+pub const MINOR: u32 = 6;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
 pub const GUARD_MINOR: u32 = 5;
+// MINOR 6: the daemon sends `Image` and `ImagesGone` (older clients skip them).
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
-pub const HANDOFF_VERSION: u32 = 1;
+pub const HANDOFF_VERSION: u32 = 2;
 
 /// What a client is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +177,17 @@ pub enum ServerMsg {
         id: u64,
         marker: Marker,
     },
+    /// An image session `id`'s program sent (kitty graphics), new or
+    /// changed; also every image right after `Attached` (MINOR 6).
+    Image {
+        id: u64,
+        image: ImageData,
+    },
+    /// Images of session `id` that went (deleted, replaced by none, evicted).
+    ImagesGone {
+        id: u64,
+        images: Vec<u32>,
+    },
     /// A Claude Code hook request for `token` (JSON body).
     Hook {
         token: String,
@@ -261,6 +273,24 @@ pub struct HandedSession {
     /// [`pack_snapshot`]'s output.
     #[serde(with = "serde_bytes")]
     pub snapshot: Vec<u8>,
+    /// Kitty graphics images its programs sent (handoff 2).
+    #[serde(default)]
+    pub images: Vec<HandedImage>,
+}
+
+/// An image a session holds, as handed to the new daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandedImage {
+    pub image: u32,
+    /// The number (`I=`) it goes by.
+    pub number: Option<u32>,
+    pub width: u32,
+    pub height: u32,
+    /// Virtual placements: `(placement id, cols, rows)`.
+    pub placements: Vec<(u32, u32, u32)>,
+    /// [`pack_pixels`]'s output.
+    #[serde(with = "serde_bytes")]
+    pub pixels: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +314,30 @@ pub struct SessionInfo {
     /// `session_id` of its latest Claude hook event.
     #[serde(default)]
     pub claude_session: Option<String>,
+}
+
+/// An image as the client needs it to draw placeholder cells.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    pub image: u32,
+    /// Changes when the pixels do.
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Virtual placements: `(placement id, cols, rows)`.
+    pub placements: Vec<(u32, u32, u32)>,
+    /// RGBA pixels, LZ4-compressed ([`pack_pixels`]); `None` when only the
+    /// placements changed.
+    #[serde(with = "serde_bytes")]
+    pub pixels: Option<Vec<u8>>,
+}
+
+pub fn pack_pixels(rgba: &[u8]) -> Vec<u8> {
+    lz4_flex::compress_prepend_size(rgba)
+}
+
+pub fn unpack_pixels(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    lz4_flex::decompress_size_prepended(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// A snapshot as sent: positional msgpack (cells are most of it; field names
@@ -369,6 +423,12 @@ impl FrameReader {
     /// The socket it reads.
     pub fn get_ref(&self) -> &UnixStream {
         &self.sock
+    }
+
+    /// Whether a whole frame is in already: [`Self::read`] won't wait.
+    pub fn has_frame(&self) -> bool {
+        let pending = &self.buf[self.start..];
+        pending.len() >= 4 && pending.len() >= 4 + u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize
     }
 
     /// The next message; `Ok(None)` at end of stream. Unknown kinds are

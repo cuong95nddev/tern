@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tern_term::mirror::Marker;
-use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report};
+use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report, version_report};
 use tern_term::palette::PaletteFile;
 use tern_term::snapshot::{self, Snapshot};
 use tern_term::status::{ActivityStatus, next_status};
@@ -46,7 +46,7 @@ use tern_term::vt::tty::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
 use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
 use tern_term::{SpawnConfig, TermSize};
 
-use crate::proto::SessionInfo;
+use crate::proto::{ServerMsg, SessionInfo};
 
 /// alacritty's poll keys for the PTY and its child-exit pipe: crate-private
 /// on Unix, public (and other values) on Windows.
@@ -54,7 +54,8 @@ use crate::proto::SessionInfo;
 const PTY_READ_WRITE_TOKEN: usize = 0;
 #[cfg(unix)]
 const PTY_CHILD_EVENT_TOKEN: usize = 1;
-const READ_BUFFER: usize = 64 << 10;
+/// What is read before it is parsed and sent on as one message.
+const READ_BUFFER: usize = 256 << 10;
 /// The most bytes parsed in one go under the lock before letting an attach in.
 const MAX_LOCKED_READ: usize = 1 << 20;
 const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
@@ -79,6 +80,8 @@ const PAUSE_TIMEOUT: Duration = Duration::from_secs(3);
 pub trait Subscriber: Send + Sync {
     fn output(&self, id: u64, bytes: &[u8]);
     fn marker(&self, id: u64, marker: &Marker);
+    /// An image changed or went (`ServerMsg::Image` / `ImagesGone`).
+    fn images(&self, _id: u64, _msg: &ServerMsg) {}
 }
 
 /// What the daemon wants to know about a program, attached or not.
@@ -123,6 +126,9 @@ struct Shared {
     subscriber: Mutex<Option<Arc<dyn Subscriber>>>,
     /// Watch alongside the subscriber, without owning the session.
     viewers: Mutex<Vec<Arc<dyn Subscriber>>>,
+    /// Images its programs sent (kitty graphics).
+    #[cfg(unix)]
+    images: crate::images::ImageSync,
 }
 
 impl Shared {
@@ -136,6 +142,8 @@ impl Shared {
             exited: Mutex::new(None),
             subscriber: Mutex::new(None),
             viewers: Mutex::new(Vec::new()),
+            #[cfg(unix)]
+            images: Default::default(),
         })
     }
 
@@ -211,7 +219,8 @@ impl EventListener for Listener {
 fn new_term(shared: &Arc<Shared>, size: TermSize, scrollback: usize) -> (Arc<FairMutex<HostTerm>>, HostParser) {
     let cell = Arc::new(OnceLock::new());
     let listener = Listener { shared: shared.clone(), term: cell.clone() };
-    let config = Config { scrolling_history: scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() };
+    let config =
+        Config { scrolling_history: scrollback, kitty_keyboard: tern_term::KITTY_KEYBOARD, osc52: Osc52::OnlyCopy, ..Config::default() };
     let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
     let _ = cell.set(term.clone());
     (term, Arc::new(Mutex::new(Processor::new())))
@@ -303,6 +312,7 @@ impl Host {
         exited: Option<Option<i32>>,
         writes: Vec<u8>,
         scheme_reports: bool,
+        images: Vec<crate::proto::HandedImage>,
         observer: Arc<dyn Observer>,
     ) -> io::Result<(Arc<Self>, Option<ParkedDriver>)> {
         let (tx, rx) = mpsc::channel();
@@ -313,6 +323,7 @@ impl Host {
         *shared.status.lock().unwrap() = snapshot.status;
         let (term, parser) = new_term(&shared, size, scrollback);
         snapshot::restore(snapshot, &mut term.lock(), &mut parser.lock().unwrap());
+        shared.images.adopt(images);
         let fd = fd.filter(|_| exited.is_none());
         let master = fd.as_ref().map(|f| f.try_clone().map(File::from)).transpose()?;
         let host = Arc::new(Self { id, pid, master, scrollback, shared: shared.clone(), term: term.clone(), parser: parser.clone() });
@@ -437,6 +448,21 @@ impl Host {
     pub fn unview(&self, sub: &Arc<dyn Subscriber>) {
         let _term = self.term.lock();
         self.shared.viewers.lock().unwrap().retain(|v| !same(v, sub));
+    }
+
+    /// Send `sub` every image the session holds: after attaching or
+    /// viewing, so it draws what the snapshot's placeholder cells show.
+    pub fn send_images(&self, sub: &dyn Subscriber) {
+        #[cfg(unix)]
+        self.shared.images.all(self.id, |msg| sub.images(self.id, &msg));
+        #[cfg(windows)]
+        let _ = sub;
+    }
+
+    /// Every image the session holds, for the daemon taking it over.
+    #[cfg(unix)]
+    pub fn handed_images(&self) -> Vec<crate::proto::HandedImage> {
+        self.shared.images.handed()
     }
 
     pub fn attached(&self) -> bool {
@@ -685,6 +711,21 @@ struct Driver<P: HostPty> {
     /// When to read Claude Code's session file again, while a turn it
     /// called done is held as working.
     claude_check: Option<Instant>,
+    /// Kitty graphics commands in the output, run on a thread of their own.
+    #[cfg(unix)]
+    graphics: tern_term::graphics::GraphicsWorker,
+}
+
+/// Runs session `id`'s kitty graphics commands: replies go to the program,
+/// changed images to whoever shows the session.
+#[cfg(unix)]
+fn graphics_worker(id: u64, shared: &Arc<Shared>) -> tern_term::graphics::GraphicsWorker {
+    let (replies, changes) = (shared.clone(), shared.clone());
+    tern_term::graphics::GraphicsWorker::new(
+        shared.images.store().clone(),
+        move |bytes| replies.send(Msg::Input(bytes.into())),
+        move || changes.images.changes(id, |msg| changes.each(|sub| sub.images(id, msg))),
+    )
 }
 
 impl<P: HostPty> Driver<P> {
@@ -699,6 +740,8 @@ impl<P: HostPty> Driver<P> {
         observer: Arc<dyn Observer>,
         parser: HostParser,
     ) -> Self {
+        #[cfg(unix)]
+        let graphics = graphics_worker(id, &shared);
         Self {
             id,
             pty,
@@ -717,6 +760,8 @@ impl<P: HostPty> Driver<P> {
             jiggle: None,
             exit_checked: Instant::now(),
             claude_check: None,
+            #[cfg(unix)]
+            graphics,
         }
     }
 
@@ -891,24 +936,42 @@ impl<P: HostPty> Driver<P> {
 
     /// Read what the program wrote: `Ok(false)` once the PTY is closed (its
     /// programs are gone; on Linux an error says so instead).
+    ///
+    /// All the PTY has is read before the lock is taken, so a flood goes on
+    /// as few big messages rather than one per (often 1 KB) read.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<bool> {
         let mut locked = 0;
         loop {
-            let n = match self.pty.reader().read(buf) {
-                Ok(0) => return Ok(false),
-                Ok(n) => n,
-                Err(e) if matches!(e.kind(), ErrorKind::Interrupted) => continue,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(true),
-                Err(e) => return Err(e),
+            let mut n = 0;
+            let end = loop {
+                match self.pty.reader().read(&mut buf[n..]) {
+                    Ok(0) => break Some(Ok(false)),
+                    Ok(k) => {
+                        n += k;
+                        if n == buf.len() {
+                            break None;
+                        }
+                    },
+                    Err(e) if matches!(e.kind(), ErrorKind::Interrupted) => {},
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break Some(Ok(true)),
+                    Err(e) => break Some(Err(e)),
+                }
             };
-            let bytes = &buf[..n];
-            {
-                let mut term = self.term.lock();
-                self.parser.lock().unwrap().advance(&mut *term, bytes);
-                self.shared.each(|sub| sub.output(self.id, bytes));
+            if n > 0 {
+                let bytes = &buf[..n];
+                {
+                    let mut term = self.term.lock();
+                    self.parser.lock().unwrap().advance(&mut *term, bytes);
+                    self.shared.each(|sub| sub.output(self.id, bytes));
+                }
+                self.scan(n, buf);
+                #[cfg(unix)]
+                self.graphics.feed(&buf[..n]);
+                locked += n;
             }
-            self.scan(n, buf);
-            locked += n;
+            if let Some(end) = end {
+                return end;
+            }
             if locked >= MAX_LOCKED_READ {
                 return Ok(true);
             }
@@ -939,6 +1002,9 @@ impl<P: HostPty> Driver<P> {
                     self.dark = theme_palette().get().is_dark();
                     self.writes.push_back((color_scheme_report(self.dark).into(), 0));
                 },
+                OscSignal::VersionQuery => self.writes.push_back((version_report(env!("CARGO_PKG_VERSION")).into(), 0)),
+                // The UI's (it keeps the folder).
+                OscSignal::Cwd(_) => {},
                 OscSignal::ProgramStatus(st) => {
                     if st.state == "working" {
                         self.claude_check = None;

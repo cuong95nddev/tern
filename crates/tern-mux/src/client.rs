@@ -81,6 +81,30 @@ struct Slot {
     /// only detach, once its id is known.
     gone: AtomicBool,
     close: AtomicBool,
+    /// Images its programs sent (kitty graphics), by image id.
+    images: Mutex<HashMap<u32, ShownImage>>,
+}
+
+/// An image a session's program sent, for drawing its placeholder cells.
+#[derive(Debug, Clone)]
+pub struct ShownImage {
+    /// Changes when the pixels do.
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    /// 4 bytes a pixel, row by row.
+    pub rgba: Arc<[u8]>,
+    /// Virtual placements: `(placement id, cols, rows)`.
+    pub placements: Vec<(u32, u32, u32)>,
+}
+
+impl ShownImage {
+    /// The box (cols, rows) of the placement a placeholder names, else of
+    /// the image's first one; `(0, 0)` with none.
+    pub fn placement(&self, id: u32) -> (u32, u32) {
+        let p = self.placements.iter().find(|p| p.0 == id).or_else(|| self.placements.first());
+        p.map_or((0, 0), |p| (p.1, p.2))
+    }
 }
 
 struct Inner {
@@ -412,6 +436,7 @@ impl MuxClient {
             early: Mutex::new(Vec::new()),
             tty: Mutex::new(None),
             want: Mutex::new(size),
+            images: Mutex::new(HashMap::new()),
         });
         self.inner.pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
@@ -769,8 +794,37 @@ pub fn log_file() -> Option<PathBuf> {
     log_path("daemon")
 }
 
+/// Keep `data` for drawing; only its placements when it carries no pixels.
+fn show_image(slot: &Slot, data: proto::ImageData) {
+    let mut images = slot.images.lock().unwrap();
+    let rgba: Arc<[u8]> = match &data.pixels {
+        Some(packed) => match proto::unpack_pixels(packed) {
+            Ok(px) if px.len() == data.width as usize * data.height as usize * 4 => px.into(),
+            _ => return log::warn!("bad pixels for image {}", data.image),
+        },
+        None => match images.get(&data.image) {
+            Some(old) if old.generation == data.generation => old.rgba.clone(),
+            _ => return,
+        },
+    };
+    images.insert(
+        data.image,
+        ShownImage { generation: data.generation, width: data.width, height: data.height, rgba, placements: data.placements },
+    );
+    drop(images);
+    slot.mirror.lock().unwrap().redraw();
+}
+
 fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
+    // Mirrors holding bytes back (their UI drew): parsed before waiting for
+    // more, so nothing stays unshown while the daemon is quiet.
+    let mut held: Vec<Arc<Slot>> = Vec::new();
     loop {
+        if !reader.has_frame() {
+            for slot in held.drain(..) {
+                slot.mirror.lock().unwrap().flush();
+            }
+        }
         let msg = match reader.read::<ServerMsg>() {
             Ok(Some(m)) => m,
             Ok(None) => break,
@@ -801,6 +855,8 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                     },
                 };
                 let status = snap.status;
+                // The images it holds follow.
+                slot.images.lock().unwrap().clear();
                 slot.mirror.lock().unwrap().install(snap);
                 let early = {
                     let mut early = slot.early.lock().unwrap();
@@ -837,13 +893,31 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
             ServerMsg::Output { id, bytes } => {
                 let slot = inner.sessions.lock().unwrap().get(&id).cloned();
                 if let Some(slot) = slot {
-                    slot.mirror.lock().unwrap().feed(&bytes);
+                    let mut mirror = slot.mirror.lock().unwrap();
+                    mirror.feed(&bytes);
+                    if mirror.has_deferred() && !held.iter().any(|s| Arc::ptr_eq(s, &slot)) {
+                        drop(mirror);
+                        held.push(slot);
+                    }
                 }
             },
             ServerMsg::Marker { id, marker } => {
                 let slot = inner.sessions.lock().unwrap().get(&id).cloned();
                 if let Some(slot) = slot {
                     slot.mirror.lock().unwrap().marker(&marker);
+                }
+            },
+            ServerMsg::Image { id, image } => {
+                let slot = inner.sessions.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    show_image(&slot, image);
+                }
+            },
+            ServerMsg::ImagesGone { id, images } => {
+                let slot = inner.sessions.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    slot.images.lock().unwrap().retain(|k, _| !images.contains(k));
+                    slot.mirror.lock().unwrap().redraw();
                 }
             },
             ServerMsg::Hook { token, body } => (inner.hooks)(token, body),
@@ -927,6 +1001,11 @@ pub struct RemoteSession {
 }
 
 impl RemoteSession {
+    /// The images its programs sent (kitty graphics). Lock briefly.
+    pub fn images(&self) -> std::sync::MutexGuard<'_, HashMap<u32, ShownImage>> {
+        self.slot.images.lock().unwrap()
+    }
+
     /// The mirror terminal. Lock briefly (render prep only).
     pub fn term(&self) -> &Arc<FairMutex<MirrorTerm>> {
         &self.slot.term

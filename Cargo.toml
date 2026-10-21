@@ -33,6 +33,7 @@ opt-level = 1
 # renderers added up alpha, so a see-through window turned opaque under a
 # few layers. See vendor/README.md.
 [patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

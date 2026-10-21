@@ -33,6 +33,9 @@ pub enum TermEvent {
     ResetTitle,
     Bell,
     ClipboardStore(String),
+    /// The program asks for the clipboard (OSC 52 `?`): the reply is
+    /// written to it if the user allows reads.
+    ClipboardLoad(ClipboardReply),
     Exit(Option<i32>),
     Signal(OscSignal),
     /// A daemon session is running (spawned or attached): its id, its hook
@@ -51,6 +54,16 @@ pub enum TermEvent {
 }
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;
+
+/// Formats the clipboard's text as the OSC 52 reply the program waits for.
+#[derive(Clone)]
+pub struct ClipboardReply(pub Arc<dyn Fn(&str) -> String + Send + Sync>);
+
+impl std::fmt::Debug for ClipboardReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClipboardReply")
+    }
+}
 
 pub type EventSink = Arc<dyn Fn(TermEvent) + Send + Sync>;
 
@@ -274,7 +287,7 @@ impl Session {
 
         let config = Config {
             scrolling_history: cfg.scrollback,
-            kitty_keyboard: true,
+            kitty_keyboard: crate::KITTY_KEYBOARD,
             // Programs may set the clipboard (Claude Code's copy), never read it.
             osc52: Osc52::OnlyCopy,
             ..Config::default()

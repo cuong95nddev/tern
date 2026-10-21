@@ -4,7 +4,8 @@
 //! with the same resizes ([`Marker`]), so its grid matches the daemon's. It
 //! never answers the program (device attributes, color and size queries, the
 //! OSC 7501 probe): the daemon does, once. Title, bell and clipboard events
-//! come from here, as they did from an in-process session.
+//! come from here, as they did from an in-process session; a clipboard read
+//! (OSC 52 `?`) too, as only the UI has the clipboard.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,10 +17,13 @@ use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use serde::{Deserialize, Serialize};
 
 use crate::osc::{OscScanner, OscSignal};
-use crate::session::{EventSink, TermEvent, TermSize};
+use crate::session::{ClipboardReply, EventSink, TermEvent, TermSize};
 use crate::snapshot::{self, Snapshot};
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;
+/// The most bytes held back while the UI has the terminal locked, before
+/// [`Mirror::feed`] waits for the lock.
+const MAX_DEFERRED: usize = 1 << 20;
 
 /// Something that happened in the daemon's terminal between two runs of
 /// bytes, applied by the mirror at the same point of the stream.
@@ -57,6 +61,7 @@ impl EventListener for MirrorListener {
             Event::ResetTitle => (self.sink)(TermEvent::ResetTitle),
             Event::Bell => (self.sink)(TermEvent::Bell),
             Event::ClipboardStore(_, text) if text.len() <= MAX_CLIPBOARD_STORE => (self.sink)(TermEvent::ClipboardStore(text)),
+            Event::ClipboardLoad(_, reply) => (self.sink)(TermEvent::ClipboardLoad(ClipboardReply(reply))),
             // Replies to the program come from the daemon.
             _ => {},
         }
@@ -73,10 +78,12 @@ pub struct Mirror {
     mode: Arc<AtomicU32>,
     size: TermSize,
     scrollback: usize,
+    /// Bytes not parsed yet: the UI had the terminal locked (it draws).
+    deferred: Vec<u8>,
 }
 
 fn config(scrollback: usize) -> Config {
-    Config { scrolling_history: scrollback, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Config::default() }
+    Config { scrolling_history: scrollback, kitty_keyboard: crate::KITTY_KEYBOARD, osc52: Osc52::CopyPaste, ..Config::default() }
 }
 
 impl Mirror {
@@ -92,6 +99,7 @@ impl Mirror {
             mode,
             size,
             scrollback,
+            deferred: Vec::new(),
         }
     }
 
@@ -117,12 +125,52 @@ impl Mirror {
         self.mode.store(term.mode().bits(), Ordering::Release);
     }
 
+    /// Parse `bytes`, or hold them back while the UI has the terminal
+    /// locked, so one tab drawing never stalls the reader that feeds every
+    /// tab. Held bytes go in with the next feed, or with [`Self::flush`].
     pub fn feed(&mut self, bytes: &[u8]) {
+        if !self.deferred.is_empty() {
+            self.deferred.extend_from_slice(bytes);
+            if self.deferred.len() >= MAX_DEFERRED {
+                self.flush();
+            }
+            return;
+        }
+        let term = self.term.clone();
+        let Some(mut term) = term.try_lock_unfair() else {
+            self.deferred.extend_from_slice(bytes);
+            return;
+        };
+        self.parser.advance(&mut *term, bytes);
+        self.sync_mode(&term);
+        drop(term);
+        self.parsed(bytes);
+    }
+
+    /// Parse the bytes [`Self::feed`] held back, waiting for the lock.
+    pub fn flush(&mut self) {
+        if self.deferred.is_empty() {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.deferred);
         {
             let mut term = self.term.lock();
-            self.parser.advance(&mut *term, bytes);
+            self.parser.advance(&mut *term, &bytes);
             self.sync_mode(&term);
         }
+        self.parsed(&bytes);
+        // Keep the room for the next burst.
+        self.deferred = bytes;
+        self.deferred.clear();
+    }
+
+    /// Whether [`Self::feed`] holds bytes back.
+    pub fn has_deferred(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
+    /// Signals and the redraw for bytes just parsed.
+    fn parsed(&mut self, bytes: &[u8]) {
         let sink = &self.listener.sink;
         self.scanner.feed(bytes, |sig| {
             if sig != OscSignal::ProgramStatusProbe {
@@ -135,7 +183,13 @@ impl Mirror {
         }
     }
 
+    /// Have the UI draw again (something it draws besides the grid changed).
+    pub fn redraw(&self) {
+        self.listener.wakeup();
+    }
+
     pub fn marker(&mut self, marker: &Marker) {
+        self.flush();
         match *marker {
             Marker::Resized(size) => {
                 self.size = size;
@@ -161,6 +215,8 @@ impl Mirror {
         snapshot::restore(snap, &mut term, &mut parser);
         self.sync_mode(&term);
         *self.term.lock() = term;
+        // Held bytes came before the snapshot: it has them.
+        self.deferred.clear();
         self.parser = parser;
         self.scanner = OscScanner::new();
         self.size = size;
@@ -241,6 +297,40 @@ mod tests {
         m.install(snap);
         assert_eq!(text(&*m.term().lock())[0], "from the daemon");
         assert!(events.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Title(t) if t == "t")));
+    }
+
+    #[test]
+    fn holds_bytes_while_the_ui_draws() {
+        let (mut m, _) = mirror();
+        let term = m.term().clone();
+        let guard = term.lock();
+        m.feed(b"held ");
+        m.feed(b"back");
+        assert!(m.has_deferred());
+        drop(guard);
+        m.feed(b"!");
+        assert!(m.has_deferred());
+        m.flush();
+        assert!(!m.has_deferred());
+        assert_eq!(text(&*m.term().lock())[0], "held back!");
+    }
+
+    #[test]
+    fn markers_and_snapshots_take_held_bytes_first() {
+        let (mut m, _) = mirror();
+        let term = m.term().clone();
+        let guard = term.lock();
+        m.feed(b"x");
+        drop(guard);
+        m.marker(&Marker::Resized(TermSize { cols: 50, ..SIZE }));
+        assert_eq!(text(&*m.term().lock())[0], "x");
+        let guard = term.lock();
+        m.feed(b"stale");
+        drop(guard);
+        let mut src = Term::new(Config::default(), &SIZE, VoidListener);
+        m.install(snapshot::capture(&mut src, SIZE, None, ActivityStatus::None));
+        assert!(!m.has_deferred());
+        assert_eq!(text(&*m.term().lock())[0], "");
     }
 
     #[test]

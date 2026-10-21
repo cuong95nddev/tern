@@ -857,6 +857,8 @@ impl Server {
                 conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
             }
         });
+        // After `Attached`; changes from here on reach it too.
+        host.send_images(&**conn);
         for body in hooks {
             if let Some(token) = &token {
                 conn.send(ServerMsg::Hook { token: token.clone(), body });
@@ -895,6 +897,7 @@ impl Server {
                 conn.send(ServerMsg::Marker { id, marker: Marker::Exited(code) });
             }
         });
+        host.send_images(&**conn);
         // The snapshot misses the scroll region and charsets: a full-screen
         // program repaints at its own size (the owner sees the same bytes).
         if exited.is_none() && !host.shell_in_foreground() {
@@ -1073,6 +1076,7 @@ impl Server {
                 writes: paused.as_ref().map(|p| p.writes()).unwrap_or_default(),
                 scheme_reports: paused.as_ref().is_some_and(|p| p.scheme_reports()),
                 snapshot: proto::pack_snapshot(&host.capture())?,
+                images: host.handed_images(),
             };
             handoff.paused.extend(paused);
             let msg = HandoffMsg::Session(Box::new(session));
@@ -1214,7 +1218,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
         for (s, fd) in handed {
             let snapshot = proto::unpack_snapshot(&s.snapshot)?;
             let observer: Arc<dyn Observer> = server.clone();
-            let (host, driver) = Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, observer)?;
+            let (host, driver) =
+                Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, s.images, observer)?;
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
             st.sessions.insert(
@@ -1390,6 +1395,21 @@ impl Subscriber for Conn {
     fn marker(&self, id: u64, marker: &Marker) {
         self.send_output(id, ServerMsg::Marker { id, marker: marker.clone() });
     }
+
+    fn images(&self, id: u64, msg: &ServerMsg) {
+        self.send_output(id, msg.clone());
+    }
+}
+
+/// How much a connection's writer gathers before it writes.
+const WRITE_BATCH: usize = 256 << 10;
+
+fn flush_batch(stream: &mut UnixStream, batch: &mut Vec<u8>) -> io::Result<()> {
+    if !batch.is_empty() {
+        stream.write_all(batch)?;
+        batch.clear();
+    }
+    Ok(())
 }
 
 fn writer(
@@ -1400,10 +1420,18 @@ fn writer(
     conn: Weak<Conn>,
 ) {
     let result = (|| -> io::Result<()> {
-        for out in rx {
+        // Frames queued together go out in one write; the batch is sent
+        // as soon as the queue is empty, so nothing waits.
+        let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH);
+        let mut next = rx.recv().ok();
+        while let Some(out) = next.take() {
             match out {
                 Out::Frame(frame, id) => {
-                    stream.write_all(&frame)?;
+                    if batch.is_empty() && frame.len() >= WRITE_BATCH {
+                        stream.write_all(&frame)?;
+                    } else {
+                        batch.extend_from_slice(&frame);
+                    }
                     queued.fetch_sub(frame.len(), Ordering::AcqRel);
                     if let Some(id) = id {
                         let mut per = per_session.lock().unwrap();
@@ -1416,6 +1444,7 @@ fn writer(
                     }
                 },
                 Out::Attached { req, id, token, pid, fd, snapshot } => {
+                    flush_batch(&mut stream, &mut batch)?;
                     let msg = ServerMsg::Attached { req, id, token, pid, fd: fd.is_some(), snapshot: proto::pack_snapshot(&snapshot)? };
                     match &fd {
                         #[cfg(unix)]
@@ -1426,8 +1455,20 @@ fn writer(
                     }
                 },
             }
+            next = match rx.try_recv() {
+                Ok(out) if batch.len() < WRITE_BATCH => Some(out),
+                Ok(out) => {
+                    flush_batch(&mut stream, &mut batch)?;
+                    Some(out)
+                },
+                Err(mpsc::TryRecvError::Empty) => {
+                    flush_batch(&mut stream, &mut batch)?;
+                    rx.recv().ok()
+                },
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            };
         }
-        Ok(())
+        flush_batch(&mut stream, &mut batch)
     })();
     if let Err(e) = result {
         log::info!("client writer: {e}");

@@ -5,6 +5,8 @@ pub mod client;
 #[cfg(unix)]
 pub mod fdpass;
 pub mod host;
+#[cfg(unix)]
+pub mod images;
 pub mod notify;
 pub mod observer;
 pub mod paths;

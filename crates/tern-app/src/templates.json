@@ -1296,7 +1296,31 @@
     "element": "terminal",
     "fill": true,
     "style": { "background": "{background}" },
-    "children": [{ "slot": "grid" }]
+    "children": [{ "slot": "grid" }, { "when": "find", "use": "terminal.find" }]
+  },
+  "terminal.find": {
+    "frame": "find",
+    "element": "terminal.find",
+    "layout": "row",
+    "align": "center",
+    "position": { "top": "$terminal.find.top", "right": "$terminal.find.right" },
+    "z": 1,
+    "children": [
+      { "icon": "search", "style": { "width": "$terminal.find.icon_size", "height": "$terminal.find.icon_size", "text": "$terminal.find.icon_color" } },
+      { "style": { "width": "$terminal.find.field_width" }, "children": [{ "slot": "input" }] },
+      {
+        "element": "terminal.find.count",
+        "shrink": 0,
+        "states": { "error": { "text": "$terminal.find.count.error_text" } },
+        "children": [{ "text": "{count}" }]
+      },
+      { "button": "case", "element": "terminal.find.button", "size": "xsmall", "icon": "case-sensitive", "selected": "case", "tooltip": "Match Case" },
+      { "button": "word", "element": "terminal.find.button", "size": "xsmall", "icon": "whole-word", "selected": "word", "tooltip": "Match Whole Word" },
+      { "button": "regex", "element": "terminal.find.button", "size": "xsmall", "icon": "regex", "selected": "regex", "tooltip": "Use Regular Expression" },
+      { "button": "prev", "element": "terminal.find.button", "size": "xsmall", "icon": "chevron-up", "tooltip": "Previous Match", "action": "terminal::FindPrevious" },
+      { "button": "next", "element": "terminal.find.button", "size": "xsmall", "icon": "chevron-down", "tooltip": "Next Match", "action": "terminal::FindNext" },
+      { "button": "close", "element": "terminal.find.button", "size": "xsmall", "icon": "close", "tooltip": "Close", "action": "terminal::CloseFind" }
+    ]
   },
   "tool_strip": {
     "element": "$element",
@@ -2643,6 +2667,20 @@
   },
   "dialog.diff_preview": { "element": "dialog.body", "style": { "height": "{height}" }, "children": [{ "slot": "diff" }] },
   "dialog.diff_preview.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [{ "button": "open_in_tab", "variant": "primary", "label": "Open in Tab" }]
+  },
+  "dialog.image_preview": {
+    "element": "dialog.body",
+    "style": { "height": "{height}" },
+    "layout": "row",
+    "justify": "center",
+    "align": "center",
+    "children": [{ "slot": "image" }]
+  },
+  "dialog.image_preview.footer": {
     "element": "dialog.footer",
     "layout": "row",
     "justify": "end",

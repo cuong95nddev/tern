@@ -82,7 +82,7 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    Calls made:
    - **Dialogs.** gpui-component's `Dialog` stays the frame (overlay, title, close button, Escape, focus): that
      is behavior. Its body is template `dialog.<name>` and its footer `dialog.<name>.footer`; the title stays a
-     string in code. Built-in: `dialog.trash`, `dialog.restart`, `dialog.delete_scratch`, `dialog.diff_preview`,
+     string in code. Built-in: `dialog.trash`, `dialog.restart`, `dialog.delete_scratch`, `dialog.diff_preview`, `dialog.image_preview`,
      `dialog.name`, `dialog.claude_args`, `dialog.theme`. Elements `dialog.note` (the small muted line) and
      `dialog.footer` (the buttons' row). New node property `wrap`: text wraps at the box's width even where a box
      around it keeps it on one line (a dialog's message).

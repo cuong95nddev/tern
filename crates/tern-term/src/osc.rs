@@ -6,8 +6,12 @@
 //! - OSC 9 / OSC 777 — desktop notifications.
 //! - `CSI ? 2031 h` / `l` and `CSI ? 996 n` — the color scheme (light or
 //!   dark) reports Claude Code's `auto` theme asks for.
+//! - OSC 7 — the shell's working directory.
+//! - `CSI > q` (XTVERSION) — the program asks which terminal this is.
 //!
 //! The scanner never modifies the stream; bytes still flow to the VT parser.
+
+use std::path::PathBuf;
 
 /// Max payload we buffer for a single OSC; longer sequences are dropped.
 const MAX_OSC_LEN: usize = 8 * 1024;
@@ -25,6 +29,16 @@ pub enum OscSignal {
     ColorSchemeReports(bool),
     /// `CSI ? 996 n`: the program asks for the color scheme now.
     ColorSchemeQuery,
+    /// `OSC 7 ; file://host/path`: the shell's working directory, when the
+    /// host is this machine.
+    Cwd(PathBuf),
+    /// `CSI > q` / `CSI > 0 q`: XTVERSION.
+    VersionQuery,
+}
+
+/// The XTVERSION reply: `DCS > | name ST`.
+pub fn version_report(version: &str) -> Vec<u8> {
+    format!("\x1bP>|Tern {version}\x1b\\").into_bytes()
 }
 
 /// The color scheme report: `CSI ? 997 ; 1 n` for dark, `; 2 n` for light.
@@ -179,6 +193,9 @@ impl OscScanner {
 
 /// The CSIs we act on, by parameters and final byte.
 fn parse_csi(params: &[u8], fin: u8) -> Option<OscSignal> {
+    if fin == b'q' && matches!(params, b">" | b">0") {
+        return Some(OscSignal::VersionQuery);
+    }
     let modes = params.strip_prefix(b"?")?;
     let has = |n: &[u8]| modes.split(|&b| b == b';').any(|m| m == n);
     match fin {
@@ -212,6 +229,7 @@ fn parse_osc(payload: &[u8]) -> Option<OscSignal> {
             }
             Some(OscSignal::Notify { title: None, body: rest.to_owned() })
         },
+        "7" => parse_cwd(rest).map(OscSignal::Cwd),
         // OSC 777 ; notify ; title ; body
         "777" => {
             let mut parts = rest.splitn(3, ';');
@@ -224,6 +242,65 @@ fn parse_osc(payload: &[u8]) -> Option<OscSignal> {
         },
         _ => None,
     }
+}
+
+/// `file://host/path` (percent-encoded), when `host` is this machine.
+fn parse_cwd(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let (host, path) = rest.split_at(rest.find('/')?);
+    if !is_local_host(host) {
+        return None;
+    }
+    let path = String::from_utf8(percent_decode(path.as_bytes())?).ok()?;
+    // `/C:/Users/me` on Windows.
+    #[cfg(windows)]
+    let path = match path.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => path[1..].to_owned(),
+        _ => path,
+    };
+    Some(PathBuf::from(path))
+}
+
+fn percent_decode(s: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'%' {
+            let hex = std::str::from_utf8(s.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+fn is_local_host(host: &str) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Some(name) = host_name() else { return false };
+    // `mac.local` and `mac` name the same machine.
+    let short = |h: &str| h.split('.').next().unwrap_or(h).to_ascii_lowercase();
+    short(host) == short(&name)
+}
+
+#[cfg(unix)]
+fn host_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
+#[cfg(windows)]
+fn host_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
 }
 
 fn parse_program_status(rest: &str) -> Option<ProgramStatus> {
@@ -307,6 +384,22 @@ mod tests {
                 OscSignal::Notify { title: Some("Claude".into()), body: "Need input".into() },
             ]
         );
+    }
+
+    #[test]
+    fn working_directory() {
+        let out = scan(&[b"\x1b]7;file:///Users/me/my%20dir\x07\x1b]7;file://localhost/tmp\x1b\\"]);
+        assert_eq!(out, [OscSignal::Cwd("/Users/me/my dir".into()), OscSignal::Cwd("/tmp".into())]);
+        let here = format!("\x1b]7;file://{}/srv\x07", host_name().unwrap());
+        assert_eq!(scan(&[here.as_bytes()]), [OscSignal::Cwd("/srv".into())]);
+        // Another machine's folder, a bad escape, not a file URI.
+        assert!(scan(&[b"\x1b]7;file://elsewhere.example/x\x07\x1b]7;file:///a%zz\x07\x1b]7;/plain\x07"]).is_empty());
+    }
+
+    #[test]
+    fn version_query() {
+        assert_eq!(scan(&[b"\x1b[>q\x1b[>0q\x1b[>1q\x1b[q"]), [OscSignal::VersionQuery, OscSignal::VersionQuery]);
+        assert_eq!(version_report("1.2"), b"\x1bP>|Tern 1.2\x1b\\");
     }
 
     #[test]

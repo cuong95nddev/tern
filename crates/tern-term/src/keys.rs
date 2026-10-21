@@ -26,6 +26,17 @@ pub enum Key {
     Insert,
     Delete,
     F(u8),
+    /// A modifier pressed or released on its own: only reported with the
+    /// Kitty protocol's "report all keys as escape codes".
+    Modifier(ModifierKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifierKey {
+    Shift,
+    Ctrl,
+    Alt,
+    Super,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,6 +83,9 @@ pub fn encode_event(key: Key, mods: Mods, text: Option<&str>, mode: TermMode, ki
     if kind == KeyEventKind::Release && !events {
         return None;
     }
+    if let Key::Modifier(_) = key {
+        return all.then(|| encode_kitty(key, mods, text, mode, kind));
+    }
     if !kitty {
         return encode_legacy(key, mods, text, mode);
     }
@@ -111,14 +125,19 @@ fn encode_kitty(key: Key, mods: Mods, text: Option<&str>, mode: TermMode, kind: 
         Key::F(4) => (1, 'S'),
         Key::F(n @ 5..=12) => (f_tilde(n), '~'),
         Key::F(n) => (57376 + n.saturating_sub(13) as u32, 'u'),
+        // The left-hand keys: the platform doesn't say which side.
+        Key::Modifier(ModifierKey::Shift) => (57441, 'u'),
+        Key::Modifier(ModifierKey::Ctrl) => (57442, 'u'),
+        Key::Modifier(ModifierKey::Alt) => (57443, 'u'),
+        Key::Modifier(ModifierKey::Super) => (57444, 'u'),
     };
     let mut first = number.to_string();
     if let Key::Char(c) = key
         && mode.contains(TermMode::REPORT_ALTERNATE_KEYS)
         && mods.shift
-        && c.is_lowercase()
+        && let Some(shifted) = shifted_key(c, text)
     {
-        first.push_str(&format!(":{}", c.to_uppercase().next().unwrap_or(c) as u32));
+        first.push_str(&format!(":{}", shifted as u32));
     }
     let event = match kind {
         KeyEventKind::Press => 1,
@@ -142,6 +161,16 @@ fn encode_kitty(key: Key, mods: Mods, text: Option<&str>, mode: TermMode, kind: 
         fields.clear();
     }
     format!("\x1b[{}{term}", fields.join(";")).into_bytes()
+}
+
+/// What Shift makes of base key `c`: the platform's text when it is one
+/// other character (Shift+2 → `@` on a US layout), else the uppercase.
+fn shifted_key(c: char, text: Option<&str>) -> Option<char> {
+    let mut chars = text.unwrap_or_default().chars();
+    match (chars.next(), chars.next()) {
+        (Some(t), None) if t != c && !t.is_control() => Some(t),
+        _ => c.is_lowercase().then(|| c.to_uppercase().next().unwrap_or(c)),
+    }
 }
 
 fn f_tilde(n: u8) -> u32 {
@@ -213,6 +242,7 @@ fn encode_legacy(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Op
             0 => return None,
             code => tilde(code as u8),
         },
+        Key::Modifier(_) => return None,
         Key::Char(c) => {
             if mods.ctrl {
                 let ctl = ctrl_byte(c)?;
@@ -230,6 +260,41 @@ fn encode_legacy(key: Key, mods: Mods, text: Option<&str>, mode: TermMode) -> Op
             }
         },
     })
+}
+
+/// macOS text-editing chords (⌘←, ⌥←, ⌘⌫, …) sent as the readline keys
+/// every shell and line editor understands, as iTerm2's "Natural Text
+/// Editing" preset, Ghostty and Warp do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineEdit {
+    /// ⌘← → Ctrl+A.
+    LineStart,
+    /// ⌘→ → Ctrl+E.
+    LineEnd,
+    /// ⌥← → Meta+B.
+    WordLeft,
+    /// ⌥→ → Meta+F.
+    WordRight,
+    /// ⌥⌫ → Ctrl+W.
+    DeleteWordLeft,
+    /// ⌘⌫ → Ctrl+U.
+    DeleteToLineStart,
+    /// ⌘⌦ → Ctrl+K.
+    DeleteToLineEnd,
+}
+
+impl LineEdit {
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::LineStart => b"\x01",
+            Self::LineEnd => b"\x05",
+            Self::WordLeft => b"\x1bb",
+            Self::WordRight => b"\x1bf",
+            Self::DeleteWordLeft => b"\x17",
+            Self::DeleteToLineStart => b"\x15",
+            Self::DeleteToLineEnd => b"\x0b",
+        }
+    }
 }
 
 fn ctrl_byte(c: char) -> Option<u8> {
@@ -347,6 +412,41 @@ mod tests {
         assert_eq!(encode(Key::Delete, SHIFT, None, m).unwrap(), b"\x1b[3;2~");
         assert_eq!(encode(Key::F(3), NONE, None, m | TermMode::REPORT_ALL_KEYS_AS_ESC).unwrap(), b"\x1b[13~");
         assert_eq!(encode(Key::F(13), NONE, None, m | TermMode::REPORT_ALL_KEYS_AS_ESC).unwrap(), b"\x1b[57376u");
+    }
+
+    #[test]
+    fn kitty_shifted_symbol_alternate() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS;
+        assert_eq!(encode(Key::Char('2'), SHIFT, Some("@"), m).unwrap(), b"\x1b[50:64;2u");
+        assert_eq!(encode(Key::Char('a'), SHIFT, None, m).unwrap(), b"\x1b[97:65;2u");
+        assert_eq!(encode(Key::Char('2'), NONE, Some("2"), m).unwrap(), b"\x1b[50u");
+    }
+
+    #[test]
+    fn kitty_super_modifier() {
+        let m = TermMode::DISAMBIGUATE_ESC_CODES;
+        let sup = Mods { meta: true, ..NONE };
+        assert_eq!(encode(Key::Char('j'), sup, None, m).unwrap(), b"\x1b[106;9u");
+        assert_eq!(encode(Key::Left, sup, None, m).unwrap(), b"\x1b[1;9D");
+    }
+
+    #[test]
+    fn lone_modifiers_only_when_all_keys_are_reported() {
+        let shift = Key::Modifier(ModifierKey::Shift);
+        assert!(encode(shift, SHIFT, None, TermMode::empty()).is_none());
+        assert!(encode(shift, SHIFT, None, TermMode::DISAMBIGUATE_ESC_CODES).is_none());
+        let all = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC;
+        assert_eq!(encode(shift, SHIFT, None, all).unwrap(), b"\x1b[57441;2u");
+        let events = all | TermMode::REPORT_EVENT_TYPES;
+        assert_eq!(encode_event(Key::Modifier(ModifierKey::Ctrl), NONE, None, events, KeyEventKind::Release).unwrap(), b"\x1b[57442;1:3u");
+    }
+
+    #[test]
+    fn line_edit_bytes() {
+        assert_eq!(LineEdit::LineStart.bytes(), [1]);
+        assert_eq!(LineEdit::LineEnd.bytes(), [5]);
+        assert_eq!(LineEdit::WordLeft.bytes(), b"\x1bb");
+        assert_eq!(LineEdit::DeleteToLineStart.bytes(), [0x15]);
     }
 
     #[test]

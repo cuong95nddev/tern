@@ -421,6 +421,14 @@ impl SettingsView {
                     },
                     Row::new("Font", "Set terminal.font_family in the settings file.").value(font),
                 ];
+                let (read, toggle_read) = self.flag(&["terminal", "clipboard_read"], false, cx);
+                rows.push(
+                    Row::new(
+                        "Programs can read the clipboard",
+                        "Lets a program (also one over ssh) read what you copied, through OSC 52. Copying to the clipboard always works.",
+                    )
+                    .switch(read, move |v, w, cx| toggle_read(v, w, cx)),
+                );
                 if cfg!(windows) {
                     let (on, toggle) = self.flag(&["terminal", "ctrl_v_paste"], true, cx);
                     rows.push(

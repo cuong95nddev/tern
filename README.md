@@ -87,6 +87,7 @@ Tooltips show each platform's keys.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>N</kbd> | New window |
 | <kbd>⌘</kbd><kbd>N</kbd> | New scratch file |
 | <kbd>⌘</kbd><kbd>B</kbd> | Toggle explorer |
+| <kbd>⌘</kbd><kbd>F</kbd> | Find in the terminal (<kbd>⌘</kbd><kbd>G</kbd> / <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd> next / previous; case, whole word, regex) |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd> | Toggle Changes panel |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>D</kbd> | Diff the open file against `HEAD` |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>V</kbd> | Toggle Markdown preview |
@@ -95,6 +96,14 @@ Tooltips show each platform's keys.
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 | <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> | Pick a theme |
 | <kbd>⌘</kbd><kbd>,</kbd> | Open `settings.json` |
+
+In a terminal, the macOS text-editing keys reach the shell or Claude Code as the readline keys they mean:
+<kbd>⌘</kbd><kbd>←</kbd> / <kbd>→</kbd> to the start / end of the line, <kbd>⌥</kbd><kbd>←</kbd> / <kbd>→</kbd> a word
+back / forward, <kbd>⌥</kbd><kbd>⌫</kbd> deletes a word, <kbd>⌘</kbd><kbd>⌫</kbd> / <kbd>⌘</kbd><kbd>⌦</kbd> to the start
+/ end of the line. A double click on a URL or a path selects all of it. Programs may copy to the clipboard (OSC 52);
+reading it takes `terminal.clipboard_read` (**Settings ▸ Terminal**). Programs can show images with the kitty
+graphics protocol's Unicode placeholders (`kitten icat --unicode-placeholder`; macOS and Linux); a click on one
+shows it full size.
 
 ## Background sessions
 
@@ -229,6 +238,7 @@ A window holds several workspaces (one folder each) as tabs in the top bar; the 
 | ⌘, | Open `settings.json` in a tab (also Tern ▸ Settings…) |
 | ⌘-hover / ⌘-click in a terminal | Underline / open the link under the mouse: a URL (in the browser), an OSC 8 hyperlink, or a file path that exists (`src/main.rs:42:7` opens it in a tab at that line; relative paths resolve against the folder of the program running in the terminal, e.g. Claude Code's). A folder is revealed in the explorer |
 | ⌘B | Toggle explorer (or the panel buttons at the right of the tab bar) |
+| ⌘F in a terminal | Find in its screen and scrollback: ↩ / ⇧↩ or ⌘G / ⌘⇧G go to the next / previous match, Esc closes; options for case, whole word and regex. Matches follow new output |
 | click in Changes | Preview the file's diff in a popup; **Open in Tab** moves it to a center tab |
 | ⌘⇧G | Toggle Changes panel (git changes of every repo under the folder) |
 | ⌘⇧S | Toggle Scratches panel (under the explorer): every scratch file, newest first; click to open, right-click for Copy Path / Reveal in Finder / Delete… |

@@ -242,7 +242,7 @@ macro_rules! simple {
 
 /// Elements drawn over other content, not in the window's flow: in a
 /// see-through window they keep a background the color of the window's.
-const OVER_CONTENT: &[&str] = &["floating", "drag_chip", "settings.switch.knob"];
+const OVER_CONTENT: &[&str] = &["floating", "drag_chip", "settings.switch.knob", "terminal.find"];
 
 /// Properties only the GUI front end draws; others ignore them.
 pub const GUI_ONLY: &[&str] = &[
@@ -959,6 +959,38 @@ pub const ELEMENTS: &[Element] = &[
                 it (a background image) show through",
         groups: &[&[("padding_x", Len, "8"), ("padding_top", Len, "4"), ("background_opacity", Num, "1")], IMAGE],
     },
+    Element {
+        name: "terminal.find",
+        about: "Find in a terminal (⌘F): the bar over its top right corner, and the matches it marks in the grid",
+        groups: &[&[
+            ("top", Len, "8"),
+            ("right", Len, "16"),
+            ("padding_x", Len, "8"),
+            ("padding_y", Len, "4"),
+            ("gap", Len, "4"),
+            ("radius", Len, "$radius"),
+            ("background", Color, "$popover"),
+            ("border", Color, "$border"),
+            ("border_width", Len, "1"),
+            ("shadow", Text, "md"),
+            ("field_width", Len, "200"),
+            ("icon_size", Len, "14"),
+            ("icon_color", Color, "$text_muted"),
+            ("match_background", Color, "$warning.background/35"),
+            ("current_background", Color, "$warning.background/80"),
+        ]],
+    },
+    Element {
+        name: "terminal.find.count",
+        about: "The bar's `3/12`; `error_text` when the regex is not valid",
+        groups: &[&[
+            ("padding_x", Len, "4"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text_muted"),
+            ("error_text", Color, "$danger.background"),
+        ]],
+    },
+    simple!("terminal.find.button", "The bar's options, previous, next and close buttons"),
     Element {
         name: "drag_chip",
         about: "What follows the pointer while dragging files, tabs or workspaces",

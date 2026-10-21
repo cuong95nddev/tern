@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tern_mux::host::{Host, Observer, Subscriber};
+use tern_mux::proto::ServerMsg;
 use tern_term::mirror::{Marker, Mirror};
 use tern_term::status::ActivityStatus;
 use tern_term::vt::grid::Dimensions;
@@ -25,6 +26,7 @@ impl Observer for NoObserver {
 struct Recorder {
     bytes: Mutex<Vec<u8>>,
     markers: Mutex<Vec<Marker>>,
+    images: Mutex<Vec<ServerMsg>>,
 }
 
 impl Subscriber for Recorder {
@@ -33,6 +35,9 @@ impl Subscriber for Recorder {
     }
     fn marker(&self, _: u64, marker: &Marker) {
         self.markers.lock().unwrap().push(marker.clone());
+    }
+    fn images(&self, _: u64, msg: &ServerMsg) {
+        self.images.lock().unwrap().push(msg.clone());
     }
 }
 
@@ -248,5 +253,25 @@ read x"#,
     host.input(b"\n".to_vec());
     wait_until("done once the file says idle", || host.status() == ActivityStatus::Done);
     assert_eq!(*log.0.lock().unwrap(), [ActivityStatus::Working, ActivityStatus::Done]);
+    host.kill();
+}
+
+#[test]
+fn kitty_images_are_answered_and_sent_on() {
+    // A 1x1 RGB image, then the program reads the answer.
+    let script = r"stty raw -echo; printf '\033_Ga=t,i=7,f=24,s=1,v=1;AAAA\033\\'; head -c 11 | od -c; read x";
+    let host = Host::spawn(11, &sh(script), None, Arc::new(NoObserver)).unwrap();
+    let rec = Arc::new(Recorder::default());
+    host.attach(rec.clone());
+    wait_until("the image", || !rec.images.lock().unwrap().is_empty());
+    let ServerMsg::Image { image, .. } = &rec.images.lock().unwrap()[0] else { panic!("not an image") };
+    assert_eq!((image.image, image.width, image.height), (7, 1, 1));
+    // The answer `ESC _ G i=7 ; OK ESC \` reached the program.
+    wait_until("the answer", || text(&rec).contains("O   K"));
+    // A client attaching later gets it too.
+    let late = Arc::new(Recorder::default());
+    host.attach(late.clone());
+    host.send_images(&*late);
+    assert!(matches!(&late.images.lock().unwrap()[..], [ServerMsg::Image { image, .. }] if image.image == 7));
     host.kill();
 }
