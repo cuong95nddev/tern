@@ -40,6 +40,54 @@ impl ContextUse {
     }
 }
 
+/// How a Claude tab keeps its conversation's context window in bounds (see
+/// `tern_bridge::context`): when `on`, past `limit` percent Claude is asked
+/// for a handoff, and with `auto_switch` the tab then goes on in a fresh
+/// conversation. Set from the usage bar's context ring.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextGuard {
+    pub on: bool,
+    pub limit: u8,
+    pub auto_switch: bool,
+}
+
+impl Default for ContextGuard {
+    fn default() -> Self {
+        Self { on: false, limit: 50, auto_switch: true }
+    }
+}
+
+impl ContextGuard {
+    /// What the limit can be set to.
+    pub const MIN: u8 = 5;
+    pub const MAX: u8 = 100;
+
+    /// From a saved tab's (limit, auto switch), on when there is one.
+    pub fn from_saved(saved: Option<(u8, bool)>) -> Self {
+        saved.map_or_else(Self::default, |(limit, auto_switch)| Self { on: true, limit: limit.clamp(Self::MIN, Self::MAX), auto_switch })
+    }
+
+    /// What a saved tab keeps of it.
+    pub fn saved(&self) -> Option<(u8, bool)> {
+        self.on.then_some((self.limit, self.auto_switch))
+    }
+
+    /// The limit the daemon is told: 0 when off.
+    pub fn sent_limit(&self) -> u8 {
+        if self.on { self.limit } else { 0 }
+    }
+
+    /// The limit typed as `text`, when it is one it can be.
+    pub fn typed(text: &str) -> Option<u8> {
+        text.trim().parse().ok().filter(|l| (Self::MIN..=Self::MAX).contains(l))
+    }
+
+    /// The limit nearest to what was typed as `text` (none for no number).
+    pub fn nearest(text: &str) -> Option<u8> {
+        text.trim().parse::<u64>().ok().map(|l| l.clamp(Self::MIN.into(), Self::MAX.into()) as u8)
+    }
+}
+
 /// The size of a context window, short: `200k`, `1M`.
 pub fn tokens_label(n: u64) -> String {
     match n {
@@ -367,6 +415,25 @@ mod tests {
         assert_eq!(ContextUse::read(&fresh), Some(ContextUse { percent: 0., size: 200_000 }));
         assert_eq!(ContextUse::read(&serde_json::json!({"model": {}})), Option::None);
         assert_eq!((super::tokens_label(200_000), super::tokens_label(1_000_000)), ("200k".to_owned(), "1M".to_owned()));
+    }
+
+    #[test]
+    fn context_guard_reads_and_saves() {
+        use super::ContextGuard;
+        let g = ContextGuard::default();
+        assert_eq!((g.sent_limit(), g.saved()), (0, Option::None));
+        let on = ContextGuard { on: true, ..g };
+        assert_eq!((on.sent_limit(), on.saved()), (50, Some((50, true))));
+        assert_eq!(ContextGuard::from_saved(on.saved()), on);
+        assert_eq!(ContextGuard::from_saved(Option::None), g);
+        assert_eq!(
+            (ContextGuard::typed(" 60 "), ContextGuard::typed("3"), ContextGuard::typed("101")),
+            (Some(60), Option::None, Option::None)
+        );
+        assert_eq!(
+            (ContextGuard::nearest("3"), ContextGuard::nearest("250"), ContextGuard::nearest("")),
+            (Some(5), Some(100), Option::None)
+        );
     }
 
     #[test]

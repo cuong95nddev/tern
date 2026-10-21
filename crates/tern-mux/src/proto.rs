@@ -30,9 +30,11 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 3;
+pub const MINOR: u32 = 5;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
+/// The first MINOR whose daemon takes `ContextGuard`.
+pub const GUARD_MINOR: u32 = 5;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 1;
@@ -121,6 +123,15 @@ pub enum ClientMsg {
     HandOff {
         req: u64,
         exe: PathBuf,
+    },
+    /// How session `id`'s Claude conversation keeps its context window in
+    /// bounds (see `tern_bridge::context`): past `limit` percent (0 for
+    /// none) it hands off, then with `auto_switch` goes on in a fresh one
+    /// (MINOR 5).
+    ContextGuard {
+        id: u64,
+        limit: u8,
+        auto_switch: bool,
     },
 }
 

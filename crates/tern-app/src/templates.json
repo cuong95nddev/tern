@@ -1890,7 +1890,83 @@
     "fill": true,
     "layout": "row",
     "align": "center",
-    "children": [{ "use": "usage.item" }, { "grow": 1 }]
+    "children": [{ "use": "usage.item" }, { "when": "context", "use": "usage.context" }, { "grow": 1 }]
+  },
+  "usage.context": {
+    "frame": "context",
+    "element": "usage.context",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "states": { "context_open": { "background": "$usage.item.hover_background" }, "hover": { "background": "$usage.item.hover_background" } },
+    "children": [
+      {
+        "element": "usage.context.ring",
+        "ring": "{context_ring}",
+        "states": { "guarded": { "text": "$usage.context.ring.guarded" }, "over": { "text": "$usage.context.ring.over" } }
+      },
+      { "when": "context_text", "nowrap": true, "text": "{context_text}" },
+      { "when": "guarded", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "/ {limit}" }
+    ]
+  },
+  "usage.context.card": {
+    "element": "usage.card",
+    "children": [
+      {
+        "element": "usage.card.section",
+        "children": [
+          { "element": "usage.card.title", "text": "Context" },
+          { "element": "usage.card.detail", "text": "{context_used}" }
+        ]
+      },
+      {
+        "element": "usage.card.section",
+        "style": { "border_top_width": 1 },
+        "children": [
+          {
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 8 },
+            "children": [
+              { "grow": 1, "element": "usage.card.heading", "text": "Hand off at a limit" },
+              { "switch": "guard", "element": "usage.card.switch", "selected": "guarded" }
+            ]
+          },
+          {
+            "element": "usage.card.detail",
+            "wrap": true,
+            "text": "Past the limit, this tab's Claude is told so, and when it next stops it writes a handoff in the repository first."
+          },
+          {
+            "when": "guarded",
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 6, "padding_top": 6 },
+            "children": [
+              { "grow": 1, "text": "Limit" },
+              { "element": "usage.context.limit", "children": [{ "slot": "input" }] },
+              { "text": "%" }
+            ]
+          },
+          {
+            "when": "guarded",
+            "layout": "row",
+            "align": "center",
+            "style": { "gap": 8, "padding_top": 6 },
+            "children": [
+              { "grow": 1, "text": "Go on in a fresh conversation" },
+              { "switch": "auto_switch", "element": "usage.card.switch", "selected": "auto_switch" }
+            ]
+          },
+          {
+            "when": "guarded",
+            "element": "usage.card.detail",
+            "wrap": true,
+            "text": "After the handoff, clear the conversation (/clear) and go on from the handoff. Off: run /clear yourself."
+          }
+        ]
+      }
+    ]
   },
   "usage.item": {
     "frame": "item",

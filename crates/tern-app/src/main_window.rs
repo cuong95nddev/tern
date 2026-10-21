@@ -285,7 +285,7 @@ pub fn reveal_session(id: u64, cx: &mut App) {
 /// shows it: no default Claude tab beside it.
 pub fn adoption_workspace(s: &tern_mux::proto::SessionInfo, home: &Path) -> window_state::SavedWorkspace {
     let tab = if s.claude {
-        window_state::SavedTab::Claude { name: None, session: s.claude_session.clone(), mux: Some(s.id), account: None }
+        window_state::SavedTab::Claude { name: None, session: s.claude_session.clone(), mux: Some(s.id), account: None, guard: None }
     } else {
         window_state::SavedTab::Shell { name: s.title.clone(), mux: Some(s.id) }
     };
@@ -1363,7 +1363,7 @@ mod tests {
         let claude = SessionInfo { id: 8, claude: true, claude_session: Some("s".into()), ..Default::default() };
         let w = adoption_workspace(&claude, "/home".as_ref());
         assert_eq!(w.folder, std::path::Path::new("/home"));
-        assert_eq!(w.tabs, [SavedTab::Claude { name: None, session: Some("s".into()), mux: Some(8), account: None }]);
+        assert_eq!(w.tabs, [SavedTab::Claude { name: None, session: Some("s".into()), mux: Some(8), account: None, guard: None }]);
     }
 
     #[test]

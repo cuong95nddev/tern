@@ -138,6 +138,16 @@ there applies it at once; if it can't be read, Tern keeps what it applied last a
 <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> picks a theme, showing each as you move through the list;
 <kbd>⌘</kbd><kbd>,</kbd> opens `settings.json` in a tab.
 
+### Claude's context limit
+
+Beside the usage bar, a ring shows how full the shown Claude tab's context window is. Click it to give that tab a
+limit: past it, Claude is told so after its next tool call, and when it next ends its turn it is asked to write a
+handoff in the repository first (where it sees fit, with a pointer in its memory). With **Go on in a fresh
+conversation**, Tern then clears the conversation (`/clear`) and the fresh one is pointed at the handoff and told to go
+on; without it, run `/clear` yourself and the fresh conversation is pointed at the handoff all the same. Each tab keeps
+its own limit, also across restarts. A conversation already past the limit when it starts is left alone. It needs
+Claude tabs opened by a Tern version that has it, in a background process that has it too.
+
 Ask an agent in a Tern tab to "make the terminal background navy" and it can do it from those files.
 
 ## Updates

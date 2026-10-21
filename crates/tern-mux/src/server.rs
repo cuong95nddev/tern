@@ -27,6 +27,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use tern_bridge::context::{Action, Guard, Policy};
 use tern_bridge::{HookEvent, HookServer};
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
@@ -160,6 +161,11 @@ struct Session {
     hooks: VecDeque<Vec<u8>>,
     /// `session_id` of its latest Claude hook event.
     claude_session: Option<String>,
+    /// How full its Claude conversation's context window is, and its
+    /// handoff past the limit.
+    guard: Guard,
+    /// The limit its tab set (none until it does).
+    policy: Policy,
 }
 
 impl Session {
@@ -331,6 +337,24 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
+/// Send Claude in `host` what `action` says, once the turn whose hook asked
+/// for it has ended and its prompt takes input again. The Enter goes on its
+/// own, so it isn't taken as part of a paste.
+fn type_after_turn(host: &Arc<Host>, action: Action) {
+    let text = match action {
+        Action::None => return,
+        Action::Clear => "/clear".to_owned(),
+        Action::Prompt(p) => p,
+    };
+    let host = host.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        host.input(text.into_bytes());
+        std::thread::sleep(Duration::from_millis(300));
+        host.input(b"\r".to_vec());
+    });
+}
+
 fn random_id() -> u64 {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).expect("getrandom");
@@ -342,11 +366,7 @@ impl Server {
     fn new(opts: &ServeOpts, dir: &Path, run_dir: PathBuf, lock: File, hooks: Hooks) -> Arc<Self> {
         Arc::new_cyclic(|weak: &Weak<Server>| {
             let weak = weak.clone();
-            let sink: tern_bridge::HookSink = Arc::new(move |ev: HookEvent| {
-                if let Some(s) = weak.upgrade() {
-                    s.on_hook(ev);
-                }
-            });
+            let sink: tern_bridge::HookSink = Arc::new(move |ev: HookEvent| weak.upgrade().and_then(|s| s.on_hook(ev)));
             let hooks = match hooks {
                 Hooks::Off => None,
                 Hooks::Start => HookServer::start(sink).map_err(|e| log::warn!("hook server unavailable: {e}")).ok(),
@@ -578,6 +598,11 @@ impl Server {
     fn on_msg(self: &Arc<Self>, conn: &Arc<Conn>, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello { .. } => {},
+            ClientMsg::ContextGuard { id, limit, auto_switch } => {
+                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                    s.policy = Policy { limit: limit.min(100), auto_switch };
+                }
+            },
             ClientMsg::Watch => self.watch(conn),
             ClientMsg::Reveal { req, id } => {
                 let ui = self.state.lock().unwrap().uis.iter().rev().filter_map(Weak::upgrade).find(|c| !c.dead.load(Ordering::Acquire));
@@ -773,6 +798,8 @@ impl Server {
                     sizes: vec![(Arc::downgrade(conn), cfg.size)],
                     hooks: VecDeque::new(),
                     claude_session: None,
+                    guard: Guard::default(),
+                    policy: Policy::default(),
                 },
             );
             Self::update_idle(&mut st);
@@ -898,15 +925,20 @@ impl Server {
         tern_bridge::remove_claude_settings(&self.run_dir, token);
     }
 
-    fn on_hook(&self, ev: HookEvent) {
+    /// Hook `ev` came; the answer for Claude Code, if any.
+    fn on_hook(&self, ev: HookEvent) -> Option<serde_json::Value> {
         let body = serde_json::to_vec(&ev.raw).unwrap_or_default();
         let mut st = self.state.lock().unwrap();
-        let Some(s) = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str())) else { return };
+        let s = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str()))?;
         if let Some(id) = &ev.session_id {
             s.claude_session = Some(id.clone());
         }
+        let (reply, action) = s.guard.on_event(&ev, s.policy);
+        type_after_turn(&s.host, action);
         match s.owner.as_ref().and_then(Weak::upgrade) {
             Some(conn) => conn.send(ServerMsg::Hook { token: ev.token, body }),
+            // A tool call that changed no file tells a UI nothing later.
+            None if ev.event == "PostToolUse" && ev.paths.is_empty() => {},
             None => {
                 // Only the latest status line matters.
                 if ev.event == tern_bridge::statusline::EVENT {
@@ -918,6 +950,7 @@ impl Server {
                 s.hooks.push_back(body);
             },
         }
+        reply
     }
 
     fn unattended(&self) -> bool {
@@ -1194,6 +1227,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                     sizes: Vec::new(),
                     hooks,
                     claude_session: s.claude_session,
+                    guard: Guard::default(),
+                    policy: Policy::default(),
                 },
             );
         }

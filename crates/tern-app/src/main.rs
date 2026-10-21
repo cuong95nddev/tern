@@ -71,6 +71,11 @@ fn main() {
         let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
         std::process::exit(tern_bridge::statusline::run(&settings));
     }
+    // A Claude Code hook it runs only as a command (see `tern_bridge::relay`).
+    if std::env::args().nth(1).as_deref() == Some("--hook") {
+        let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
+        std::process::exit(tern_bridge::relay::run(&settings));
+    }
     env_logger::init();
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());

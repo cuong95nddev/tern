@@ -172,6 +172,8 @@ struct TermTab {
     /// How full its Claude conversation's context window is, from its
     /// status line.
     context: Option<crate::agents::ContextUse>,
+    /// How it keeps that window in bounds (set from the usage bar's ring).
+    guard: crate::agents::ContextGuard,
     _subs: Vec<Subscription>,
 }
 
@@ -597,6 +599,7 @@ impl Workspace {
             UsageEvent::Rename(id) => this.rename_account(id.clone(), window, cx),
             UsageEvent::Remove(id) => this.confirm_remove_account(id.clone(), window, cx),
             UsageEvent::TurnOff(id) => this.turn_off_account(id.clone(), window, cx),
+            UsageEvent::Guard(guard) => this.set_guard(*guard, cx),
         });
 
         let mut this = Self {
@@ -660,9 +663,12 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux, account } => {
+                SavedTab::Claude { name, session, mux, account, guard } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
-                    this.add_term(TabKind::Claude, name, session, mux, &account, window, cx)
+                    this.add_term(TabKind::Claude, name, session, mux, &account, window, cx);
+                    if let Some(CenterTab::Term(t)) = this.tabs.get_mut(before) {
+                        t.guard = crate::agents::ContextGuard::from_saved(guard);
+                    }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
@@ -725,6 +731,7 @@ impl Workspace {
                             session: t.session.clone(),
                             mux,
                             account: (t.account != accounts::DEFAULT).then(|| t.account.clone()),
+                            guard: t.guard.saved(),
                         },
                         TabKind::Shell => SavedTab::Shell { name, mux },
                     }
@@ -1201,6 +1208,7 @@ impl Workspace {
             rang: false,
             follows: None,
             context: None,
+            guard: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1254,6 +1262,7 @@ impl Workspace {
             rang: false,
             follows: Some(output),
             context: None,
+            guard: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1953,6 +1962,28 @@ impl Workspace {
         })
     }
 
+    /// Tell the daemon the context guard of `view`'s Claude tab.
+    fn send_guard(&mut self, view: &Entity<TerminalView>, cx: &App) {
+        let Some(t) = self.term_tab_mut(view).filter(|t| t.kind == TabKind::Claude) else { return };
+        let guard = t.guard;
+        if let Some(id) = view.read(cx).mux_id() {
+            self.services.mux.set_context_guard(id, guard.sent_limit(), guard.auto_switch);
+        }
+    }
+
+    /// The shown Claude tab keeps its context window in bounds as `guard` says.
+    fn set_guard(&mut self, guard: crate::agents::ContextGuard, cx: &mut Context<Self>) {
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind == TabKind::Claude))
+        else {
+            return;
+        };
+        t.guard = guard;
+        let view = t.view.clone();
+        self.send_guard(&view, cx);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
     /// Show a notification for `view`'s tab unless it showed one moments
     /// ago (Claude Code sends OSC 9 and a status change for one event).
     fn notify_for(&mut self, view: &Entity<TerminalView>, title: &str, body: &str, cx: &mut Context<Self>) {
@@ -1974,6 +2005,8 @@ impl Workspace {
                     // (see `spawn_config`); one it reattached to doesn't.
                     t.resuming = !*attached && t.kind == TabKind::Claude && t.session.is_some();
                 }
+                // The daemon (maybe a new one) keeps its limit.
+                self.send_guard(view, cx);
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
             },
@@ -4638,6 +4671,17 @@ impl Render for Workspace {
         if self.usage.read(cx).current() != current.as_deref() {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
+        }
+        // And how full its context window is, with the limit it keeps.
+        let context = self
+            .tabs
+            .get(self.active)
+            .and_then(CenterTab::term)
+            .filter(|t| t.kind == TabKind::Claude)
+            .map(|t| crate::usage_view::ContextShown { usage: t.context, guard: t.guard });
+        if self.usage.read(cx).context() != context.as_ref() {
+            let usage = self.usage.clone();
+            cx.defer(move |cx| usage.update(cx, |u, cx| u.set_context(context, cx)));
         }
         // The panes are a panel of their own (template `panes`), so they move as the others do.
         let panes = template::render(PANES, template::Scope::new(PANES).slot("center", center), &mut |_, _, d| d.into_any_element(), cx);

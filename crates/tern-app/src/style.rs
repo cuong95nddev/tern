@@ -657,6 +657,39 @@ pub const ELEMENTS: &[Element] = &[
     },
     Element { name: "usage.item.name", about: "An account's name in the usage bar", groups: &[&[("font_weight", Num, "600")]] },
     Element {
+        name: "usage.context",
+        about: "The shown Claude tab's context window in the usage bar: a ring of how full it is, the percent and the limit \
+                it keeps. Clicking it opens `usage.context.card`",
+        groups: &[&[
+            ("height", Len, "22"),
+            ("padding_x", Len, "6"),
+            ("gap", Len, "5"),
+            ("radius", Len, "$radius"),
+            ("font_size", Len, "$text_xs"),
+            ("text", Color, "$text"),
+        ]],
+    },
+    Element {
+        name: "usage.context.ring",
+        about: "How full the context window is: its arc (`text`) on its track; `guarded` and `over` are its colors with a \
+                limit, and past it",
+        groups: &[&[
+            ("width", Len, "13"),
+            ("height", Len, "13"),
+            ("stroke_width", Len, "2"),
+            ("text", Color, "$muted.foreground"),
+            ("track", Color, "$muted.foreground/25"),
+            ("spin", Num, "0"),
+            ("guarded", Color, "$info.background"),
+            ("over", Color, "$warning.background"),
+        ]],
+    },
+    Element {
+        name: "usage.context.limit",
+        about: "Where the limit is typed in `usage.context.card` (5 to 100)",
+        groups: &[&[("width", Len, "52")]],
+    },
+    Element {
         name: "usage.item.limits",
         about: "A service's limits in the usage panel, in one row: those that don't fit are hidden",
         groups: &[&[("height", Len, "$row_height"), ("min_width", Len, "0"), ("gap", Len, "12")]],

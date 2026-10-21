@@ -6,16 +6,22 @@
 //! run the shown tab as, open a tab as, rename, turn on or off, add or
 //! remove. The numbers come from the app's one store ([`crate::usage`]),
 //! the accounts from [`crate::accounts`].
+//!
+//! Beside it, when the shown tab is a Claude one, a ring of how full its
+//! conversation's context window is (`usage.context`); clicking it opens
+//! `usage.context.card`, which turns that tab's context limit on or off and
+//! sets it (see [`crate::agents::ContextGuard`]).
 
 use std::time::{Duration, SystemTime};
 
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::Selectable;
+use gpui_kit::component::input::{Input, InputEvent, InputState, MaskPattern};
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{Selectable, Sizable as _};
 use gpui_kit::*;
 
 use crate::accounts::{self, AccountStore};
-use crate::agents::Agent;
+use crate::agents::{Agent, ContextGuard, ContextUse};
 use crate::template::{self, Framed};
 use crate::usage::{self, AccountUsage, Limit, UsageStore};
 
@@ -35,6 +41,36 @@ pub enum UsageEvent {
     /// Ask which account the shown Claude tab switches to, then turn this
     /// one, which it runs as, off.
     TurnOff(String),
+    /// The shown Claude tab keeps its context window in bounds so.
+    Guard(ContextGuard),
+}
+
+/// The shown Claude tab's context window: how full it is (once its status
+/// line said) and the limit it keeps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextShown {
+    pub usage: Option<ContextUse>,
+    pub guard: ContextGuard,
+}
+
+impl ContextShown {
+    /// Its values, for `usage.context` and `usage.context.card`.
+    fn scope(&self, scope: template::Scope) -> template::Scope {
+        let (g, percent) = (self.guard, self.usage.map(|u| u.percent));
+        let used = match self.usage {
+            Some(u) => format!("{}% of {} used", u.percent.round(), crate::agents::tokens_label(u.size)),
+            None => "Not known until Claude answers".into(),
+        };
+        scope
+            .var("context", true)
+            .var("context_ring", percent.map(|p| p.to_string()).unwrap_or_default())
+            .var("context_text", percent.map(|p| format!("{}%", p.round())).unwrap_or_default())
+            .var("context_used", used)
+            .var("guarded", g.on)
+            .var("over", g.on && percent.is_some_and(|p| p >= f32::from(g.limit)))
+            .var("limit", format!("{}%", g.limit))
+            .var("auto_switch", g.auto_switch)
+    }
 }
 
 pub struct UsageView {
@@ -48,6 +84,12 @@ pub struct UsageView {
     shown: Option<String>,
     /// The card is open.
     open: bool,
+    /// The shown Claude tab's context window; `None` when the shown tab
+    /// isn't a Claude one.
+    context: Option<ContextShown>,
+    context_card: Entity<ContextCard>,
+    /// The context card is open.
+    context_open: bool,
     _subs: Vec<Subscription>,
     _tick: Task<()>,
 }
@@ -78,7 +120,38 @@ impl UsageView {
                 card.update(cx, |_, cx| cx.notify());
             }
         });
-        Self { store, accounts, card, current: None, shown: None, open: false, _subs: subs, _tick: tick }
+        let bar = cx.entity().downgrade();
+        let context_card = cx.new(|_| ContextCard { bar, shown: None, input: None });
+        Self {
+            store,
+            accounts,
+            card,
+            current: None,
+            shown: None,
+            open: false,
+            context: None,
+            context_card,
+            context_open: false,
+            _subs: subs,
+            _tick: tick,
+        }
+    }
+
+    pub fn context(&self) -> Option<&ContextShown> {
+        self.context.as_ref()
+    }
+
+    /// The shown tab's context window (`None`: it isn't a Claude tab).
+    pub fn set_context(&mut self, context: Option<ContextShown>, cx: &mut Context<Self>) {
+        if self.context != context {
+            self.context = context;
+            self.context_open &= context.is_some();
+            self.context_card.update(cx, |c, cx| {
+                c.shown = context;
+                cx.notify();
+            });
+            cx.notify();
+        }
     }
 
     pub fn current(&self) -> Option<&str> {
@@ -173,12 +246,17 @@ impl Render for UsageView {
             let u = s.get(&id);
             (u.report.as_ref().map(|r| r.limits.iter().map(|l| limit_scope(l, now)).collect()), note(u))
         });
-        let scope = template::Scope::new("usage")
+        let mut scope = template::Scope::new("usage")
             .var("name", name)
             .var("note", note)
             .var("open", self.open)
+            .var("context_open", self.context_open)
             .slot("icon", Agent::Claude.icon(cx.theme()))
             .list("limits", limits.unwrap_or_default());
+        if let Some(c) = &self.context {
+            scope = c.scope(scope);
+        }
+        let (context_card, context_open) = (self.context_card.clone(), self.context_open);
         let me = cx.entity().downgrade();
         let card = self.card.clone();
         let open = self.open;
@@ -199,6 +277,22 @@ impl Render for UsageView {
                             });
                         })
                         .trigger(Trigger::new(d.id("usage-item")))
+                        .content(move |_, _, _| card.clone())
+                        .into_any_element()
+                },
+                ("context", Framed::Box(d)) => {
+                    let (me, card) = (me.clone(), context_card.clone());
+                    Popover::new("usage-context-card")
+                        .anchor(Anchor::BottomLeft)
+                        .appearance(false)
+                        .open(context_open)
+                        .on_open_change(move |open, _, cx| {
+                            let _ = me.update(cx, |this, cx| {
+                                this.context_open = *open;
+                                cx.notify();
+                            });
+                        })
+                        .trigger(Trigger::new(d.id("usage-context")))
                         .content(move |_, _, _| card.clone())
                         .into_any_element()
                 },
@@ -383,5 +477,92 @@ impl Render for UsageCard {
             },
             cx,
         )
+    }
+}
+
+/// What clicking the context ring opens: how full the shown Claude tab's
+/// context window is, and its limit to turn on or off and type.
+pub struct ContextCard {
+    bar: WeakEntity<UsageView>,
+    /// As the bar's.
+    shown: Option<ContextShown>,
+    /// Where the limit is typed (made at the first draw: it needs the window).
+    input: Option<(Entity<InputState>, Subscription)>,
+}
+
+impl ContextCard {
+    /// Ask the workspace for the shown tab's guard changed so; the card stays.
+    fn set(&self, guard: ContextGuard, cx: &mut App) {
+        let _ = self.bar.update(cx, |_, cx| cx.emit(UsageEvent::Guard(guard)));
+    }
+
+    /// The limit field, made once, showing the limit while it isn't typed in.
+    fn input(&mut self, limit: u8, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        let input = match &self.input {
+            Some((input, _)) => input.clone(),
+            None => {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .mask_pattern(MaskPattern::Number { separator: None, fraction: None })
+                        .default_value(limit.to_string())
+                });
+                let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| {
+                    let Some(g) = this.shown.map(|s| s.guard) else { return };
+                    let text = input.read(cx).value();
+                    let limit = match ev {
+                        // Taken as typed once it is a limit it can be.
+                        InputEvent::Change => ContextGuard::typed(&text),
+                        // Done typing: the nearest one, or back to what it was.
+                        InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                            let limit = ContextGuard::nearest(&text).unwrap_or(g.limit);
+                            if text.trim() != limit.to_string() {
+                                input.update(cx, |i, cx| i.set_value(limit.to_string(), window, cx));
+                            }
+                            Some(limit)
+                        },
+                        InputEvent::Focus => None,
+                    };
+                    if let Some(limit) = limit.filter(|l| *l != g.limit) {
+                        this.set(ContextGuard { limit, ..g }, cx);
+                    }
+                });
+                self.input = Some((input.clone(), sub));
+                input
+            },
+        };
+        let typing = input.read(cx).focus_handle(cx).is_focused(window);
+        if !typing && input.read(cx).value() != limit.to_string() {
+            input.update(cx, |i, cx| i.set_value(limit.to_string(), window, cx));
+        }
+        input
+    }
+}
+
+impl Render for ContextCard {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(shown) = self.shown else { return div().into_any_element() };
+        let g = shown.guard;
+        let input = self.input(g.limit, window, cx);
+        let me = cx.entity().downgrade();
+        let scope = shown.scope(template::Scope::new("usage.context.card")).slot("input", Input::new(&input).small());
+        template::render(
+            "usage.context.card",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                (switch @ ("guard" | "auto_switch"), Framed::Switch(sw)) => {
+                    let me = me.clone();
+                    let guarding = switch == "guard";
+                    sw.on_click(move |on, _, cx| {
+                        cx.stop_propagation();
+                        let guard = if guarding { ContextGuard { on: *on, ..g } } else { ContextGuard { auto_switch: *on, ..g } };
+                        let _ = me.update(cx, |c, cx| c.set(guard, cx));
+                    })
+                    .into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
+        .into_any_element()
     }
 }

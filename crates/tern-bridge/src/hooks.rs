@@ -40,6 +40,9 @@ impl Read for DeadlineReader {
     }
 }
 
+/// The tools whose `file_path` (or `notebook_path`) is a file they changed.
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookEvent {
     pub token: String,
@@ -59,7 +62,9 @@ impl HookEvent {
         let s = |v: &Value| v.as_str().map(str::to_owned);
         let cwd = raw.get("cwd").and_then(Value::as_str).map(PathBuf::from);
         let mut paths = vec![];
-        let input = raw.get("tool_input");
+        // Only tools that write: a `Read` names a file it left alone.
+        let writes = raw.get("tool_name").and_then(Value::as_str).is_some_and(|t| EDIT_TOOLS.contains(&t));
+        let input = raw.get("tool_input").filter(|_| writes);
         for key in ["file_path", "notebook_path"] {
             if let Some(p) = input.and_then(|i| i.get(key)).and_then(Value::as_str) {
                 paths.push(PathBuf::from(p));
@@ -86,7 +91,9 @@ impl HookEvent {
     }
 }
 
-pub type HookSink = Arc<dyn Fn(HookEvent) + Send + Sync>;
+/// Takes each hook event; returns the answer for Claude Code, if any (else
+/// `{}`).
+pub type HookSink = Arc<dyn Fn(HookEvent) -> Option<Value> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct HookServer {
@@ -160,7 +167,8 @@ impl HookServer {
 /// the user's local app data, which only they can read.
 ///
 /// With `exe` (Tern's own binary), Claude Code's status line runs through it
-/// (see [`crate::statusline`]).
+/// (see [`crate::statusline`]), and so do the hooks it can't send over HTTP
+/// (see [`crate::relay`]).
 pub fn write_claude_settings(
     dir: &std::path::Path,
     token: &str,
@@ -169,6 +177,7 @@ pub fn write_claude_settings(
 ) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("claude-settings-{token}.json"));
     let status_line = exe.map(|e| crate::statusline::command(e, &path));
+    let relay = exe.map(|e| crate::relay::command(e, &path));
     #[cfg(unix)]
     let mut f = {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -188,7 +197,7 @@ pub fn write_claude_settings(
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?
     };
-    f.write_all(claude_settings_json(hook_url, status_line.as_deref()).as_bytes())?;
+    f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref()).as_bytes())?;
     Ok(path)
 }
 
@@ -263,14 +272,15 @@ fn process_alive(pid: i32) -> bool {
 }
 
 /// Settings JSON passed to `claude --settings` for a tab, its status line
-/// `status_line` when given.
-pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>) -> String {
+/// `status_line` when given, and its `SessionStart` hook (which Claude Code
+/// runs only as a command) `relay`.
+pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>, relay: Option<&str>) -> String {
     let handler = serde_json::json!([{ "type": "http", "url": hook_url, "timeout": 5 }]);
     let mut settings = serde_json::json!({
         "hooks": {
-            "PostToolUse": [
-                { "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": handler }
-            ],
+            // Every tool: the files edited come from these, and Claude
+            // learns from their answers that its context is past the limit.
+            "PostToolUse": [{ "hooks": handler }],
             // The tab learns its session id from these, to resume it later.
             "UserPromptSubmit": [{ "hooks": handler }],
             "Stop": [{ "hooks": handler }]
@@ -278,6 +288,10 @@ pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>) -> String
     });
     if let Some(command) = status_line {
         settings["statusLine"] = serde_json::json!({ "type": "command", "command": command });
+    }
+    if let Some(command) = relay {
+        // A fresh conversation learns of the handoff it goes on from.
+        settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]);
     }
     settings.to_string()
 }
@@ -333,10 +347,11 @@ fn handle(stream: TcpStream, tokens: &Mutex<HashSet<String>>, sink: &HookSink) -
     if body.len() != content_length {
         return Ok(());
     }
-    out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
-    if let Some(ev) = HookEvent::parse(token.unwrap(), &body) {
-        sink(ev);
-    }
+    let reply =
+        HookEvent::parse(token.unwrap(), &body).and_then(|ev| sink(ev)).map_or_else(|| b"{}".to_vec(), |v| v.to_string().into_bytes());
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+    out.write_all(head.as_bytes())?;
+    out.write_all(&reply)?;
     Ok(())
 }
 
@@ -406,6 +421,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let srv = HookServer::start(Arc::new(move |e| {
             let _ = tx.send(e);
+            None
         }))
         .unwrap();
         let token = srv.register();
@@ -418,6 +434,23 @@ mod tests {
 
         assert!(post(srv.port(), "/hook/bogus", body).starts_with("HTTP/1.1 403"));
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn answers_with_the_sinks_reply() {
+        let srv =
+            HookServer::start(Arc::new(|e: HookEvent| (e.event == "Stop").then(|| serde_json::json!({"decision": "block"})))).unwrap();
+        let token = srv.register();
+        let resp = post(srv.port(), &format!("/hook/{token}"), r#"{"hook_event_name":"Stop"}"#);
+        assert!(resp.ends_with(r#"{"decision":"block"}"#), "{resp}");
+        let resp = post(srv.port(), &format!("/hook/{token}"), r#"{"hook_event_name":"PostToolUse"}"#);
+        assert!(resp.ends_with("\r\n\r\n{}"), "{resp}");
+    }
+
+    #[test]
+    fn a_read_changes_no_file() {
+        let body = br#"{"hook_event_name":"PostToolUse","tool_name":"Read","cwd":"/p","tool_input":{"file_path":"/p/a.rs"}}"#;
+        assert!(HookEvent::parse("t".into(), body).unwrap().paths.is_empty());
     }
 
     #[test]
@@ -444,12 +477,15 @@ mod tests {
 
     #[test]
     fn settings_json_shape() {
-        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t", None)).unwrap();
+        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t", None, None)).unwrap();
         assert_eq!(v.pointer("/hooks/PostToolUse/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/UserPromptSubmit/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/Stop/0/hooks/0/type").unwrap(), "http");
         assert!(v.get("statusLine").is_none());
-        let v: Value = serde_json::from_str(&claude_settings_json("u", Some("'tern' --statusline 's'"))).unwrap();
+        assert!(v.pointer("/hooks/SessionStart").is_none());
+        let v: Value =
+            serde_json::from_str(&claude_settings_json("u", Some("'tern' --statusline 's'"), Some("'tern' --hook 's'"))).unwrap();
         assert_eq!(v.pointer("/statusLine/command").unwrap(), "'tern' --statusline 's'");
+        assert_eq!(v.pointer("/hooks/SessionStart/0/hooks/0/command").unwrap(), "'tern' --hook 's'");
     }
 }

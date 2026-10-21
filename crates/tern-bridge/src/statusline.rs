@@ -28,7 +28,7 @@ pub fn command(exe: &Path, settings: &Path) -> String {
     format!("{} --statusline {}", quote(&exe.to_string_lossy()), quote(&settings.to_string_lossy()))
 }
 
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -55,14 +55,14 @@ pub fn run(settings: &Path) -> i32 {
 }
 
 /// The hook URL in a tab's settings JSON.
-fn hook_url(settings: &[u8]) -> Option<String> {
+pub(crate) fn hook_url(settings: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(settings).ok()?;
     v.pointer("/hooks/Stop/0/hooks/0/url")?.as_str().map(str::to_owned)
 }
 
-/// POST `body` to `url` (`http://127.0.0.1:<port>/<path>`), waiting for the
-/// answer so the request isn't cut off.
-fn post(url: &str, body: &[u8]) -> std::io::Result<()> {
+/// POST `body` to `url` (`http://127.0.0.1:<port>/<path>`); the answer's
+/// body.
+pub(crate) fn post(url: &str, body: &[u8]) -> std::io::Result<Vec<u8>> {
     let rest = url.strip_prefix("http://").ok_or(std::io::ErrorKind::InvalidInput)?;
     let (host, path) = rest.split_once('/').ok_or(std::io::ErrorKind::InvalidInput)?;
     let addr = host.parse().map_err(|_| std::io::ErrorKind::InvalidInput)?;
@@ -74,8 +74,10 @@ fn post(url: &str, body: &[u8]) -> std::io::Result<()> {
     );
     s.write_all(head.as_bytes())?;
     s.write_all(body)?;
-    std::io::copy(&mut s, &mut std::io::sink())?;
-    Ok(())
+    let mut answer = vec![];
+    s.read_to_end(&mut answer)?;
+    let start = answer.windows(4).position(|w| w == b"\r\n\r\n").map_or(answer.len(), |i| i + 4);
+    Ok(answer.split_off(start))
 }
 
 /// The status line command the user set, as Claude Code would pick it
@@ -126,7 +128,7 @@ mod tests {
 
     #[test]
     fn reads_the_hook_url() {
-        let s = crate::claude_settings_json("http://127.0.0.1:9/hook/t", None);
+        let s = crate::claude_settings_json("http://127.0.0.1:9/hook/t", None, None);
         assert_eq!(hook_url(s.as_bytes()).as_deref(), Some("http://127.0.0.1:9/hook/t"));
     }
 
@@ -141,7 +143,11 @@ mod tests {
     #[test]
     fn posts_to_the_hook_server() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let server = crate::HookServer::start(std::sync::Arc::new(move |ev| tx.send(ev).unwrap())).unwrap();
+        let server = crate::HookServer::start(std::sync::Arc::new(move |ev| {
+            tx.send(ev).unwrap();
+            None
+        }))
+        .unwrap();
         let token = server.register();
         post(&server.hook_url(&token), br#"{"hook_event_name":"StatusLine","session_id":"s"}"#).unwrap();
         let ev = rx.recv_timeout(Duration::from_secs(2)).unwrap();

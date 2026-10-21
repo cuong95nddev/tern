@@ -20,7 +20,7 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ClientMsg, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// What the client asks who runs in a session's foreground with: the PTY
 /// the daemon passed, on Windows the shell's pid.
@@ -442,6 +442,14 @@ impl MuxClient {
     pub fn close(&self, id: u64) {
         let _ = self.inner.send(ClientMsg::Close { id });
     }
+
+    /// Tell the daemon how session `id`'s Claude conversation keeps its
+    /// context window in bounds (an older daemon can't: it is left as it is).
+    pub fn set_context_guard(&self, id: u64, limit: u8, auto_switch: bool) {
+        if self.inner.server_minor >= GUARD_MINOR {
+            let _ = self.inner.send(ClientMsg::ContextGuard { id, limit, auto_switch });
+        }
+    }
 }
 
 /// The UI's way to the daemon: one connection, made again (starting the
@@ -499,6 +507,16 @@ impl Connector {
         let c = MuxClient::connect(&self.dir, false, self.hooks.clone(), self.reveal.clone()).ok()?;
         *cur = Some(c.clone());
         Some(c)
+    }
+
+    /// Keep session `id`'s Claude conversation under `limit` percent of its
+    /// context window (0 for no limit), going on in a fresh conversation
+    /// with `auto_switch`. Only over a live connection (doesn't connect):
+    /// the tab tells it again each time it attaches.
+    pub fn set_context_guard(&self, id: u64, limit: u8, auto_switch: bool) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.set_context_guard(id, limit, auto_switch);
+        }
     }
 
     /// Whether a live connection exists (doesn't connect).
