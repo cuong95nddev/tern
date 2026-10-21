@@ -47,16 +47,19 @@ pub fn load(cmd: &Command, payload: &[u8]) -> Result<Image, Error> {
         Medium::TempFile => {
             let path = path_of(&data)?;
             let bytes = read_file(&path, cmd);
-            remove_temp_file(&path);
+            if bytes.is_ok() {
+                let _ = std::fs::remove_file(&path);
+            }
             bytes
         },
         Medium::SharedMemory => read_shm(&data, cmd),
     };
-    // The program may be on another machine (ssh): say nothing about whether
-    // the file exists, what it is or how big it is.
+    // The program may be on another machine (ssh), or be a file someone
+    // `cat`s: say nothing about whether the file exists, what it is or how
+    // big it is.
     let image = bytes.and_then(|b| decode(cmd, &b)).map_err(|_| Error::new("EBADF", "cannot read an image from it"))?;
-    // The protocol hands the object over to us, but only one that held the
-    // image: anything else may be another program's.
+    // The protocol hands the object over to us; `read_shm` took only one
+    // that is ours and sized for this image.
     if cmd.medium == Medium::SharedMemory
         && let Ok(cname) = std::ffi::CString::new(data)
     {
@@ -65,6 +68,9 @@ pub fn load(cmd: &Command, payload: &[u8]) -> Result<Image, Error> {
     }
     Ok(image)
 }
+
+/// What marks a file as written for this protocol (kitty's convention).
+const MARKER: &str = "tty-graphics-protocol";
 
 fn path_of(data: &[u8]) -> Result<PathBuf, Error> {
     let s = std::str::from_utf8(data).map_err(|_| Error::new("EINVAL", "path is not UTF-8"))?;
@@ -86,11 +92,16 @@ fn window(cmd: &Command, len: u64) -> Result<u64, Error> {
     Ok(want)
 }
 
+/// Reads a file the program wrote for us. Any program's output can name a
+/// file, so only one plainly meant for this protocol is read (and a `t=t`
+/// one deleted): ours, in a temporary folder, its name marked.
 fn read_file(path: &Path, cmd: &Command) -> Result<Vec<u8>, Error> {
     let real = path.canonicalize().map_err(io_error)?;
-    // Any program's output can name a file, so only temporary files are read.
     if !temp_dirs().iter().any(|d| real.starts_with(d)) {
         return Err(Error::new("EPERM", "not a temporary file"));
+    }
+    if !real.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(MARKER)) {
+        return Err(Error::new("EPERM", "not named for the protocol"));
     }
     // Look before opening: opening a FIFO would block. O_NONBLOCK covers a
     // file swapped for one in between.
@@ -101,6 +112,9 @@ fn read_file(path: &Path, cmd: &Command) -> Result<Vec<u8>, Error> {
     let meta = file.metadata().map_err(io_error)?;
     if !meta.is_file() {
         return Err(Error::new("EINVAL", "not a regular file"));
+    }
+    if !owned(&meta) {
+        return Err(Error::new("EPERM", "not ours"));
     }
     let want = window(cmd, meta.len())?;
     file.seek(SeekFrom::Start(cmd.offset)).map_err(io_error)?;
@@ -114,17 +128,40 @@ fn temp_dirs() -> Vec<PathBuf> {
     [std::env::temp_dir(), PathBuf::from("/tmp"), PathBuf::from("/dev/shm")].iter().filter_map(|d| d.canonicalize().ok()).collect()
 }
 
-/// Deletes a `t=t` file, but only one plainly meant for this protocol.
-fn remove_temp_file(path: &Path) {
-    let named = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("tty-graphics-protocol"));
-    let parent = path.parent().and_then(|p| p.canonicalize().ok());
-    let in_tmp = temp_dirs().iter().any(|d| parent.as_ref().is_some_and(|p| p.starts_with(d)));
-    if named && in_tmp {
-        let _ = std::fs::remove_file(path);
-    }
+/// Owned by the user Tern runs as.
+fn owned(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: `geteuid` has no preconditions.
+    meta.uid() == unsafe { libc::geteuid() }
 }
 
+/// A shared-memory object's name: `/` and at least one more byte, no other `/`.
+fn valid_shm_name(name: &[u8]) -> bool {
+    name.len() >= 2 && name[0] == b'/' && !name[1..].contains(&b'/')
+}
+
+/// Whether an object `len` bytes long is one written for this image: for
+/// raw pixels, no longer than they need rounded up to a page (the system
+/// may round the object up). A PNG's length can't be told in advance.
+fn sized_for(cmd: &Command, len: u64) -> bool {
+    let bpp = match cmd.format {
+        Format::Png => return true,
+        Format::Rgb => 3,
+        Format::Rgba => 4,
+    };
+    let need = cmd.offset + if cmd.size != 0 { cmd.size } else { u64::from(cmd.width) * u64::from(cmd.height) * bpp };
+    // SAFETY: `sysconf` has no preconditions.
+    let page = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(1) as u64;
+    len <= need.div_ceil(page) * page
+}
+
+/// Reads the image from a shared-memory object the program wrote for us:
+/// one of ours, sized for the image, so unlinking it after (as the protocol
+/// says) can't remove another program's.
 fn read_shm(name: &[u8], cmd: &Command) -> Result<Vec<u8>, Error> {
+    if !valid_shm_name(name) {
+        return Err(Error::new("EINVAL", "bad shared memory name"));
+    }
     let cname = std::ffi::CString::new(name).map_err(|_| Error::new("EINVAL", "bad shared memory name"))?;
     // SAFETY: the fd is owned by `file` (closed on drop); the mapping covers
     // `map_len` bytes of an object at least that long and is unmapped below.
@@ -134,7 +171,11 @@ fn read_shm(name: &[u8], cmd: &Command) -> Result<Vec<u8>, Error> {
             return Err(io_error(std::io::Error::last_os_error()));
         }
         let file = File::from_raw_fd(fd);
-        let want = window(cmd, file.metadata().map_err(io_error)?.len())?;
+        let meta = file.metadata().map_err(io_error)?;
+        if !owned(&meta) || !sized_for(cmd, meta.len()) {
+            return Err(Error::new("EPERM", "not an object written for this image"));
+        }
+        let want = window(cmd, meta.len())?;
         if want == 0 {
             return Ok(Vec::new());
         }
@@ -261,7 +302,7 @@ mod tests {
 
     #[test]
     fn file_with_offset_and_size() {
-        let path = temp("tern-gfx-file");
+        let path = temp("tty-graphics-protocol-file");
         std::fs::write(&path, [0, 0, 1, 2, 3, 0]).unwrap();
         let img = load(&cmd("t=f,f=24,s=1,v=1,O=2,S=3"), &b64(path.to_str().unwrap().as_bytes())).unwrap();
         assert_eq!(&*img.rgba, &[1, 2, 3, 255]);
@@ -285,9 +326,19 @@ mod tests {
     }
 
     #[test]
+    fn temp_files_not_named_for_the_protocol_are_refused() {
+        // Else any temporary file's size could be probed with raw pixels.
+        let path = temp("tern-gfx-unmarked");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        let res = load(&cmd("t=f,f=24,s=1,v=1"), &b64(path.to_str().unwrap().as_bytes()));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(res.unwrap_err().code, "EBADF");
+    }
+
+    #[test]
     fn files_outside_temp_dirs_are_refused() {
         // The crate directory, not a temp dir.
-        let path = std::env::current_dir().unwrap().join(format!("tern-gfx-outside-{}", std::process::id()));
+        let path = std::env::current_dir().unwrap().join(format!("tty-graphics-protocol-outside-{}", std::process::id()));
         std::fs::write(&path, [1, 2, 3]).unwrap();
         let res = load(&cmd("t=f,f=24,s=1,v=1"), &b64(path.to_str().unwrap().as_bytes()));
         std::fs::remove_file(&path).unwrap();
@@ -353,11 +404,46 @@ mod tests {
         let other = temp("tern-keep");
         for p in [&ours, &other] {
             std::fs::write(p, [1, 2, 3]).unwrap();
-            load(&cmd("t=t,f=24,s=1,v=1"), &b64(p.to_str().unwrap().as_bytes())).unwrap();
         }
+        let load_from = |p: &Path| load(&cmd("t=t,f=24,s=1,v=1"), &b64(p.to_str().unwrap().as_bytes()));
+        load_from(&ours).unwrap();
+        assert!(load_from(&other).is_err());
         assert!(!ours.exists());
         assert!(other.exists());
         std::fs::remove_file(other).unwrap();
+    }
+
+    #[test]
+    fn shared_memory_bigger_than_the_image_is_left_alone() {
+        // SAFETY: `sysconf` has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as libc::off_t;
+        let name = format!("/tern-b{}", std::process::id());
+        let cname = std::ffi::CString::new(name.clone()).unwrap();
+        // SAFETY: test-only shm object of three pages.
+        unsafe {
+            let fd = shm_open(&cname, libc::O_CREAT | libc::O_RDWR);
+            assert!(fd >= 0);
+            assert_eq!(libc::ftruncate(fd, 3 * page), 0);
+            libc::close(fd);
+        }
+        // A 1x1 image reads from any object; this one isn't written for it.
+        assert_eq!(load(&cmd("t=s,f=24,s=1,v=1"), &b64(name.as_bytes())).unwrap_err().code, "EBADF");
+        // SAFETY: the object is still there; open and remove it.
+        unsafe {
+            let fd = shm_open(&cname, libc::O_RDONLY);
+            assert!(fd >= 0, "unlinked an object not written for the image");
+            libc::close(fd);
+            libc::shm_unlink(cname.as_ptr());
+        }
+        assert_eq!(load(&cmd("t=s,f=24,s=1,v=1"), &b64(b"no-slash")).unwrap_err().code, "EBADF");
+    }
+
+    #[test]
+    fn shared_memory_names() {
+        assert!(valid_shm_name(b"/tty-graphics-protocol-1"));
+        for bad in [&b"/"[..], b"x", b"/a/b", b""] {
+            assert!(!valid_shm_name(bad), "{bad:?}");
+        }
     }
 
     #[test]
