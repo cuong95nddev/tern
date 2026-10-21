@@ -283,7 +283,10 @@ pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>, relay: Op
             "PostToolUse": [{ "hooks": handler }],
             // The tab learns its session id from these, to resume it later.
             "UserPromptSubmit": [{ "hooks": handler }],
-            "Stop": [{ "hooks": handler }]
+            "Stop": [{ "hooks": handler }],
+            // The tab lists the sub-agents at work.
+            "SubagentStart": [{ "hooks": handler }],
+            "SubagentStop": [{ "hooks": handler }]
         }
     });
     if let Some(command) = status_line {

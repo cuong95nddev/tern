@@ -780,7 +780,8 @@
           "shrink": 0,
           "children": [
             { "when": "folder", "use": "agents.folder" },
-            { "when": "!folder", "use": "agents.tab" }
+            { "when": "child", "use": "agents.child" },
+            { "when": "!folder && !child", "use": "agents.tab" }
           ]
         },
         "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
@@ -924,6 +925,35 @@
             "size": "xsmall",
             "icon": "close",
             "tooltip": "Close ({close_key})"
+          }
+        ]
+      }
+    ]
+  },
+  "agents.child": {
+    "frame": "child",
+    "element": "agents.child",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "states": { "hover": { "background": "$agents.child.hover_background" } },
+    "children": [
+      { "icon": "bot", "shrink": 0, "style": { "width": "$agents.child.icon_size", "height": "$agents.child.icon_size" } },
+      { "grow": 1, "truncate": true, "text": "{label}" },
+      {
+        "element": "agents.status",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "children": [
+          { "text": "{time}" },
+          {
+            "element": "agents.state",
+            "shrink": 0,
+            "align": "center",
+            "justify": "center",
+            "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
+            "children": [{ "element": "agents.ring", "ring": "75" }]
           }
         ]
       }

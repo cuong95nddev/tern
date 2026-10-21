@@ -793,12 +793,15 @@ impl MainWindow {
 
     /// The agents panel (`agents`), a part every workspace of the window
     /// draws: each workspace's folder with its agents' terminals under it,
-    /// unless collapsed. Picking one shows its tab and gives it focus.
+    /// unless collapsed, and each agent's sub-agents at work under it.
+    /// Picking one shows its (agent's) tab and gives it focus.
     fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
         #[derive(Clone, Copy)]
         enum Entry {
             Folder(usize),
             Tab(usize, EntityId),
+            /// A sub-agent of the agent in a tab.
+            Child(usize, EntityId),
         }
         let shortcut = |k| crate::platform::shortcut(k).to_string();
         let close_key = shortcut("⌘⇧W");
@@ -806,6 +809,8 @@ impl MainWindow {
         let mut items = vec![];
         // What each agent's ring says, in words.
         let mut tips: HashMap<EntityId, SharedString> = HashMap::new();
+        // The id of the sub-agent at each of their rows.
+        let mut child_ids: HashMap<usize, SharedString> = HashMap::new();
         let mut active_row = 0;
         let mut working = false;
         for (i, slot) in self.slots.iter().enumerate() {
@@ -815,8 +820,9 @@ impl MainWindow {
                 active_row = entries.len();
             }
             let tabs = ws.sidebar_tabs(i == self.active, cx);
-            let top = tabs.iter().map(|(_, _, s)| *s).max_by_key(|s| crate::agents::priority(*s));
-            working |= tabs.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
+            let top = tabs.iter().map(|(_, _, s, _)| *s).max_by_key(|s| crate::agents::priority(*s));
+            // Sub-agents' times count seconds too.
+            working |= tabs.iter().any(|(_, _, s, children)| *s == ActivityStatus::Working || !children.is_empty());
             entries.push(Entry::Folder(i));
             let mut folder = template::Scope::new(format!("side-ws-{}", slot.ws.entity_id().as_u64()))
                 .var("folder", true)
@@ -828,18 +834,25 @@ impl MainWindow {
             if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
                 folder = folder.var("dot", true).var("dot_color", crate::agents::status_color(s, cx.theme()));
             }
-            let needs = tabs.iter().filter(|(_, _, s)| *s == ActivityStatus::Blocked).count();
+            let needs = tabs.iter().filter(|(_, _, s, _)| *s == ActivityStatus::Blocked).count();
             if needs > 0 {
                 folder = folder.var("needs", crate::agents::needs_label(needs));
             }
             items.push(folder);
             if open {
-                for (id, scope, _) in tabs {
+                for (id, scope, _, children) in tabs {
                     if let Some(tip) = scope.text_var("tip") {
                         tips.insert(id, tip);
                     }
                     entries.push(Entry::Tab(i, id));
                     items.push(scope);
+                    for child in children {
+                        if let Some(agent) = child.text_var("agent") {
+                            child_ids.insert(entries.len(), agent);
+                        }
+                        entries.push(Entry::Child(i, id));
+                        items.push(child);
+                    }
                 }
             }
         }
@@ -969,6 +982,19 @@ impl MainWindow {
                         Some(ws) => Workspace::sidebar_tab_row(&ws.downgrade(), id, d, cx),
                         None => d.into_any_element(),
                     }
+                },
+                ("child", Framed::Box(d), Some(Entry::Child(i, id))) => {
+                    let row = ix.unwrap_or_default();
+                    let agent = child_ids.get(&row).cloned().unwrap_or_default();
+                    d.id(("agents-child", row))
+                        .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                            let Some(ws) = this.slots.get(i).map(|s| s.ws.clone()) else { return };
+                            if i != this.active {
+                                this.activate(i, window, cx);
+                            }
+                            ws.update(cx, |w, cx| w.open_subagent_log(id, &agent, window, cx));
+                        }))
+                        .into_any_element()
                 },
                 ("status", Framed::Box(d), Some(Entry::Tab(_, id))) => match tips.get(&id).cloned() {
                     Some(tip) => d

@@ -1,5 +1,6 @@
 //! Integration with Claude Code: hook receiver (and later the IDE protocol).
 
+pub mod agent_log;
 pub mod context;
 pub mod hooks;
 pub mod relay;
