@@ -15,6 +15,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+# No debug info for dependencies: it made most of a debug target's size.
+debug = false
 
 # The terminal path (parsing, the mux, drawing frames) is too slow unoptimized
 # to judge how a debug build feels; level 1 keeps builds quick.
