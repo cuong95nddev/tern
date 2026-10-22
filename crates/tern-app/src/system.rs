@@ -1,6 +1,7 @@
 //! How busy the machine is: the CPU's load over the last samples and how
 //! much memory is in use, read from the kernel (Mach's host statistics, as
-//! Activity Monitor does) every [`SAMPLE`].
+//! Activity Monitor does; on Windows the system times and memory status, as
+//! Task Manager does) every [`SAMPLE`].
 //!
 //! One store for the app ([`System`]); the system panels only draw it. It
 //! samples while a panel was drawn lately.
@@ -153,12 +154,37 @@ fn memory() -> Option<(u64, u64)> {
     Some(((pages * page).min(total), total))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn cpu_ticks() -> Option<Ticks> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // Kernel time counts the idle time too.
+    let total = t(kernel) + t(user);
+    Some(Ticks { busy: total.saturating_sub(t(idle)), total })
+}
+
+/// Memory in use and in all, in bytes, as Task Manager counts them.
+#[cfg(windows)]
+fn memory() -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 || m.ullTotalPhys == 0 {
+        return None;
+    }
+    Some((m.ullTotalPhys.saturating_sub(m.ullAvailPhys), m.ullTotalPhys))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn cpu_ticks() -> Option<Ticks> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn memory() -> Option<(u64, u64)> {
     None
 }
@@ -166,7 +192,7 @@ fn memory() -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::Ticks;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     use super::{cpu_ticks, memory};
 
     #[test]
@@ -178,7 +204,7 @@ mod tests {
         assert_eq!(a.load_until(Ticks { busy: 0, total: 10 }), None);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn reads_this_machine() {
         let (used, total) = memory().expect("memory");

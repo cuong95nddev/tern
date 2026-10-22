@@ -407,7 +407,59 @@ fn parse_stat(pid: u32, stat: &str, tick: u64, page: u64) -> Option<Proc> {
     Some(Proc { pid, ppid: u32::try_from(field(4)?).ok()?, cpu_ns: cpu * 1_000_000_000 / tick, mem: field(24)? * page })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn scan() -> Vec<Proc> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut entries = vec![];
+    let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+    let mut more = unsafe { Process32FirstW(snap, &mut e) } != 0;
+    while more {
+        entries.push((e.th32ProcessID, e.th32ParentProcessID));
+        more = unsafe { Process32NextW(snap, &mut e) } != 0;
+    }
+    unsafe { CloseHandle(snap) };
+    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // With the time each started, so a parent id reused since is told apart.
+    let read: Vec<(Proc, u64)> = entries
+        .into_iter()
+        .filter(|&(pid, _)| pid != 0)
+        .filter_map(|(pid, ppid)| {
+            let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if h.is_null() {
+                return None;
+            }
+            let (mut created, mut exited, mut kernel, mut user) = Default::default();
+            let times = unsafe { GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user) } != 0;
+            let mut m = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+            let mem = unsafe { K32GetProcessMemoryInfo(h, &mut m, m.cb) } != 0;
+            unsafe { CloseHandle(h) };
+            // Times count 100 ns.
+            let proc = Proc { pid, ppid, cpu_ns: (t(kernel) + t(user)).saturating_mul(100), mem: m.WorkingSetSize as u64 };
+            (times && mem).then_some((proc, t(created)))
+        })
+        .collect();
+    // Windows keeps a child's parent id after the parent exits, and the id
+    // may then go to a newer process: that one isn't its parent.
+    let started: HashMap<u32, u64> = read.iter().map(|(p, at)| (p.pid, *at)).collect();
+    read.into_iter()
+        .map(|(mut p, at)| {
+            if started.get(&p.ppid).is_none_or(|&parent| parent > at) {
+                p.ppid = 0;
+            }
+            p
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn scan() -> Vec<Proc> {
     Vec::new()
 }
@@ -419,7 +471,7 @@ mod tests {
 
     use tern_mux::proto::SessionInfo;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     use super::scan;
     use super::{Proc, Sampler, Usage, attribute, bytes, parse_stat, percent};
 
@@ -487,7 +539,7 @@ mod tests {
         assert_eq!(proc, Proc { pid: 42, ppid: 7, cpu_ns: 3_000_000_000, mem: 300 * 4096 });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn scans_this_machine() {
         let procs = scan();
