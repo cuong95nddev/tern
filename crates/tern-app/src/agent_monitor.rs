@@ -284,7 +284,7 @@ impl Render for Monitor {
                 .var("label", crate::agents::display_name(&e.title, e.agent))
                 .var("shown", true)
                 .slot("icon", e.agent.icon(&theme));
-            let item = crate::agents::ring_vars(item, e.view.read(cx), false, None, None, &theme);
+            let item = crate::agents::ring_vars(item, e.view.read(cx), false, None, &theme);
             items.push(item);
             rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
         }

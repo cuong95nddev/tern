@@ -103,21 +103,18 @@ pub fn tokens_label(n: u64) -> String {
 /// tick cut out and the title in bold once its turn is done (`done`), a quiet
 /// tick once its tab has been seen (`seen`), an empty ring before its first
 /// turn (`pending`), an amber dot after a bell rang in it unseen (`rang`); a
-/// dot on its corner once its turn is done while it left shells or
-/// sub-agents (of `children`) running in the background (`shell_dot`).
-/// `time`, how long it has been working or since its turn ended; `tip`, all
-/// of it in words, with how full its context window is and the finished
-/// task that woke it.
+/// dot on its corner once its turn is done while it left shells running in
+/// the background (`shell_dot`). `time`, how long it has been working or
+/// since its turn ended; `tip`, all of it in words, with how full its
+/// context window is.
 pub fn ring_vars(
     scope: crate::template::Scope,
     view: &crate::terminal_view::TerminalView,
     rang: bool,
     context: Option<ContextUse>,
-    children: Option<&crate::subagents::Children>,
     theme: &Theme,
 ) -> crate::template::Scope {
     let (status, shells) = (view.status(), view.shells().len());
-    let agents = children.map_or(0, crate::subagents::Children::background);
     let seen = view.seen_done() && status == ActivityStatus::None;
     let since = view.status_since().elapsed();
     let (word, _, _) = status_look(status, rang, since, theme);
@@ -127,18 +124,13 @@ pub fn ring_vars(
         _ => ago_label(since),
     };
     // Only a finished turn: while it works its shells are its work.
-    let shell_dot = shells + agents > 0 && (status == ActivityStatus::Done || seen);
+    let shell_dot = shells > 0 && (status == ActivityStatus::Done || seen);
     let mut tip = match context {
         Some(c) => format!("{word} · context {:.0}% of {}", c.percent, tokens_label(c.size)),
         None => word,
     };
     if shell_dot {
-        tip += &format!(" · {}", background_label(shells, agents));
-    }
-    if status == ActivityStatus::Working
-        && let Some(woke) = children.and_then(|c| c.woke.as_deref())
-    {
-        tip += &format!(" · woken by: {woke}");
+        tip += &format!(" · {shells} background shell{}", if shells == 1 { "" } else { "s" });
     }
     let idle = status == ActivityStatus::None;
     scope
@@ -151,13 +143,6 @@ pub fn ring_vars(
         .var("seen", idle && !rang && seen)
         .var("pending", idle && !rang && !seen)
         .var("shell_dot", shell_dot)
-}
-
-/// What runs in the background, in words: "1 background shell, 2 background
-/// agents".
-pub fn background_label(shells: usize, agents: usize) -> String {
-    let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} background {what}{}", if n == 1 { "" } else { "s" }));
-    [count(shells, "shell"), count(agents, "agent")].into_iter().flatten().collect::<Vec<_>>().join(", ")
 }
 
 /// What a workspace's line says of its agents that wait for you, in place
