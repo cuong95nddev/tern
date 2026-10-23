@@ -3554,7 +3554,10 @@ impl Workspace {
             .slot("shells", self.shells.clone().cached(cache_layout()))
             .slot("system", self.system.clone().cached(cache_layout()))
             .slot("usage", self.usage.clone().cached(cache_layout()))
-            .slot_opt("agents", self.agents.clone())
+            // Cached like the others: drawn again when its window or a
+            // workspace changes (`AgentsView` observes them), not with every
+            // frame a terminal draws.
+            .slot_opt("agents", self.agents.clone().map(|a| a.cached(cache_layout())))
     }
 
     /// `part_scope` with the arrangement, for drawing a part outside the

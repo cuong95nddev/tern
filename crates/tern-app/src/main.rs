@@ -15,6 +15,7 @@ mod dock;
 mod dock_badge;
 mod file_icons;
 mod file_tree_view;
+mod frame_trace;
 mod git_log_view;
 #[cfg(not(target_os = "macos"))]
 mod handoff;

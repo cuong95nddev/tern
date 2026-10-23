@@ -140,9 +140,6 @@ const IMAGE_CACHE_TTL: Duration = Duration::from_secs(10);
 /// Most bytes of GPU-ready images kept per tab.
 const IMAGE_CACHE_CAP: usize = 256 * 1024 * 1024;
 
-/// The shortest time between two redraws for output.
-const OUTPUT_FRAME: Duration = Duration::from_millis(16);
-
 /// How many of an agent's bottom lines tell what it is doing.
 const AGENT_SCREEN_LINES: usize = 15;
 
@@ -359,7 +356,14 @@ pub struct TerminalView {
     /// Content origin + cursor rect from the last prepaint (for mouse + IME).
     last_origin: Point<Pixels>,
     last_cursor: Option<Bounds<Pixels>>,
+    /// Wheel movement not yet a whole line, for the program.
     scroll_px: f32,
+    /// How far past the display offset the scrollback is scrolled, under a
+    /// line: the grid draws that much lower, showing part of the line above.
+    scroll_frac: f32,
+    /// The part of `scroll_frac` the last frame drew (none with no line
+    /// above to show), for mouse positions.
+    drawn_frac: f32,
     selecting: bool,
     mouse_button_down: Option<mouse::MouseButton>,
     /// Last mouse position over the view, to find the link under it when ⌘
@@ -388,10 +392,8 @@ pub struct TerminalView {
     shells: Vec<AgentShell>,
     /// When the program last wrote something.
     last_output: Instant,
-    /// When the grid was last drawn, and the redraw held back to keep
-    /// output at [`OUTPUT_FRAME`] (see `on_term_event`).
-    last_draw: Instant,
-    _redraw: Option<Task<()>>,
+    /// Frame timing, with `TERN_FRAME_TRACE` set.
+    trace: Option<crate::frame_trace::FrameTrace>,
     /// The find bar, while it is open.
     find: Option<FindBar>,
     /// GPU-ready copies of the images on screen (kitty graphics).
@@ -545,6 +547,8 @@ impl TerminalView {
             last_origin: Point::default(),
             last_cursor: None,
             scroll_px: 0.,
+            scroll_frac: 0.,
+            drawn_frac: 0.,
             selecting: false,
             mouse_button_down: None,
             mouse_pos: None,
@@ -558,8 +562,7 @@ impl TerminalView {
             agent: None,
             shells: Vec::new(),
             last_output: Instant::now(),
-            last_draw: Instant::now(),
-            _redraw: None,
+            trace: crate::frame_trace::FrameTrace::new(),
             find: None,
             images: DrawnImages::new(IMAGE_CACHE_CAP),
             session_serial: 0,
@@ -868,8 +871,9 @@ impl TerminalView {
         let Some(s) = &self.session else { return };
         {
             let mut term = s.term().lock();
-            if term.grid().display_offset() != 0 {
+            if term.grid().display_offset() != 0 || self.scroll_frac != 0. {
                 term.scroll_display(Scroll::Bottom);
+                self.scroll_frac = 0.;
                 cx.notify();
             }
             if term.selection.take().is_some() {
@@ -884,27 +888,19 @@ impl TerminalView {
             TermEvent::Wakeup => {
                 self.last_output = Instant::now();
                 self.output_since_ready = true;
+                if let Some(t) = &mut self.trace {
+                    t.output();
+                }
                 if self.hover_link.is_some() {
                     self.update_hover(true, cx);
                 }
                 self.refresh_find_soon(cx);
-                // As Warp: output redraws at most every OUTPUT_FRAME. The
-                // first after a pause draws at once (an echoed key shows
-                // with no delay); a flood draws at 60 fps, not at a 120 Hz
-                // display's rate.
-                let since = self.last_draw.elapsed();
-                if since >= OUTPUT_FRAME {
-                    cx.notify();
-                } else if self._redraw.is_none() {
-                    let wait = OUTPUT_FRAME - since;
-                    self._redraw = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(wait).await;
-                        let _ = this.update(cx, |view, cx| {
-                            view._redraw = None;
-                            cx.notify();
-                        });
-                    }));
-                }
+                // The window draws at most once a display refresh, so a
+                // flood shows at the display's rate. Holding redraws back to
+                // 60 fps with a timer made them miss refreshes: the timer
+                // fired just after one, and a stream drew at 30-40 fps,
+                // 25 ms late.
+                cx.notify();
             },
             TermEvent::Title(t) => {
                 if *t != *self.raw_title {
@@ -1296,6 +1292,7 @@ impl TerminalView {
         find.matches = Matches::find(&term, &find.query, bottom);
         if let Some(m) = find.matches.current_match() {
             term.scroll_to_point(*m.start());
+            self.scroll_frac = 0.;
         }
         cx.notify();
     }
@@ -1306,6 +1303,7 @@ impl TerminalView {
         let (Some(find), Some(s)) = (&mut self.find, &self.session) else { return };
         if let Some(m) = find.matches.step(up) {
             s.term().lock().scroll_to_point(*m.start());
+            self.scroll_frac = 0.;
             cx.notify();
         }
     }
@@ -1479,6 +1477,7 @@ impl TerminalView {
     fn scroll_page(&mut self, up: bool, cx: &mut Context<Self>) {
         if let Some(s) = &self.session {
             s.term().lock().scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
+            self.scroll_frac = 0.;
             cx.notify();
         }
     }
@@ -1489,7 +1488,7 @@ impl TerminalView {
         let m = self.metrics?;
         let s = self.session.as_ref()?;
         let size = s.size();
-        let local = pos - self.last_origin;
+        let local = pos - self.last_origin - point(px(0.), px(self.drawn_frac));
         let x = (local.x / m.width).max(0.);
         let col = (x as usize).min(size.cols.saturating_sub(1) as usize);
         let row = ((local.y / m.height).max(0.) as usize).min(size.rows.saturating_sub(1) as usize);
@@ -1835,13 +1834,32 @@ impl TerminalView {
             ScrollDelta::Pixels(p) => f32::from(p.y),
             ScrollDelta::Lines(l) => l.y * f32::from(m.height),
         };
+        let mode = self.mode();
+        let to_program = (mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift)
+            || mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
+        if !to_program {
+            // The scrollback moves by pixels, as in Warp: whole lines
+            // through the display offset, the rest by drawing the grid
+            // that much lower (`scroll_frac`).
+            if let Some(s) = &self.session {
+                let h = f32::from(m.height);
+                let mut term = s.term().lock();
+                let offset = term.grid().display_offset();
+                let max = term.grid().history_size() as f32 * h;
+                let target = (offset as f32 * h + self.scroll_frac + dy).clamp(0., max);
+                let lines = (target / h).floor();
+                self.scroll_frac = target - lines * h;
+                term.scroll_display(Scroll::Delta(lines as i32 - offset as i32));
+                cx.notify();
+            }
+            return;
+        }
         self.scroll_px += dy;
         let lines = (self.scroll_px / f32::from(m.height)) as i32;
         if lines == 0 {
             return;
         }
         self.scroll_px -= lines as f32 * f32::from(m.height);
-        let mode = self.mode();
         let button = if lines > 0 { mouse::MouseButton::WheelUp } else { mouse::MouseButton::WheelDown };
         if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
             // One write for every notch.
@@ -1850,25 +1868,18 @@ impl TerminalView {
                 && let Some(one) = mouse::encode(mode, MouseAction::Press, button, Self::mouse_mods(&ev.modifiers), col, row)
                 && let Some(s) = &self.session
             {
-                s.write(one.repeat(lines.unsigned_abs().min(10) as usize));
+                s.write(one.repeat(lines.unsigned_abs() as usize));
             }
             return;
         }
-        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-            let seq: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
-                (true, true) => b"\x1bOA",
-                (true, false) => b"\x1b[A",
-                (false, true) => b"\x1bOB",
-                (false, false) => b"\x1b[B",
-            };
-            if let Some(s) = &self.session {
-                s.write(seq.repeat(lines.unsigned_abs() as usize));
-            }
-            return;
-        }
+        let seq: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
         if let Some(s) = &self.session {
-            s.term().lock().scroll_display(Scroll::Delta(lines));
-            cx.notify();
+            s.write(seq.repeat(lines.unsigned_abs() as usize));
         }
     }
 
@@ -1930,7 +1941,6 @@ impl Render for TerminalView {
         if let Some(s) = &self.session {
             s.take_wakeup();
         }
-        self.last_draw = Instant::now();
         self.watch_focus(window, cx);
         let look = crate::style::el("terminal", cx);
         let opacity = look.num("background_opacity").clamp(0., 1.) * crate::style::window_opacity(&crate::style::looks(cx));
@@ -2361,6 +2371,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let start = self.view.read(cx).trace.is_some().then(Instant::now);
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
         for data in frame.dropped.drain(..) {
@@ -2388,6 +2399,14 @@ impl Element for TerminalElement {
                 let _ = seg.line.paint(seg.origin, lh, TextAlign::Left, None, window, cx);
             }
         });
+        if let Some(start) = start {
+            let took = start.elapsed();
+            self.view.update(cx, |view, _| {
+                if let Some(t) = &mut view.trace {
+                    t.paint(start, took);
+                }
+            });
+        }
     }
 }
 
@@ -2428,7 +2447,9 @@ fn build_frame(
         view.last_cursor = None;
         return frame;
     };
+    let traced = view.trace.is_some().then(Instant::now);
     let term = session.term().lock();
+    let locked = traced.map(|_| Instant::now());
     let content = term.renderable_content();
     let colors = content.colors;
     let offset = content.display_offset as i32;
@@ -2441,7 +2462,17 @@ fn build_frame(
     let link = view.hover_link.as_ref().map(|h| h.start..=h.end);
     let block_cursor = focused && cursor.shape == CursorShape::Block;
 
-    let mut row: i32 = -1;
+    // Scrolled part of a line into the scrollback: the grid draws that much
+    // lower, under the bottom of the line above it (viewport row -1).
+    let frac = if (offset as usize) < term.grid().history_size() { view.scroll_frac } else { 0. };
+    view.drawn_frac = frac;
+    let bounds = Bounds::new(point(bounds.origin.x, bounds.origin.y + px(frac)), bounds.size);
+    let above = (frac > 0.).then(|| {
+        let line = Line(-offset - 1);
+        term.grid().iter_from(GridPoint::new(Line(line.0 - 1), term.last_column())).take_while(move |c| c.point.line == line)
+    });
+
+    let mut row = i32::MIN;
     let mut builder: Option<RowBuilder> = None;
     let mut bg_run: Option<(i32, usize, usize, Hsla)> = None; // row, start, end(excl), color
     let flush_bg = |run: &mut Option<(i32, usize, usize, Hsla)>, rects: &mut Vec<PaintQuad>| {
@@ -2463,7 +2494,7 @@ fn build_frame(
     let mut last_bg: Option<(Rgb, Hsla)> = None;
     let mut buf = String::new();
     let mut placeholders: Vec<PlaceholderRun> = Vec::new();
-    for indexed in content.display_iter {
+    for indexed in above.into_iter().flatten().chain(content.display_iter) {
         let vp_line = indexed.point.line.0 + offset;
         let col = indexed.point.column.0;
         if vp_line != row {
@@ -2644,10 +2675,15 @@ fn build_frame(
     }
     view.images.sweep(Instant::now(), &mut frame.dropped);
 
+    let walked = traced.map(|_| Instant::now());
+    let segments = pending.len();
     frame.text = pending
         .into_iter()
         .map(|p| TextSegment { origin: p.origin, line: ts.shape_line(p.text.into(), font_size, &p.runs, Some(m.width)) })
         .collect();
+    if let (Some(start), Some(locked), Some(walked), Some(t)) = (traced, locked, walked, &mut view.trace) {
+        t.prepaint(locked - start, walked - locked, walked.elapsed(), start.elapsed(), segments);
+    }
 
     // IME marked text, drawn over the cursor.
     if let Some(marked) = view.marked_text.clone() {
