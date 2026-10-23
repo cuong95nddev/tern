@@ -41,7 +41,14 @@ pub struct RepoChanges {
     pub renamed_from: HashMap<PathBuf, PathBuf>,
     /// Why status is unavailable (e.g. skipped for safety).
     pub error: Option<String>,
+    /// Changed files past [`STATUS_LIMIT`], counted but not listed.
+    pub left_out: usize,
 }
+
+/// At most this many changed files of a repo are listed (VS Code's
+/// `git.statusLimit`): a big folder nobody ignored can hold tens of
+/// thousands of new files, too many to list and recheck on every change.
+pub const STATUS_LIMIT: usize = 10_000;
 
 const MAX_SCAN_DEPTH: usize = 4;
 const MAX_SCAN_DIRS: usize = 20_000;
@@ -162,10 +169,7 @@ pub fn repo_changes_with(repo: &Path, scope: &Path, defines_commands: bool) -> R
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            let (branch, files, renamed_from) = parse_status(&o.stdout, repo);
-            rc.branch = branch;
-            rc.files = files;
-            rc.renamed_from = renamed_from;
+            rc = parse_status(&o.stdout, repo, STATUS_LIMIT);
         },
         Ok(o) => rc.error = Some(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("git status failed").to_owned()),
         Err(e) => rc.error = Some(format!("git: {e}")),
@@ -241,31 +245,37 @@ pub fn repo_defines_commands(root: &Path) -> bool {
     })
 }
 
-/// Parse `status --porcelain=v1 -z [-b]` output: the branch line, the
-/// changed files, renamed files' old paths. Paths are joined to `toplevel`.
-#[allow(clippy::type_complexity)]
-pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBuf, GitStatus)>, HashMap<PathBuf, PathBuf>) {
-    let mut branch = None;
-    let mut files = vec![];
-    let mut renamed_from = HashMap::new();
+/// Parse `status --porcelain=v1 -z [-b]` output of the repo at `toplevel`:
+/// the branch line, the first `limit` changed files (joined to `toplevel`),
+/// renamed files' old paths, how many files are left out.
+pub fn parse_status(raw: &[u8], toplevel: &Path, limit: usize) -> RepoChanges {
+    let mut rc = RepoChanges { root: toplevel.to_path_buf(), ..Default::default() };
     let mut parts = raw.split(|&b| b == 0).filter(|p| !p.is_empty());
     while let Some(rec) = parts.next() {
         if let Some(b) = rec.strip_prefix(b"## ") {
             let b = String::from_utf8_lossy(b);
-            branch = Some(b.strip_prefix("No commits yet on ").unwrap_or(&b).to_owned());
+            rc.branch = Some(b.strip_prefix("No commits yet on ").unwrap_or(&b).to_owned());
             continue;
         }
         if rec.len() < 4 {
             continue;
         }
         let (x, y) = (rec[0], rec[1]);
+        if rc.files.len() == limit {
+            // A rename's old path is a record of its own.
+            if x == b'R' {
+                parts.next();
+            }
+            rc.left_out += 1;
+            continue;
+        }
         let path = toplevel.join(String::from_utf8_lossy(&rec[3..]).as_ref());
         let st = match (x, y) {
             (b'?', b'?') => GitStatus::Untracked,
             (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => GitStatus::Conflicted,
             (b'R', _) => {
                 if let Some(from) = parts.next() {
-                    renamed_from.insert(path.clone(), toplevel.join(String::from_utf8_lossy(from).as_ref()));
+                    rc.renamed_from.insert(path.clone(), toplevel.join(String::from_utf8_lossy(from).as_ref()));
                 }
                 GitStatus::Renamed
             },
@@ -273,9 +283,9 @@ pub fn parse_status(raw: &[u8], toplevel: &Path) -> (Option<String>, Vec<(PathBu
             (b'D', _) | (_, b'D') => GitStatus::Deleted,
             _ => GitStatus::Modified,
         };
-        files.push((path, st));
+        rc.files.push((path, st));
     }
-    (branch, files, renamed_from)
+    rc
 }
 
 /// Unified diff of `path` against HEAD in its own repository (or vs /dev/null
@@ -331,11 +341,11 @@ mod tests {
     fn parses_status_and_marks_dirs() {
         let raw = b"## main...origin/main [ahead 1]\0 M src/a.rs\0?? new.txt\0R  b.rs\0old.rs\0A  src/x/y.rs\0";
         let root = Path::new("/r");
-        let (branch, files, renamed_from) = parse_status(raw, root);
-        assert_eq!(branch.as_deref(), Some("main...origin/main [ahead 1]"));
-        assert_eq!(files.len(), 4);
-        assert_eq!(renamed_from[Path::new("/r/b.rs")], Path::new("/r/old.rs"));
-        let rc = RepoChanges { root: root.into(), files, ..Default::default() };
+        let rc = parse_status(raw, root, STATUS_LIMIT);
+        assert_eq!(rc.branch.as_deref(), Some("main...origin/main [ahead 1]"));
+        assert_eq!(rc.files.len(), 4);
+        assert_eq!(rc.left_out, 0);
+        assert_eq!(rc.renamed_from[Path::new("/r/b.rs")], Path::new("/r/old.rs"));
         let m = status_map([&rc], root);
         assert_eq!(m[Path::new("/r/src/a.rs")], GitStatus::Modified);
         assert_eq!(m[Path::new("/r/new.txt")], GitStatus::Untracked);
@@ -343,6 +353,15 @@ mod tests {
         assert_eq!(m[Path::new("/r/src/x/y.rs")], GitStatus::Added);
         assert_eq!(m[Path::new("/r/src")], GitStatus::Modified);
         assert!(!m.contains_key(Path::new("/r/old.rs")));
+    }
+
+    #[test]
+    fn lists_at_most_the_limit_and_counts_the_rest() {
+        let raw = b"## main\0 M a.rs\0R  b.rs\0old.rs\0R  c.rs\0old_c.rs\0?? d.txt\0";
+        let rc = parse_status(raw, Path::new("/r"), 2);
+        assert_eq!(rc.files, vec![(PathBuf::from("/r/a.rs"), GitStatus::Modified), (PathBuf::from("/r/b.rs"), GitStatus::Renamed)]);
+        assert_eq!(rc.left_out, 2);
+        assert_eq!(rc.branch.as_deref(), Some("main"));
     }
 
     #[test]

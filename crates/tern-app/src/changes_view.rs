@@ -69,6 +69,9 @@ pub struct ChangesView {
     unchecked: HashSet<PathBuf>,
     /// New files put in the commit (they start unchecked).
     checked_new: HashSet<PathBuf>,
+    /// Per repo, how many of its files are checked ([`ChangesView::recount`]):
+    /// not counted again on every frame, a repo can list thousands.
+    on: Vec<usize>,
     message: Entity<TextareaState>,
     amend: bool,
     committing: bool,
@@ -176,6 +179,7 @@ impl ChangesView {
             focus: cx.focus_handle(),
             unchecked: HashSet::new(),
             checked_new: HashSet::new(),
+            on: vec![],
             message,
             amend: false,
             committing: false,
@@ -291,6 +295,7 @@ impl ChangesView {
                 if repos != this.repos {
                     this.repos = repos;
                     this.rebuild_rows();
+                    this.recount();
                     cx.emit(ChangesEvent::Updated(tern_fs::git::status_map(&this.repos, &this.root)));
                 }
                 cx.notify();
@@ -312,7 +317,11 @@ impl ChangesView {
     }
 
     fn total(&self) -> usize {
-        self.repos.iter().map(|r| r.files.len()).sum()
+        self.repos.iter().map(|r| r.files.len() + r.left_out).sum()
+    }
+
+    fn recount(&mut self) {
+        self.on = self.repos.iter().map(|r| r.files.iter().filter(|(p, st)| self.is_checked(p, *st)).count()).collect();
     }
 
     fn repo_label(&self, repo: &Path) -> String {
@@ -363,6 +372,7 @@ impl ChangesView {
         for (p, st) in &files {
             self.set_checked(p, *st, on);
         }
+        self.recount();
         cx.notify();
     }
 
@@ -370,6 +380,7 @@ impl ChangesView {
         let (p, st) = self.repos[ri].files[fi].clone();
         let on = !self.is_checked(&p, st);
         self.set_checked(&p, st, on);
+        self.recount();
         cx.notify();
     }
 
@@ -451,6 +462,7 @@ impl ChangesView {
                     this.amend = false;
                     this.unchecked.clear();
                     this.checked_new.clear();
+                    this.recount();
                 } else {
                     this.commit_result = Some(Err(errors.join("\n")));
                 }
@@ -489,9 +501,10 @@ impl ChangesView {
                         let detail: SharedString = match (&repo.error, repo.files.len()) {
                             (Some(e), _) => e.clone().into(),
                             (None, 0) => "clean".into(),
+                            (None, n) if repo.left_out > 0 => format!("first {n} of {}", n + repo.left_out).into(),
                             (None, n) => n.to_string().into(),
                         };
-                        let on = repo.files.iter().filter(|(p, st)| self.is_checked(p, *st)).count();
+                        let on = self.on.get(ri).copied().unwrap_or(0);
                         let (check_icon, check_tooltip) = match on {
                             0 => ("square", "Check all"),
                             n if n == repo.files.len() => ("square-check", "Uncheck all"),
@@ -598,7 +611,7 @@ impl Render for ChangesView {
             },
             cx,
         );
-        let checked: usize = self.checked().iter().map(|(_, p)| p.len()).sum();
+        let checked: usize = self.on.iter().sum();
         let count_text = match (checked, self.amend) {
             (0, true) => "Message only".to_owned(),
             (1, _) => "1 file".to_owned(),

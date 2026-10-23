@@ -126,6 +126,9 @@ impl Render for DraggedEntries {
     }
 }
 
+/// What runs once folders are read ([`FileTreeView::load`]).
+type Then = Box<dyn FnOnce(&mut FileTreeView, &mut Context<FileTreeView>)>;
+
 pub struct FileTreeView {
     tree: FileTree,
     git: HashMap<PathBuf, GitStatus>,
@@ -167,9 +170,8 @@ impl FileTreeView {
                 }
                 tern_web::live::changed(&batch.paths);
                 let ok = this.update(cx, |view, cx| {
-                    if view.tree.apply_changes(batch.paths.iter().map(PathBuf::as_path)) {
-                        cx.notify();
-                    }
+                    let applied = view.tree.apply_changes(batch.paths.iter().map(PathBuf::as_path));
+                    view.applied(applied, cx);
                     cx.emit(FileTreeEvent::Changed(batch));
                 });
                 if ok.is_err() {
@@ -178,8 +180,8 @@ impl FileTreeView {
             }
         });
 
-        Self {
-            tree: FileTree::new(root),
+        let mut this = Self {
+            tree: FileTree::unloaded(root.clone()),
             git: HashMap::new(),
             claude_touched: HashSet::new(),
             selected: vec![],
@@ -190,6 +192,68 @@ impl FileTreeView {
             focus: cx.focus_handle(),
             _watcher: watcher,
             _tasks: vec![pump],
+        };
+        this.load(vec![root], |_, _| {}, cx);
+        this
+    }
+
+    /// Read `dirs` off the main thread (a folder can hold tens of thousands
+    /// of entries), put them in the tree, then run `then`.
+    fn load(&mut self, dirs: Vec<PathBuf>, then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        self.load_boxed(dirs, Box::new(then), cx);
+    }
+
+    fn load_boxed(&mut self, dirs: Vec<PathBuf>, then: Then, cx: &mut Context<Self>) {
+        if dirs.is_empty() {
+            return then(self, cx);
+        }
+        for d in &dirs {
+            self.tree.start_loading(d);
+        }
+        let show_hidden = self.tree.show_hidden();
+        cx.spawn(async move |this, cx| {
+            let listings = cx
+                .background_spawn(
+                    async move { dirs.into_iter().map(|d| (tern_fs::tree::list_dir(&d, show_hidden), d)).collect::<Vec<_>>() },
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let again = this.tree.loaded(listings.into_iter().map(|(entries, d)| (d, entries)).collect());
+                then(this, cx);
+                // Changed while being read: the listing may have missed it.
+                this.load_boxed(again, Box::new(|_, _| {}), cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Changes went into the tree: read again the folders it asks for.
+    fn applied(&mut self, applied: tern_fs::tree::Applied, cx: &mut Context<Self>) {
+        if applied.changed {
+            cx.notify();
+        }
+        self.load(applied.reread, |_, cx| cx.notify(), cx);
+    }
+
+    /// Open `dir` once it is read.
+    fn expand(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.load(
+            self.tree.unread(&dir),
+            move |this, cx| {
+                this.tree.expand(&dir);
+                cx.notify();
+            },
+            cx,
+        );
+    }
+
+    fn toggle(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.tree.is_expanded(&dir) {
+            self.tree.collapse(&dir);
+            cx.notify();
+        } else {
+            self.expand(dir, cx);
         }
     }
 
@@ -204,16 +268,37 @@ impl FileTreeView {
     /// Mark files Claude edited (from hooks).
     pub fn mark_claude_edit(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         self.claude_touched.extend(paths.iter().cloned());
-        self.tree.apply_changes(paths.iter().map(PathBuf::as_path));
+        let applied = self.tree.apply_changes(paths.iter().map(PathBuf::as_path));
+        self.applied(applied, cx);
         cx.notify();
     }
 
     pub fn reveal(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tree.reveal(path) {
-            self.select_only(path.to_path_buf());
-            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-            cx.notify();
-        }
+        let path = path.to_path_buf();
+        self.load(
+            self.tree.unread_above(&path),
+            move |this, cx| {
+                if let Some(ix) = this.tree.reveal(&path) {
+                    this.select_only(path);
+                    this.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Show `path` without selecting it, once the folders above it are read.
+    fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.load(
+            self.tree.unread_above(&path),
+            move |this, cx| {
+                this.tree.reveal(&path);
+                this.scroll_to(&path);
+                cx.notify();
+            },
+            cx,
+        );
     }
 
     fn root(&self) -> &Path {
@@ -317,7 +402,7 @@ impl FileTreeView {
         if is_dir {
             // A double click's second click would fold it back.
             if ev.click_count() == 1 {
-                self.tree.toggle(&path);
+                self.toggle(path, cx);
             }
         } else {
             cx.emit(FileTreeEvent::OpenFile { path, pin: ev.click_count() > 1 });
@@ -367,7 +452,8 @@ impl FileTreeView {
 
     fn new_entry(&mut self, dir: bool, window: &mut Window, cx: &mut Context<Self>) {
         let parent = self.target_dir();
-        self.tree.expand(&parent);
+        // The field sits under the folder's row while its entries are read.
+        self.expand(parent.clone(), cx);
         self.start_edit(EditKind::New { parent, dir }, "", window, cx);
         if let Some((ix, _)) = self.new_row() {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
@@ -431,7 +517,7 @@ impl FileTreeView {
                     match kind {
                         EditKind::Rename(from) => self.moved(&from, &to, cx),
                         EditKind::New { dir, .. } => {
-                            self.show_new(&to);
+                            self.show_new(&to, cx);
                             self.reveal(&to, cx);
                             if !dir {
                                 cx.emit(FileTreeEvent::OpenFile { path: to, pin: true });
@@ -444,24 +530,25 @@ impl FileTreeView {
         cx.notify();
     }
 
-    /// Reload the folders `path` and any new folders above it (`a/b/c.txt`)
-    /// appeared in.
-    fn show_new(&mut self, path: &Path) {
+    /// Put `path` and any new folders above it (`a/b/c.txt`) in the folders
+    /// they appeared in.
+    fn show_new(&mut self, path: &Path, cx: &mut Context<Self>) {
         let root = self.root().to_path_buf();
         let fresh: Vec<PathBuf> = path.ancestors().take_while(|a| *a != root).map(Path::to_path_buf).collect();
-        self.tree.apply_changes(fresh.iter().map(PathBuf::as_path));
+        let applied = self.tree.apply_changes(fresh.iter().map(PathBuf::as_path));
+        self.applied(applied, cx);
     }
 
     /// `from` now lives at `to`: update the tree and selection, tell the tabs.
     fn moved(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
-        self.tree.moved(from, to);
-        self.show_new(to);
+        let applied = self.tree.moved(from, to);
+        self.applied(applied, cx);
+        self.show_new(to, cx);
         let follow = |p: &PathBuf| p.strip_prefix(from).map(|r| to.join(r)).unwrap_or_else(|_| p.clone());
         self.selected = self.selected.iter().map(follow).collect();
         self.cursor = self.cursor.as_ref().map(follow);
         self.claude_touched = self.claude_touched.iter().map(follow).collect();
-        self.tree.reveal(to);
-        self.scroll_to(to);
+        self.show(to.to_path_buf(), cx);
         cx.emit(FileTreeEvent::Moved { from: from.to_path_buf(), to: to.to_path_buf() });
     }
 
@@ -558,7 +645,8 @@ impl FileTreeView {
                 Err(e) => window.push_notification(format!("Could not delete '{}': {e}", self.rel(p)), cx),
             }
         }
-        self.tree.apply_changes(gone.iter().map(PathBuf::as_path));
+        let applied = self.tree.apply_changes(gone.iter().map(PathBuf::as_path));
+        self.applied(applied, cx);
         self.selected.retain(|s| !gone.iter().any(|g| s.starts_with(g)));
         if self.cursor.as_ref().is_some_and(|c| gone.iter().any(|g| c.starts_with(g))) {
             self.cursor = None;
@@ -607,16 +695,23 @@ impl FileTreeView {
                 Err(e) => window.push_notification(format!("Could not {} '{}': {e}", if move_ { "move" } else { "copy" }, self.rel(p)), cx),
             }
         }
-        self.tree.expand(dir);
         for p in &landed {
-            self.show_new(p);
+            self.show_new(p, cx);
         }
-        if let Some(last) = landed.last() {
-            self.tree.reveal(last);
-            self.scroll_to(last);
-            self.cursor = Some(last.clone());
-            self.selected = landed;
-        }
+        let dir = dir.to_path_buf();
+        let Some(last) = landed.last().cloned() else { return self.expand(dir, cx) };
+        self.cursor = Some(last.clone());
+        self.selected = landed;
+        self.load(
+            self.tree.unread_above(&last),
+            move |this, cx| {
+                this.tree.expand(&dir);
+                this.tree.reveal(&last);
+                this.scroll_to(&last);
+                cx.notify();
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -664,8 +759,8 @@ impl FileTreeView {
     }
 
     fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        self.tree.refresh_all();
-        cx.notify();
+        tern_fs::tree::reload_global_excludes();
+        self.load(self.tree.loaded_dirs(), |_, cx| cx.notify(), cx);
     }
 
     // ----- keyboard navigation -----
@@ -717,15 +812,13 @@ impl FileTreeView {
             return self.select_ix(ix + 1, cx);
         }
         let path = row.entry.path.to_path_buf();
-        self.tree.expand(&path);
-        cx.notify();
+        self.expand(path, cx);
     }
 
     fn open_cursor(&mut self, pin: bool, cx: &mut Context<Self>) {
         let Some(path) = self.cursor.clone() else { return };
         if path.is_dir() {
-            self.tree.toggle(&path);
-            cx.notify();
+            self.toggle(path, cx);
         } else {
             cx.emit(FileTreeEvent::OpenFile { path, pin });
         }
@@ -770,10 +863,7 @@ impl FileTreeView {
     /// The row likely to be widest, which the list measures for its
     /// scrollable width.
     fn widest_row(&self) -> usize {
-        let width = |r: &tern_fs::tree::Row| r.depth as f32 * 14. + r.entry.name.chars().count() as f32 * 7.;
-        let rows = self.tree.rows();
-        let widest = (0..rows.len()).max_by(|&a, &b| width(&rows[a]).total_cmp(&width(&rows[b]))).unwrap_or(0);
-        self.display_ix(widest)
+        self.display_ix(self.tree.widest_row())
     }
 
     fn render_rows(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
