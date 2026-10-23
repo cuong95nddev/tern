@@ -248,6 +248,9 @@ pub struct Arrangement {
     /// panels. A group is a part (it sits in a dock, floats or is among the
     /// panes) and a dock: its tree is in `docks` under its name.
     pub groups: BTreeMap<String, GroupMode>,
+    /// The panel groups drawn without their borders: the lines around them
+    /// and between their panels.
+    pub borderless: BTreeSet<String>,
 }
 
 /// A part floating over the docks: the dock it came from (its strip button
@@ -635,6 +638,7 @@ impl Arrangement {
             floating: BTreeMap::new(),
             center: BTreeMap::new(),
             groups: BTreeMap::new(),
+            borderless: BTreeSet::new(),
         };
         a.wrap_loose(docks);
         a
@@ -757,6 +761,7 @@ impl Arrangement {
         if self.groups.remove(name).is_none() {
             return false;
         }
+        self.borderless.remove(name);
         let inner = self.docks.remove(name).flatten();
         let mut placed = false;
         if let Some(t) = &inner {
@@ -820,6 +825,20 @@ impl Arrangement {
             }
         }
         changed
+    }
+
+    /// Draws group `name` with its borders or without. False when there is
+    /// no such group or nothing changes.
+    pub fn set_group_border(&mut self, name: &str, on: bool) -> bool {
+        if !self.groups.contains_key(name) {
+            return false;
+        }
+        if on { self.borderless.remove(name) } else { self.borderless.insert(name.to_owned()) }
+    }
+
+    /// True unless `part` is a panel group drawn without its borders.
+    pub fn bordered(&self, part: &str) -> bool {
+        !self.borderless.contains(part)
     }
 
     /// The dock `part` sits in.
@@ -1174,6 +1193,7 @@ impl Arrangement {
                 None => {
                     problems.push(format!("layout: \"{lost}\" has no dock"));
                     self.groups.remove(&lost);
+                    self.borderless.remove(&lost);
                     self.docks.remove(&lost);
                 },
             }
@@ -1212,6 +1232,7 @@ impl Arrangement {
         }
         out.extend(self.center.iter().map(|(part, from)| format!("c:{part}={from}")));
         out.extend(self.groups.iter().map(|(g, mode)| format!("g:{g}={}", mode.key())));
+        out.extend(self.borderless.iter().map(|g| format!("b:{g}")));
         if !self.widths.is_empty() {
             let widths: Vec<String> = self.widths.iter().map(|(n, w)| format!("{n}={w}")).collect();
             out.push(format!("w:{}", widths.join(",")));
@@ -1226,6 +1247,7 @@ impl Arrangement {
         let mut floating = BTreeMap::new();
         let mut center = BTreeMap::new();
         let mut groups = BTreeMap::new();
+        let mut borderless = BTreeSet::new();
         let segments: Vec<&str> = text.split(';').collect();
         // Floating parts and those in the center come after the docks, before the widths.
         let mut docks_done = false;
@@ -1234,6 +1256,13 @@ impl Arrangement {
                 docks_done = true;
                 let (group, mode) = entry.split_once('=')?;
                 if !is_group(group) || groups.insert(group.to_string(), GroupMode::parse(mode)?).is_some() {
+                    return None;
+                }
+                continue;
+            }
+            if let Some(group) = seg.strip_prefix("b:") {
+                docks_done = true;
+                if !is_group(group) || !borderless.insert(group.to_string()) {
                     return None;
                 }
                 continue;
@@ -1303,7 +1332,8 @@ impl Arrangement {
             docks.entry(g.clone()).or_insert(None);
         }
         docks.retain(|name, _| !is_group(name) || groups.contains_key(name));
-        Some(Arrangement { key: key.to_string(), docks, widths, floating, center, groups })
+        borderless.retain(|g| groups.contains_key(g));
+        Some(Arrangement { key: key.to_string(), docks, widths, floating, center, groups, borderless })
     }
 }
 
@@ -2073,6 +2103,24 @@ mod tests {
         assert!(!a.move_part(&g1, "panel", &g2, Drop::End, &d));
         assert!(a.move_part(&g1, "panel", "left", Drop::End, &d));
         assert!(a.group_holds(&g1, &g2));
+    }
+
+    #[test]
+    fn a_group_keeps_its_borders_off() {
+        let d = docks();
+        let mut a = fresh();
+        let g = a.add_group("right", Drop::End, &d).unwrap();
+        assert!(a.bordered(&g));
+        assert!(!a.set_group_border("ghost", false));
+        assert!(a.set_group_border(&g, false));
+        assert!(!a.set_group_border(&g, false));
+        assert!(!a.bordered(&g));
+        let back = Arrangement::decode("k", &a.encode()).unwrap();
+        assert!(!back.bordered(&g));
+        // Gone with its group, and never read for a group that isn't one.
+        assert!(a.close_group(&g, &d, &[]));
+        assert!(a.borderless.is_empty());
+        assert!(Arrangement::decode("k", "right=changes;b:group-9").unwrap().borderless.is_empty());
     }
 
     #[test]

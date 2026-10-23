@@ -29,6 +29,8 @@ pub enum Change {
     Center { part: SharedString, target: crate::panes::Layout, edge: Edge },
     /// Panel group `group` lays its panels out as `mode`.
     GroupMode { group: SharedString, mode: arrange::GroupMode },
+    /// Panel group `group` is drawn with its borders, or without.
+    GroupBorder { group: SharedString, on: bool },
     /// Panel group `group` is closed: its panels go back to the docks.
     CloseGroup { group: SharedString },
     /// A new, empty panel group at `at` in `dock`.

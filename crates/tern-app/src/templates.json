@@ -473,10 +473,10 @@
     "align": "start",
     "shrink": 0,
     "style": { "border_bottom_width": 0 },
-    "states": { "wrap": { "border_bottom_width": "$pane_tab_bar.border_bottom_width" } },
+    "states": { "wrap && borders": { "border_bottom_width": "$pane_tab_bar.border_bottom_width" } },
     "children": [
       {
-        "when": "!wrap",
+        "when": "!wrap && borders",
         "position": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
         "style": { "border_bottom_width": "$pane_tab_bar.border_bottom_width", "border": "$pane_tab_bar.border" }
       },
@@ -1391,6 +1391,15 @@
         "style": { "gap": "$title_bar.buttons_gap" },
         "children": [
           {
+            "when": "editing_layout",
+            "button": "edit_done",
+            "variant": "primary",
+            "size": "small",
+            "icon": "check",
+            "label": "Done Editing Layout",
+            "tooltip": "Stop editing the layout"
+          },
+          {
             "when": "update",
             "button": "update",
             "element": "title_bar.update",
@@ -1941,15 +1950,24 @@
       { "button": "grid", "element": "panel_group.header.button", "size": "xsmall", "icon": "layout-grid", "selected": "grid", "tooltip": "Split Any Way" },
       { "button": "tabs", "element": "panel_group.header.button", "size": "xsmall", "icon": "panel-top", "selected": "tabs", "tooltip": "Tabs" },
       { "button": "stack", "element": "panel_group.header.button", "size": "xsmall", "icon": "rows-3", "selected": "stack", "tooltip": "One Under Another" },
+      { "button": "border", "element": "panel_group.header.button", "size": "xsmall", "icon": "square", "selected": "border", "tooltip": "Border" },
       { "button": "close", "element": "panel_group.header.button", "size": "xsmall", "icon": "close", "tooltip": "Close Panel (its panels go back)" }
     ]
+  },
+  "split.cell": {
+    "element": "split.cell",
+    "fill": true,
+    "children": [{ "slot": "content" }],
+    "states": {
+      "left && border && left_border": { "border_left_width": "$split.cell.line_width" },
+      "top && border && top_border": { "border_top_width": "$split.cell.line_width" }
+    }
   },
   "panel_group.empty": {
     "element": "panel_group.empty",
     "grow": 1,
     "align": "center",
-    "justify": "center",
-    "children": [{ "text": "Empty panel" }, { "style": { "font_size": "$text_xs" }, "text": "Drag panels here" }]
+    "justify": "center"
   },
   "shells.empty": {
     "element": "shells.empty",

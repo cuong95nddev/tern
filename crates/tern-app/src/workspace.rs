@@ -415,6 +415,9 @@ pub struct Workspace {
 }
 
 /// A terminal tab, as the screenshot tray and the agent monitor list it.
+    /// Takes the keys while no tab has them, so they still reach the
+    /// workspace's actions.
+    focus: FocusHandle,
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
 pub struct TermTabInfo {
     pub id: EntityId,
@@ -655,6 +658,7 @@ impl Workspace {
         let mut made = vec![];
         let groups: Vec<u64> = saved
             .groups
+            focus: cx.focus_handle(),
             .iter()
             .map(|g| {
                 let color = GROUP_COLORS.iter().position(|c| c.0 == g.color).unwrap_or(0);
@@ -1762,8 +1766,8 @@ impl Workspace {
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.get(self.active) {
             Some(t) => window.focus(&t.focus_handle(cx), cx),
-            // No tab: keys still reach the workspace through the explorer.
-            None => window.focus(&self.tree.focus_handle(cx), cx),
+            // No tab: the explorer may not show, the workspace always does.
+            None => window.focus(&self.focus, cx),
         }
     }
 
@@ -2601,6 +2605,7 @@ impl Workspace {
             let names = files
                 .iter()
                 .map(|p| {
+            .var("borders", self.borders())
                     template::Scope::default().var("name", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
                 })
                 .collect();
@@ -3365,6 +3370,11 @@ impl Workspace {
         let change = Change::Float { part: a.0.clone(), rect, area: crate::dock::area_size(area) };
         self.arrangement_changed(change, cx);
     }
+            Change::GroupBorder { group, on } => {
+                if !a.set_group_border(&group, on) {
+                    return;
+                }
+            },
 
     /// Adds an empty panel group at the end of the right dock (else the
     /// first that takes panels), and edits the layout so it shows.
@@ -3383,7 +3393,7 @@ impl Workspace {
     }
 
     /// Starts or ends editing the layout: only then do panels drag.
-    fn toggle_edit_layout(&mut self, _: &ToggleEditLayout, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_edit_layout(&mut self, _: &ToggleEditLayout, _: &mut Window, cx: &mut Context<Self>) {
         let on = !crate::dock::editing(cx);
         cx.set_global(crate::dock::LayoutEdit(on));
         self.docks_epoch += 1;
@@ -4032,9 +4042,15 @@ impl Workspace {
                 let panels: Vec<_> = children
                     .iter()
                     .enumerate()
-                    .map(|(k, c)| resizable_panel().child(self.render_layout(c, &format!("{path}.{k}"), cx)))
+                    .map(|(k, c)| {
+                        let path = format!("{path}.{k}");
+                        let body = self.render_layout(c, &path, cx);
+                        let line = (k > 0).then_some(on);
+                        let (left, top) = if *axis == Axis::Horizontal { (line, None) } else { (None, line) };
+                        resizable_panel().child(template::split_cell(format!("panes-{path}"), left, top, on, body, cx))
+                    })
                     .collect();
-                group.children(panels).into_any_element()
+                group.with_handle_appearance(template::no_line()).children(panels).into_any_element()
             },
         }
     }
@@ -4089,6 +4105,8 @@ impl Workspace {
     fn empty_pane(&self, pane: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let ws = cx.entity().downgrade();
         let scope = template::Scope::new(format!("empty-{pane}"));
+                // Template `split.cell` draws the lines between the panes.
+                let on = self.borders();
         template::render(
             "pane.empty",
             scope,
@@ -4099,6 +4117,12 @@ impl Workspace {
 
     /// What the pane dock allows (`"dock": "center"`).
     fn pane_dock(cx: &App) -> template::PaneDock {
+    /// Whether the panes are drawn with their borders: not in a panel group
+    /// without them.
+    fn borders(&self) -> bool {
+        self.arranged.as_ref().is_none_or(|a| a.dock_of(PANES).is_none_or(|d| a.bordered(d)))
+    }
+
         cx.try_global::<template::Templates>().map(|t| t.pane_dock(PANES)).unwrap_or_default()
     }
 
@@ -4121,6 +4145,7 @@ impl Workspace {
     /// its sides while a tab, a pane or a panel the pane dock takes is dragged.
     fn render_center_part(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let body = template::render_part(name, self.arranged_scope(cx.entity().downgrade()), cx);
+            .var("borders", self.borders())
         let d = div().relative().size_full().flex().flex_col().min_w_0().min_h_0().child(body);
         let Some(dock) = self.drops_on_panes(cx).filter(|d| d.edges) else { return d.into_any_element() };
         let own = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| *p.part == *name);
@@ -4559,13 +4584,18 @@ impl Workspace {
                 self.new_panel(&NewPanel, window, cx);
                 "ok".into()
             },
-            // Lays out GROUP's panels as MODE, or closes it.
-            cmd if cmd.starts_with("panel-mode ") || cmd.starts_with("panel-close ") => {
+            // Lays out GROUP's panels as MODE, draws it with its borders or
+            // without, or closes it.
+            cmd if cmd.starts_with("panel-mode ") || cmd.starts_with("panel-border ") || cmd.starts_with("panel-close ") => {
                 let args: Vec<&str> = cmd.split_whitespace().collect();
-                let change = match (args.first().copied(), args.get(1), args.get(2).and_then(|m| arrange::GroupMode::parse(m))) {
-                    (Some("panel-mode"), Some(g), Some(mode)) => Change::GroupMode { group: (*g).to_owned().into(), mode },
-                    (Some("panel-close"), Some(g), None) => Change::CloseGroup { group: (*g).to_owned().into() },
-                    _ => return "error: panel-mode GROUP grid|tabs|stack, or panel-close GROUP".into(),
+                let (verb, group, arg) = (args.first().copied(), args.get(1), args.get(2).copied());
+                let change = match (verb, group, arg, arg.and_then(arrange::GroupMode::parse)) {
+                    (Some("panel-mode"), Some(g), _, Some(mode)) => Change::GroupMode { group: (*g).to_owned().into(), mode },
+                    (Some("panel-border"), Some(g), Some(on @ ("on" | "off")), _) => {
+                        Change::GroupBorder { group: (*g).to_owned().into(), on: on == "on" }
+                    },
+                    (Some("panel-close"), Some(g), None, _) => Change::CloseGroup { group: (*g).to_owned().into() },
+                    _ => return "error: panel-mode GROUP grid|tabs|stack, panel-border GROUP on|off, or panel-close GROUP".into(),
                 };
                 self.arrangement_changed(change, cx);
                 "ok".into()
@@ -4836,6 +4866,7 @@ impl Render for Workspace {
                     Some(CenterTab::Scratch { view, .. }) => view.update(cx, |_, cx| cx.notify()),
                     _ => {},
                 }
+            .track_focus(&self.focus)
             }))
             .on_action(cx.listener(|this, a: &viewer::TogglePreview, w, cx| {
                 if let Some(CenterTab::File { view, .. }) = this.tabs.get(this.active) {

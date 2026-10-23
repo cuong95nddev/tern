@@ -33,7 +33,7 @@ mod draw;
 mod menu;
 
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, on_event, render, render_part, render_plain};
+pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, no_line, on_event, render, render_part, render_plain, split_cell};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");

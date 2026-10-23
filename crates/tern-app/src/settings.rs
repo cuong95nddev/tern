@@ -1023,8 +1023,8 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 |---|---|---|
 | `window` | `workspace` | `welcome`, `workspace` |
 | `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`; list `parts` (`icon`, `on`, `tooltip`) | |
-| `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs` | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`, `editing_layout` (the layout is edited: its Done button shows); list `parts` (`icon`, `on`, `tooltip`) | |
+| `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs`, `borders` (drawn with its borders: not in a panel group without them; its splits' lines follow it) | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
 | `explorer.header`, `changes.header`, `scratches.header`, `shells.header` | as `panel_header` | as `panel_header` |
@@ -1054,8 +1054,9 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `panel_group.header` | `part` (the group's name, `group-<n>`), `title` | `buttons` |
 | `panel_group.seam` | | |
 | `panel.edit` | `part`, `title` (the panel under it) | |
-| `panel_group.header.buttons` | `grid`, `tabs`, `stack` (the layout it has); buttons `grid`, `tabs`, `stack`, `close` | |
+| `panel_group.header.buttons` | `grid`, `tabs`, `stack` (the layout it has), `border` (it has its borders); buttons `grid`, `tabs`, `stack`, `border`, `close` | |
 | `panel_group.empty` | | |
+| `split.cell` (a part at a line of a split: the panels side by side or one under another) | `left`, `top` (a line is wanted on that side), `left_border`, `top_border` (what is across that line is bordered), `border` (the part is: not a panel group without borders) | `content` |
 | `usage`, `usage.item` | `name`, `note`, `open`; list `limits` (as `usage.item.limit`): the account the shown Claude tab runs as, else the first one turned on | `icon` |
 | `usage.item.limit`, `usage.card.limit`, `usage.bar` | `name`, `short`, `used` (0 to 100), `rest`, `used_text`, `left`, `resets`, `warning`, `critical`, `has_pace`, `pace`, `pace_rest`, `pace_text` | |
 | `usage.card` | `title`, `updated`, `plan`, `email`, `error`, `extra`, `reading`; list `limits` (as `usage.card.limit`); list `accounts` (as `usage.card.account`: `name`, `detail`, `shown`, `active`, `last`, `removable`, `switch_tip`) | `icon` |
@@ -1064,7 +1065,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `agent_monitor` | `summary`, `agents`; list `rows` | `fit` |
 | `drag_chip` | `label`, `icon` | |
 | `drag_group` | `text`, `group_color` | |
-| `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`; list `items` | `scrollbar` |
+| `pane_tab_bar` | `wrap`, `overflows`, `panes`, `zoomed`, `corner`, `borders` (as `pane`); list `items` | `scrollbar` |
 | `pane_tab_bar.tab`, `vertical_tabs.tab` | `label`, `active`, `preview`, `grouped`, `badge`, `group_color` | `icon` |
 | `vertical_tabs` | as `pane_tab_bar` | |
 | `agents` | list `items` | `header` |

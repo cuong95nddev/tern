@@ -620,6 +620,12 @@ pub const ELEMENTS: &[Element] = &[
     simple!("panel_group.header.button", "A button in a panel group's title bar"),
     Element { name: "panel_group.empty", about: "What a panel group shows without panels", groups: &[EMPTY] },
     Element {
+        name: "split.cell",
+        about: "A cell of a split (the panels side by side or one under another): it draws the line before it, \
+                `line_width` thick",
+        groups: &[&[("border", Color, "$border"), ("line_width", Len, "1")]],
+    },
+    Element {
         name: "panel_group.edit",
         about: "A panel group while the layout is edited",
         groups: &[&[("border", Color, "$primary/40"), ("border_width", Len, "1")]],

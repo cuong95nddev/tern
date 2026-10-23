@@ -19,7 +19,7 @@ use gpui_kit::*;
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
 use crate::theme_picker::{self, OpenSettings, OpenSettingsFile, SelectTheme};
-use crate::workspace::{Panels, ToggleAgents, Workspace, WorkspaceEvent, confirm_close};
+use crate::workspace::{Panels, ToggleAgents, ToggleEditLayout, Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 use tern_term::status::ActivityStatus;
 
@@ -531,6 +531,9 @@ impl MainWindow {
             // The last window going quits Tern: like ⌘Q, its terminals keep
             // running and it comes back at the next launch.
             if windows(cx).len() <= 1 {
+        // The focused view went away (a panel moved, closed or popped out):
+        // keys would only reach the window's root, past the workspace's actions.
+        let focus_lost_sub = cx.on_focus_lost(window, |this: &mut Self, window, cx| this.focus_active(window, cx));
                 return true;
             }
             let jobs = me.upgrade().map(|m| m.read(cx).running(cx)).unwrap_or_default();
@@ -580,7 +583,7 @@ impl MainWindow {
             backdrop: crate::style::Backdrop::default(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
-            _subs: vec![bounds_sub, activation_sub],
+            _subs: vec![bounds_sub, activation_sub, focus_lost_sub],
             _save_placement: Task::ready(()),
             _tick: None,
         }
@@ -1243,6 +1246,7 @@ impl MainWindow {
         }
         let bar = template::render(
             "title_bar",
+            .var("editing_layout", ws.is_some() && crate::dock::editing(cx))
             scope,
             &mut |name, ix, f| match (name, f, ix.and_then(|i| clicks.get(i))) {
                 ("part", Framed::Button(b), Some(click)) => {
@@ -1256,6 +1260,15 @@ impl MainWindow {
                 ("update", Framed::Button(b), _) => {
                     let update = update.clone();
                     b.on_click(move |_, _, cx| {
+                ("edit_done", Framed::Button(b), _) => {
+                    let ws = ws.map(|ws| ws.downgrade());
+                    b.on_click(move |_, window, cx| {
+                        if let Some(ws) = ws.as_ref().and_then(|ws| ws.upgrade()) {
+                            ws.update(cx, |w, cx| w.toggle_edit_layout(&ToggleEditLayout, window, cx));
+                        }
+                    })
+                    .into_any_element()
+                },
                         if let Some((release, false)) = &update {
                             crate::update::offer(release.clone(), cx)
                         }

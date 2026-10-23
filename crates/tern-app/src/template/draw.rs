@@ -64,7 +64,7 @@ pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyEle
         return div().into_any_element();
     };
     let mut scope = scope;
-    let mut d = Drawer { frames, cx, rem: cx.theme_rem() };
+    let mut d = Drawer { frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
     let root = d.node(&node, &mut scope, &[]).unwrap_or_else(|| div().into_any_element());
     if scope.arrangement.is_none() {
         return root;
@@ -84,7 +84,7 @@ pub fn render_plain(name: &str, scope: Scope, cx: &App) -> AnyElement {
 pub fn render_part(name: &str, scope: Scope, cx: &App) -> AnyElement {
     let mut scope = scope;
     let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
-    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem() };
+    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
     d.part_body(name, &mut scope, &[])
 }
 
@@ -140,7 +140,7 @@ fn fill_menu(entries: &[Entry], mut menu: PopupMenu, items: &MenuItems, window: 
 fn content_of(n: &Node, content: &super::menu::Content, cx: &App) -> AnyElement {
     let mut scope = Scope { vars: content.vars.clone(), index: content.index, ..Default::default() };
     let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
-    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem() };
+    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
     let (look, hovers) = d.look(n, &scope, &[]);
     let kids: Vec<AnyElement> = n.children.iter().filter_map(|c| d.node(c, &mut scope, &[])).collect();
     let place = place(n, &lookup(&scope, &[]));
@@ -162,6 +162,30 @@ struct Drawer<'a, 'f> {
     frames: &'a mut Frames<'f>,
     cx: &'a App,
     rem: Pixels,
+    /// The lines the split drawing a dock asks of the parts at its sides.
+    lines: Lines,
+}
+
+/// The lines a split wants along a node's left and top sides: for each,
+/// whether the cell before it there is bordered (None: no line there). A
+/// split across that side hands it on to each of its cells, so each part
+/// drawn along it decides its stretch of the line.
+#[derive(Clone, Copy, Default)]
+struct Lines {
+    left: Option<bool>,
+    top: Option<bool>,
+}
+
+impl Lines {
+    /// The lines of the cell at `ix` of a split along `dir` holding a node
+    /// with these lines, `prev` the trailing edge of the cell before it.
+    fn of_cell(self, dir: arrange::Dir, ix: usize, prev: bool) -> Lines {
+        let lead = if ix == 0 { None } else { Some(prev) };
+        match dir {
+            arrange::Dir::Row => Lines { left: if ix == 0 { self.left } else { lead }, top: self.top },
+            arrange::Dir::Column => Lines { left: self.left, top: if ix == 0 { self.top } else { lead } },
+        }
+    }
 }
 
 /// The values a node sees: its scope's, then those of the scopes around it.
@@ -241,8 +265,9 @@ impl Drawer<'_, '_> {
             What::Separator => return None,
         }
         if let Some(d) = &n.dock {
+            let lines = std::mem::take(&mut self.lines);
             match self.dock_tree(d, scope, outer) {
-                Some(t) => kids.push(self.tree(d, &t, scope, outer)),
+                Some(t) => kids.push(self.tree(d, &t, lines, scope, outer)),
                 // An empty dock that stays: all of it takes a dragged part.
                 None => kids.extend(self.end_zone(d, scope).map(|z| z.absolute().inset_0().into_any_element())),
             }
@@ -465,7 +490,7 @@ impl Drawer<'_, '_> {
         let tree = self.dock_tree(&d, scope, outer);
         let empty = tree.is_none();
         let content = match tree {
-            Some(t) => self.tree(&d, &t, scope, outer),
+            Some(t) => self.tree(&d, &t, Lines::default(), scope, outer),
             None => {
                 let hint = render("panel_group.empty", Scope::new(format!("{name}:empty")), &mut |_, _, f| f.into_any_element(), self.cx);
                 // All of it takes a dragged panel.
@@ -473,18 +498,20 @@ impl Drawer<'_, '_> {
                 div().relative().size_full().flex().flex_col().child(hint).children(zone).into_any_element()
             },
         };
+        let bordered = scope.arrangement.as_ref().is_none_or(|a| a.bordered(name));
         let on_change = scope.on_change.clone();
         let group: SharedString = name.to_owned().into();
         let mut frames = |button: &str, _: Option<usize>, f: Framed| {
             let Framed::Button(b) = f else { return f.into_any_element() };
-            let close = button == "close";
-            let mode = arrange::GroupMode::parse(button);
-            let Some(on_change) = on_change.clone().filter(|_| close || mode.is_some()) else { return b.into_any_element() };
+            let (mode, border, close) = (arrange::GroupMode::parse(button), button == "border", button == "close");
+            let Some(on_change) = on_change.clone().filter(|_| mode.is_some() || border || close) else { return b.into_any_element() };
             let group = group.clone();
             b.on_click(move |_, window, cx| {
+                let group = group.clone();
                 let change = match mode {
-                    Some(mode) => Change::GroupMode { group: group.clone(), mode },
-                    None => Change::CloseGroup { group: group.clone() },
+                    Some(mode) => Change::GroupMode { group, mode },
+                    None if border => Change::GroupBorder { group, on: !bordered },
+                    None => Change::CloseGroup { group },
                 };
                 on_change(change, window, cx);
             })
@@ -493,7 +520,8 @@ impl Drawer<'_, '_> {
         let buttons = Scope::new(format!("{name}:buttons"))
             .var("grid", mode == arrange::GroupMode::Grid)
             .var("tabs", mode == arrange::GroupMode::Tabs)
-            .var("stack", mode == arrange::GroupMode::Stack);
+            .var("stack", mode == arrange::GroupMode::Stack)
+            .var("border", bordered);
         let header = crate::dock::panel_header(group.clone(), "panel_group.header", "Panel", None, buttons, &mut frames, self.cx);
         let edit = !self.no_drag();
         let scope = Scope::new(format!("{}:{name}", scope.id))
@@ -704,6 +732,12 @@ impl Drawer<'_, '_> {
         // The docks shown here, by panel, with the width they start the drag at:
         // a resize stores the widths that changed.
         let mut docks: Vec<(usize, SharedString, Option<Pixels>)> = vec![];
+        let dir = if axis == Axis::Horizontal { arrange::Dir::Row } else { arrange::Dir::Column };
+        // A part drawn without its borders (`borders` false) has no lines in it.
+        let own = !matches!(lookup(scope, outer)("borders"), Some(Value::Bool(false)));
+        // The trailing edge of the cell shown before: None before the first.
+        let mut prev: Option<bool> = None;
+        let mut cell = 0;
         for (i, c) in n.children.iter().enumerate() {
             let shown = self.holds(&c.when, scope, outer) && !self.dock_hidden(c, scope, outer);
             let fixed = c.panel.fixed.as_ref().is_some_and(|f| f.holds(&lookup(scope, outer)));
@@ -716,7 +750,20 @@ impl Drawer<'_, '_> {
                     docks.push((i, d.name.clone(), size));
                 }
             }
-            let body = if shown { self.draw(c, scope, outer) } else { None };
+            let body = if shown {
+                // A dock's parts draw its lines: they decide them.
+                let tree = c.dock.as_ref().and_then(|d| self.dock_tree(d, scope, outer));
+                let lines = Lines::default().of_cell(dir, cell, prev.unwrap_or(own));
+                self.lines = if tree.is_some() { lines } else { Lines::default() };
+                let body = self.draw(c, scope, outer);
+                self.lines = Lines::default();
+                prev = Some(tree.as_ref().map_or(own, |t| self.edges(t, dir, true, scope).1));
+                cell += 1;
+                let id = format!("{}:{}:{i}", scope.id, n.path);
+                body.map(|b| if tree.is_some() { b } else { self.cell(id, lines, own, b) })
+            } else {
+                None
+            };
             let locked = c.dock.is_some() && self.locked();
             let panel = self.panel(self.range(&c.panel), fixed, size, locked).visible(shown);
             group = group.child(match body {
@@ -724,6 +771,7 @@ impl Drawer<'_, '_> {
                 None => panel,
             });
         }
+        group = group.with_handle_appearance(no_line());
         if let Some(on_change) = scope.on_change.clone().filter(|_| !docks.is_empty() && !self.locked()) {
             group = group.on_resize(move |state, window, cx| {
                 let sizes = state.read(cx).sizes().clone();
@@ -803,18 +851,29 @@ impl Drawer<'_, '_> {
     }
 
     /// What dock `d` shows of its tree: ids and resizes go by the stored tree's places.
-    fn tree(&mut self, d: &DockNode, t: &Shown, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
+    fn tree(&mut self, d: &DockNode, t: &Shown, lines: Lines, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> AnyElement {
         let cx = self.cx;
         let templates = cx.try_global::<Templates>();
+        // A panel group's lines are its own: none while it has no borders.
+        let on = !arrange::is_group(&d.name) || scope.arrangement.as_ref().is_none_or(|a| a.bordered(&d.name));
         let (dir, path, sizes, items) = match t {
             Shown::Part(name) => {
                 let body = self.part_body(name, scope, outer);
-                return self.leaf(d, std::slice::from_ref(name), 0, body, scope);
+                let body = self.leaf(d, std::slice::from_ref(name), 0, body, scope);
+                let own = self.edges(t, arrange::Dir::Row, on, scope).0;
+                return self.cell(format!("{}:dock:{}:{name}", scope.id, d.name), lines, own, body);
             },
-            Shown::Stack { path, parts, active } => return self.stack(d, path, parts, *active, scope, outer),
+            Shown::Stack { path, parts, active } => {
+                let body = self.stack(d, path, parts, *active, scope, outer);
+                let own = self.edges(t, arrange::Dir::Row, on, scope).0;
+                let at: Vec<String> = path.iter().map(usize::to_string).collect();
+                return self.cell(format!("{}:dock:{}:{}:stack", scope.id, d.name, at.join(".")), lines, own, body);
+            },
             Shown::Split { dir, path, sizes, items } => (dir, path, sizes, items),
         };
         let mut cells = vec![];
+        // The trailing edge of the cell before.
+        let mut prev = true;
         for (ix, child) in items {
             // A stack sizes as the part it shows.
             let part = match child {
@@ -841,7 +900,8 @@ impl Drawer<'_, '_> {
                     None => (false, None),
                 },
             };
-            let body = self.tree(d, child, scope, outer);
+            let body = self.tree(d, child, lines.of_cell(*dir, cells.len(), prev), scope, outer);
+            prev = self.edges(child, *dir, on, scope).1;
             cells.push((range, fixed, size, body));
         }
         if self.locked() {
@@ -857,6 +917,7 @@ impl Drawer<'_, '_> {
         for (range, fixed, size, body) in cells {
             group = group.child(self.panel(range, fixed, size, false).child(body));
         }
+        group = group.with_handle_appearance(no_line());
         if let Some(on_change) = scope.on_change.clone() {
             let (dock, path, stored) = (d.name.clone(), path.clone(), sizes.clone());
             let kept: Vec<usize> = items.iter().map(|(i, _)| *i).collect();
@@ -873,23 +934,49 @@ impl Drawer<'_, '_> {
     /// A dock's split while the layout is locked: the same parts in a plain
     /// row or column, with nothing to drag. Parts with a size keep it.
     fn locked_tree(&self, dir: arrange::Dir, cells: Vec<(Range<Pixels>, bool, Option<Pixels>, AnyElement)>) -> AnyElement {
-        use gpui_kit::component::ActiveTheme as _;
-        let line = self.cx.theme().border;
         let row = dir == arrange::Dir::Row;
         let mut group = div().flex().size_full();
         group = if row { group.flex_row() } else { group.flex_col() };
-        for (i, (_, fixed, size, body)) in cells.into_iter().enumerate() {
+        for (_, fixed, size, body) in cells {
             let mut cell = div().flex().relative().size_full().min_w_0().min_h_0();
             cell = match size.filter(|_| fixed) {
                 Some(size) => cell.flex_none().flex_basis(size),
                 None => cell.flex_1(),
             };
-            if i > 0 {
-                cell = if row { cell.border_l_1() } else { cell.border_t_1() }.border_color(line);
-            }
             group = group.child(cell.child(body));
         }
         group.into_any_element()
+    }
+
+    /// `body` in template `split.cell`, which draws the `lines` wanted on its
+    /// left and top; `own` is whether `body` itself is bordered. Without
+    /// lines wanted, `body` as it is.
+    fn cell(&self, id: String, lines: Lines, own: bool, body: AnyElement) -> AnyElement {
+        split_cell(id, lines.left, lines.top, own, body, self.cx)
+    }
+
+    /// Whether `t`, in a split along `dir`, has its (leading, trailing) edges
+    /// bordered: a part unless it is a panel group without borders, all of
+    /// it when `on` is false.
+    fn edges(&self, t: &Shown, dir: arrange::Dir, on: bool, scope: &Scope) -> (bool, bool) {
+        let bordered = |part: &str| on && scope.arrangement.as_ref().is_none_or(|a| a.bordered(part));
+        match t {
+            Shown::Part(name) => (bordered(name), bordered(name)),
+            Shown::Stack { parts, active, .. } => {
+                let b = parts.get(*active).is_none_or(|p| bordered(p));
+                (b, b)
+            },
+            Shown::Split { dir: along, items, .. } => {
+                let edges: Vec<(bool, bool)> = items.iter().map(|(_, c)| self.edges(c, dir, on, scope)).collect();
+                // Along `dir` the first child is at the leading edge and the
+                // last at the trailing one; across it, all of them are at both.
+                if *along == dir {
+                    (edges.first().is_none_or(|e| e.0), edges.last().is_none_or(|e| e.1))
+                } else {
+                    (edges.iter().all(|e| e.0), edges.iter().all(|e| e.1))
+                }
+            },
+        }
     }
 
     /// The node's look: its element and style, with the states that hold;
@@ -1254,4 +1341,57 @@ fn ring_at(turn: f32, full: Option<f32>, arc: Hsla, track: Hsla, width: Pixels) 
         },
     )
     .size_full()
+}
+
+/// `body` in template `split.cell`, which draws a line on its left and on
+/// its top where one is wanted: `left` and `top` say whether the cell across
+/// that line is bordered (None: no line there), `own` whether `body` is.
+/// Without lines wanted, `body` as it is.
+pub fn split_cell(id: String, left: Option<bool>, top: Option<bool>, own: bool, body: AnyElement, cx: &App) -> AnyElement {
+    if left.is_none() && top.is_none() {
+        return body;
+    }
+    let scope = Scope::new(id)
+        .var("left", left.is_some())
+        .var("top", top.is_some())
+        .var("left_border", left.unwrap_or(false))
+        .var("top_border", top.unwrap_or(false))
+        .var("border", own)
+        .slot("content", body);
+    render("split.cell", scope, &mut |_, _, f| f.into_any_element(), cx)
+}
+
+/// A split's dividers without their line (template `split.cell` draws the
+/// lines): only the design system's pill, which grows as the pointer takes
+/// the divider.
+pub fn no_line() -> gpui_kit::base::ResizeHandleRenderer {
+    use gpui_kit::base::{ResizeHandleState, Transition, transition};
+    use gpui_kit::component::ActiveTheme as _;
+    const THICKNESS: Pixels = px(3.);
+    Rc::new(|handle, window, cx| {
+        let (length, opacity) = match handle.state() {
+            ResizeHandleState::Idle => (px(0.), 0.),
+            ResizeHandleState::Hovered => (px(20.), 0.35),
+            ResizeHandleState::Pressed => (px(28.), 0.6),
+            ResizeHandleState::Dragging => (px(44.), 0.9),
+        };
+        let motion = cx.theme().motion_tokens();
+        let policy = Transition::new(motion.duration_fast).easing(motion.easing_move.clone());
+        let length = transition("split-divider-length", length, policy.clone(), window, cx);
+        let opacity = transition("split-divider-opacity", opacity, policy, window, cx);
+        let horizontal = handle.axis() == Axis::Horizontal;
+        // Where the line was: the pill straddles it.
+        let mut line = div().flex_none().flex();
+        line = if horizontal { line.w(px(1.)).h_full().items_center() } else { line.h(px(1.)).w_full().items_start().justify_center() };
+        if length > px(0.5) {
+            let pill = div().flex_none().rounded(cx.theme().radius_full()).bg(cx.theme().muted_foreground).opacity(opacity);
+            let pill = if horizontal {
+                pill.w(THICKNESS).h(length).ml((THICKNESS - px(1.)) * -0.5)
+            } else {
+                pill.h(THICKNESS).w(length).mt((THICKNESS - px(1.)) * -0.5)
+            };
+            line = line.child(pill);
+        }
+        Some(line.into_any_element())
+    })
 }
