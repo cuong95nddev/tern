@@ -33,9 +33,12 @@ opt-level = 1
 # first layout included, so off-screen rows counted as zero height and the
 # diff view could not scroll past its first screen. The Metal and DirectX
 # renderers added up alpha, so a see-through window turned opaque under a
-# few layers. See vendor/README.md.
+# few layers. gpui-component's text view hid the base view's image resolver,
+# so the Markdown preview could not show a note's own images. See
+# vendor/README.md.
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+gpui-component = { path = "vendor/gpui-component" }
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

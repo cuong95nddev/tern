@@ -7,6 +7,8 @@ edition.workspace = true
 embed-resource = "3.0"
 
 [dependencies]
+# Markdown preview: `data:` images, which an image resolver decodes itself.
+data-url = "0.3"
 dunce = "1"
 env_logger = "0.11.11"
 flume = "0.12.0"

@@ -1,14 +1,17 @@
 //! File tab: preview / light editor (tree-sitter) and diff vs HEAD.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{DefinitionProvider, Editor, EditorState, GoToDefinition, InputEvent, Position, Rope, RopeExt};
 use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use tern_fs::ops;
 
 use crate::diff_pane::{DiffPane, language_for};
 use crate::platform::bind;
@@ -144,6 +147,9 @@ pub struct Viewer {
     message: Option<SharedString>,
     /// Where to put the cursor once the file being loaded is in.
     go_to: Option<Position>,
+    /// What each image in the Markdown preview resolved to; cleared when the
+    /// note reloads or an image file changes.
+    images: ImageCache,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
     _load: Option<Task<()>>,
@@ -193,6 +199,92 @@ fn load_file(path: &Path) -> Loaded {
         return Loaded::Message("Binary file".into());
     }
     Loaded::Text(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+type ImageCache = Arc<Mutex<HashMap<SharedUri, Found>>>;
+
+/// Where a Markdown image loads from ([`find_image`]).
+#[derive(Debug, Clone, PartialEq)]
+enum Found {
+    File(PathBuf),
+    Bytes(Arc<Image>),
+    /// Left to GPUI's loader, which fetches over HTTP.
+    Uri,
+}
+
+impl Found {
+    fn source(self, url: &SharedUri) -> ImageSource {
+        match self {
+            Found::File(path) => path.into(),
+            Found::Bytes(image) => ImageSource::Image(image),
+            Found::Uri => url.clone().into(),
+        }
+    }
+}
+
+/// Where a Markdown image in a note in `dir` loads from: a relative path (or
+/// `/x`, relative to `root`) from the file, if it is inside the workspace; a
+/// `data:` URL from its own bytes; anything else as a URI.
+fn find_image(root: &Path, dir: &Path, url: &str) -> Found {
+    if url.starts_with("data:") {
+        let decoded = data_url::DataUrl::process(url).ok().and_then(|d| {
+            let mime = d.mime_type();
+            let format = ImageFormat::from_mime_type(&format!("{}/{}", mime.type_, mime.subtype))?;
+            Some(Image::from_bytes(format, d.decode_to_vec().ok()?.0))
+        });
+        if let Some(image) = decoded {
+            return Found::Bytes(Arc::new(image));
+        }
+    } else if !url.contains(':') && !url.starts_with("//") {
+        let target = url.split(['#', '?']).next().unwrap_or("");
+        let file = link_target(root, dir, target).or_else(|| link_target(root, dir, &percent_decode(target)?));
+        if let Some(file) = file {
+            return Found::File(file);
+        }
+    }
+    Found::Uri
+}
+
+/// `%XX` escapes decoded (as written for GitHub: `My%20Shot.png`), or none
+/// when there are none or they don't make UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    if !s.contains('%') {
+        return None;
+    }
+    let (bytes, mut out, mut i) = (s.as_bytes(), Vec::with_capacity(s.len()), 0);
+    while i < bytes.len() {
+        let hex = (bytes[i] == b'%').then(|| s.get(i + 1..i + 3)).flatten().and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            },
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `file` relative to folder `dir` (both resolved), with `..` steps as needed.
+fn relative(dir: &Path, file: &Path) -> PathBuf {
+    let (dir, file): (Vec<_>, Vec<_>) = (dir.components().collect(), file.components().collect());
+    let common = dir.iter().zip(&file).take_while(|(a, b)| a == b).count();
+    let mut out: PathBuf = dir[common..].iter().map(|_| "..").collect();
+    out.extend(&file[common..]);
+    out
+}
+
+/// A Markdown image of `file` for a note in `dir`: relative, `/`-separated,
+/// in `<...>` when a space or bracket would end it early.
+fn image_markdown(dir: &Path, file: &Path) -> String {
+    let rel = relative(dir, file);
+    let dest = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let dest = if dest.contains([' ', '(', ')', '<', '>']) { format!("<{}>", dest.replace('<', "\\<").replace('>', "\\>")) } else { dest };
+    let alt = file.file_stem().map(|s| s.to_string_lossy().replace(['[', ']'], "")).unwrap_or_default();
+    format!("![{alt}]({dest})")
 }
 
 /// Resolve `.` and `..` lexically, so a linked path compares equal to the
@@ -250,6 +342,7 @@ impl Viewer {
             loading: false,
             language: None,
             go_to: None,
+            images: ImageCache::default(),
             message: None,
             focus: cx.focus_handle(),
             // The decoded image stays in the app's asset cache until removed.
@@ -332,6 +425,7 @@ impl Viewer {
         if self.dirty {
             return;
         }
+        self.images.lock().unwrap().clear();
         let lang = language_for(&path);
         self._load = Some(cx.spawn_in(window, async move |this, cx| {
             let p = path.clone();
@@ -397,6 +491,11 @@ impl Viewer {
 
     /// Paths changed on disk: reload if the open file is among them.
     pub fn files_changed(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        // An image the preview shows (or couldn't find) may be among them.
+        if paths.iter().any(|p| image_format(p).is_some()) {
+            self.images.lock().unwrap().clear();
+            cx.notify();
+        }
         if let Some(p) = &self.path
             && paths.iter().any(|c| c == p)
         {
@@ -448,6 +547,40 @@ impl Viewer {
             self.reload(window, cx);
             self.sync_preview(cx);
         }
+        cx.notify();
+    }
+
+    /// Images dropped from Finder on a Markdown file: each linked at the
+    /// cursor. One from outside the workspace is copied beside the note first
+    /// (a taken name getting a ` copy` suffix), so the link stays good.
+    fn drop_images(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) else { return };
+        let (Ok(real_dir), Ok(real_root)) = (dir.canonicalize(), self.root.canonicalize()) else { return };
+        let mut links = Vec::new();
+        for p in paths.paths().iter().filter(|p| image_format(p).is_some() && p.is_file()) {
+            let inside = p.canonicalize().ok().filter(|r| r.starts_with(&real_root) && r.is_file());
+            let file = match inside {
+                Some(real) => real,
+                None => match ops::copy_into(p, &dir).and_then(|to| to.canonicalize()) {
+                    Ok(to) => to,
+                    Err(e) => {
+                        window.push_notification(format!("Could not copy '{}': {e}", p.display()), cx);
+                        continue;
+                    },
+                },
+            };
+            links.push(image_markdown(&real_dir, &file));
+        }
+        if links.is_empty() {
+            return;
+        }
+        // In the editor, where the links land.
+        self.mode = Mode::Edit;
+        self.editor.update(cx, |ed, cx| {
+            ed.insert(links.join("\n"), window, cx);
+            ed.focus(window, cx);
+        });
+        self.dirty = true;
         cx.notify();
     }
 
@@ -593,12 +726,25 @@ impl Render for Viewer {
             )
         } else if self.mode == Mode::Preview {
             let viewer = me.clone();
+            let (root, dir) = (self.root.clone(), self.path.as_deref().and_then(Path::parent).unwrap_or(&self.root).to_path_buf());
+            let images = self.images.clone();
             scope.slot(
                 "preview",
-                TextView::new(&self.preview).scrollable(true).size_full().px_4().py_2().on_link_click(move |url, _, _, cx| {
-                    let url = url.clone();
-                    let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
-                }),
+                TextView::new(&self.preview)
+                    .scrollable(true)
+                    .size_full()
+                    .px_4()
+                    .py_2()
+                    // Asked every frame: each URL is resolved (a few file
+                    // system calls) once.
+                    .image_source(move |url| {
+                        let found = images.lock().unwrap().entry(url.clone()).or_insert_with(|| find_image(&root, &dir, url)).clone();
+                        found.source(url)
+                    })
+                    .on_link_click(move |url, _, _, cx| {
+                        let url = url.clone();
+                        let _ = viewer.update(cx, |v, cx| v.open_link(&url, cx));
+                    }),
             )
         } else {
             scope.slot("editor", Editor::new(&self.editor).bordered(false).h_full())
@@ -616,6 +762,7 @@ impl Render for Viewer {
                     .on_action(cx.listener(Self::toggle_preview))
                     .on_action(cx.listener(Self::open_external))
                     .on_action(cx.listener(Self::toggle_word_wrap))
+                    .when(markdown && !diff_mode && !is_image, |d| d.on_drop(cx.listener(Self::drop_images)))
                     .into_any_element(),
                 ("preview", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, w, cx| this.toggle_preview(&TogglePreview, w, cx))).into_any_element()
@@ -638,7 +785,7 @@ impl Render for Viewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, PathBuf, image_format, is_markdown, normalize};
+    use super::{Found, Path, PathBuf, find_image, image_format, image_markdown, is_markdown, normalize, percent_decode, relative};
 
     #[test]
     fn normalize_resolves_dots() {
@@ -686,5 +833,45 @@ mod tests {
         assert!(image_format(Path::new("photo.jpeg")).is_some());
         assert!(image_format(Path::new("main.rs")).is_none());
         assert!(image_format(Path::new("png")).is_none());
+    }
+
+    #[test]
+    fn percent_escapes() {
+        assert_eq!(percent_decode("My%20Shot.png").as_deref(), Some("My Shot.png"));
+        assert_eq!(percent_decode("100%.png").as_deref(), Some("100%.png"));
+        assert_eq!(percent_decode("plain.png"), None);
+    }
+
+    #[test]
+    fn preview_images_load_from_inside_the_root() {
+        let base = std::env::temp_dir().join(format!("tern-viewer-img-{}", std::process::id()));
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(root.join("docs/img")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("docs/img/My Shot.png"), b"png").unwrap();
+        std::fs::write(outside.join("x.png"), b"png").unwrap();
+        let docs = root.join("docs");
+        let shot = Found::File(docs.join("img/My Shot.png"));
+        assert_eq!(find_image(&root, &docs, "img/My Shot.png"), shot.clone());
+        assert_eq!(find_image(&root, &docs, "img/My%20Shot.png"), shot.clone());
+        assert_eq!(find_image(&root, &docs, "/docs/img/My Shot.png"), shot.clone());
+        assert_eq!(find_image(&root, &docs, "../../outside/x.png"), Found::Uri);
+        assert_eq!(find_image(&root, &docs, "https://example.com/a.png"), Found::Uri);
+        assert!(matches!(find_image(&root, &docs, "data:image/png;base64,iVBORw0KGgo="), Found::Bytes(_)));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn relative_paths() {
+        assert_eq!(relative(Path::new("/r/docs"), Path::new("/r/docs/a.png")), PathBuf::from("a.png"));
+        assert_eq!(relative(Path::new("/r/docs"), Path::new("/r/img/a.png")), PathBuf::from("../img/a.png"));
+        assert_eq!(relative(Path::new("/r/a/b"), Path::new("/r/c.png")), PathBuf::from("../../c.png"));
+    }
+
+    #[test]
+    fn image_links() {
+        assert_eq!(image_markdown(Path::new("/r"), Path::new("/r/img/shot.png")), "![shot](img/shot.png)");
+        assert_eq!(image_markdown(Path::new("/r/d"), Path::new("/r/Screen Shot (1).png")), "![Screen Shot (1)](<../Screen Shot (1).png>)");
+        assert_eq!(image_markdown(Path::new("/r"), Path::new("/r/[x]<y>.png")), r"![x<y>](<[x]\<y\>.png>)");
     }
 }

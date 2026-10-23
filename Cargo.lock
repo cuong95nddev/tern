@@ -2340,8 +2340,6 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465a363235cd4062ef5f0953fc096fc764ed6f53dfbd9f409f669f93ea3b1ff9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6657,6 +6655,7 @@ version = "0.8.0"
 dependencies = [
  "ab_glyph",
  "block2 0.6.2",
+ "data-url",
  "dunce",
  "embed-resource",
  "env_logger",

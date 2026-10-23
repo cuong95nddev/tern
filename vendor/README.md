@@ -33,6 +33,17 @@ panel at 30% over the window at 30% over the workspace at 30% was solid. The
 destination's alpha now goes by `OneMinusSourceAlpha`, the usual "over", as
 the wgpu renderer (Linux) already does with `PREMULTIPLIED_ALPHA_BLENDING`.
 
+## gpui-component 0.7.3
+
+Left out: `Cargo.lock`.
+
+`src/text/compat.rs`, `TextView::image_source`: the component's `TextView`
+wraps gpui-base's and forwards its builder methods, all but `image_source`.
+Without it an image's URL went to GPUI's loader, which only fetches over
+HTTP, so a Markdown preview showed none of a note's own images
+(`![](img/shot.png)`). The method forwards to the base view's, as
+`on_link_click` does.
+
 ## alacritty_terminal 0.26.0
 
 Left out: `tests/` (46 MB of reference recordings) and its `[[test]]` entry.

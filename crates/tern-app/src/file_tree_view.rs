@@ -354,6 +354,15 @@ impl FileTreeView {
         }
     }
 
+    /// Files and folders dropped from Finder (or another app) on `dir`:
+    /// copied in, a taken name getting a ` copy` suffix.
+    fn import(&mut self, dir: PathBuf, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if !paths.is_empty() {
+            self.transfer(paths, &dir, false, window, cx);
+        }
+    }
+
     // ----- name field -----
 
     fn new_entry(&mut self, dir: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -855,9 +864,14 @@ impl FileTreeView {
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, window, cx| this.right_click(Some(real), window, cx)))
                     .when_some(drag.take(), |d, drag| d.on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone())))
                     .drag_over::<DraggedEntries>(move |s, _, _, _| s.bg(drop_bg))
+                    .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_bg))
                     .on_drop(cx.listener({
                         let drop_dir = drop_dir.clone();
                         move |this, d: &DraggedEntries, window, cx| this.drop_on(drop_dir.clone(), &d.paths, window, cx)
+                    }))
+                    .on_drop(cx.listener({
+                        let drop_dir = drop_dir.clone();
+                        move |this, d: &ExternalPaths, window, cx| this.import(drop_dir.clone(), d.paths(), window, cx)
                     }))
                     .into_any_element(),
                 (_, f) => f.into_any_element(),
@@ -913,7 +927,11 @@ impl Render for FileTreeView {
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)))
-            .on_drop(cx.listener(move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)))
+            .on_drop(cx.listener({
+                let root = root.clone();
+                move |this, d: &DraggedEntries, window, cx| this.drop_on(root.clone(), &d.paths, window, cx)
+            }))
+            .on_drop(cx.listener(move |this, d: &ExternalPaths, window, cx| this.import(root.clone(), d.paths(), window, cx)))
             .child(
                 uniform_list("file-tree", self.display_len(), cx.processor(Self::render_rows))
                     .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
