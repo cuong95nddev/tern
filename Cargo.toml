@@ -34,11 +34,13 @@ opt-level = 1
 # diff view could not scroll past its first screen. The Metal and DirectX
 # renderers added up alpha, so a see-through window turned opaque under a
 # few layers. gpui-component's text view hid the base view's image resolver,
-# so the Markdown preview could not show a note's own images. See
+# so the Markdown preview could not show a note's own images. macOS
+# notifications came without a sound. See
 # vendor/README.md.
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 gpui-component = { path = "vendor/gpui-component" }
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

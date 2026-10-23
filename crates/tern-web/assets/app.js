@@ -8,8 +8,9 @@ const $ = (id) => document.getElementById(id);
 
 const FONT = 'Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
 const LINE_HEIGHT = 1.15;
-// The page asks for the grid that fits its screen at this font size; the
-// session takes it while the page has the session (see bridge.rs). Until it
+// Once fitted (see `fitted`), the page asks for the grid that fits its screen
+// at this font size; the session takes it while the page has the session
+// (see bridge.rs). Until it
 // does, or once the desktop takes it back, the page draws the grid it has at
 // this size or smaller until it fits. The zoom buttons change it, for this
 // browser only.
@@ -20,10 +21,22 @@ const MIN_FONT = 7;
 // The smallest the zoom buttons go: below it the grid is drawn scaled down.
 const MIN_ZOOM = 9;
 let fontSize = savedFont();
+// A phone shows a terminal at the desktop's size until Fit to Phone is
+// tapped: it doesn't take the session's size just by opening it. A desktop
+// browser fits at once.
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+const FIT_AT_ONCE = !TOUCH;
+// Whether this page asks for the grid that fits it, for the session shown.
+let fitted = FIT_AT_ONCE;
+// Who has the session shown, as `control` said last.
+let controller = "you";
 
 let socket = null;
 let retry = 0;
 let theme = null;
+// The server build that served this page; another one after a reconnect
+// (an update replaced the server) has a newer page.
+let build = null;
 let sessions = [];
 // The session shown, and the one asked for whose snapshot hasn't come yet
 // (output before it belongs to the session left).
@@ -105,6 +118,8 @@ function send(msg) {
 function onText(m) {
   switch (m.t) {
     case "hello":
+      if (build != null && m.build !== build) return location.reload();
+      build = m.build;
       theme = m.theme;
       document.documentElement.style.setProperty("--bg", theme.background);
       document.documentElement.style.setProperty("--fg", theme.foreground);
@@ -127,6 +142,7 @@ function onText(m) {
       term.resize(m.cols, m.rows);
       snapshotNext = true;
       setBanner(null);
+      fitted = FIT_AT_ONCE;
       setControl("you");
       layout();
       fit(true);
@@ -201,14 +217,23 @@ const STATUS = { Working: "Working", Blocked: "Needs input", Done: "Done" };
 const PRIORITY = { Blocked: 3, Working: 2, Done: 1 };
 // Lucide icons, as the app draws them.
 const ICON = {
-  Working: '<circle cx="12" cy="12" r="10" stroke-dasharray="3.5 2.8"/>',
-  Blocked: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
-  Done: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
   folder: '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
   open: '<path d="m6 9 6 6 6-6"/>',
   closed: '<path d="m9 18 6-6-6-6"/>',
   terminal: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/>',
-  claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/>',
+};
+
+// An agent's state icon, as the app's `agents::GLYPHS` (16×16, in the text
+// color): a disc with the tick cut out once its turn is done, a quiet tick
+// once seen, a ring and dot while it waits for you, an empty ring before its
+// first turn; while it works, an arc turning on its track (`agents.ring`).
+const GLYPH = {
+  done: '<mask id="m"><rect width="16" height="16" fill="white"/><path d="M5.1 8.2l2 2 3.8-4.1" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="8" cy="8" r="7.2" fill="currentColor" mask="url(#m)"/>',
+  seen: '<path d="M4.2 8.4l2.6 2.6 5-5.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  needs: '<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="8" r="3.2" fill="currentColor"/>',
+  pending: '<circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.3"/>',
+  // r 5.8: 13.3 wide with its stroke, as `agents.ring`; the arc is 75% of it.
+  working: '<circle class="track" cx="8" cy="8" r="5.8" fill="none" stroke-width="1.7"/><circle class="arc" cx="8" cy="8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" pathLength="100" stroke-dasharray="75 100"/>',
 };
 
 function icon(name, cls) {
@@ -216,6 +241,26 @@ function icon(name, cls) {
   span.className = `ic ${cls || ""}`;
   span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
   return span;
+}
+
+// Each mask its own id: one in a hidden row would hide the rest.
+let masks = 0;
+
+function glyph(state) {
+  const span = document.createElement("span");
+  span.className = `state ${state}`;
+  const id = `m${++masks}`;
+  span.innerHTML = `<svg viewBox="0 0 16 16">${GLYPH[state].replace('id="m"', `id="${id}"`).replace("url(#m)", `url(#${id})`)}</svg>`;
+  return span;
+}
+
+// The agent's logo, as the app's row draws it.
+function logo() {
+  const img = document.createElement("img");
+  img.className = "ic";
+  img.src = "/agents/claude.svg";
+  img.alt = "";
+  return img;
 }
 
 // When each session's state was last seen to change: its working time, or
@@ -246,18 +291,30 @@ function noteStatuses() {
     seen.add(s.id);
     const key = s.exited ? "exited" : s.status;
     const was = since.get(s.id);
-    if (!was || was.status !== key) since.set(s.id, { status: key, at: now });
+    // A turn this page saw end, as the app's tick once its tab was seen.
+    const done = (was?.done || was?.status === "Done") && key === "None";
+    if (!was || was.status !== key) since.set(s.id, { status: key, at: now, done });
   }
   for (const id of since.keys()) if (!seen.has(id)) since.delete(id);
 }
 
-// A row's state: label, icon and class (the color), as `agents::status_look`.
+// A row's state, as `agents::ring_vars`: its time (working, or since the
+// state began), its icon, and all of it in words.
 function statusLook(s) {
-  const at = since.get(s.id)?.at ?? Date.now();
-  if (s.exited) return { text: "Ended", cls: "" };
-  if (s.status === "Working") return { text: `Working ${workingLabel(Date.now() - at)}`, icon: "Working", cls: "Working" };
-  if (STATUS[s.status]) return { text: STATUS[s.status], icon: s.status, cls: s.status };
-  return { text: agoLabel(Date.now() - at), cls: "" };
+  const was = since.get(s.id);
+  const ms = Date.now() - (was?.at ?? Date.now());
+  if (s.exited) return { text: "Ended", time: agoLabel(ms), state: "pending" };
+  if (s.status === "Working") return { text: `Working ${workingLabel(ms)}`, time: workingLabel(ms), state: "working" };
+  if (s.status === "Blocked") return { text: "Needs input", time: agoLabel(ms), state: "needs" };
+  if (s.status === "Done") return { text: "Done", time: agoLabel(ms), state: "done" };
+  const state = was?.done ? "seen" : "pending";
+  return { text: state === "seen" ? "Done" : agoLabel(ms), time: agoLabel(ms), state };
+}
+
+// What a folder's line says of its agents that wait for you, in place of its
+// dot, as `agents::needs_label`.
+function needsLabel(n) {
+  return `${n} need${n === 1 ? "s" : ""} you`;
 }
 
 function renderList() {
@@ -285,8 +342,15 @@ function renderList() {
     const fill = document.createElement("span");
     fill.className = "fill";
     folder.append(name, icon(open ? "open" : "closed", "chevron"), fill);
-    const top = list.filter((s) => !s.exited).map((s) => s.status).sort((a, b) => (PRIORITY[b] ?? 0) - (PRIORITY[a] ?? 0))[0];
-    if (PRIORITY[top]) {
+    const live = list.filter((s) => !s.exited);
+    const needs = live.filter((s) => s.status === "Blocked").length;
+    const top = live.map((s) => s.status).sort((a, b) => (PRIORITY[b] ?? 0) - (PRIORITY[a] ?? 0))[0];
+    if (needs) {
+      const n = document.createElement("span");
+      n.className = "needs-count";
+      n.textContent = needsLabel(needs);
+      folder.append(n);
+    } else if (PRIORITY[top]) {
       const dot = document.createElement("span");
       dot.className = `dot ${top}`;
       folder.append(dot);
@@ -299,17 +363,17 @@ function renderList() {
     if (!open) continue;
     for (const s of list) {
       const li = document.createElement("li");
-      li.className = `tab ${s.exited ? "exited" : ""} ${s.status === "Working" ? "working" : ""} ${s.id === (pending ?? current) ? "on" : ""}`;
-      li.append(icon("claude", "agent"));
+      const look = statusLook(s);
+      li.className = `tab ${s.exited ? "exited" : ""} ${look.state} ${s.id === (pending ?? current) ? "on" : ""}`;
+      li.title = look.text;
+      li.append(logo());
       const title = document.createElement("span");
       title.className = "name";
       title.textContent = label(s);
       li.append(title);
-      const look = statusLook(s);
       const status = document.createElement("span");
-      status.className = `status ${look.cls}`;
-      if (look.icon) status.append(icon(look.icon));
-      status.append(look.text);
+      status.className = "status";
+      status.append(look.time, glyph(look.state));
       li.append(status);
       li.onclick = () => openSession(s.id);
       ul.append(li);
@@ -355,7 +419,7 @@ function renderTabs() {
     ...list.map((x) => {
       const b = document.createElement("button");
       b.className = `tab ${x.id === id ? "on" : ""}`;
-      b.append(icon(x.claude ? "claude" : "terminal", x.claude ? "agent" : "muted"));
+      b.append(x.claude ? logo() : icon("terminal", "muted"));
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = label(x);
@@ -449,6 +513,70 @@ function ensureTerm() {
     input(d);
   });
   term.onBinary((d) => input(d));
+  if (TOUCH) typeAsAField(term);
+}
+
+// A phone's keyboard edits the text it typed in place: Vietnamese (Telex,
+// VNI) turns "aa" into "â", autocorrect swaps a word. xterm.js takes only
+// inserted text, so those edits were lost. On a touch screen the terminal's
+// text box is read as a field instead: what changed in it since the last
+// look goes to the program, as Backspaces and the new text. Enter, arrows,
+// Tab, Esc and Ctrl keys stay xterm.js's; the box starts empty after them.
+function typeAsAField(t) {
+  const box = t.textarea;
+  // The box's text the program has been sent.
+  let sent = "";
+  let composing = false;
+  const clear = () => {
+    box.value = "";
+    sent = "";
+  };
+  const sync = () => {
+    const now = box.value.normalize("NFC");
+    const was = Array.from(sent);
+    const is = Array.from(now);
+    let same = 0;
+    while (same < was.length && same < is.length && was[same] === is[same]) same++;
+    const d = "\x7f".repeat(was.length - same) + is.slice(same).join("");
+    sent = now;
+    if (d) input(d);
+    // Kept short, between words: the keyboard needs only the word it edits.
+    if (!composing && sent.length > 200 && /\s$/.test(sent)) clear();
+  };
+  // Caught on the way down to the box, before xterm.js's own listeners
+  // there (also capturing) see it; they don't then.
+  const catchOn = (type, f) => t.element.addEventListener(type, (e) => {
+    if (e.target === box) f(e);
+  }, true);
+  const on = (type, f) => catchOn(type, (e) => {
+    e.stopPropagation();
+    f(e);
+  });
+  on("compositionstart", () => (composing = true));
+  on("compositionupdate", () => {});
+  on("compositionend", () => {
+    composing = false;
+    sync();
+  });
+  on("keypress", () => {});
+  on("input", (e) => {
+    if (e.inputType === "insertLineBreak") {
+      clear();
+      return input("\r");
+    }
+    sync();
+  });
+  catchOn("keydown", (e) => {
+    // Text, or an edit of it: the box's change sends it.
+    const text = e.key.length === 1 || e.key === "Unidentified" || e.key === "Dead";
+    if (e.isComposing || e.keyCode === 229 || (!e.ctrlKey && !e.metaKey && !e.altKey && (text || (e.key === "Backspace" && box.value)))) {
+      e.stopPropagation();
+      return;
+    }
+    // xterm.js sends it; the line goes on from wherever the cursor is now.
+    clear();
+  });
+  box.addEventListener("blur", clear);
 }
 
 // Tern's background server already answers the program's queries (device
@@ -566,7 +694,7 @@ function fit(now) {
 }
 
 function ask(again) {
-  if (!term || current == null || pending != null || $("term-view").hidden) return;
+  if (!fitted || !term || current == null || pending != null || $("term-view").hidden) return;
   const want = fitting();
   const key = `${current} ${want.cols} ${want.rows}`;
   if (again || key !== asked) {
@@ -724,17 +852,24 @@ $("compose").onsubmit = (e) => {
   text.style.height = "auto";
 };
 
-// Who has the session shown: "you" (its size is this page's), "desktop"
-// or "viewer" (another page).
+// Who has the session shown: "you" (its size is this page's, once fitted),
+// "desktop" or "viewer" (another page).
 function setControl(by) {
-  $("control").hidden = by === "you";
-  $("control-text").textContent = by === "desktop" ? "Shown at the desktop's size." : "Another device has this terminal.";
+  controller = by;
+  $("control").hidden = by === "you" && fitted;
+  $("control-text").textContent = by === "viewer" ? "Another device has this terminal." : "Shown at the desktop's size.";
   layout();
   fit();
 }
 
-// Take the session: the terminal fits this screen (typing does too).
-$("drive").onclick = () => send({ t: "drive" });
+// Take the session at this screen's size (typing takes it at the size it
+// has).
+$("drive").onclick = () => {
+  fitted = true;
+  send({ t: "drive" });
+  setControl(controller);
+  fit(true);
+};
 
 function setBanner(textValue) {
   $("banner").hidden = !textValue;

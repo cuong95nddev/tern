@@ -3088,6 +3088,8 @@
       { "when": "grouped", "button": "remove_from_group", "label": "Remove from Group" },
       { "separator": true },
       { "when": "renamable", "button": "rename", "label": "Rename…" },
+      { "when": "terminal && !muted", "button": "mute", "label": "Mute Notifications" },
+      { "when": "muted", "button": "mute", "label": "Unmute Notifications" },
       { "when": "diff_file", "button": "open_file", "label": "Open File" },
       { "when": "has_path", "button": "copy_path", "label": "Copy Path" },
       { "when": "has_path", "button": "reveal", "label": "{reveal}" },

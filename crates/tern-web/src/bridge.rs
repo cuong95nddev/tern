@@ -67,7 +67,7 @@ impl State {
 
 pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Path) {
     let palette = PaletteFile::new(tern_mux::paths::palette_path()).get();
-    if sender.text(&json!({ "t": "hello", "theme": theme(&palette) }).to_string()).is_err() {
+    if sender.text(&json!({ "t": "hello", "theme": theme(&palette), "build": tern_mux::paths::build_id() }).to_string()).is_err() {
         return;
     }
     let (viewer, mut stream) = match Viewer::connect(mux_dir) {

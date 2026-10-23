@@ -27,6 +27,19 @@ pub struct Serving {
     pub local_only: bool,
     /// The paired devices with a page open (see [`crate::access`]).
     pub connected: Vec<String>,
+    /// The server's [`build_id`](tern_mux::paths::build_id); `None` from a
+    /// server older than the field.
+    pub build: Option<String>,
+}
+
+impl Serving {
+    /// Whether the server runs another build than this app: it serves the
+    /// page built into it, so an update shows only once it is replaced.
+    pub fn outdated(&self) -> bool {
+        let ours = tern_mux::paths::build_id();
+        // A build that couldn't be read tells nothing.
+        self.build.as_deref().is_none_or(|b| !b.is_empty() && !ours.is_empty() && b != ours)
+    }
 }
 
 fn dir() -> PathBuf {
@@ -51,6 +64,7 @@ pub(crate) fn write_status(dir: &Path, s: &Serving) -> io::Result<()> {
         "all_networks": s.all_networks,
         "local_only": s.local_only,
         "connected": s.connected,
+        "build": s.build,
     });
     // Whole, for the app reading it.
     let tmp = dir.join(format!("{STATUS}.tmp"));
@@ -81,6 +95,7 @@ fn serving_in(dir: &Path) -> Option<Serving> {
             .and_then(|c| c.as_array())
             .map(|c| c.iter().filter_map(|id| Some(id.as_str()?.to_owned())).collect())
             .unwrap_or_default(),
+        build: v.get("build").and_then(|b| b.as_str()).map(str::to_owned),
     })
 }
 
@@ -94,6 +109,23 @@ pub fn start(all_networks: bool) -> io::Result<()> {
     // The app makes its own pairing links.
     let args: &[&str] = if all_networks { &["--web", "--no-pair", "--bind", "0.0.0.0"] } else { &["--web", "--no-pair"] };
     tern_mux::client::spawn_background(args, log_file().as_deref())
+}
+
+/// Replace a running server of another build with one of this build, on
+/// the same networks. Its pages reconnect, and reload for the new page.
+pub fn replace_outdated(all_networks: bool) -> io::Result<()> {
+    let dir = dir();
+    let Some(old) = serving_in(&dir).filter(Serving::outdated) else { return Ok(()) };
+    tern_mux::client::kill_process(old.pid)?;
+    // The new one can't serve until the old one lets go of the lock.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while lock(&dir).is_err() {
+        if std::time::Instant::now() > deadline {
+            return Err(io::Error::other("the old server didn't stop"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    start(all_networks)
 }
 
 /// End the running server (fine when none runs), and don't start it at
@@ -142,7 +174,14 @@ mod tests {
     fn status_reads_back() {
         let dir = std::env::temp_dir().join(format!("tern-web-status-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let s = Serving { pid: 42, links: vec!["http://a:1/".into()], all_networks: true, local_only: false, connected: vec!["d1".into()] };
+        let s = Serving {
+            pid: 42,
+            links: vec!["http://a:1/".into()],
+            all_networks: true,
+            local_only: false,
+            connected: vec!["d1".into()],
+            build: Some("abc".into()),
+        };
         write_status(&dir, &s).unwrap();
         assert_eq!(serving_in(&dir), None);
         let held = lock(&dir).unwrap();
@@ -152,6 +191,27 @@ mod tests {
         drop(held);
         assert_eq!(serving_in(&dir), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_server_of_another_build_is_outdated() {
+        let ours = tern_mux::paths::build_id().to_owned();
+        let s = |build: Option<&str>| Serving {
+            pid: 1,
+            links: Vec::new(),
+            all_networks: false,
+            local_only: false,
+            connected: Vec::new(),
+            build: build.map(str::to_owned),
+        };
+        assert!(!s(Some(&ours)).outdated());
+        // Older than the field: it can't serve this build's page.
+        assert!(s(None).outdated());
+        // Unreadable: tells nothing.
+        assert!(!s(Some("")).outdated());
+        if !ours.is_empty() {
+            assert!(s(Some("0000")).outdated());
+        }
     }
 
     #[test]

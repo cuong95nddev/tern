@@ -117,13 +117,16 @@ pub fn input(line: &str, cx: &mut App) -> String {
 }
 
 /// At launch: serve the terminals again if the app had that on (the server
-/// outlives the app, but not a restart of the machine).
+/// outlives the app, but not a restart of the machine), and replace a server
+/// an update left behind, which would keep serving its own, older page.
 pub fn start_remote_at_launch(cx: &mut App) {
     cx.background_spawn(async move {
-        if let Some(all_networks) = tern_web::wanted()
-            && tern_web::serving().is_none()
-            && let Err(e) = tern_web::start(all_networks)
-        {
+        let Some(all_networks) = tern_web::wanted() else { return };
+        let started = match tern_web::serving() {
+            None => tern_web::start(all_networks),
+            Some(_) => tern_web::replace_outdated(all_networks),
+        };
+        if let Err(e) = started {
             log::warn!("can't start serving the terminals: {e}");
         }
     })

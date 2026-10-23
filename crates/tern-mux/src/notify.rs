@@ -11,7 +11,9 @@ pub fn post(title: &str, body: &str) {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_foundation::{NSBundle, NSError, NSString};
-    use objc2_user_notifications::{UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter,
+    };
 
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         log::info!("notification not posted (not in an app bundle): {title}: {body}");
@@ -30,6 +32,7 @@ pub fn post(title: &str, body: &str) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
+    content.setSound(Some(&UNNotificationSound::defaultSound()));
     let id = NSString::from_str(&format!(
         "tern-daemon-{}",
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()

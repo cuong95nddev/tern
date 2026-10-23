@@ -30,7 +30,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 8;
+pub const MINOR: u32 = 9;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -39,6 +39,8 @@ pub const GUARD_MINOR: u32 = 5;
 // MINOR 7: the daemon sends `Control` and takes `Drive`.
 /// The first MINOR whose daemon takes `AskHandoff` and `ResumeHandoff`.
 pub const ASK_HANDOFF_MINOR: u32 = 8;
+/// The first MINOR whose daemon takes `Mute`.
+pub const MUTE_MINOR: u32 = 9;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 2;
@@ -153,6 +155,12 @@ pub enum ClientMsg {
     ResumeHandoff {
         id: u64,
         path: Option<String>,
+    },
+    /// Session `id`'s tab mutes (or unmutes) its notifications: the daemon
+    /// doesn't post them while no UI is attached either (MINOR 9).
+    Mute {
+        id: u64,
+        muted: bool,
     },
 }
 

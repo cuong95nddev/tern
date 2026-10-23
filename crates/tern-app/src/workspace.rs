@@ -168,6 +168,8 @@ struct TermTab {
     notified: Option<Instant>,
     /// Rang the bell while not shown; cleared when shown.
     rang: bool,
+    /// Shows no notifications (and tells its daemon session not to).
+    muted: bool,
     /// The output file of an agent's shell it follows (see `open_shell`).
     follows: Option<PathBuf>,
     /// How full its Claude conversation's context window is, from its
@@ -696,6 +698,11 @@ impl Workspace {
             }
             if this.tabs.len() > before {
                 made.push((i, this.tabs[before].entity_id()));
+                if saved.muted.contains(&i)
+                    && let CenterTab::Term(t) = &mut this.tabs[before]
+                {
+                    t.muted = true;
+                }
             }
             if this.tabs.len() > before
                 && let Some(&g) = saved.tab_groups.get(i).copied().flatten().and_then(|g| groups.get(g))
@@ -780,7 +787,8 @@ impl Workspace {
         } else {
             Default::default()
         };
-        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active }
+        let muted = (0..self.tabs.len()).filter(|&i| self.tabs[i].term().is_some_and(|t| t.muted)).collect();
+        SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active, muted }
     }
 
     /// The side panels as this workspace has them.
@@ -1224,6 +1232,7 @@ impl Workspace {
             resuming,
             notified: None,
             rang: false,
+            muted: false,
             follows: None,
             context: None,
             guard: Default::default(),
@@ -1279,6 +1288,7 @@ impl Workspace {
             resuming: false,
             notified: None,
             rang: false,
+            muted: false,
             follows: Some(output),
             context: None,
             guard: Default::default(),
@@ -2079,15 +2089,38 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Show a notification for `view`'s tab unless it showed one moments
-    /// ago (Claude Code sends OSC 9 and a status change for one event).
+    /// Show a notification for `view`'s tab unless it is muted or showed
+    /// one moments ago (Claude Code sends OSC 9 and a status change for one
+    /// event).
     fn notify_for(&mut self, view: &Entity<TerminalView>, title: &str, body: &str, cx: &mut Context<Self>) {
         let Some(tab) = self.term_tab_mut(view) else { return };
-        if tab.notified.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+        if tab.muted || tab.notified.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
             return;
         }
         tab.notified = Some(Instant::now());
         notify_system(title, body, cx);
+    }
+
+    /// The agent `view` runs (`Claude` when it can't tell) and the task its
+    /// tab is named for, for its notifications.
+    fn task_of(&self, view: &Entity<TerminalView>, cx: &App) -> (String, Option<String>) {
+        let v = view.read(cx);
+        let agent = v.agent().map_or("Claude", |a| a.name()).to_owned();
+        let rename = self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view == *view).and_then(|t| t.rename.clone());
+        let title = rename.map_or_else(|| v.title().to_string(), |r| r.to_string());
+        let task = tern_term::status::task_name(&title, &agent);
+        (agent, task)
+    }
+
+    /// Mute tab `ix`'s notifications, or unmute them.
+    fn toggle_mute(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(ix) else { return };
+        t.muted = !t.muted;
+        if let Some(id) = t.view.read(cx).mux_id() {
+            self.services.mux.set_muted(id, t.muted);
+        }
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
     }
 
     fn on_terminal_event(&mut self, view: &Entity<TerminalView>, ev: &TerminalEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2100,8 +2133,14 @@ impl Workspace {
                     // (see `spawn_config`); one it reattached to doesn't.
                     t.resuming = !*attached && t.kind == TabKind::Claude && t.session.is_some();
                 }
-                // The daemon (maybe a new one) keeps its limit.
+                // The daemon (maybe a new one) keeps its limit, and its mute.
                 self.send_guard(view, cx);
+                if let Some(t) = self.term_tab_mut(view)
+                    && t.muted
+                    && let Some(id) = view.read(cx).mux_id()
+                {
+                    self.services.mux.set_muted(id, true);
+                }
                 // Its id goes into the saved session.
                 cx.emit(WorkspaceEvent::TabsChanged);
             },
@@ -2174,13 +2213,9 @@ impl Workspace {
                     view.update(cx, |v, cx| v.clear_done_status(cx));
                 }
                 if !window.is_window_active() || !self.is_shown(view) {
-                    let (title, body) = match status {
-                        ActivityStatus::Blocked => ("Claude needs your input", "Waiting for permission or an answer"),
-                        ActivityStatus::Done => ("Claude finished", "The turn is complete"),
-                        _ => ("", ""),
-                    };
-                    if !title.is_empty() {
-                        self.notify_for(view, title, body, cx);
+                    let (agent, task) = self.task_of(view, cx);
+                    if let Some((title, body)) = tern_term::status::status_notification(*status, &agent, task.as_deref()) {
+                        self.notify_for(view, &title, &body, cx);
                     }
                 }
                 cx.notify();
@@ -2190,8 +2225,8 @@ impl Workspace {
                     let title = match title {
                         Some(t) if !t.is_empty() => t.clone(),
                         _ => {
-                            let v = view.read(cx);
-                            v.agent().map_or_else(|| v.title().to_string(), |a| a.name().to_owned())
+                            let (agent, task) = self.task_of(view, cx);
+                            task.unwrap_or(agent)
                         },
                     };
                     self.notify_for(view, &title, body, cx);
@@ -3008,6 +3043,8 @@ impl Workspace {
             .var("file_tabs", !this.tabs.iter().all(is_file) && this.tabs.iter().any(is_file))
             .var("grouped", own.is_some())
             .var("renamable", matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }))
+            .var("terminal", tab.term().is_some())
+            .var("muted", tab.term().is_some_and(|t| t.muted))
             .var("diff_file", matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()))
             .var("has_path", path.is_some())
             .var("reveal", crate::platform::REVEAL)
@@ -3028,6 +3065,7 @@ impl Workspace {
                 },
                 "remove_from_group" => Self::remove_from_group,
                 "rename" => Self::rename_tab,
+                "mute" => Self::toggle_mute,
                 "open_file" => Self::open_tab_file,
                 "copy_path" => Self::copy_tab_path,
                 "reveal" => Self::reveal_tab_file,

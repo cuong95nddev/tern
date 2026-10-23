@@ -173,6 +173,8 @@ struct Session {
     guard: Guard,
     /// The limit its tab set (none until it does).
     policy: Policy,
+    /// Its tab muted its notifications.
+    muted: bool,
 }
 
 /// The program wasn't typed to: focus reports (DECSET 1004), which a
@@ -687,6 +689,11 @@ impl Server {
                     s.policy = Policy { limit: limit.min(100), auto_switch };
                 }
             },
+            ClientMsg::Mute { id, muted } => {
+                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                    s.muted = muted;
+                }
+            },
             ClientMsg::AskHandoff { id } => {
                 if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
                     // Waiting on the user (a permission) counts as busy: typing
@@ -905,6 +912,7 @@ impl Server {
                     claude_session: None,
                     guard: Guard::default(),
                     policy: Policy::default(),
+                    muted: false,
                 },
             );
             Self::update_idle(&mut st);
@@ -1073,20 +1081,27 @@ impl Server {
         reply
     }
 
-    fn unattended(&self) -> bool {
-        self.notifications && self.state.lock().unwrap().clients == 0
+    /// Whether session `id` notifies the user: no UI is attached (it would)
+    /// and its tab didn't mute it.
+    fn unattended(&self, id: u64) -> bool {
+        let st = self.state.lock().unwrap();
+        self.notifications && st.clients == 0 && !st.sessions.get(&id).is_some_and(|s| s.muted)
     }
 
-    fn agent_name(&self, id: u64) -> String {
+    /// The agent session `id` runs, and its task (from its title; see
+    /// [`tern_term::status::task_name`]).
+    fn agent_name(&self, id: u64) -> (String, Option<String>) {
         let host = self.host(id);
-        let programs = host.map(|h| h.foreground_programs()).unwrap_or_default();
-        if programs.iter().any(|p| p.contains("codex")) {
-            "Codex".into()
+        let programs = host.as_ref().map(|h| h.foreground_programs()).unwrap_or_default();
+        let agent = if programs.iter().any(|p| p.contains("codex")) {
+            "Codex"
         } else if programs.iter().any(|p| p.contains("opencode")) {
-            "OpenCode".into()
+            "OpenCode"
         } else {
-            "Claude".into()
-        }
+            "Claude"
+        };
+        let task = host.and_then(|h| h.title()).and_then(|t| tern_term::status::task_name(&t, agent));
+        (agent.to_owned(), task)
     }
 }
 
@@ -1353,6 +1368,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                     claude_session: s.claude_session,
                     guard: Guard::default(),
                     policy: Policy::default(),
+                    muted: false,
                 },
             );
         }
@@ -1377,20 +1393,21 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
 
 impl Observer for Server {
     fn status(&self, id: u64, _old: ActivityStatus, new: ActivityStatus) {
-        if !self.unattended() {
+        if !self.unattended(id) {
             return;
         }
-        let name = self.agent_name(id);
-        match new {
-            ActivityStatus::Blocked => crate::notify::post(&format!("{name} needs your input"), "Waiting for permission or an answer"),
-            ActivityStatus::Done => crate::notify::post(&format!("{name} finished"), "The turn is complete"),
-            _ => {},
+        let (agent, task) = self.agent_name(id);
+        if let Some((title, body)) = tern_term::status::status_notification(new, &agent, task.as_deref()) {
+            crate::notify::post(&title, &body);
         }
     }
 
     fn notify(&self, id: u64, title: Option<String>, body: String) {
-        if self.unattended() {
-            let title = title.filter(|t| !t.is_empty()).unwrap_or_else(|| self.agent_name(id));
+        if self.unattended(id) {
+            let title = title.filter(|t| !t.is_empty()).unwrap_or_else(|| {
+                let (agent, task) = self.agent_name(id);
+                task.unwrap_or(agent)
+            });
             crate::notify::post(&title, &body);
         }
     }

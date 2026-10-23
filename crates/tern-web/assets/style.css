@@ -127,16 +127,31 @@ body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--l
 
 #list-view { overflow-y: auto; }
 
-#sessions { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 1px; }
+/* As the app's agents panel (templates `agents.folder`, `agents.tab`): a
+   folder row, its agents under it, not indented. A phone (below) gets the
+   same rows larger, to tap. */
+#sessions {
+  --row: 30px;
+  --row-text: 14px;
+  --row-icon: 14px;
+  --state: 16px;
+  --status-text: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 
-/* As the app's agents panel: a folder row, its terminals under it, not indented. */
 #sessions li {
   display: flex;
   gap: 6px;
   align-items: center;
-  min-height: 40px;
-  padding: 0 10px 0 6px;
+  height: var(--row);
+  padding: 0 4px 0 8px;
   border-radius: 6px;
+  font-size: var(--row-text);
   cursor: pointer;
 }
 #sessions li:active { background: var(--raised); }
@@ -144,31 +159,67 @@ body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--l
 #sessions li.folder { font-weight: 600; }
 #sessions li.folder .name { flex: 0 1 auto; }
 #sessions li.folder .fill { flex: 1; }
+#sessions li.folder .ic { width: var(--row-icon); height: var(--row-icon); }
 @media (hover: hover) {
   #sessions li.folder .chevron { opacity: 0; }
   #sessions li.folder:hover .chevron { opacity: 1; }
 }
 #sessions li.on { background: var(--raised); }
-#sessions li.working { opacity: 0.7; }
+#sessions li.working:not(.on) { opacity: 0.7; }
+#sessions li.done { font-weight: 600; }
 #sessions li.exited { opacity: 0.5; }
+/* "1 needs you", in place of the folder's dot. */
+#sessions .needs-count { flex: none; padding: 0 4px; font-weight: 400; font-size: var(--status-text); color: var(--blocked); }
+#sessions .dot { width: 6px; height: 6px; margin: 0 9px; }
 
 .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .ic { display: inline-flex; flex: none; width: 15px; height: 15px; }
 .ic svg { width: 100%; height: 100%; }
 .ic.muted, .ic.chevron { color: var(--muted); }
-.ic.agent { color: #d97757; }
 
-.status { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; color: var(--muted); }
-.status .ic { width: 13px; height: 13px; }
-.status.Working { color: var(--working); }
-.status.Blocked { color: var(--blocked); }
-.status.Done { color: var(--done); }
+/* How long it has been working or since its turn ended, and its icon. */
+.status { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 0 4px; font-size: var(--status-text); font-weight: 400; color: var(--muted); }
+.state { display: inline-flex; flex: none; width: var(--state); height: var(--state); align-items: center; justify-content: center; }
+.state svg { width: 94%; height: 94%; }
+.state.done { color: var(--fg); }
+.state.seen { color: var(--muted); }
+.state.needs { color: var(--blocked); }
+.state.pending { color: color-mix(in srgb, var(--muted) 25%, transparent); }
+.state.working { color: var(--fg); }
+.state.working svg { width: 83%; height: 83%; animation: spin 1s linear infinite; }
+.state.working .track { stroke: color-mix(in srgb, var(--muted) 25%, transparent); }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .dot.Working { background: var(--working); }
 .dot.Blocked { background: var(--blocked); }
 .dot.Done { background: var(--done); }
-#sessions .dot { width: 6px; height: 6px; }
+
+/* A finger, not a pointer: rows and buttons large enough to tap. */
+@media (pointer: coarse) {
+  #sessions {
+    --row: 52px;
+    --row-text: 17px;
+    --row-icon: 20px;
+    --state: 22px;
+    --status-text: 14px;
+    padding: 8px;
+    gap: 4px;
+  }
+  #sessions li { gap: 10px; padding: 0 8px 0 12px; border-radius: 10px; }
+  #sessions li .ic { width: 20px; height: 20px; }
+  #sessions .dot { width: 8px; height: 8px; margin: 0 11px; }
+  .status { gap: 8px; }
+  #bar .icon { width: 44px; height: 44px; font-size: 32px; }
+  #title { font-size: 17px; }
+  #subtitle { font-size: 13px; }
+  #zoom { gap: 6px; }
+  #zoom button { min-width: 48px; height: 40px; font-size: 16px; }
+  #keys button { min-width: 52px; height: 44px; font-size: 16px; }
+  #control button { padding: 8px 14px; }
+  #send { padding: 0 18px; }
+  .dot#conn { width: 10px; height: 10px; }
+}
 
 .note { color: var(--muted); text-align: center; padding: 32px 20px; margin: 0; }
 

@@ -34,6 +34,32 @@ pub fn next_status(prev: ActivityStatus, sig: &OscSignal) -> Option<ActivityStat
     (status != prev).then_some(status)
 }
 
+/// What a tab calls its task in a notification: `title` (a name the user
+/// gave it, or its terminal's title) without the status glyph some agents
+/// put first (Claude Code's "✳"); `None` when that says no more than the
+/// agent's name (Claude Code's own title before it names the task).
+pub fn task_name(title: &str, agent: &str) -> Option<String> {
+    let bare = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    let generic = bare.is_empty() || bare.eq_ignore_ascii_case(agent) || bare.eq_ignore_ascii_case(&format!("{agent} Code"));
+    (!generic).then(|| bare.to_owned())
+}
+
+/// The title and body of the notification for `agent` (e.g. `Claude`)
+/// reaching `status` in the tab whose task is `task` (see [`task_name`]):
+/// the task leads, so it says which of several agents it is; `None` for a
+/// status not notified.
+pub fn status_notification(status: ActivityStatus, agent: &str, task: Option<&str>) -> Option<(String, String)> {
+    let (what, detail) = match status {
+        ActivityStatus::Blocked => ("needs your input", "Waiting for permission or an answer"),
+        ActivityStatus::Done => ("finished", "The turn is complete"),
+        ActivityStatus::None | ActivityStatus::Working => return None,
+    };
+    Some(match task {
+        Some(task) => (task.to_owned(), format!("{agent} {what}")),
+        None => (format!("{agent} {what}"), detail.to_owned()),
+    })
+}
+
 /// Where Claude Code keeps a file per running process, `<pid>.json`, with
 /// its `status` (`busy`, `shell`, `waiting`, `idle`): its own folder's
 /// `sessions`, and those of the Claude accounts Tern added (each runs
@@ -129,6 +155,22 @@ mod tests {
 
     fn st(state: &str) -> OscSignal {
         OscSignal::ProgramStatus(ProgramStatus { state: state.into(), ..Default::default() })
+    }
+
+    #[test]
+    fn notifications_name_the_task() {
+        assert_eq!(task_name("✳ Fix the mute toggle", "Claude").as_deref(), Some("Fix the mute toggle"));
+        assert_eq!(task_name("✳ Claude Code", "Claude"), None);
+        assert_eq!(task_name("  ", "Claude"), None);
+        assert_eq!(
+            status_notification(ActivityStatus::Blocked, "Claude", Some("Fix the mute toggle")),
+            Some(("Fix the mute toggle".into(), "Claude needs your input".into()))
+        );
+        assert_eq!(
+            status_notification(ActivityStatus::Done, "Codex", None),
+            Some(("Codex finished".into(), "The turn is complete".into()))
+        );
+        assert_eq!(status_notification(ActivityStatus::Working, "Claude", None), None);
     }
 
     #[test]

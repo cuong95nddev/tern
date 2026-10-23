@@ -21,7 +21,8 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 use crate::UnixStream;
 use crate::paths;
 use crate::proto::{
-    self, ASK_HANDOFF_MINOR, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo,
+    self, ASK_HANDOFF_MINOR, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, MUTE_MINOR, Role, ServerMsg,
+    SessionInfo,
 };
 
 /// What the client asks who runs in a session's foreground with: the PTY
@@ -478,6 +479,14 @@ impl MuxClient {
         }
     }
 
+    /// Tell the daemon whether session `id`'s tab is muted (an older daemon
+    /// can't: it goes on notifying).
+    pub fn set_muted(&self, id: u64, muted: bool) {
+        if self.inner.server_minor >= MUTE_MINOR {
+            let _ = self.inner.send(ClientMsg::Mute { id, muted });
+        }
+    }
+
     /// Whether the daemon takes the user's handoffs (`ask_handoff`,
     /// `resume_handoff`).
     pub fn takes_handoffs(&self) -> bool {
@@ -564,6 +573,14 @@ impl Connector {
     pub fn set_context_guard(&self, id: u64, limit: u8, auto_switch: bool) {
         if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
             c.set_context_guard(id, limit, auto_switch);
+        }
+    }
+
+    /// Session `id`'s notifications are muted (or not). Only over a live
+    /// connection: the tab tells it again each time it attaches.
+    pub fn set_muted(&self, id: u64, muted: bool) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.set_muted(id, muted);
         }
     }
 

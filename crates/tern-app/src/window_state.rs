@@ -347,6 +347,8 @@ pub struct SavedWorkspace {
     pub tab_panes: Vec<usize>,
     /// Per pane, the tab it shows (none when it is empty).
     pub pane_active: Vec<Option<usize>>,
+    /// The tabs whose notifications are muted.
+    pub muted: Vec<usize>,
 }
 
 /// The side panels, the same in every workspace.
@@ -379,6 +381,7 @@ impl SavedWorkspace {
             panes: String::new(),
             tab_panes: vec![],
             pane_active: vec![],
+            muted: vec![],
         }
     }
 }
@@ -408,7 +411,8 @@ fn field(s: &str) -> String {
 /// one per tab group (`group`, color, collapsed, name) and one per tab, its
 /// kind and fields separated by tabs, after `@N` when it is in group N.
 /// A split center adds `panes`, its layout and each pane's tab (`-` for none),
-/// and `tab-panes`, each tab's pane; older builds skip both lines. Builds
+/// and `tab-panes`, each tab's pane; older builds skip both lines. `muted`
+/// lists the tabs whose notifications are muted (older builds skip it). Builds
 /// before shared panels kept `hidden` and `arrange` per workspace.
 fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
     let mut out = String::new();
@@ -439,6 +443,10 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
             let path = |p: &PathBuf| field(&p.display().to_string());
             for g in &ws.groups {
                 out.push_str(&format!("\t\tgroup\t{}\t{}\t{}\n", field(&g.color), u8::from(g.collapsed), field(&g.name)));
+            }
+            if !ws.muted.is_empty() {
+                let muted: Vec<String> = ws.muted.iter().map(usize::to_string).collect();
+                out.push_str(&format!("\t\tmuted\t{}\n", muted.join(" ")));
             }
             for (i, tab) in ws.tabs.iter().enumerate() {
                 let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
@@ -598,6 +606,8 @@ fn decode_session(text: &str) -> (Vec<SavedWindow>, SavedPanels) {
                 }
             } else if let Some(p) = rest.strip_prefix("tab-panes\t") {
                 ws.tab_panes = p.split_whitespace().map(|n| n.parse().unwrap_or(0)).collect();
+            } else if let Some(m) = rest.strip_prefix("muted\t") {
+                ws.muted = m.split_whitespace().filter_map(|n| n.parse().ok()).collect();
             } else if let Some(g) = rest.strip_prefix("group\t") {
                 let mut parts = g.splitn(3, '\t');
                 let color = parts.next().unwrap_or_default().to_owned();
@@ -780,6 +790,7 @@ mod tests {
                         panes: "h(0,v(1,2))".into(),
                         tab_panes: vec![0, 0, 1, 1, 2, 0, 0, 0, 2],
                         pane_active: vec![Some(0), Some(3), None],
+                        muted: vec![1, 2],
                     },
                     SavedWorkspace::fresh(PathBuf::from("/d")),
                 ],

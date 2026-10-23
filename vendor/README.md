@@ -33,6 +33,18 @@ panel at 30% over the window at 30% over the workspace at 30% was solid. The
 destination's alpha now goes by `OneMinusSourceAlpha`, the usual "over", as
 the wgpu renderer (Linux) already does with `PREMULTIPLIED_ALPHA_BLENDING`.
 
+## gpui-pre-macos 0.3.9
+
+Left out: `Cargo.lock`.
+
+`src/system_notifications.rs`, `NotificationCenter::show` and
+`will_present_notification`: a notification's content had no sound, so every
+one arrived silently (an agent that finished or needed an answer made no
+sound), and the delegate let a notification shown while the app is in front
+have a banner but no sound. The content now has the default sound and the
+delegate presents it with `Sound`. `Cargo.toml` turns on
+objc2-user-notifications' `UNNotificationSound` for it.
+
 ## gpui-component 0.7.3
 
 Left out: `Cargo.lock`.

@@ -15,7 +15,7 @@ pub mod live;
 mod service;
 mod ws;
 
-pub use service::{Serving, last_log_line, log_file, qr, serving, start, stop, wanted};
+pub use service::{Serving, last_log_line, log_file, qr, replace_outdated, serving, start, stop, wanted};
 
 use std::io::{self, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -97,6 +97,8 @@ fn attach_console() {
 }
 
 fn serve(opts: Opts) -> io::Result<()> {
+    // Hash this binary now, before an update can replace it on disk.
+    tern_mux::paths::build_id();
     let mux_dir = tern_mux::paths::mux_dir();
     tern_mux::paths::ensure_private_dir(&mux_dir)?;
     // Held while serving. An app looking at it holds it for a moment.
@@ -150,6 +152,7 @@ fn serve(opts: Opts) -> io::Result<()> {
         all_networks: ip.is_unspecified(),
         local_only: ip.is_loopback(),
         connected: Vec::new(),
+        build: Some(tern_mux::paths::build_id().to_owned()),
     };
     service::write_status(&mux_dir, &status)?;
 
@@ -281,6 +284,8 @@ fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
         "/vendor/addon-unicode11.js" => (include_bytes!("../assets/vendor/addon-unicode11.js"), "text/javascript; charset=utf-8"),
         "/vendor/addon-webgl.js" => (include_bytes!("../assets/vendor/addon-webgl.js"), "text/javascript; charset=utf-8"),
         "/manifest.json" => (include_bytes!("../assets/manifest.json"), "application/manifest+json"),
+        // The app's own logo, as its agents panel draws it.
+        "/agents/claude.svg" => (include_bytes!("../../tern-app/assets/agents/claude.svg"), "image/svg+xml"),
         _ => return None,
     })
 }
@@ -465,7 +470,7 @@ mod tests {
 
     #[test]
     fn every_asset_is_served() {
-        for p in ["/", "/app.js", "/style.css", "/vendor/xterm.js", "/vendor/xterm.css", "/manifest.json"] {
+        for p in ["/", "/app.js", "/style.css", "/vendor/xterm.js", "/vendor/xterm.css", "/manifest.json", "/agents/claude.svg"] {
             assert!(asset(p).is_some_and(|(b, _)| !b.is_empty()), "{p}");
         }
         assert!(asset("/../Cargo.toml").is_none());
