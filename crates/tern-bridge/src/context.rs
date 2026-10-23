@@ -5,6 +5,11 @@
 //! fresh conversation: `/clear`, then the new one is pointed at the handoff
 //! (its `SessionStart` hook answer) and told to go on.
 //!
+//! The user can also ask for a handoff themselves ([`Guard::request`]), to
+//! step away: it is asked for the same way, but the conversation then
+//! stops, and goes on from the handoff only when they say
+//! ([`Guard::resume_from`]).
+//!
 //! How full the window is comes from the status line's input (see
 //! [`crate::statusline`]), the latest one before each hook.
 
@@ -38,6 +43,9 @@ pub enum Action {
 enum Phase {
     #[default]
     Under,
+    /// The user asked for a handoff while it worked: it is told at its
+    /// next hook.
+    Requested,
     /// Told it is past the limit.
     Warned,
     /// Asked for a handoff when it tried to stop.
@@ -57,6 +65,8 @@ pub struct Guard {
     /// It was past the limit at its first reading: a fresh one would be as
     /// full, so it isn't handed off (else it would hand off over and over).
     born_over: bool,
+    /// The handoff under way is the user's (see [`Guard::request`]).
+    by_user: bool,
 }
 
 /// The line the agent ends its handoff turn with.
@@ -71,6 +81,31 @@ impl Guard {
         self.percent
     }
 
+    /// The user asks for a handoff, to step away; `busy`: the agent is in
+    /// a turn. What to send the terminal: an idle agent is asked by a
+    /// prompt, a busy one at its next hook.
+    pub fn request(&mut self, busy: bool) -> Action {
+        if matches!(self.phase, Phase::Asked | Phase::Written { .. }) {
+            return Action::None;
+        }
+        self.by_user = true;
+        if busy {
+            self.phase = Phase::Requested;
+            Action::None
+        } else {
+            self.phase = Phase::Asked;
+            Action::Prompt(self.handoff_request(Policy::default()))
+        }
+    }
+
+    /// The user goes on from `handoff` (its path, when known) in a fresh
+    /// conversation: what to send the terminal.
+    pub fn resume_from(&mut self, handoff: Option<String>) -> Action {
+        self.by_user = false;
+        self.phase = Phase::Written { handoff, clearing: true };
+        Action::Clear
+    }
+
     /// Hook `ev` came: the answer for Claude Code (`None` for `{}`), and
     /// what to send the terminal after.
     pub fn on_event(&mut self, ev: &HookEvent, policy: Policy) -> (Option<Value>, Action) {
@@ -82,7 +117,7 @@ impl Guard {
                     self.fresh = false;
                     self.born_over = self.over(policy);
                 }
-                if self.phase == Phase::Warned && !self.over(policy) {
+                if self.phase == Phase::Warned && !self.by_user && !self.over(policy) {
                     self.phase = Phase::Under;
                 }
                 none
@@ -91,7 +126,7 @@ impl Guard {
                 let fresh = matches!(ev.raw.get("source").and_then(Value::as_str), Some("clear" | "startup"));
                 let phase = std::mem::take(&mut self.phase);
                 self.percent = 0.;
-                (self.fresh, self.born_over) = (fresh, false);
+                (self.fresh, self.born_over, self.by_user) = (fresh, false, false);
                 match phase {
                     Phase::Written { handoff, clearing } if fresh => {
                         let context = continue_context(handoff.as_deref());
@@ -109,19 +144,20 @@ impl Guard {
                     },
                 }
             },
-            "PostToolUse" | "UserPromptSubmit" if self.phase == Phase::Under && self.over(policy) => {
+            "PostToolUse" | "UserPromptSubmit" if self.phase == Phase::Requested || (self.phase == Phase::Under && self.over(policy)) => {
                 self.phase = Phase::Warned;
                 let reply = json!({"hookSpecificOutput": {"hookEventName": ev.event, "additionalContext": self.warning(policy)}});
                 (Some(reply), Action::None)
             },
             "Stop" => match self.phase {
-                Phase::Under | Phase::Warned if self.over(policy) && !stop_hook_active(&ev.raw) => {
+                Phase::Requested | Phase::Under | Phase::Warned if (self.by_user || self.over(policy)) && !stop_hook_active(&ev.raw) => {
                     self.phase = Phase::Asked;
                     (Some(json!({"decision": "block", "reason": self.handoff_request(policy)})), Action::None)
                 },
                 Phase::Asked => {
                     let handoff = last_message(&ev.raw).as_deref().and_then(handoff_path);
-                    let clearing = policy.auto_switch;
+                    // The user's own handoff stops: they go on when they say.
+                    let clearing = policy.auto_switch && !std::mem::take(&mut self.by_user);
                     self.phase = Phase::Written { handoff, clearing };
                     (None, if clearing { Action::Clear } else { Action::None })
                 },
@@ -135,22 +171,33 @@ impl Guard {
         policy.limit > 0 && self.percent >= f32::from(policy.limit) && !self.born_over
     }
 
+    /// Why it hands off.
+    fn reason(&self, policy: Policy) -> String {
+        if self.by_user {
+            "the user asked for a handoff: they are stepping away".into()
+        } else {
+            format!("this conversation's context window is {:.0}% full, past the {}% limit", self.percent, policy.limit)
+        }
+    }
+
     fn warning(&self, policy: Policy) -> String {
         format!(
-            "Tern: this conversation's context window is {:.0}% full, past the {}% limit. Finish the step you are on and end your turn at the next good stopping point; you will then be asked for a handoff.",
-            self.percent, policy.limit
+            "Tern: {}. Finish the step you are on and end your turn at the next good stopping point; you will then be asked for a handoff.",
+            self.reason(policy)
         )
     }
 
     fn handoff_request(&self, policy: Policy) -> String {
-        let next = if policy.auto_switch {
+        let next = if self.by_user {
+            "Then stop: the user goes on later, in a fresh conversation from your handoff."
+        } else if policy.auto_switch {
             "Tern then clears this conversation and a fresh one goes on from your handoff."
         } else {
             "The user then starts a fresh conversation that goes on from your handoff."
         };
         format!(
-            "Tern: this conversation's context window is {:.0}% full, past the {}% limit. Before stopping, write a handoff in this repository, where you see fit: what the task is, what is done, what is left, the decisions taken and the files that matter, so a fresh conversation can go on without this one. Update your memory to point at it too. Then end your turn with a last line `{HANDOFF_LINE} <path of the handoff file>`. {next}",
-            self.percent, policy.limit
+            "Tern: {}. Before stopping, write a handoff in this repository, where you see fit: what the task is, what is done, what is left, the decisions taken and the files that matter, so a fresh conversation can go on without this one. Update your memory to point at it too. Then end your turn with a last line `{HANDOFF_LINE} <path of the handoff file>`. {next}",
+            self.reason(policy)
         )
     }
 }
@@ -159,9 +206,9 @@ impl Guard {
 fn continue_context(handoff: Option<&str>) -> String {
     match handoff {
         Some(path) => format!(
-            "Tern: this conversation goes on from the previous one, which ran out of context room. Its handoff is at `{path}`: read it (and your memory) before anything else, then go on with the work."
+            "Tern: this conversation goes on from the previous one, which handed off. Its handoff is at `{path}`: read it (and your memory) before anything else, then go on with the work."
         ),
-        None => "Tern: this conversation goes on from the previous one, which ran out of context room and wrote a handoff in this repository; your memory points at it. Read it before anything else, then go on with the work.".into(),
+        None => "Tern: this conversation goes on from the previous one, which wrote a handoff in this repository; your memory points at it. Read it before anything else, then go on with the work.".into(),
     }
 }
 
@@ -173,6 +220,12 @@ fn used_percent(line: &Value) -> f32 {
 
 fn stop_hook_active(raw: &Value) -> bool {
     raw.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The handoff path a `Stop` hook event's `raw` names: its last message's
+/// `Handoff: <path>` line.
+pub fn handoff_of(raw: &Value) -> Option<String> {
+    last_message(raw).as_deref().and_then(handoff_path)
 }
 
 /// The text of the agent's last message: what the `Stop` hook says, else
@@ -332,6 +385,51 @@ mod tests {
         let mut g = Guard::default();
         g.on_event(&line(60.), POLICY);
         assert_eq!(g.on_event(&ev(json!({"hook_event_name": "Stop", "stop_hook_active": true})), POLICY), (None, Action::None));
+    }
+
+    #[test]
+    fn the_users_handoff_of_a_busy_agent_stops() {
+        let mut g = Guard::default();
+        g.on_event(&line(10.), POLICY);
+        assert_eq!(g.request(true), Action::None);
+        let (reply, _) = g.on_event(&ev(json!({"hook_event_name": "PostToolUse"})), POLICY);
+        assert!(reply.unwrap().pointer("/hookSpecificOutput/additionalContext").unwrap().as_str().unwrap().contains("the user asked"));
+        // Under the limit, it isn't let off.
+        g.on_event(&line(11.), POLICY);
+        let (reply, _) = g.on_event(&ev(json!({"hook_event_name": "Stop"})), POLICY);
+        assert_eq!(reply.unwrap().get("decision").unwrap(), "block");
+        let done = json!({"hook_event_name": "Stop", "stop_hook_active": true, "last_assistant_message": "Handoff: a.md"});
+        // Auto switch or not, it stops.
+        assert_eq!(g.on_event(&ev(done), POLICY), (None, Action::None));
+        // The limit's handoffs go on as before.
+        g.on_event(&ev(json!({"hook_event_name": "SessionStart", "source": "clear"})), POLICY);
+        g.on_event(&line(8.), POLICY);
+        g.on_event(&line(60.), POLICY);
+        g.on_event(&ev(json!({"hook_event_name": "Stop"})), POLICY);
+        let done = json!({"hook_event_name": "Stop", "stop_hook_active": true, "last_assistant_message": "Handoff: b.md"});
+        assert_eq!(g.on_event(&ev(done), POLICY), (None, Action::Clear));
+    }
+
+    #[test]
+    fn the_users_handoff_of_an_idle_agent_is_a_prompt() {
+        let mut g = Guard::default();
+        let Action::Prompt(p) = g.request(false) else { panic!("no prompt") };
+        assert!(p.contains("the user asked") && p.contains(HANDOFF_LINE));
+        // Asked again meanwhile: nothing more.
+        assert_eq!(g.request(false), Action::None);
+        assert_eq!(g.on_event(&ev(json!({"hook_event_name": "UserPromptSubmit"})), POLICY), (None, Action::None));
+        let done = json!({"hook_event_name": "Stop", "last_assistant_message": "Handoff: a.md"});
+        assert_eq!(g.on_event(&ev(done), POLICY), (None, Action::None));
+    }
+
+    #[test]
+    fn goes_on_from_a_handoff_when_the_user_says() {
+        // As after a restart: the daemon knows nothing of it.
+        let mut g = Guard::default();
+        assert_eq!(g.resume_from(Some("docs/h.md".into())), Action::Clear);
+        let (reply, action) = g.on_event(&ev(json!({"hook_event_name": "SessionStart", "source": "clear"})), Policy::default());
+        assert!(reply.unwrap().pointer("/hookSpecificOutput/additionalContext").unwrap().as_str().unwrap().contains("docs/h.md"));
+        assert_eq!(action, Action::Prompt(CONTINUE_PROMPT.into()));
     }
 
     #[test]

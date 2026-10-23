@@ -687,6 +687,19 @@ impl Server {
                     s.policy = Policy { limit: limit.min(100), auto_switch };
                 }
             },
+            ClientMsg::AskHandoff { id } => {
+                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                    // Waiting on the user (a permission) counts as busy: typing
+                    // would answer it.
+                    let busy = matches!(s.host.status(), ActivityStatus::Working | ActivityStatus::Blocked);
+                    type_after_turn(&s.host, s.guard.request(busy));
+                }
+            },
+            ClientMsg::ResumeHandoff { id, path } => {
+                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                    type_after_turn(&s.host, s.guard.resume_from(path));
+                }
+            },
             ClientMsg::Watch => self.watch(conn),
             ClientMsg::Reveal { req, id } => {
                 let ui = self.state.lock().unwrap().uis.iter().rev().filter_map(Weak::upgrade).find(|c| !c.dead.load(Ordering::Acquire));

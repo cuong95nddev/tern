@@ -9,6 +9,8 @@
   --blocked: #f2cc60;
   --done: #a5d6a7;
   --bad: #ff7b72;
+  /* The keys and the message box, down to the on-screen keyboard. */
+  --dock: color-mix(in srgb, var(--bg) 94%, var(--fg));
   color-scheme: dark;
 }
 
@@ -17,13 +19,21 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
   color: var(--fg);
   font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-tap-highlight-color: transparent;
 }
 
+html { background: var(--bg); }
+
+/* With the on-screen keyboard up the page ends where the screen is left
+   uncovered (app.js), and Safari floats its own see-through bars (address,
+   form arrows or AutoFill) over what is past the page, above the keys: the
+   dock goes on behind them, down to the keyboard. */
+html.keyboard { background: var(--dock); }
+
 body {
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   height: 100dvh;
@@ -75,6 +85,11 @@ button:active { background: var(--line); }
 }
 .dot.up { background: var(--done); }
 .dot.down { background: var(--bad); }
+
+#zoom { flex: none; display: flex; gap: 4px; }
+#zoom[hidden] { display: none; }
+#zoom button { min-width: 36px; height: 30px; padding: 0 8px; font-size: 13px; }
+#zoom button:disabled { color: var(--muted); cursor: default; }
 
 main { flex: 1; min-height: 0; display: flex; }
 section { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -213,6 +228,8 @@ body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--l
   padding: 6px 8px;
   padding-bottom: max(6px, env(safe-area-inset-bottom));
 }
+
+html.keyboard #keys, html.keyboard #compose { background: var(--dock); }
 
 #text {
   flex: 1;

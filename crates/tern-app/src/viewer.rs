@@ -2,15 +2,17 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
+use gpui_kit::component::input::{DefinitionProvider, Editor, EditorState, GoToDefinition, InputEvent, Position, Rope, RopeExt};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::*;
 
 use crate::diff_pane::{DiffPane, language_for};
 use crate::platform::bind;
+use crate::symbols;
 use crate::template::{Framed, on_event};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
@@ -20,6 +22,8 @@ actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal, ToggleWordWrap]
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         bind("cmd-s", Save, Some("Viewer")),
+        // ⌘-click works too; F12 as in VS Code.
+        bind("f12", GoToDefinition, Some("Viewer")),
         bind("cmd-shift-d", ToggleDiff, None),
         bind("cmd-shift-v", TogglePreview, None),
         bind("cmd-shift-o", OpenExternal, None),
@@ -82,10 +86,46 @@ pub struct ViewerState {
 pub enum ViewerEvent {
     /// A relative link in the Markdown preview points at this file.
     OpenFile(PathBuf),
+    /// Go to definition landed in another file: open it at 1-based `line`, `col`.
+    OpenFileAt { path: PathBuf, line: u32, col: u32 },
+}
+
+/// Go to definition for the open file, from the workspace's [`symbols::Index`].
+struct Definitions {
+    index: Arc<symbols::Index>,
+    path: PathBuf,
+}
+
+impl DefinitionProvider for Definitions {
+    fn definitions(&self, text: &Rope, offset: usize, _: &mut Window, cx: &mut App) -> Task<Result<Vec<lsp_types::LocationLink>>> {
+        let Some(range) = text.word_range(offset) else { return Task::ready(Ok(vec![])) };
+        let name = text.slice(range.clone()).to_string();
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            return Task::ready(Ok(vec![]));
+        }
+        let origin = lsp_types::Range::new(text.offset_to_position(range.start), text.offset_to_position(range.end));
+        let (index, path, text) = (self.index.clone(), self.path.clone(), text.clone());
+        cx.background_spawn(async move {
+            let hits = index.lookup(&name, &path, &text, (origin.start.line, origin.start.character));
+            Ok(hits
+                .into_iter()
+                .filter_map(|(path, d)| {
+                    let target = lsp_types::Range::new(Position::new(d.line, d.col), Position::new(d.line, d.end_col));
+                    Some(lsp_types::LocationLink {
+                        origin_selection_range: Some(origin),
+                        target_uri: symbols::path_to_uri(&path)?,
+                        target_range: target,
+                        target_selection_range: target,
+                    })
+                })
+                .collect())
+        })
+    }
 }
 
 pub struct Viewer {
     root: PathBuf,
+    symbols: Arc<symbols::Index>,
     path: Option<PathBuf>,
     editor: Entity<EditorState>,
     /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
@@ -186,7 +226,7 @@ fn link_target(root: &Path, dir: &Path, target: &str) -> Option<PathBuf> {
 }
 
 impl Viewer {
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, symbols: Arc<symbols::Index>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let wrap = crate::window_state::word_wrap();
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(wrap));
         let sub = cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, _, cx| {
@@ -198,6 +238,7 @@ impl Viewer {
         let preview = cx.new(|cx| TextViewState::markdown("", cx).scrollable(true));
         Self {
             root,
+            symbols,
             path: None,
             editor,
             wrap,
@@ -226,11 +267,39 @@ impl Viewer {
             return self.reload(window, cx);
         }
         self.mode = mode;
+        self.set_definitions(&path, cx);
         self.path = Some(path);
         self.dirty = false;
         self.diff = None;
         self.set_image(None, cx);
         self.reload(window, cx);
+    }
+
+    /// Point go to definition at `path`, the file about to be shown.
+    fn set_definitions(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let supported = symbols::supports(path);
+        if supported {
+            self.symbols.warm(cx);
+        }
+        let provider: Option<Rc<dyn DefinitionProvider>> =
+            supported.then(|| Rc::new(Definitions { index: self.symbols.clone(), path: path.to_path_buf() }) as _);
+        let (me, here) = (cx.entity().downgrade(), path.to_path_buf());
+        // A definition in this file is the editor's to go to; another file
+        // opens in a tab.
+        let show = Rc::new(move |params: &lsp_types::ShowDocumentParams, _: &mut Window, cx: &mut App| {
+            let Some(path) = symbols::uri_to_path(&params.uri) else { return false };
+            if path == here {
+                return false;
+            }
+            let start = params.selection.map(|s| s.start).unwrap_or_default();
+            let (line, col) = (start.line + 1, start.character + 1);
+            me.update(cx, |_, cx| cx.emit(ViewerEvent::OpenFileAt { path, line, col })).is_ok()
+        });
+        self.editor.update(cx, |ed, _| {
+            let lsp = ed.lsp_mut();
+            lsp.definition_provider = provider;
+            lsp.show_document = Some(show);
+        });
     }
 
     /// Show `image` (or none), dropping the one shown before from the app's
@@ -439,6 +508,7 @@ impl Viewer {
         let lang = language_for(&path);
         self.language = Some(lang.clone());
         self.editor.update(cx, |ed, cx| ed.set_highlighter(lang, cx));
+        self.set_definitions(&path, cx);
         self.path = Some(path);
         self.reload(window, cx);
         cx.notify();
@@ -461,6 +531,7 @@ impl Viewer {
     pub fn restore(&mut self, state: ViewerState, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = state.path else { return };
         self.mode = state.mode;
+        self.set_definitions(&path, cx);
         self.path = Some(path.clone());
         let Some(text) = state.unsaved else { return self.reload(window, cx) };
         self.loading = true;

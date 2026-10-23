@@ -1021,9 +1021,9 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 
 | Template | Values | Slots |
 |---|---|---|
-| `window` | `workspace` | `welcome`, `workspace` |
+| `window` | `workspace`, `title_bar_border` (a line runs under the title bar: its button shows while the layout is edited) | `welcome`, `workspace` |
 | `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`, `editing_layout` (the layout is edited: its Done button shows); list `parts` (`icon`, `on`, `tooltip`) | |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`, `editing_layout` (the layout is edited: its Done button and the title bar line's button show), `title_bar_border` (a line runs under the title bar); list `parts` (`icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs`, `borders` (drawn with its borders: not in a panel group without them; its splits' lines follow it) | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |

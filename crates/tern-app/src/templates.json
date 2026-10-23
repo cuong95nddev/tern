@@ -4,6 +4,7 @@
     "fill": true,
     "children": [
       { "slot": "title_bar" },
+      { "when": "title_bar_border", "shrink": 0, "style": { "height": "$title_bar.line_width", "background": "$title_bar.border" } },
       { "when": "!workspace", "grow": 1, "children": [{ "slot": "welcome" }] },
       { "when": "workspace", "grow": 1, "children": [{ "slot": "workspace" }] }
     ]
@@ -1400,6 +1401,15 @@
             "tooltip": "Stop editing the layout"
           },
           {
+            "when": "editing_layout",
+            "button": "title_bar_border",
+            "element": "title_bar.button",
+            "size": "small",
+            "icon": "panel-top",
+            "selected": "title_bar_border",
+            "tooltip": "Line Under the Title Bar"
+          },
+          {
             "when": "update",
             "button": "update",
             "element": "title_bar.update",
@@ -1997,7 +2007,8 @@
         "states": { "guarded": { "text": "$usage.context.ring.guarded" }, "over": { "text": "$usage.context.ring.over" } }
       },
       { "when": "context_text", "nowrap": true, "text": "{context_text}" },
-      { "when": "guarded", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "/ {limit}" }
+      { "when": "guarded", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "/ {limit}" },
+      { "when": "handoff_ready", "nowrap": true, "style": { "text": "$usage.item.detail_text" }, "text": "· handoff" }
     ]
   },
   "usage.context.card": {
@@ -2054,6 +2065,23 @@
             "element": "usage.card.detail",
             "wrap": true,
             "text": "After the handoff, clear the conversation (/clear) and go on from the handoff. Off: run /clear yourself."
+          }
+        ]
+      },
+      {
+        "when": "can_hand_off",
+        "element": "usage.card.section",
+        "style": { "border_top_width": 1 },
+        "children": [
+          { "element": "usage.card.heading", "text": "Step away" },
+          { "element": "usage.card.detail", "wrap": true, "text": "{handoff_text}" },
+          {
+            "layout": "row",
+            "style": { "padding_top": 6 },
+            "children": [
+              { "when": "!handoff_ready", "button": "hand_off", "variant": "outline", "size": "small", "label": "Hand Off Now", "loading": "handing_off", "disabled": "handing_off" },
+              { "when": "handoff_ready", "button": "resume", "variant": "primary", "size": "small", "label": "Continue from Handoff" }
+            ]
           }
         ]
       }

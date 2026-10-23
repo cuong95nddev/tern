@@ -175,6 +175,8 @@ struct TermTab {
     context: Option<crate::agents::ContextUse>,
     /// How it keeps that window in bounds (set from the usage bar's ring).
     guard: crate::agents::ContextGuard,
+    /// The handoff it can go on from.
+    handoff: crate::agents::Handoff,
     _subs: Vec<Subscription>,
 }
 
@@ -340,6 +342,8 @@ pub struct Services {
 
 pub struct Workspace {
     root: PathBuf,
+    /// Definitions in the workspace's files, for go to definition in file tabs.
+    symbols: Arc<crate::symbols::Index>,
     services: Services,
     tree: Entity<FileTreeView>,
     changes: Entity<ChangesView>,
@@ -411,13 +415,13 @@ pub struct Workspace {
     /// The windows of the parts in windows of their own, by part (None
     /// while one opens).
     part_windows: HashMap<String, Option<AnyWindowHandle>>,
+    /// Takes the keys while no tab has them, so they still reach the
+    /// workspace's actions.
+    focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
 
 /// A terminal tab, as the screenshot tray and the agent monitor list it.
-    /// Takes the keys while no tab has them, so they still reach the
-    /// workspace's actions.
-    focus: FocusHandle,
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
 pub struct TermTabInfo {
     pub id: EntityId,
@@ -604,9 +608,12 @@ impl Workspace {
             UsageEvent::Remove(id) => this.confirm_remove_account(id.clone(), window, cx),
             UsageEvent::TurnOff(id) => this.turn_off_account(id.clone(), window, cx),
             UsageEvent::Guard(guard) => this.set_guard(*guard, cx),
+            UsageEvent::HandOff => this.hand_off(cx),
+            UsageEvent::ResumeHandoff => this.resume_handoff(cx),
         });
 
         let mut this = Self {
+            symbols: crate::symbols::Index::new(root.clone()),
             root,
             services,
             tree,
@@ -651,6 +658,7 @@ impl Workspace {
             float_area: None,
             agents: None,
             part_windows: HashMap::new(),
+            focus: cx.focus_handle(),
             _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, cx.observe_global::<Panels>(Self::follow_panels)],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
@@ -658,7 +666,6 @@ impl Workspace {
         let mut made = vec![];
         let groups: Vec<u64> = saved
             .groups
-            focus: cx.focus_handle(),
             .iter()
             .map(|g| {
                 let color = GROUP_COLORS.iter().position(|c| c.0 == g.color).unwrap_or(0);
@@ -668,11 +675,12 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux, account, guard } => {
+                SavedTab::Claude { name, session, mux, account, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
                     this.add_term(TabKind::Claude, name, session, mux, &account, window, cx);
                     if let Some(CenterTab::Term(t)) = this.tabs.get_mut(before) {
                         t.guard = crate::agents::ContextGuard::from_saved(guard);
+                        t.handoff = handoff.map_or_else(Default::default, crate::agents::Handoff::Written);
                     }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
@@ -737,6 +745,10 @@ impl Workspace {
                             mux,
                             account: (t.account != accounts::DEFAULT).then(|| t.account.clone()),
                             guard: t.guard.saved(),
+                            handoff: match &t.handoff {
+                                crate::agents::Handoff::Written(path) => Some(path.clone()),
+                                _ => None,
+                            },
                         },
                         TabKind::Shell => SavedTab::Shell { name, mux },
                     }
@@ -817,6 +829,7 @@ impl Workspace {
         vec![
             cx.subscribe_in(viewer, window, |this, _, ev: &ViewerEvent, window, cx| match ev {
                 ViewerEvent::OpenFile(p) => this.open_file(p.clone(), false, window, cx),
+                ViewerEvent::OpenFileAt { path, line, col } => this.open_file_at(path.clone(), *line, Some(*col), window, cx),
             }),
             // Dirty marker in the tab label.
             cx.observe(viewer, |_, _, cx| cx.notify()),
@@ -835,7 +848,7 @@ impl Workspace {
                 let state = view.read(cx).state(cx);
                 let root = self.root.clone();
                 *view = cx.new(|cx| {
-                    let mut v = Viewer::new(root, window, cx);
+                    let mut v = Viewer::new(root, self.symbols.clone(), window, cx);
                     v.restore(state, window, cx);
                     v
                 });
@@ -1214,6 +1227,7 @@ impl Workspace {
             follows: None,
             context: None,
             guard: Default::default(),
+            handoff: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1268,6 +1282,7 @@ impl Workspace {
             follows: Some(output),
             context: None,
             guard: Default::default(),
+            handoff: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(tab));
@@ -1909,6 +1924,7 @@ impl Workspace {
 
     /// Reload open files and diffs (tabs and the preview popup) affected by `batch`.
     fn files_changed(&mut self, batch: &ChangeBatch, window: &mut Window, cx: &mut Context<Self>) {
+        self.symbols.changed(&batch.paths);
         let preview = self.preview.as_ref().and_then(|p| p.upgrade());
         let mut diffs = vec![];
         for t in &self.tabs {
@@ -1970,7 +1986,7 @@ impl Workspace {
         }
         let root = self.root.clone();
         let view = cx.new(|cx| {
-            let mut v = Viewer::new(root, window, cx);
+            let mut v = Viewer::new(root, self.symbols.clone(), window, cx);
             v.open(path, window, cx);
             v
         });
@@ -2029,6 +2045,36 @@ impl Workspace {
         t.guard = guard;
         let view = t.view.clone();
         self.send_guard(&view, cx);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
+    /// The shown Claude tab, with its daemon session's id.
+    fn shown_claude_mut(&mut self, cx: &App) -> Option<(&mut TermTab, u64)> {
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind == TabKind::Claude))
+        else {
+            return None;
+        };
+        let id = t.view.read(cx).mux_id()?;
+        Some((t, id))
+    }
+
+    /// Ask the shown Claude tab's conversation for a handoff: it writes one
+    /// and stops, for the user to go on from later.
+    fn hand_off(&mut self, cx: &mut Context<Self>) {
+        let mux = self.services.mux.clone();
+        let Some((t, id)) = self.shown_claude_mut(cx) else { return };
+        t.handoff = crate::agents::Handoff::Asked;
+        mux.ask_handoff(id);
+        cx.notify();
+    }
+
+    /// The shown Claude tab goes on from its handoff in a fresh conversation.
+    fn resume_handoff(&mut self, cx: &mut Context<Self>) {
+        let mux = self.services.mux.clone();
+        let Some((t, id)) = self.shown_claude_mut(cx) else { return };
+        let crate::agents::Handoff::Written(path) = std::mem::take(&mut t.handoff) else { return };
+        mux.resume_handoff(id, Some(path));
         cx.emit(WorkspaceEvent::TabsChanged);
         cx.notify();
     }
@@ -2201,6 +2247,20 @@ impl Workspace {
                 tab.context = context;
                 cx.notify();
             }
+        }
+        // The handoff it can go on from: the one its last turn named, until
+        // a fresh conversation starts.
+        let handoff = match ev.event.as_str() {
+            "Stop" => tern_bridge::context::handoff_of(&ev.raw).map(crate::agents::Handoff::Written),
+            "SessionStart" if matches!(ev.raw.get("source").and_then(|s| s.as_str()), Some("clear" | "startup")) => {
+                Some(crate::agents::Handoff::None)
+            },
+            _ => None,
+        };
+        if let Some(handoff) = handoff.filter(|h| *h != tab.handoff) {
+            tab.handoff = handoff;
+            cx.emit(WorkspaceEvent::TabsChanged);
+            cx.notify();
         }
         if ev.session_id.is_some() && tab.session != ev.session_id {
             tab.session = ev.session_id.clone();
@@ -2545,6 +2605,7 @@ impl Workspace {
             .var("split_key", shortcut("⌘\\"))
             .var("zoom_key", shortcut("⌘⇧↩"))
             .var("close_key", shortcut("⌘W"))
+            .var("borders", self.borders())
     }
 
     /// What pane `pane`'s buttons do (`pane.buttons`, `pane.new_tab`,
@@ -2605,7 +2666,6 @@ impl Workspace {
             let names = files
                 .iter()
                 .map(|p| {
-            .var("borders", self.borders())
                     template::Scope::default().var("name", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
                 })
                 .collect();
@@ -3310,6 +3370,11 @@ impl Workspace {
                 }
                 self.docks_epoch += 1;
             },
+            Change::GroupBorder { group, on } => {
+                if !a.set_group_border(&group, on) {
+                    return;
+                }
+            },
             Change::AddGroup { dock, at } => {
                 let docks = cx.try_global::<template::Templates>().map(|t| t.docks("workspace")).unwrap_or_default();
                 if a.add_group(&dock, at, &docks).is_none() {
@@ -3370,11 +3435,6 @@ impl Workspace {
         let change = Change::Float { part: a.0.clone(), rect, area: crate::dock::area_size(area) };
         self.arrangement_changed(change, cx);
     }
-            Change::GroupBorder { group, on } => {
-                if !a.set_group_border(&group, on) {
-                    return;
-                }
-            },
 
     /// Adds an empty panel group at the end of the right dock (else the
     /// first that takes panels), and edits the layout so it shows.
@@ -4039,6 +4099,8 @@ impl Workspace {
                     Axis::Horizontal => h_resizable(id),
                     Axis::Vertical => v_resizable(id),
                 };
+                // Template `split.cell` draws the lines between the panes.
+                let on = self.borders();
                 let panels: Vec<_> = children
                     .iter()
                     .enumerate()
@@ -4053,6 +4115,12 @@ impl Workspace {
                 group.with_handle_appearance(template::no_line()).children(panels).into_any_element()
             },
         }
+    }
+
+    /// Whether the panes are drawn with their borders: not in a panel group
+    /// without them.
+    fn borders(&self) -> bool {
+        self.arranged.as_ref().is_none_or(|a| a.dock_of(PANES).is_none_or(|d| a.bordered(d)))
     }
 
     /// Pane `pane`: its tabs and the one it shows, its drop zones while a
@@ -4077,6 +4145,7 @@ impl Workspace {
             .var("vertical", vertical)
             .var("title", title)
             .var("tabs", self.pane_tabs(pane).len())
+            .var("borders", self.borders())
             .slot("content", content)
             .slot_opt("drop_overlay", self.drops_on_panes(cx).map(|dock| self.drop_overlay(pane, dock, cx)));
         let scope = if vertical {
@@ -4105,8 +4174,6 @@ impl Workspace {
     fn empty_pane(&self, pane: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let ws = cx.entity().downgrade();
         let scope = template::Scope::new(format!("empty-{pane}"));
-                // Template `split.cell` draws the lines between the panes.
-                let on = self.borders();
         template::render(
             "pane.empty",
             scope,
@@ -4117,12 +4184,6 @@ impl Workspace {
 
     /// What the pane dock allows (`"dock": "center"`).
     fn pane_dock(cx: &App) -> template::PaneDock {
-    /// Whether the panes are drawn with their borders: not in a panel group
-    /// without them.
-    fn borders(&self) -> bool {
-        self.arranged.as_ref().is_none_or(|a| a.dock_of(PANES).is_none_or(|d| a.bordered(d)))
-    }
-
         cx.try_global::<template::Templates>().map(|t| t.pane_dock(PANES)).unwrap_or_default()
     }
 
@@ -4145,7 +4206,6 @@ impl Workspace {
     /// its sides while a tab, a pane or a panel the pane dock takes is dragged.
     fn render_center_part(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let body = template::render_part(name, self.arranged_scope(cx.entity().downgrade()), cx);
-            .var("borders", self.borders())
         let d = div().relative().size_full().flex().flex_col().min_w_0().min_h_0().child(body);
         let Some(dock) = self.drops_on_panes(cx).filter(|d| d.edges) else { return d.into_any_element() };
         let own = cx.try_global::<ActiveDrag>().and_then(|d| d.0.as_ref()).is_some_and(|p| *p.part == *name);
@@ -4765,12 +4825,14 @@ impl Render for Workspace {
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
         }
         // And how full its context window is, with the limit it keeps.
-        let context = self
-            .tabs
-            .get(self.active)
-            .and_then(CenterTab::term)
-            .filter(|t| t.kind == TabKind::Claude)
-            .map(|t| crate::usage_view::ContextShown { usage: t.context, guard: t.guard });
+        let context = self.tabs.get(self.active).and_then(CenterTab::term).filter(|t| t.kind == TabKind::Claude).map(|t| {
+            crate::usage_view::ContextShown {
+                usage: t.context,
+                guard: t.guard,
+                handoff: t.handoff.clone(),
+                takes_handoffs: self.services.mux.takes_handoffs(),
+            }
+        });
         if self.usage.read(cx).context() != context.as_ref() {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_context(context, cx)));
@@ -4804,6 +4866,7 @@ impl Render for Workspace {
         .size_full();
         crate::dock::floats(div(), arrangement, on_change)
             .key_context("Workspace")
+            .track_focus(&self.focus)
             .size_full()
             .relative()
             .on_action(cx.listener(Self::float_part))
@@ -4866,7 +4929,6 @@ impl Render for Workspace {
                     Some(CenterTab::Scratch { view, .. }) => view.update(cx, |_, cx| cx.notify()),
                     _ => {},
                 }
-            .track_focus(&self.focus)
             }))
             .on_action(cx.listener(|this, a: &viewer::TogglePreview, w, cx| {
                 if let Some(CenterTab::File { view, .. }) = this.tabs.get(this.active) {

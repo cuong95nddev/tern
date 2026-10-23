@@ -11,9 +11,15 @@ const LINE_HEIGHT = 1.15;
 // The page asks for the grid that fits its screen at this font size; the
 // session takes it while the page has the session (see bridge.rs). Until it
 // does, or once the desktop takes it back, the page draws the grid it has at
-// this size or smaller until it fits.
-const FONT_SIZE = 13;
+// this size or smaller until it fits. The zoom buttons change it, for this
+// browser only.
+const FONT_KEY = "tern.fontSize";
+const DEFAULT_FONT = 13;
+const MAX_FONT = 24;
 const MIN_FONT = 7;
+// The smallest the zoom buttons go: below it the grid is drawn scaled down.
+const MIN_ZOOM = 9;
+let fontSize = savedFont();
 
 let socket = null;
 let retry = 0;
@@ -374,6 +380,7 @@ function show(which) {
   const shown = which === "message-view" || !wide ? [which] : ["list-view", which === "term-view" ? "term-view" : "pick-view"];
   for (const id of ["list-view", "pick-view", "term-view", "message-view"]) $(id).hidden = !shown.includes(id);
   $("back").hidden = wide || which !== "term-view";
+  $("zoom").hidden = which !== "term-view";
   renderHeading();
   renderList();
   renderTabs();
@@ -415,7 +422,7 @@ function ensureTerm() {
   if (term) return;
   term = new Terminal({
     fontFamily: FONT,
-    fontSize: FONT_SIZE,
+    fontSize,
     lineHeight: LINE_HEIGHT,
     scrollback: 10000,
     allowProposedApi: true,
@@ -503,14 +510,14 @@ function room() {
 // The terminal's height without the on-screen keyboard, at this width.
 let tall = { w: 0, h: 0 };
 
-// Draw the session's grid as large as fits the screen, at most FONT_SIZE;
+// Draw the session's grid as large as fits the screen, at most `fontSize`;
 // scaled down past MIN_FONT. With the on-screen keyboard up, its bottom
 // rows (the prompt) show, above the keyboard.
 function layout() {
   if (!term || $("term-view").hidden) return;
   const { w, h, tallH } = room();
   let fs = 0;
-  for (let f = FONT_SIZE; f >= MIN_FONT; f -= 0.5) {
+  for (let f = fontSize; f >= MIN_FONT; f -= 0.5) {
     const c = cellAt(f);
     if (size.cols * c.w <= w && size.rows * c.h <= tallH) {
       fs = f;
@@ -530,11 +537,11 @@ function layout() {
   $("term").style.transform = t;
 }
 
-// The grid that fits the screen at FONT_SIZE, and the size of its cell in
+// The grid that fits the screen at `fontSize`, and the size of its cell in
 // device pixels.
 function fitting() {
   const { w, tallH: h } = room();
-  const c = cellAt(FONT_SIZE);
+  const c = cellAt(fontSize);
   const dpr = window.devicePixelRatio || 1;
   return {
     cols: Math.max(10, Math.floor(w / c.w)),
@@ -581,6 +588,11 @@ if (window.visualViewport) {
   const vv = window.visualViewport;
   const fitKeyboard = () => {
     document.body.style.height = `${Math.round(vv.height * vv.scale)}px`;
+    // What the keyboard (and the bars over it) covers, as `offsetTop` is
+    // where the visual viewport begins; not while pinched in, which shrinks
+    // the visual viewport as much.
+    const covered = document.documentElement.clientHeight - (vv.height + vv.offsetTop);
+    document.documentElement.classList.toggle("keyboard", vv.scale <= 1.01 && covered > 1);
     // iOS scrolls the page to show the focused box: it fits now.
     if (vv.scale <= 1.01) window.scrollTo(0, 0);
     layout();
@@ -620,6 +632,48 @@ if (window.visualViewport) {
   }, { capture: true, passive: false });
   wrap.addEventListener("touchend", () => (lastY = null), { capture: true, passive: true });
 }
+
+// ---- Zoom ---------------------------------------------------------------------
+
+// The font size this browser chose last; storage can be off (a private tab).
+function savedFont() {
+  try {
+    const f = Number(localStorage.getItem(FONT_KEY));
+    if (f >= MIN_ZOOM && f <= MAX_FONT) return f;
+  } catch (e) {
+    // The default, then.
+  }
+  return DEFAULT_FONT;
+}
+
+// Draw at `f`, and ask for the grid that fits at it (when this page has the
+// session; else the desktop's grid is drawn at it, or as large as fits).
+function zoom(f) {
+  f = Math.min(MAX_FONT, Math.max(MIN_ZOOM, f));
+  if (f === fontSize) return;
+  fontSize = f;
+  try {
+    localStorage.setItem(FONT_KEY, String(f));
+  } catch (e) {
+    // Kept for this page only.
+  }
+  zoomButtons();
+  layout();
+  fit(true);
+}
+
+function zoomButtons() {
+  $("zoom-out").disabled = fontSize <= MIN_ZOOM;
+  $("zoom-in").disabled = fontSize >= MAX_FONT;
+  $("zoom").title = `Text size ${fontSize}`;
+}
+
+for (const [id, step] of [["zoom-out", -1], ["zoom-in", 1]]) {
+  // As the keys: the on-screen keyboard stays up.
+  $(id).addEventListener("pointerdown", (e) => e.preventDefault());
+  $(id).onclick = () => zoom(fontSize + step);
+}
+zoomButtons();
 
 // ---- Keys and the message box ---------------------------------------------
 

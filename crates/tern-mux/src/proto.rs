@@ -30,13 +30,15 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 7;
+pub const MINOR: u32 = 8;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
 pub const GUARD_MINOR: u32 = 5;
 // MINOR 6: the daemon sends `Image` and `ImagesGone` (older clients skip them).
 // MINOR 7: the daemon sends `Control` and takes `Drive`.
+/// The first MINOR whose daemon takes `AskHandoff` and `ResumeHandoff`.
+pub const ASK_HANDOFF_MINOR: u32 = 8;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 2;
@@ -140,6 +142,17 @@ pub enum ClientMsg {
     /// owner, that (MINOR 7).
     Drive {
         id: u64,
+    },
+    /// The user asks session `id`'s Claude for a handoff, to step away: it
+    /// writes one and stops (MINOR 8).
+    AskHandoff {
+        id: u64,
+    },
+    /// Session `id`'s Claude goes on in a fresh conversation from the
+    /// handoff at `path` (when known) (MINOR 8).
+    ResumeHandoff {
+        id: u64,
+        path: Option<String>,
     },
 }
 
@@ -558,6 +571,8 @@ mod tests {
             ClientMsg::Resize { id: 7, size: SIZE },
             ClientMsg::Close { id: 7 },
             ClientMsg::List { req: 4 },
+            ClientMsg::AskHandoff { id: 7 },
+            ClientMsg::ResumeHandoff { id: 7, path: Some("docs/h.md".into()) },
         ];
         let mut buf = vec![];
         for m in &msgs {

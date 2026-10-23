@@ -25,6 +25,8 @@ mod menus;
 mod palette;
 mod panes;
 mod part_window;
+#[cfg(target_os = "macos")]
+mod permissions;
 mod platform;
 mod resources;
 mod resources_view;
@@ -38,6 +40,7 @@ mod shells_view;
 mod shot;
 mod shot_icons;
 mod style;
+mod symbols;
 mod system;
 mod system_view;
 mod template;
@@ -207,6 +210,17 @@ fn main() {
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).
         let scripted = cfg!(debug_assertions) && control_socket.is_some() && std::env::var_os("TERN_SESSION").is_none();
         cx.set_global(main_window::Session { persist: !scripted, quitting: false });
+        // Ask for notifications while a window is up to show macOS's prompt:
+        // asked first from the daemon, which has none, macOS refuses them.
+        #[cfg(target_os = "macos")]
+        if !scripted {
+            cx.background_spawn(async {
+                if permissions::notifications() == permissions::Notifications::NotAsked {
+                    permissions::ask_notifications();
+                }
+            })
+            .detach();
+        }
         // The menu bar agent outlives us; a newer one replaces an older one.
         if cfg!(target_os = "macos") && !scripted && tern_menubar::setting::enabled(&tern_menubar::setting::file()) {
             tern_menubar::launch();

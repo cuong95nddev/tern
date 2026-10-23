@@ -524,3 +524,21 @@ fn claude_session_comes_from_hooks() {
     });
     s.close();
 }
+
+#[test]
+fn the_users_handoff_is_typed_to_an_idle_agent() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y; echo then:$y; read z"), hook: true, seed: None }, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    assert!(c.takes_handoffs());
+    c.ask_handoff(id);
+    wait_until("the handoff prompt", || screen(&s).contains("got:Tern: the user asked for a handoff"));
+    // Asked again while it writes one: nothing more.
+    c.ask_handoff(id);
+    c.resume_handoff(id, Some("docs/h.md".into()));
+    wait_until("the clear", || screen(&s).contains("then:/clear"));
+    s.close();
+}

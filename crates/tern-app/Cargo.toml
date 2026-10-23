@@ -19,6 +19,7 @@ image = { version = "0.25", default-features = false, features = ["png", "bmp", 
 ab_glyph = "0.2"
 tiny-skia = "0.11"
 libc = "0.2.190"
+lsp-types = "0.97"
 lyon_tessellation = "1"
 log = "0.4.34"
 schemars = "1.2"
@@ -26,6 +27,18 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+streaming-iterator = "0.1"
+# Go to definition: the grammars' tags queries (the same crates the editor highlights with).
+tree-sitter = "0.26"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-typescript = "0.23"
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
 tern-menubar = { version = "0.8.0", path = "../tern-menubar" }
@@ -34,7 +47,10 @@ tern-term = { version = "0.1.0", path = "../tern-term" }
 tern-web = { path = "../tern-web" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", features = ["NSBundle", "NSError", "NSString"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationSettings", "UNUserNotificationCenter"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]

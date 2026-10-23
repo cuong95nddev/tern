@@ -40,6 +40,19 @@ impl ContextUse {
     }
 }
 
+/// A Claude tab's handoff, which its conversation writes when the user
+/// asks (to step away) or past its context limit, and which it can go on
+/// from in a fresh conversation later, also after a restart.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Handoff {
+    #[default]
+    None,
+    /// The user asked for one; it isn't written yet.
+    Asked,
+    /// Written at this path.
+    Written(String),
+}
+
 /// How a Claude tab keeps its conversation's context window in bounds (see
 /// `tern_bridge::context`): when `on`, past `limit` percent Claude is asked
 /// for a handoff, and with `auto_switch` the tab then goes on in a fresh

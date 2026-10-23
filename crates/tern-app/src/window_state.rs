@@ -254,6 +254,23 @@ pub fn set_word_wrap(on: bool) {
     write(&word_wrap_file(), if on { "on\n" } else { "off\n" });
 }
 
+fn title_bar_border_file() -> PathBuf {
+    file().with_file_name("title-bar-border")
+}
+
+static TITLE_BAR_BORDER: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// Whether a line runs under the title bar, in every window.
+pub fn title_bar_border() -> bool {
+    let mut cached = TITLE_BAR_BORDER.lock().unwrap_or_else(|e| e.into_inner());
+    *cached.get_or_insert_with(|| std::fs::read_to_string(title_bar_border_file()).map_or(true, |s| s.trim() != "off"))
+}
+
+pub fn set_title_bar_border(on: bool) {
+    *TITLE_BAR_BORDER.lock().unwrap_or_else(|e| e.into_inner()) = Some(on);
+    write(&title_bar_border_file(), if on { "on\n" } else { "off\n" });
+}
+
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -279,13 +296,15 @@ pub fn toggle_flag(args: &str, flag: &str) -> String {
 pub enum SavedTab {
     /// `account`: the Claude account it runs as; `None` is the default one.
     /// `guard`: the context limit and auto switch it keeps, when turned on
-    /// (see [`crate::agents::ContextGuard`]).
+    /// (see [`crate::agents::ContextGuard`]). `handoff`: the path of the
+    /// handoff it can go on from (see [`crate::agents::Handoff`]).
     Claude {
         name: Option<String>,
         session: Option<String>,
         mux: Option<u64>,
         account: Option<String>,
         guard: Option<(u8, bool)>,
+        handoff: Option<String>,
     },
     Shell {
         name: Option<String>,
@@ -424,13 +443,15 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
             for (i, tab) in ws.tabs.iter().enumerate() {
                 let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
                 let line = match tab {
-                    SavedTab::Claude { name, session, mux, account, guard } => {
+                    SavedTab::Claude { name, session, mux, account, guard, handoff } => {
                         let mux = mux.map(|m| m.to_string()).unwrap_or_default();
+                        let guard = guard.map(|(limit, switch)| format!("{limit}{}", if switch { "s" } else { "" }));
                         // The field after `mux` is a one-workspace build's folder.
-                        let rest = match (account, guard) {
-                            (None, None) => String::new(),
-                            (_, None) => format!("\t\t{}", opt(account)),
-                            (_, Some((limit, switch))) => format!("\t\t{}\t{limit}{}", opt(account), if *switch { "s" } else { "" }),
+                        let rest = match (account, guard, handoff) {
+                            (None, None, None) => String::new(),
+                            (_, None, None) => format!("\t\t{}", opt(account)),
+                            (_, guard, None) => format!("\t\t{}\t{}", opt(account), guard.unwrap_or_default()),
+                            (_, guard, handoff) => format!("\t\t{}\t{}\t{}", opt(account), guard.unwrap_or_default(), opt(handoff)),
                         };
                         format!("claude\t{}\t{}\t{mux}{rest}", opt(session), opt(name))
                     },
@@ -465,7 +486,8 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
                 let (limit, switch) = g.strip_suffix('s').map_or((g.as_str(), false), |l| (l, true));
                 Some((limit.parse().ok()?, switch))
             });
-            SavedTab::Claude { session, name, mux, account, guard }
+            let handoff = next();
+            SavedTab::Claude { session, name, mux, account, guard, handoff }
         },
         "shell" => {
             let name = next();
@@ -704,13 +726,21 @@ mod tests {
                     SavedWorkspace {
                         folder: PathBuf::from("/a b/c"),
                         tabs: vec![
-                            SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None, guard: None },
+                            SavedTab::Claude {
+                                name: None,
+                                session: Some("s-1".into()),
+                                mux: Some(42),
+                                account: None,
+                                guard: None,
+                                handoff: None,
+                            },
                             SavedTab::Claude {
                                 name: Some("api work".into()),
                                 session: None,
                                 mux: None,
                                 account: Some("account-2".into()),
                                 guard: None,
+                                handoff: Some("docs/handoff a.md".into()),
                             },
                             SavedTab::Shell { name: None, mux: Some(7) },
                             SavedTab::File(PathBuf::from("/a b/c/x y.rs")),
@@ -724,13 +754,21 @@ mod tests {
                                 from: Some("old.rs".into()),
                             },
                             SavedTab::GitLog,
-                            SavedTab::Claude { name: None, session: Some("s-2".into()), mux: None, account: None, guard: Some((50, true)) },
+                            SavedTab::Claude {
+                                name: None,
+                                session: Some("s-2".into()),
+                                mux: None,
+                                account: None,
+                                guard: Some((50, true)),
+                                handoff: None,
+                            },
                             SavedTab::Claude {
                                 name: None,
                                 session: None,
                                 mux: Some(3),
                                 account: Some("account-2".into()),
                                 guard: Some((70, false)),
+                                handoff: Some("h.md".into()),
                             },
                         ],
                         tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None, None, None],
@@ -768,7 +806,10 @@ mod tests {
             a.tabs,
             [SavedTab::Shell { name: None, mux: Some(7) }, SavedTab::Scratch("/s/n.txt".into()), SavedTab::Shell { name: None, mux: None }]
         );
-        assert_eq!(b.tabs, [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None, guard: None }]);
+        assert_eq!(
+            b.tabs,
+            [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None, guard: None, handoff: None }]
+        );
         assert_eq!(sub.tabs, [SavedTab::File("/b/sub/x.rs".into())]);
         assert_eq!((&a.tab_groups[..], &b.tab_groups[..], &sub.tab_groups[..]), (&[None, None, None][..], &[Some(0)][..], &[Some(0)][..]));
         assert!(a.groups.is_empty() && sub.groups[0].name == "api");
@@ -833,7 +874,14 @@ mod tests {
         assert_eq!(
             w[0].workspaces[0].tabs,
             vec![
-                SavedTab::Claude { name: Some("name".into()), session: Some("s-1".into()), mux: None, account: None, guard: None },
+                SavedTab::Claude {
+                    name: Some("name".into()),
+                    session: Some("s-1".into()),
+                    mux: None,
+                    account: None,
+                    guard: None,
+                    handoff: None
+                },
                 SavedTab::Shell { name: None, mux: None },
                 SavedTab::Shell { name: Some("n".into()), mux: None },
             ]

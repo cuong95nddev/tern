@@ -362,12 +362,14 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "workspace", about: "One workspace: its panels and tabs", groups: &[&[("background", Color, "$background")], IMAGE] },
     Element {
         name: "title_bar",
-        about: "The window's title bar: its title, what is wrong with the background terminals or the settings, the buttons of the panels docked on the right, the window controls (Windows)",
+        about: "The window's title bar: its title, what is wrong with the background terminals or the settings, the buttons of the panels docked on the right, the window controls (Windows). `border` and `line_width` are the line under it (template `window` draws it)",
         groups: &[&[
             ("height", Len, "34"),
             ("background", Color, "$background"),
             ("border", Color, "$border"),
-            ("border_bottom_width", Len, "1"),
+            // The bar's own line is off: template `window` draws it.
+            ("border_bottom_width", Len, "0"),
+            ("line_width", Len, "1"),
             ("font_size", Len, "$text_sm"),
             ("text", Color, "$text_muted"),
             ("error_text", Color, "$danger.background"),

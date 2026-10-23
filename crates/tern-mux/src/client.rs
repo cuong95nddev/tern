@@ -20,7 +20,9 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{
+    self, ASK_HANDOFF_MINOR, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, Role, ServerMsg, SessionInfo,
+};
 
 /// What the client asks who runs in a session's foreground with: the PTY
 /// the daemon passed, on Windows the shell's pid.
@@ -475,6 +477,27 @@ impl MuxClient {
             let _ = self.inner.send(ClientMsg::ContextGuard { id, limit, auto_switch });
         }
     }
+
+    /// Whether the daemon takes the user's handoffs (`ask_handoff`,
+    /// `resume_handoff`).
+    pub fn takes_handoffs(&self) -> bool {
+        self.inner.server_minor >= ASK_HANDOFF_MINOR
+    }
+
+    /// Ask session `id`'s Claude for a handoff, to step away.
+    pub fn ask_handoff(&self, id: u64) {
+        if self.takes_handoffs() {
+            let _ = self.inner.send(ClientMsg::AskHandoff { id });
+        }
+    }
+
+    /// Session `id`'s Claude goes on from the handoff at `path` in a fresh
+    /// conversation.
+    pub fn resume_handoff(&self, id: u64, path: Option<String>) {
+        if self.takes_handoffs() {
+            let _ = self.inner.send(ClientMsg::ResumeHandoff { id, path });
+        }
+    }
 }
 
 /// The UI's way to the daemon: one connection, made again (starting the
@@ -541,6 +564,28 @@ impl Connector {
     pub fn set_context_guard(&self, id: u64, limit: u8, auto_switch: bool) {
         if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
             c.set_context_guard(id, limit, auto_switch);
+        }
+    }
+
+    /// Whether the live connection's daemon takes the user's handoffs
+    /// (doesn't connect).
+    pub fn takes_handoffs(&self) -> bool {
+        self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).is_some_and(MuxClient::takes_handoffs)
+    }
+
+    /// Ask session `id`'s Claude for a handoff (see
+    /// [`MuxClient::ask_handoff`]), over a live connection.
+    pub fn ask_handoff(&self, id: u64) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.ask_handoff(id);
+        }
+    }
+
+    /// Session `id`'s Claude goes on from a handoff (see
+    /// [`MuxClient::resume_handoff`]), over a live connection.
+    pub fn resume_handoff(&self, id: u64, path: Option<String>) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.resume_handoff(id, path);
         }
     }
 

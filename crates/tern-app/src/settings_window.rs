@@ -15,6 +15,8 @@ use gpui_kit::*;
 
 use tern_web::access::{self, Access, NewPairing};
 
+#[cfg(target_os = "macos")]
+use crate::permissions;
 use crate::template::{self, Framed, on_event};
 use crate::theme_picker::OpenSettings;
 use crate::{restart, settings, style, theme_picker, update};
@@ -26,6 +28,8 @@ enum Section {
     Terminal,
     Editor,
     Connections,
+    /// macOS only.
+    Permissions,
 }
 
 /// Each section: what it is, its label, icon and page subtitle.
@@ -35,7 +39,13 @@ const SECTIONS: &[(Section, &str, &str, &str)] = &[
     (Section::Terminal, "Terminal", "square-terminal", "Terminal tabs."),
     (Section::Editor, "Editor", "file-code", "The file editor and code blocks."),
     (Section::Connections, "Connections", "globe", "Use Tern from your phone or another computer."),
+    (Section::Permissions, "Permissions", "shield-check", "What macOS lets Tern do."),
 ];
+
+/// The sections this platform has.
+fn sections() -> Vec<&'static (Section, &'static str, &'static str, &'static str)> {
+    SECTIONS.iter().filter(|s| cfg!(target_os = "macos") || s.0 != Section::Permissions).collect()
+}
 
 /// How often Connections looks again at the server (a server started or
 /// stopped by hand shows too).
@@ -92,10 +102,7 @@ pub fn show(label: &str, cx: &mut App) -> String {
     let Some(&(section, ..)) = SECTIONS.iter().find(|s| s.1.eq_ignore_ascii_case(label)) else { return "error: no such section".into() };
     open(cx);
     let Some((_, view)) = cx.default_global::<Open>().0.clone() else { return "error: no window".into() };
-    match view.update(cx, |v, cx| {
-        v.section = section;
-        cx.notify();
-    }) {
+    match view.update(cx, |v, cx| v.select(section, cx)) {
         Ok(()) => "ok".into(),
         Err(_) => "error: window closed".into(),
     }
@@ -238,6 +245,24 @@ struct Remote {
     copied: Option<Instant>,
 }
 
+/// What macOS lets Tern do, as of the last look.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Granted {
+    notifications: permissions::Notifications,
+    screen_recording: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn look_up_permissions() -> Granted {
+    Granted { notifications: permissions::notifications(), screen_recording: permissions::screen_recording() }
+}
+
+/// Whether the server runs, the choice it starts with and who has access.
+fn look_up() -> (Option<tern_web::Serving>, Option<bool>, Access) {
+    (tern_web::serving(), tern_web::wanted(), access::load())
+}
+
 pub struct SettingsView {
     section: Section,
     /// `settings.json` as of the templates' `generation` (each load compiles
@@ -245,6 +270,8 @@ pub struct SettingsView {
     file: serde_json::Value,
     generation: u64,
     remote: Remote,
+    #[cfg(target_os = "macos")]
+    granted: Option<Granted>,
     /// What the desktop does behind the window, as last set.
     backdrop: crate::style::Backdrop,
     _refresh: Task<()>,
@@ -256,8 +283,16 @@ impl SettingsView {
             loop {
                 let Ok(look) = this.update(cx, |v, _| v.section == Section::Connections && !v.remote.busy) else { break };
                 if look {
-                    let found = cx.background_spawn(async move { (tern_web::serving(), tern_web::wanted(), access::load()) }).await;
+                    let found = cx.background_spawn(async move { look_up() }).await;
                     if this.update(cx, |v, cx| v.found(found, cx)).is_err() {
+                        break;
+                    }
+                }
+                // Changed in System Settings meanwhile, or answered at macOS's prompt.
+                #[cfg(target_os = "macos")]
+                if this.update(cx, |v, _| v.section == Section::Permissions).unwrap_or(false) {
+                    let granted = cx.background_spawn(async move { look_up_permissions() }).await;
+                    if this.update(cx, |v, cx| v.set_granted(granted, cx)).is_err() {
                         break;
                     }
                 }
@@ -269,9 +304,29 @@ impl SettingsView {
             file: settings::file_value(cx),
             generation: generation(cx),
             remote: Remote::default(),
+            #[cfg(target_os = "macos")]
+            granted: None,
             backdrop: crate::style::Backdrop::default(),
             _refresh: refresh,
         }
+    }
+
+    /// Show `section`. Connections looks at the server at once, not at the
+    /// next refresh, and Permissions at what macOS allows.
+    fn select(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Connections && self.section != section {
+            cx.spawn(async move |this, cx| {
+                let found = cx.background_spawn(async move { look_up() }).await;
+                let _ = this.update(cx, |v, cx| v.found(found, cx));
+            })
+            .detach();
+        }
+        #[cfg(target_os = "macos")]
+        if section == Section::Permissions && self.section != section {
+            self.look_at_permissions(cx);
+        }
+        self.section = section;
+        cx.notify();
     }
 
     fn found(&mut self, (serving, wanted, access): (Option<tern_web::Serving>, Option<bool>, Access), cx: &mut Context<Self>) {
@@ -446,7 +501,82 @@ impl SettingsView {
                 ]
             },
             Section::Connections => self.remote_rows(),
+            #[cfg(target_os = "macos")]
+            Section::Permissions => self.permission_rows(),
+            #[cfg(not(target_os = "macos"))]
+            Section::Permissions => Vec::new(),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn look_at_permissions(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let granted = cx.background_spawn(async move { look_up_permissions() }).await;
+            let _ = this.update(cx, |v, cx| v.set_granted(granted, cx));
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_granted(&mut self, granted: Granted, cx: &mut Context<Self>) {
+        if self.granted != Some(granted) {
+            self.granted = Some(granted);
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn permission_rows(&self) -> Vec<Row> {
+        use permissions::Notifications as N;
+        let Some(g) = self.granted else {
+            return vec![Row::new("Notifications", "Looking…"), Row::new("Screen Recording", "Looking…")];
+        };
+        let mut notifications = Row::new(
+            "Notifications",
+            "When an agent finishes or needs your input while you look elsewhere. Without them, only the Dock icon bounces.",
+        )
+        .value(match g.notifications {
+            N::Allowed => "Allowed",
+            N::Hidden => "No banners",
+            N::Denied => "Off",
+            N::NotAsked => "Not asked",
+            N::Unavailable => "Unavailable",
+        });
+        notifications.problem = match g.notifications {
+            N::Denied => Some("macOS doesn't show Tern's notifications: turn on Allow Notifications for Tern in System Settings.".into()),
+            N::Hidden => Some("Set to show no banners: pick Banners or Alerts for Tern in System Settings.".into()),
+            N::Unavailable => Some("Only when Tern runs as an app, not from cargo run.".into()),
+            N::Allowed | N::NotAsked => None,
+        };
+        notifications = match g.notifications {
+            // macOS's prompt; the answer shows at the next look.
+            N::NotAsked => notifications.action("Allow…", |_, _, _| permissions::ask_notifications()),
+            N::Allowed => notifications.action("Send Test", |_, _, cx| {
+                cx.show_system_notification(SystemNotification {
+                    tag: "tern-test".into(),
+                    title: "Tern notifications are on".into(),
+                    body: "Tern tells you here when an agent finishes or needs your input.".into(),
+                    actions: vec![],
+                })
+            }),
+            N::Denied | N::Hidden => notifications.action("Open System Settings", |_, _, _| permissions::open_notification_settings()),
+            N::Unavailable => notifications,
+        };
+        let screen = Row::new(
+            "Screen Recording",
+            "For the screenshot tool: other apps' windows show in screenshots. A change takes effect when Tern restarts.",
+        )
+        .value(if g.screen_recording { "Allowed" } else { "Off" });
+        let screen = if g.screen_recording {
+            screen.action("Open System Settings", |_, _, _| permissions::open_screen_recording_settings())
+        } else {
+            // macOS lists Tern there once it has asked.
+            screen.action("Allow…", |_, _, _| {
+                permissions::ask_screen_recording();
+                permissions::open_screen_recording_settings();
+            })
+        };
+        vec![notifications, screen]
     }
 
     fn remote_rows(&self) -> Vec<Row> {
@@ -736,10 +866,11 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let rows = self.rows(cx);
-        let &(_, title, _, subtitle) = SECTIONS.iter().find(|s| s.0 == self.section).expect("every section is listed");
-        let sections = SECTIONS
+        let sections = self::sections();
+        let &(_, title, _, subtitle) = *sections.iter().find(|s| s.0 == self.section).expect("every section is listed");
+        let sections = sections
             .iter()
-            .map(|&(s, label, icon, _)| {
+            .map(|&&(s, label, icon, _)| {
                 template::Scope::new(format!("section-{label}")).var("label", label).var("icon", icon).var("active", s == self.section)
             })
             .collect();
@@ -757,13 +888,10 @@ impl Render for SettingsView {
             scope,
             &mut |name, ix, f| match (name, f) {
                 ("section", Framed::Box(d)) => {
-                    let Some(&(section, ..)) = ix.and_then(|i| SECTIONS.get(i)) else { return d.into_any_element() };
+                    let Some(&(section, ..)) = ix.and_then(|i| self::sections().get(i).copied()) else { return d.into_any_element() };
                     d.id(("settings-section", ix.unwrap_or(0)))
                         .cursor_pointer()
-                        .on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| {
-                            v.section = section;
-                            cx.notify();
-                        }))
+                        .on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| v.select(section, cx)))
                         .into_any_element()
                 },
                 ("page", Framed::Box(d)) => d.id("settings-page").overflow_y_scroll().into_any_element(),

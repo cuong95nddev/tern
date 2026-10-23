@@ -10,7 +10,8 @@
 //! Beside it, when the shown tab is a Claude one, a ring of how full its
 //! conversation's context window is (`usage.context`); clicking it opens
 //! `usage.context.card`, which turns that tab's context limit on or off and
-//! sets it (see [`crate::agents::ContextGuard`]).
+//! sets it (see [`crate::agents::ContextGuard`]), and asks for a handoff
+//! to step away, or goes on from one (see [`crate::agents::Handoff`]).
 
 use std::time::{Duration, SystemTime};
 
@@ -21,7 +22,7 @@ use gpui_kit::component::{Selectable, Sizable as _};
 use gpui_kit::*;
 
 use crate::accounts::{self, AccountStore};
-use crate::agents::{Agent, ContextGuard, ContextUse};
+use crate::agents::{Agent, ContextGuard, ContextUse, Handoff};
 use crate::template::{self, Framed};
 use crate::usage::{self, AccountUsage, Limit, UsageStore};
 
@@ -43,14 +44,21 @@ pub enum UsageEvent {
     TurnOff(String),
     /// The shown Claude tab keeps its context window in bounds so.
     Guard(ContextGuard),
+    /// Ask the shown Claude tab for a handoff, to step away.
+    HandOff,
+    /// The shown Claude tab goes on from its handoff in a fresh conversation.
+    ResumeHandoff,
 }
 
 /// The shown Claude tab's context window: how full it is (once its status
-/// line said) and the limit it keeps.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// line said), the limit it keeps and its handoff.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContextShown {
     pub usage: Option<ContextUse>,
     pub guard: ContextGuard,
+    pub handoff: Handoff,
+    /// Its daemon takes the user's handoffs.
+    pub takes_handoffs: bool,
 }
 
 impl ContextShown {
@@ -70,6 +78,21 @@ impl ContextShown {
             .var("over", g.on && percent.is_some_and(|p| p >= f32::from(g.limit)))
             .var("limit", format!("{}%", g.limit))
             .var("auto_switch", g.auto_switch)
+            .var("can_hand_off", self.takes_handoffs)
+            .var("handing_off", self.handoff == Handoff::Asked)
+            .var("handoff_ready", matches!(self.handoff, Handoff::Written(_)))
+            .var(
+                "handoff_text",
+                match &self.handoff {
+                    Handoff::None => {
+                        "Claude writes a handoff in the repository, then stops. Go on from it later, also after a restart.".into()
+                    },
+                    Handoff::Asked => "Claude is writing a handoff…".into(),
+                    Handoff::Written(path) => {
+                        format!("Handoff at {path}. Going on clears this conversation and a fresh one starts from it.")
+                    },
+                },
+            )
     }
 }
 
@@ -144,8 +167,8 @@ impl UsageView {
     /// The shown tab's context window (`None`: it isn't a Claude tab).
     pub fn set_context(&mut self, context: Option<ContextShown>, cx: &mut Context<Self>) {
         if self.context != context {
-            self.context = context;
             self.context_open &= context.is_some();
+            self.context = context.clone();
             self.context_card.update(cx, |c, cx| {
                 c.shown = context;
                 cx.notify();
@@ -507,7 +530,7 @@ impl ContextCard {
                         .default_value(limit.to_string())
                 });
                 let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| {
-                    let Some(g) = this.shown.map(|s| s.guard) else { return };
+                    let Some(g) = this.shown.as_ref().map(|s| s.guard) else { return };
                     let text = input.read(cx).value();
                     let limit = match ev {
                         // Taken as typed once it is a limit it can be.
@@ -540,7 +563,7 @@ impl ContextCard {
 
 impl Render for ContextCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(shown) = self.shown else { return div().into_any_element() };
+        let Some(shown) = self.shown.clone() else { return div().into_any_element() };
         let g = shown.guard;
         let input = self.input(g.limit, window, cx);
         let me = cx.entity().downgrade();
@@ -556,6 +579,17 @@ impl Render for ContextCard {
                         cx.stop_propagation();
                         let guard = if guarding { ContextGuard { on: *on, ..g } } else { ContextGuard { auto_switch: *on, ..g } };
                         let _ = me.update(cx, |c, cx| c.set(guard, cx));
+                    })
+                    .into_any_element()
+                },
+                (button @ ("hand_off" | "resume"), Framed::Button(b)) => {
+                    let me = me.clone();
+                    let ev = if button == "hand_off" { UsageEvent::HandOff } else { UsageEvent::ResumeHandoff };
+                    b.on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = me.update(cx, |c, cx| {
+                            let _ = c.bar.update(cx, |_, cx| cx.emit(ev.clone()));
+                        });
                     })
                     .into_any_element()
                 },
