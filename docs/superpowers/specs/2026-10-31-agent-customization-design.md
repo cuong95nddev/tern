@@ -153,9 +153,10 @@ new features (new panels with their own data); that is a later project.
 
 ### 5. Release control channel
 
-- The app listens, in release builds too, on a Unix socket in Tern's data
-  folder (mode 0600; on Windows a named pipe restricted to the user),
-  separate from the debug `TERN_CONTROL`.
+- The app listens, in release builds too, on a Unix domain socket in the
+  daemon's private folder (`tern_mux::paths::mux_dir()`, mode 0700; AF_UNIX
+  on Windows too, as the daemon does with `uds_windows`), separate from the
+  debug `TERN_CONTROL`.
 - Allowlisted commands only: settings read/write/validate/undo, action
   list/run (actions that type into terminals or send chat are refused),
   layout read and change (the existing `part-move`, `part-center`,
@@ -165,7 +166,7 @@ new features (new panels with their own data); that is a later project.
   `key`, `term-*`, `chat-send`, `chat-answer`, `settings-input`.
 - The debug socket keeps everything it has today.
 
-- One socket per running app: `agent.sock` in the data folder (debug
+- One socket per running app: `agent.sock` in that folder (debug
   builds use `agent-debug.sock`, so a debug and a release app sharing the
   data folder do not collide). A second instance that finds a live socket
   does not take it. `tern --mcp` connects per tool call, so an app
