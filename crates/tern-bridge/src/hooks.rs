@@ -166,7 +166,8 @@ impl HookServer {
 /// [`remove_claude_settings`] when the tab closes. On Windows `dir` is under
 /// the user's local app data, which only they can read.
 ///
-/// With `exe` (Tern's own binary), Claude Code's status line runs through it
+/// `version` is the tab's Claude's (see [`claude_settings_json`]). With
+/// `exe` (Tern's own binary), Claude Code's status line runs through it
 /// (see [`crate::statusline`]), and so do the hooks it can't send over HTTP
 /// (see [`crate::relay`]).
 pub fn write_claude_settings(
@@ -174,6 +175,7 @@ pub fn write_claude_settings(
     token: &str,
     hook_url: &str,
     exe: Option<&std::path::Path>,
+    version: Option<crate::claude_version::Version>,
 ) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("claude-settings-{token}.json"));
     let status_line = exe.map(|e| crate::statusline::command(e, &path));
@@ -197,7 +199,7 @@ pub fn write_claude_settings(
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?
     };
-    f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref()).as_bytes())?;
+    f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref(), version).as_bytes())?;
     Ok(path)
 }
 
@@ -271,27 +273,51 @@ fn process_alive(pid: i32) -> bool {
     }
 }
 
-/// Settings JSON passed to `claude --settings` for a tab, its status line
-/// `status_line` when given, and its `SessionStart` hook (which Claude Code
-/// runs only as a command) `relay`.
-pub fn claude_settings_json(hook_url: &str, status_line: Option<&str>, relay: Option<&str>) -> String {
-    let handler = serde_json::json!([{ "type": "http", "url": hook_url, "timeout": 5 }]);
-    let mut settings = serde_json::json!({
-        "hooks": {
-            // Every tool: the files edited come from these, and Claude
-            // learns from their answers that its context is past the limit.
-            "PostToolUse": [{ "hooks": handler }],
-            // The tab learns its session id from these, to resume it later.
-            "UserPromptSubmit": [{ "hooks": handler }],
-            "Stop": [{ "hooks": handler }]
-        }
-    });
-    if let Some(command) = status_line {
-        settings["statusLine"] = serde_json::json!({ "type": "command", "command": command });
+/// The events a tab's hooks post to Tern over HTTP: its tab status follows
+/// them (see `tern_term::claude_status`), the files edited come from
+/// PostToolUse, Claude learns from their answers that its context is past
+/// the limit, and the tab learns its session id from them, to resume it.
+const HTTP_EVENTS: [&str; 12] = [
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "TeammateIdle",
+    // A manual /compact ends at the prompt with no Stop. Not PreCompact: an
+    // aborted compact sends it alone.
+    "PostCompact",
+    "SessionEnd",
+];
+
+/// Settings JSON passed to `claude --settings` for a tab whose Claude is
+/// `version` (`None`: not known; see [`crate::claude_version`]): its hooks,
+/// its status line `status_line` when given, and its `SessionStart` hook
+/// (which Claude Code runs only as a command) `relay`.
+pub fn claude_settings_json(
+    hook_url: &str,
+    status_line: Option<&str>,
+    relay: Option<&str>,
+    version: Option<crate::claude_version::Version>,
+) -> String {
+    use crate::claude_version::{knows_event, knows_status_line};
+    let handler = serde_json::json!([{ "hooks": [{ "type": "http", "url": hook_url, "timeout": 5 }] }]);
+    let mut hooks = serde_json::Map::new();
+    for event in HTTP_EVENTS.into_iter().filter(|e| knows_event(version, e)) {
+        hooks.insert(event.to_owned(), handler.clone());
     }
-    if let Some(command) = relay {
-        // A fresh conversation learns of the handoff it goes on from.
-        settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]);
+    if let Some(command) = relay.filter(|_| knows_event(version, "SessionStart")) {
+        // A fresh conversation learns of the handoff it goes on from; a
+        // resumed or cleared one tells the tab so.
+        hooks.insert("SessionStart".into(), serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]));
+    }
+    let mut settings = serde_json::json!({ "hooks": hooks });
+    if let Some(command) = status_line.filter(|_| knows_status_line(version)) {
+        settings["statusLine"] = serde_json::json!({ "type": "command", "command": command });
     }
     settings.to_string()
 }
@@ -382,7 +408,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tern-claim-settings-{}", std::process::id()));
         let dir = root.join("run");
         super::claim_run_dir(&dir).unwrap();
-        let path = super::write_claude_settings(&dir, "tok", "http://127.0.0.1:1/hook/tok", None).unwrap();
+        let path = super::write_claude_settings(&dir, "tok", "http://127.0.0.1:1/hook/tok", None, None).unwrap();
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -464,28 +490,45 @@ mod tests {
     fn settings_file_private_and_removed() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("run");
-        let p = write_claude_settings(&dir, "abc", "http://127.0.0.1:1/hook/abc", None).unwrap();
+        let p = write_claude_settings(&dir, "abc", "http://127.0.0.1:1/hook/abc", None, None).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        assert!(write_claude_settings(&dir, "abc", "x", None).is_err(), "must not overwrite");
+        assert!(write_claude_settings(&dir, "abc", "x", None, None).is_err(), "must not overwrite");
         remove_claude_settings(&dir, "abc");
         assert!(!p.exists());
     }
 
     #[test]
     fn settings_json_shape() {
-        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t", None, None)).unwrap();
+        let v: Value = serde_json::from_str(&claude_settings_json("http://127.0.0.1:1/hook/t", None, None, None)).unwrap();
         assert_eq!(v.pointer("/hooks/PostToolUse/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/UserPromptSubmit/0/hooks/0/type").unwrap(), "http");
         assert_eq!(v.pointer("/hooks/Stop/0/hooks/0/type").unwrap(), "http");
         assert!(v.get("statusLine").is_none());
         assert!(v.pointer("/hooks/SessionStart").is_none());
         let v: Value =
-            serde_json::from_str(&claude_settings_json("u", Some("'tern' --statusline 's'"), Some("'tern' --hook 's'"))).unwrap();
+            serde_json::from_str(&claude_settings_json("u", Some("'tern' --statusline 's'"), Some("'tern' --hook 's'"), None)).unwrap();
         assert_eq!(v.pointer("/statusLine/command").unwrap(), "'tern' --statusline 's'");
         assert_eq!(v.pointer("/hooks/SessionStart/0/hooks/0/command").unwrap(), "'tern' --hook 's'");
+    }
+
+    #[test]
+    fn settings_name_only_events_its_claude_knows() {
+        let events = |version| {
+            let v: Value = serde_json::from_str(&claude_settings_json("u", None, Some("r"), version)).unwrap();
+            let mut names: Vec<String> = v["hooks"].as_object().unwrap().keys().cloned().collect();
+            names.sort();
+            names
+        };
+        // Not known: what 1.0.64 knows.
+        assert_eq!(events(None), ["PostToolUse", "PreToolUse", "SessionStart", "Stop", "SubagentStop", "UserPromptSubmit"]);
+        assert_eq!(events(Some((2, 1, 312))).len(), 13);
+        assert!(!events(Some((2, 1, 77))).contains(&"StopFailure".to_owned()));
+        assert!(events(Some((2, 1, 78))).contains(&"StopFailure".to_owned()));
+        let v: Value = serde_json::from_str(&claude_settings_json("u", Some("s"), None, Some((1, 0, 60)))).unwrap();
+        assert!(v.get("statusLine").is_none());
     }
 }

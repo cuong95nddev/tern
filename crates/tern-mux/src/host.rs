@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
+use tern_term::claude_status::{ClaudeStatus, ClaudeTracker, TurnState};
 use tern_term::mirror::Marker;
 use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report, version_report};
 use tern_term::palette::PaletteFile;
@@ -89,6 +90,70 @@ pub trait Observer: Send + Sync {
     fn status(&self, id: u64, old: ActivityStatus, new: ActivityStatus);
     fn notify(&self, id: u64, title: Option<String>, body: String);
     fn exited(&self, id: u64, code: Option<i32>);
+    /// A Claude tab's status from its hooks changed.
+    fn agent_status(&self, _id: u64, _status: &ClaudeStatus) {}
+    /// A Claude tab's main agent ended its turn while child work keeps the
+    /// tab working: the turn is finished, once (its later drain to done is
+    /// not news).
+    fn turn_finished(&self, _id: u64) {}
+}
+
+/// Milliseconds since the Unix epoch: a Claude tracker's clock.
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// When `ms` (epoch milliseconds) is, as an instant.
+fn instant_at(ms: u64) -> Instant {
+    Instant::now() + Duration::from_millis(ms.saturating_sub(epoch_ms()))
+}
+
+/// A Claude tab's hooks and what they told (see
+/// [`tern_term::claude_status`]).
+#[derive(Default)]
+struct ClaudeHooks {
+    tracker: ClaudeTracker,
+    status: Option<ClaudeStatus>,
+    /// The turn end last told as finished.
+    announced: Option<u64>,
+    /// A hook came since its session file was last read.
+    hooked: bool,
+    /// Reads of its session file in a row that found it at its prompt while
+    /// the main agent was in a turn.
+    idle_reads: u8,
+    /// When to read its session file again, while the main agent is in a turn.
+    next_read: Option<Instant>,
+}
+
+impl ClaudeHooks {
+    /// Take `st` as the tab's status: `status` is set and `observer` told,
+    /// announcing a turn that ended while child work goes on once, and not
+    /// again when that work drains.
+    fn apply(&mut self, id: u64, st: ClaudeStatus, status: &Mutex<ActivityStatus>, observer: &dyn Observer) {
+        if st.held_open()
+            && let Some(at) = st.turn_completed_at
+            && self.announced != Some(at)
+        {
+            self.announced = Some(at);
+            observer.turn_finished(id);
+        }
+        let new = match st.state {
+            TurnState::Working => ActivityStatus::Working,
+            TurnState::Waiting => ActivityStatus::Blocked,
+            // Started, resumed, cleared: no turn finished.
+            TurnState::Done if st.session_boundary => ActivityStatus::None,
+            TurnState::Done => ActivityStatus::Done,
+        };
+        let told = new == ActivityStatus::Done && st.turn_completed_at.is_some() && st.turn_completed_at == self.announced;
+        let old = std::mem::replace(&mut *status.lock().unwrap(), new);
+        if old != new && !told {
+            observer.status(id, old, new);
+        }
+        if self.status.as_ref() != Some(&st) {
+            observer.agent_status(id, &st);
+            self.status = Some(st);
+        }
+    }
 }
 
 /// A driver not running yet (an adopted PTY), or stopped for a handoff.
@@ -122,6 +187,8 @@ struct Shared {
     size: Mutex<TermSize>,
     title: Mutex<Option<String>>,
     status: Mutex<ActivityStatus>,
+    /// Its Claude's hooks, for a Claude tab (once one came).
+    claude: Mutex<ClaudeHooks>,
     exited: Mutex<Option<Option<i32>>>,
     subscriber: Mutex<Option<Arc<dyn Subscriber>>>,
     /// Watch alongside the subscriber, without owning the session.
@@ -139,6 +206,7 @@ impl Shared {
             size: Mutex::new(size),
             title: Mutex::new(None),
             status: Mutex::new(ActivityStatus::None),
+            claude: Mutex::default(),
             exited: Mutex::new(None),
             subscriber: Mutex::new(None),
             viewers: Mutex::new(Vec::new()),
@@ -241,6 +309,7 @@ pub struct Host {
     term: Arc<FairMutex<HostTerm>>,
     /// Locked after `term`, never before.
     parser: HostParser,
+    observer: Arc<dyn Observer>,
 }
 
 fn window_size(s: TermSize) -> WindowSize {
@@ -292,6 +361,7 @@ impl Host {
             shared: shared.clone(),
             term: term.clone(),
             parser: parser.clone(),
+            observer: observer.clone(),
         });
         let driver = Driver::new(id, pty, poller, rx, term, shared, observer, parser);
         std::thread::Builder::new().name(format!("host {id}")).spawn(move || driver.run())?;
@@ -326,7 +396,16 @@ impl Host {
         shared.images.adopt(images);
         let fd = fd.filter(|_| exited.is_none());
         let master = fd.as_ref().map(|f| f.try_clone().map(File::from)).transpose()?;
-        let host = Arc::new(Self { id, pid, master, scrollback, shared: shared.clone(), term: term.clone(), parser: parser.clone() });
+        let host = Arc::new(Self {
+            id,
+            pid,
+            master,
+            scrollback,
+            shared: shared.clone(),
+            term: term.clone(),
+            parser: parser.clone(),
+            observer: observer.clone(),
+        });
         let Some(fd) = fd else {
             *shared.exited.lock().unwrap() = Some(exited.flatten());
             *shared.status.lock().unwrap() = ActivityStatus::None;
@@ -372,6 +451,40 @@ impl Host {
 
     pub fn exited(&self) -> Option<Option<i32>> {
         *self.shared.exited.lock().unwrap()
+    }
+
+    /// Claude hook `raw` came for it; `stop_blocked`: Tern's own Stop hook
+    /// blocked it, so the turn goes on.
+    pub fn claude_hook(&self, raw: &serde_json::Value, stop_blocked: bool) {
+        let mut hooks = self.shared.claude.lock().unwrap();
+        hooks.hooked = true;
+        hooks.idle_reads = 0;
+        if let Some(st) = hooks.tracker.on_event(raw, epoch_ms(), stop_blocked) {
+            hooks.apply(self.id, st, &self.shared.status, &*self.observer);
+        }
+        drop(hooks);
+        // Its lease and session-file reads may have changed.
+        let _ = self.shared.poller.notify();
+    }
+
+    /// Its Claude's status from its hooks, once one came.
+    pub fn claude_status(&self) -> Option<ClaudeStatus> {
+        self.shared.claude.lock().unwrap().status.clone()
+    }
+
+    /// Its Claude hook state, for a daemon taking it over (none before a
+    /// hook came).
+    pub fn claude_tracker(&self) -> Option<ClaudeTracker> {
+        let hooks = self.shared.claude.lock().unwrap();
+        hooks.tracker.knows().then(|| hooks.tracker.clone())
+    }
+
+    /// Go on from the hook state another daemon had (before its driver runs).
+    pub fn adopt_claude(&self, tracker: ClaudeTracker) {
+        let mut hooks = self.shared.claude.lock().unwrap();
+        hooks.status = tracker.clone().current(epoch_ms());
+        hooks.announced = hooks.status.as_ref().and_then(|s| s.turn_completed_at);
+        hooks.tracker = tracker;
     }
 
     /// Start sending to `sub`; returns the state it starts from. Replaces a
@@ -806,7 +919,8 @@ impl<P: HostPty> Driver<P> {
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
             let scheme_check = self.scheme_reports.then(|| self.scheme_checked + SCHEME_CHECK);
             let exit_check = P::POLLED.then(|| self.exit_checked + EXIT_POLL);
-            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check, self.claude_check];
+            let hooks_check = self.claude_hooks_check(now);
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check, self.claude_check, hooks_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -831,6 +945,9 @@ impl<P: HostPty> Driver<P> {
             }
             if self.claude_check.is_some_and(|t| t <= now) {
                 self.check_claude(now);
+            }
+            if hooks_check.is_some_and(|t| t <= now) {
+                self.check_claude_hooks(now);
             }
             if exit_check.is_some_and(|t| t <= now) {
                 self.exit_checked = now;
@@ -1005,6 +1122,21 @@ impl<P: HostPty> Driver<P> {
                 OscSignal::VersionQuery => self.writes.push_back((version_report(env!("CARGO_PKG_VERSION")).into(), 0)),
                 // The UI's (it keeps the folder).
                 OscSignal::Cwd(_) => {},
+                // Its hooks tell a Claude tab's status; its reports only say
+                // sooner that a question was answered or a turn may have
+                // been cancelled (no hook says either).
+                OscSignal::ProgramStatus(st) if self.shared.claude.lock().unwrap().tracker.knows() => {
+                    let mut hooks = self.shared.claude.lock().unwrap();
+                    if st.state == "working" {
+                        if hooks.tracker.asking()
+                            && let Some(status) = hooks.tracker.question_answered(epoch_ms())
+                        {
+                            hooks.apply(self.id, status, &self.shared.status, &*self.observer);
+                        }
+                    } else if hooks.tracker.main_agent_busy() {
+                        hooks.next_read = Some(Instant::now());
+                    }
+                },
                 OscSignal::ProgramStatus(st) => {
                     if st.state == "working" {
                         self.claude_check = None;
@@ -1055,6 +1187,66 @@ impl<P: HostPty> Driver<P> {
                 self.claude_check = None;
                 self.set_status(if status == Some(ActivityStatus::Blocked) { ActivityStatus::Blocked } else { ActivityStatus::Done });
             },
+        }
+    }
+
+    /// When its Claude hooks want a look: the lease on a notification its
+    /// idle main agent is owed runs out, or its session file is to be read
+    /// again while the main agent is in a turn.
+    fn claude_hooks_check(&mut self, now: Instant) -> Option<Instant> {
+        let mut hooks = self.shared.claude.lock().unwrap();
+        if !hooks.tracker.knows() {
+            return None;
+        }
+        let lease = hooks.tracker.deadline().map(instant_at);
+        if hooks.tracker.main_agent_busy() {
+            hooks.next_read.get_or_insert(now + CLAUDE_CHECK);
+        } else {
+            hooks.next_read = None;
+            hooks.idle_reads = 0;
+        }
+        [lease, hooks.next_read].into_iter().flatten().min()
+    }
+
+    /// Give up on owed notifications past their lease; and, from its session
+    /// file, notice a cancelled turn (at its prompt twice in a row with no
+    /// hook between: Esc and Ctrl+C send none) and an answered question.
+    fn check_claude_hooks(&mut self, now: Instant) {
+        let busy = self.shared.claude.lock().unwrap().tracker.main_agent_busy();
+        // Read before locking: it reads the disk.
+        let file = if busy { self.claude_status() } else { None };
+        let mut hooks = self.shared.claude.lock().unwrap();
+        let ms = epoch_ms();
+        if hooks.tracker.deadline().is_some_and(|d| d <= ms)
+            && let Some(st) = hooks.tracker.current(ms)
+        {
+            hooks.apply(self.id, st, &self.shared.status, &*self.observer);
+        }
+        if !hooks.next_read.is_some_and(|t| t <= now) || !hooks.tracker.main_agent_busy() {
+            return;
+        }
+        hooks.next_read = Some(now + CLAUDE_CHECK);
+        if std::mem::take(&mut hooks.hooked) {
+            hooks.idle_reads = 0;
+            return;
+        }
+        let update = match file {
+            Some(ActivityStatus::None) => {
+                hooks.idle_reads += 1;
+                if hooks.idle_reads < 2 {
+                    return;
+                }
+                hooks.idle_reads = 0;
+                hooks.tracker.interrupted(ms)
+            },
+            Some(ActivityStatus::Working) if hooks.tracker.asking() => hooks.tracker.question_answered(ms),
+            _ => {
+                hooks.idle_reads = 0;
+                None
+            },
+        };
+        if let Some(st) = update {
+            hooks.apply(self.id, st, &self.shared.status, &*self.observer);
         }
     }
 

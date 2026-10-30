@@ -6678,6 +6678,7 @@ dependencies = [
  "sha2 0.10.9",
  "streaming-iterator",
  "tern-bridge",
+ "tern-chat",
  "tern-fs",
  "tern-menubar",
  "tern-mux",
@@ -6709,13 +6710,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-chat"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "serde_json",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "tern-fs"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "log",
  "notify",
  "objc2-foundation 0.3.2",
  "regex",
+ "regex-syntax",
  "tempfile",
  "trash",
 ]

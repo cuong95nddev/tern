@@ -16,6 +16,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
 use tern_fs::fuzzy;
+use tern_fs::index::SearchIndex;
 use tern_fs::search::{Match, Query, Results};
 
 use crate::platform::shortcut;
@@ -76,6 +77,7 @@ const COMMANDS: &[Command] = &[
     Command { title: "Go to File…", key: "⌘P", run: Do::Show(Mode::Files) },
     Command { title: "Search in Files", key: "⌘⇧F", run: Do::Show(Mode::Search) },
     cmd!("New Claude Tab", "⌘T", workspace::NewClaudeTab),
+    cmd!("New Claude Chat", "", workspace::NewClaudeChat),
     cmd!("New Shell Tab", "⌘⇧T", workspace::NewShellTab),
     cmd!("New Scratch File", "⌘N", workspace::NewScratch),
     cmd!("Toggle Explorer", "⌘B", workspace::ToggleExplorer),
@@ -144,6 +146,9 @@ enum Status {
 
 pub struct Palette {
     root: PathBuf,
+    /// Search in Files reads only the files that can match; built the first
+    /// time it shows.
+    index: Arc<SearchIndex>,
     mode: Mode,
     commands_input: Entity<InputState>,
     files_input: Entity<InputState>,
@@ -210,6 +215,7 @@ impl Palette {
             }),
         ];
         Self {
+            index: Arc::new(SearchIndex::new(root.clone())),
             root,
             mode: Mode::Commands,
             commands_input,
@@ -247,7 +253,7 @@ impl Palette {
             Mode::Commands => self.commands = filter_commands(&input.read(cx).value()),
             // The list so far shows until the new one is read.
             Mode::Files => self.list_files(cx),
-            Mode::Search => {},
+            Mode::Search => self.index.warm(),
         }
         self.select(0, cx);
     }
@@ -374,11 +380,10 @@ impl Palette {
         }
         self.status = Status::Searching;
         cx.notify();
-        let root = self.root.clone();
+        let index = self.index.clone();
         self._search = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
-            let found =
-                cx.background_spawn(async move { tern_fs::search::search(&root, &query, LIMIT, &cancel).map(|r| (r, cancel)) }).await;
+            let found = cx.background_spawn(async move { index.search(&query, LIMIT, &cancel).map(|r| (r, cancel)) }).await;
             let _ = this.update(cx, |this, cx| match found {
                 Ok((_, cancel)) if cancel.load(Ordering::Relaxed) => {},
                 Ok((results, _)) => this.set_results(results, Status::Done, cx),

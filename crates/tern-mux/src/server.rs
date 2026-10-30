@@ -29,18 +29,22 @@ use std::time::{Duration, Instant};
 
 use tern_bridge::context::{Action, Guard, Policy};
 use tern_bridge::{HookEvent, HookServer};
+use tern_term::claude_status::ClaudeStatus;
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
 use tern_term::{SpawnConfig, TermSize};
 
+use crate::chat::{ChatHost, ChatSink, Notify};
 #[cfg(unix)]
 use crate::host::Paused;
 use crate::host::{Host, Observer, Subscriber};
 use crate::paths;
-use crate::proto::{self, ClientMsg, Controller, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{
+    self, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, MAJOR, MINOR, Role, ServerMsg, ServiceSpec, SessionInfo,
+};
 #[cfg(unix)]
-use crate::proto::{HANDOFF_VERSION, HandedSession, HandoffMsg};
+use crate::proto::{HANDOFF_VERSION, HandedChat, HandedSession, HandoffMsg};
 use crate::{UnixListener, UnixStream};
 
 /// Queued output a client may fall behind by, over all its sessions, before
@@ -175,6 +179,8 @@ struct Session {
     policy: Policy,
     /// Its tab muted its notifications.
     muted: bool,
+    /// The service it runs, when an agent started it as one.
+    service: Option<ServiceSpec>,
 }
 
 /// The program wasn't typed to: focus reports (DECSET 1004), which a
@@ -293,6 +299,8 @@ impl Session {
 
 struct State {
     sessions: HashMap<u64, Session>,
+    /// Chats (Claude Code run headless; see [`crate::chat`]).
+    chats: HashMap<u64, Arc<ChatHost>>,
     /// UI connections (observers don't count).
     clients: usize,
     /// UI connections, oldest first (`Reveal` goes to the newest).
@@ -362,6 +370,10 @@ pub fn serve(dir: &Path, opts: ServeOpts) -> io::Result<()> {
             let _ = std::fs::remove_file(&sock);
         },
     }
+    // The socket shows only once it listens: a client that sees it can connect.
+    #[cfg(unix)]
+    let listener = bind_over(&sock)?;
+    #[cfg(not(unix))]
     let listener = UnixListener::bind(&sock)?;
     tern_bridge::sweep_run_dirs(&opts.run_root);
     let run_dir = opts.run_root.join(std::process::id().to_string());
@@ -426,6 +438,20 @@ fn shell_quote(s: &str) -> String {
 /// Send Claude in `host` what `action` says, once the turn whose hook asked
 /// for it has ended and its prompt takes input again. The Enter goes on its
 /// own, so it isn't taken as part of a paste.
+/// Hook events only the daemon reads (for the tab's status; see
+/// [`Host::claude_hook`]).
+const UI_SKIPS: [&str; 9] = [
+    "PreToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "TeammateIdle",
+    "PostCompact",
+    "SessionEnd",
+];
+
 fn type_after_turn(host: &Arc<Host>, action: Action) {
     let text = match action {
         Action::None => return,
@@ -464,6 +490,7 @@ impl Server {
             Server {
                 state: Mutex::new(State {
                     sessions: HashMap::new(),
+                    chats: HashMap::new(),
                     clients: 0,
                     uis: Vec::new(),
                     observers: Vec::new(),
@@ -513,7 +540,7 @@ impl Server {
                     let (idle, after) = {
                         let mut st = server.state.lock().unwrap();
                         // Ended programs are kept a while for their tabs.
-                        let after = if st.sessions.is_empty() { idle_exit } else { idle_exit.max(ENDED_GRACE) };
+                        let after = if st.sessions.is_empty() && st.chats.is_empty() { idle_exit } else { idle_exit.max(ENDED_GRACE) };
                         let idle = st.idle_since.map(|t| t.elapsed());
                         if idle.is_some_and(|for_| for_ >= after) {
                             st.exiting = true;
@@ -584,8 +611,11 @@ impl Server {
     }
 
     fn update_idle(state: &mut State) {
-        let idle =
-            state.clients == 0 && state.connecting == 0 && !state.handing_off && state.sessions.values().all(|s| s.host.exited().is_some());
+        let idle = state.clients == 0
+            && state.connecting == 0
+            && !state.handing_off
+            && state.sessions.values().all(|s| s.host.exited().is_some())
+            && state.chats.values().all(|c| c.exited().is_some());
         match (idle, state.idle_since) {
             (true, None) => state.idle_since = Some(Instant::now()),
             (false, Some(_)) => state.idle_since = None,
@@ -665,6 +695,9 @@ impl Server {
         } else {
             st.observers.retain(|w| w.upgrade().is_some_and(|c| !Arc::ptr_eq(&c, &conn)));
         }
+        for c in st.chats.values() {
+            c.detach(Arc::as_ptr(&conn) as *const ());
+        }
         let sub: Arc<dyn Subscriber> = conn.clone();
         for (&id, s) in st.sessions.iter_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {
@@ -690,8 +723,11 @@ impl Server {
                 }
             },
             ClientMsg::Mute { id, muted } => {
-                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
                     s.muted = muted;
+                } else if let Some(chat) = st.chats.get(&id) {
+                    chat.set_muted(muted);
                 }
             },
             ClientMsg::AskHandoff { id } => {
@@ -759,7 +795,40 @@ impl Server {
                 }
             },
             ClientMsg::Close { id } => self.close(id),
+            ClientMsg::RunService { req, cfg, service } => self.run_service(conn, req, cfg, service),
+            ClientMsg::ReadText { req, id, lines } => match self.host(id) {
+                Some(h) => conn.send(ServerMsg::Text { req, id, text: h.capture().text(lines as usize) }),
+                None => conn.send(ServerMsg::NotFound { req, id }),
+            },
             ClientMsg::List { req } => conn.send(ServerMsg::Sessions { req, list: self.list() }),
+            ClientMsg::SpawnChat { req, spec } => self.spawn_chat(conn, req, spec),
+            ClientMsg::ListChats { req } => conn.send(ServerMsg::Chats { req, list: self.chat_list() }),
+            ClientMsg::AttachChat { req, id } => match self.chat(id) {
+                Some(chat) => Self::attach_chat(conn, req, &chat),
+                None => conn.send(ServerMsg::NotFound { req, id }),
+            },
+            ClientMsg::ChatInput { id, line } => {
+                if let Some(chat) = self.chat(id) {
+                    chat.write(&line);
+                }
+            },
+            ClientMsg::DetachChat { id } => {
+                if let Some(chat) = self.chat(id) {
+                    chat.detach(Arc::as_ptr(conn) as *const ());
+                }
+            },
+            ClientMsg::CloseChat { id } => {
+                let chat = {
+                    let mut st = self.state.lock().unwrap();
+                    let chat = st.chats.remove(&id);
+                    Self::update_idle(&mut st);
+                    chat
+                };
+                if let Some(chat) = chat {
+                    log::info!("chat {id}: closed");
+                    chat.kill();
+                }
+            },
             #[cfg(unix)]
             ClientMsg::HandOff { req, exe } => {
                 let (server, conn) = (self.clone(), conn.clone());
@@ -797,10 +866,24 @@ impl Server {
     }
 
     fn list_with(&self, info: impl Fn(&Host) -> SessionInfo) -> Vec<SessionInfo> {
-        let sessions: Vec<_> =
-            self.state.lock().unwrap().sessions.values().map(|s| (s.host.clone(), s.token.is_some(), s.claude_session.clone())).collect();
-        let mut list: Vec<_> =
-            sessions.into_iter().map(|(h, claude, claude_session)| SessionInfo { claude, claude_session, ..info(&h) }).collect();
+        let sessions: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .map(|s| (s.host.clone(), s.token.is_some(), s.claude_session.clone(), s.service.clone()))
+            .collect();
+        let mut list: Vec<_> = sessions
+            .into_iter()
+            .map(|(h, claude, claude_session, service)| SessionInfo {
+                claude,
+                claude_session,
+                service,
+                exit_code: h.exited().flatten(),
+                ..info(&h)
+            })
+            .collect();
         list.sort_by_key(|i| i.id);
         list
     }
@@ -814,6 +897,8 @@ impl Server {
         let (server, conn) = (Arc::downgrade(self), Arc::downgrade(conn));
         let _ = std::thread::Builder::new().name("watch".into()).spawn(move || {
             let mut last: Option<Vec<SessionInfo>> = None;
+            // A watcher starts knowing of no chats: told of them once there are.
+            let mut last_chats: Vec<ChatInfo> = Vec::new();
             let mut ticks = 0u32;
             loop {
                 let (Some(server), Some(conn)) = (server.upgrade(), conn.upgrade()) else { return };
@@ -831,9 +916,77 @@ impl Server {
                     conn.send(ServerMsg::SessionsChanged { list: list.clone() });
                     last = Some(list);
                 }
+                let chats = server.chat_list();
+                if last_chats != chats {
+                    conn.send(ServerMsg::ChatsChanged { list: chats.clone() });
+                    last_chats = chats;
+                }
                 drop((server, conn));
                 std::thread::sleep(WATCH_INTERVAL);
             }
+        });
+    }
+
+    /// The chats it runs, by id.
+    fn chat_list(&self) -> Vec<ChatInfo> {
+        let chats: Vec<Arc<ChatHost>> = self.state.lock().unwrap().chats.values().cloned().collect();
+        let mut list: Vec<ChatInfo> = chats
+            .iter()
+            .map(|c| ChatInfo {
+                id: c.id,
+                cwd: c.meta.cwd.clone(),
+                session: c.meta.session.clone(),
+                account: c.meta.account.clone(),
+                attached: c.attached(),
+                exited: c.exited().is_some(),
+                status: c.status(),
+                title: c.title(),
+            })
+            .collect();
+        list.sort_by_key(|c| c.id);
+        list
+    }
+
+    fn chat(&self, id: u64) -> Option<Arc<ChatHost>> {
+        self.state.lock().unwrap().chats.get(&id).cloned()
+    }
+
+    /// Posts a chat's notification while no UI is connected.
+    fn chat_notify(self: &Arc<Self>) -> Notify {
+        let server = Arc::downgrade(self);
+        Arc::new(move |title: &str, body: &str| {
+            if let Some(s) = server.upgrade()
+                && s.notifications
+                && s.state.lock().unwrap().clients == 0
+            {
+                crate::notify::post(title, body);
+            }
+        })
+    }
+
+    fn spawn_chat(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, spec: ChatSpec) {
+        if !self.wait_handoff(conn) {
+            return;
+        }
+        let id = random_id();
+        match ChatHost::spawn(id, &spec, self.chat_notify()) {
+            Ok(chat) => {
+                log::info!("chat {id}: started pid {}", chat.pid);
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.chats.insert(id, chat.clone());
+                    Self::update_idle(&mut st);
+                }
+                Self::attach_chat(conn, req, &chat);
+            },
+            Err(e) => conn.send(ServerMsg::Error { req, message: e.to_string() }),
+        }
+    }
+
+    fn attach_chat(conn: &Arc<Conn>, req: u64, chat: &Arc<ChatHost>) {
+        let owner: Arc<dyn ChatSink> = conn.clone();
+        chat.attach(&owner, |lines, exited| {
+            conn.send(ServerMsg::ChatAttached { req, id: chat.id, pid: chat.pid, started: chat.started, lines, exited });
         });
     }
 
@@ -841,28 +994,70 @@ impl Server {
         self.state.lock().unwrap().sessions.get(&id).map(|s| s.host.clone())
     }
 
-    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, mut cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>) {
-        // A handoff exports the sessions there are: wait for it. If it
-        // succeeds this connection is closed and the UI asks the new daemon.
-        while self.state.lock().unwrap().handing_off {
-            if conn.dead.load(Ordering::Acquire) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if conn.dead.load(Ordering::Acquire) {
+    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>) {
+        if !self.wait_handoff(conn) {
             return;
         }
         let seed = seed.and_then(|s| proto::unpack_snapshot(&s).map_err(|e| log::warn!("bad seed: {e}")).ok());
+        let sizes = vec![(Arc::downgrade(conn), cfg.size)];
+        match self.start(cfg, hook, seed, sizes, None) {
+            Ok(id) => self.attach_host(conn, req, id, None),
+            Err(message) => conn.send(ServerMsg::Error { req, message }),
+        }
+    }
+
+    /// Start `service` with no one attached; it runs until closed.
+    fn run_service(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, cfg: SpawnConfig, mut service: ServiceSpec) {
+        if !self.wait_handoff(conn) {
+            return;
+        }
+        service.started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        log::info!("service {:?}: {}", service.name, service.command);
+        match self.start(cfg, false, None, Vec::new(), Some(service)) {
+            Ok(id) => {
+                let pid = self.host(id).map_or(0, |h| h.pid());
+                conn.send(ServerMsg::ServiceStarted { req, id, pid });
+            },
+            Err(message) => conn.send(ServerMsg::Error { req, message }),
+        }
+    }
+
+    /// A handoff exports the sessions there are: wait for it. If it
+    /// succeeds this connection is closed and the client asks the new
+    /// daemon. False when the connection is gone.
+    fn wait_handoff(&self, conn: &Arc<Conn>) -> bool {
+        while self.state.lock().unwrap().handing_off {
+            if conn.dead.load(Ordering::Acquire) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !conn.dead.load(Ordering::Acquire)
+    }
+
+    /// Start a session running `cfg`; its id, or why it didn't start.
+    fn start(
+        self: &Arc<Self>,
+        mut cfg: SpawnConfig,
+        hook: bool,
+        seed: Option<Snapshot>,
+        sizes: Vec<(Weak<Conn>, TermSize)>,
+        service: Option<ServiceSpec>,
+    ) -> Result<u64, String> {
         let id = random_id();
+        // Its programs learn which session they run in (`tern --mcp` tells
+        // the daemon who asked for a service).
+        cfg.env.insert("TERN_SESSION_ID".into(), id.to_string());
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
+                let version = crate::claude_probe::version(&cfg, SETTINGS_PLACEHOLDER);
                 match tern_bridge::write_claude_settings(
                     &self.run_dir,
                     &token,
                     &hooks.hook_url(&token),
                     std::env::current_exe().ok().as_deref(),
+                    version,
                 ) {
                     Ok(path) => {
                         let quoted = shell_quote(&path.to_string_lossy());
@@ -892,7 +1087,7 @@ impl Server {
                 if let Some(t) = &token {
                     self.drop_token(t);
                 }
-                return conn.send(ServerMsg::Error { req, message: e.to_string() });
+                return Err(e.to_string());
             },
         };
         log::info!("session {id}: started pid {}", host.pid());
@@ -905,7 +1100,7 @@ impl Server {
                     token: token.clone(),
                     owner: None,
                     viewers: Vec::new(),
-                    sizes: vec![(Arc::downgrade(conn), cfg.size)],
+                    sizes,
                     driver: None,
                     held: false,
                     hooks: VecDeque::new(),
@@ -913,11 +1108,12 @@ impl Server {
                     guard: Guard::default(),
                     policy: Policy::default(),
                     muted: false,
+                    service,
                 },
             );
             Self::update_idle(&mut st);
         }
-        self.attach_host(conn, req, id, None);
+        Ok(id)
     }
 
     fn attach(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, id: u64, size: TermSize) {
@@ -975,6 +1171,9 @@ impl Server {
         self.tell_control(conn, id);
         // After `Attached`; changes from here on reach it too.
         host.send_images(&**conn);
+        if let Some(status) = host.claude_status() {
+            conn.send(ServerMsg::AgentStatus { id, status: Box::new(status) });
+        }
         for body in hooks {
             if let Some(token) = &token {
                 conn.send(ServerMsg::Hook { token: token.clone(), body });
@@ -1056,27 +1255,38 @@ impl Server {
     /// Hook `ev` came; the answer for Claude Code, if any.
     fn on_hook(&self, ev: HookEvent) -> Option<serde_json::Value> {
         let body = serde_json::to_vec(&ev.raw).unwrap_or_default();
-        let mut st = self.state.lock().unwrap();
-        let s = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str()))?;
-        if let Some(id) = &ev.session_id {
-            s.claude_session = Some(id.clone());
-        }
-        let (reply, action) = s.guard.on_event(&ev, s.policy);
-        type_after_turn(&s.host, action);
-        match s.owner.as_ref().and_then(Weak::upgrade) {
-            Some(conn) => conn.send(ServerMsg::Hook { token: ev.token, body }),
-            // A tool call that changed no file tells a UI nothing later.
-            None if ev.event == "PostToolUse" && ev.paths.is_empty() => {},
-            None => {
-                // Only the latest status line matters.
-                if ev.event == tern_bridge::statusline::EVENT {
-                    s.hooks.retain(|b| !tern_bridge::statusline::is_event(b));
-                }
-                if s.hooks.len() >= MAX_QUEUED_HOOKS {
-                    s.hooks.pop_front();
-                }
-                s.hooks.push_back(body);
-            },
+        let (host, reply) = {
+            let mut st = self.state.lock().unwrap();
+            let s = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str()))?;
+            if let Some(id) = &ev.session_id {
+                s.claude_session = Some(id.clone());
+            }
+            let (reply, action) = s.guard.on_event(&ev, s.policy);
+            type_after_turn(&s.host, action);
+            match s.owner.as_ref().and_then(Weak::upgrade) {
+                // The UI has the status from the daemon: it wants only the
+                // events it reads files, the session and the handoff from.
+                _ if UI_SKIPS.contains(&ev.event.as_str()) => {},
+                Some(conn) => conn.send(ServerMsg::Hook { token: ev.token.clone(), body }),
+                // A tool call that changed no file tells a UI nothing later.
+                None if ev.event == "PostToolUse" && ev.paths.is_empty() => {},
+                None => {
+                    // Only the latest status line matters.
+                    if ev.event == tern_bridge::statusline::EVENT {
+                        s.hooks.retain(|b| !tern_bridge::statusline::is_event(b));
+                    }
+                    if s.hooks.len() >= MAX_QUEUED_HOOKS {
+                        s.hooks.pop_front();
+                    }
+                    s.hooks.push_back(body);
+                },
+            }
+            (s.host.clone(), reply)
+        };
+        // Unlocked: what it tells reaches the observer, which locks.
+        if ev.event != tern_bridge::statusline::EVENT {
+            let blocked = reply.as_ref().is_some_and(|r| r.get("decision").and_then(|d| d.as_str()) == Some("block"));
+            host.claude_hook(&ev.raw, ev.event == "Stop" && blocked);
         }
         reply
     }
@@ -1112,6 +1322,8 @@ struct Handoff<'a> {
     server: &'a Arc<Server>,
     kill: Option<Box<dyn FnOnce() + Send>>,
     paused: Vec<Box<dyn Paused>>,
+    /// Chats whose readers stopped, read again on a rollback.
+    parked: Vec<(Arc<ChatHost>, crate::chat::Parked)>,
     /// The new daemon may have taken the socket path.
     rebind: bool,
 }
@@ -1124,6 +1336,9 @@ impl Drop for Handoff<'_> {
         }
         for p in self.paused.drain(..) {
             p.resume();
+        }
+        for (chat, parked) in self.parked.drain(..) {
+            chat.resume(parked);
         }
         if self.rebind {
             match bind_over(&self.server.sock) {
@@ -1161,14 +1376,16 @@ impl Server {
                 .sessions
                 .iter()
                 .map(|(&id, s)| {
-                    (id, s.host.clone(), s.token.clone(), s.claude_session.clone(), s.hooks.iter().cloned().collect::<Vec<_>>())
+                    let hooks = s.hooks.iter().cloned().collect::<Vec<_>>();
+                    (id, s.host.clone(), s.token.clone(), s.claude_session.clone(), hooks, s.service.clone())
                 })
                 .collect();
             v.sort_by_key(|s| s.0);
             v
         };
-        log::info!("handing {} sessions to a new daemon from {}", sessions.len(), exe.display());
-        let mut handoff = Handoff { server: self, kill: None, paused: Vec::new(), rebind: false };
+        let chats: Vec<Arc<ChatHost>> = self.state.lock().unwrap().chats.values().cloned().collect();
+        log::info!("handing {} sessions and {} chats to a new daemon from {}", sessions.len(), chats.len(), exe.display());
+        let mut handoff = Handoff { server: self, kill: None, paused: Vec::new(), parked: Vec::new(), rebind: false };
         let (stream, kill) = match &self.successor {
             Some(start) => start(exe)?,
             None => spawn_successor(exe)?,
@@ -1188,9 +1405,10 @@ impl Server {
             run_dir: self.run_dir.clone(),
             hook_port: self.hooks.as_ref().map(HookServer::port),
             sessions: sessions.len() as u32,
+            chats: chats.len() as u32,
         };
         proto::write_frame_with_fds(&stream, &begin, &fds)?;
-        for (id, host, token, claude_session, hooks) in sessions {
+        for (id, host, token, claude_session, hooks, service) in sessions {
             let paused = host.pause()?;
             let fd = paused.as_ref().and_then(|_| host.master_fd());
             let session = HandedSession {
@@ -1209,11 +1427,40 @@ impl Server {
                 scheme_reports: paused.as_ref().is_some_and(|p| p.scheme_reports()),
                 snapshot: proto::pack_snapshot(&host.capture())?,
                 images: host.handed_images(),
+                service,
+                claude: host.claude_tracker(),
             };
             handoff.paused.extend(paused);
             let msg = HandoffMsg::Session(Box::new(session));
             match fd {
                 Some(fd) => proto::write_frame_with_fds(&stream, &msg, &[fd])?,
+                None => proto::write_frame(&mut &stream, &msg)?,
+            }
+        }
+        for chat in chats {
+            let io = chat.park()?;
+            let fds = io.as_ref().map(|(stdin, p)| [stdin.as_raw_fd(), p.stdout.as_raw_fd(), p.stderr.as_raw_fd()]);
+            let handed = chat.handed(None);
+            let msg = HandoffMsg::Chat(Box::new(HandedChat {
+                id: chat.id,
+                pid: chat.pid,
+                started: chat.started,
+                title: handed.title,
+                lines: handed.lines,
+                partial: io.as_ref().map(|(_, p)| p.partial.clone()).unwrap_or_default(),
+                stderr: handed.stderr,
+                exited: handed.exited,
+                cwd: handed.meta.cwd,
+                session: handed.meta.session,
+                account: handed.meta.account,
+                record: handed.meta.record,
+            }));
+            // Parked before it goes, so a failure below reads again.
+            if let Some((_, parked)) = io {
+                handoff.parked.push((chat.clone(), parked));
+            }
+            match fds {
+                Some(fds) => proto::write_frame_with_fds(&stream, &msg, &fds)?,
                 None => proto::write_frame(&mut &stream, &msg)?,
             }
         }
@@ -1230,6 +1477,8 @@ impl Server {
         for p in handoff.paused.drain(..) {
             p.forget();
         }
+        // Their pipes are the new daemon's: this one's copies close.
+        handoff.parked.clear();
         std::mem::forget(handoff);
         log::info!("handoff committed");
         self.stopped.store(true, Ordering::Release);
@@ -1237,6 +1486,7 @@ impl Server {
             let mut st = self.state.lock().unwrap();
             // Its hosts aren't driven here any more.
             st.sessions.clear();
+            st.chats.clear();
             st.uis.iter().chain(st.observers.iter()).filter_map(Weak::upgrade).collect()
         };
         // The UIs reattach to the new daemon by session id.
@@ -1320,7 +1570,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
     stream.set_read_timeout(Some(HANDOFF_TIMEOUT))?;
     let mut reader = FrameReader::new(stream.try_clone()?, proto::MAX_SERVER_FRAME);
     let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
-    let Some(HandoffMsg::Begin { version, major, app_version, run_dir, hook_port, sessions }) = reader.read()? else {
+    let Some(HandoffMsg::Begin { version, major, app_version, run_dir, hook_port, sessions, chats }) = reader.read()? else {
         return Err(bad("expected Begin"));
     };
     if version > HANDOFF_VERSION || major != MAJOR {
@@ -1338,6 +1588,18 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
         let fd: Option<OwnedFd> = if s.fd { Some(reader.take_fd().ok_or_else(|| bad("no PTY fd"))?) } else { None };
         handed.push((s, fd));
     }
+    let mut handed_chats = Vec::new();
+    for _ in 0..chats {
+        let Some(HandoffMsg::Chat(c)) = reader.read()? else { return Err(bad("expected Chat")) };
+        let io = if c.exited.is_none() {
+            let mut fd = || reader.take_fd().map(File::from).ok_or_else(|| bad("no chat fd"));
+            let (stdin, stdout, stderr) = (fd()?, fd()?, fd()?);
+            Some((stdin, crate::chat::Parked { stdout, stderr, partial: c.partial.clone() }))
+        } else {
+            None
+        };
+        handed_chats.push((c, io));
+    }
     let tokens = handed.iter().filter_map(|(s, _)| s.token.clone()).collect();
     let hooks = match hook_listener {
         Some(l) if opts.hooks => Hooks::Adopt(l, tokens),
@@ -1352,6 +1614,9 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             let observer: Arc<dyn Observer> = server.clone();
             let (host, driver) =
                 Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, s.images, observer)?;
+            if let Some(tracker) = s.claude {
+                host.adopt_claude(tracker);
+            }
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
             st.sessions.insert(
@@ -1369,11 +1634,21 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                     guard: Guard::default(),
                     policy: Policy::default(),
                     muted: false,
+                    service: s.service,
                 },
             );
         }
         Server::update_idle(&mut st);
     }
+    let mut chat_readers = Vec::new();
+    for (c, io) in handed_chats {
+        let meta = crate::chat::ChatMeta { cwd: c.cwd, session: c.session, account: c.account, record: c.record };
+        let handed = crate::chat::Handed { meta, title: c.title, lines: c.lines, stderr: c.stderr, exited: c.exited, io };
+        let (chat, parked) = ChatHost::adopt(c.id, c.pid, c.started, handed, server.chat_notify());
+        chat_readers.extend(parked.map(|p| (chat.clone(), p)));
+        server.state.lock().unwrap().chats.insert(c.id, chat);
+    }
+    Server::update_idle(&mut server.state.lock().unwrap());
     proto::write_frame(&mut &stream.try_clone()?, &HandoffMsg::Restored)?;
     match reader.read::<HandoffMsg>() {
         Ok(Some(HandoffMsg::Commit)) => {},
@@ -1385,6 +1660,9 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
     server.claim_run_dir();
     for d in drivers {
         d.resume();
+    }
+    for (chat, parked) in chat_readers {
+        chat.resume(parked);
     }
     proto::write_frame(&mut &stream.try_clone()?, &HandoffMsg::Committed)?;
     log::info!("daemon {} adopted the sessions; listening on {}", std::process::id(), server.sock.display());
@@ -1415,6 +1693,17 @@ impl Observer for Server {
     fn exited(&self, id: u64, code: Option<i32>) {
         log::info!("session {id}: exited ({code:?})");
         Self::update_idle(&mut self.state.lock().unwrap());
+    }
+
+    fn agent_status(&self, id: u64, status: &ClaudeStatus) {
+        let owner = self.state.lock().unwrap().sessions.get(&id).and_then(|s| s.owner.as_ref().and_then(Weak::upgrade));
+        if let Some(conn) = owner {
+            conn.send(ServerMsg::AgentStatus { id, status: Box::new(status.clone()) });
+        }
+    }
+
+    fn turn_finished(&self, id: u64) {
+        self.status(id, ActivityStatus::Working, ActivityStatus::Done);
     }
 }
 
@@ -1520,6 +1809,16 @@ impl Conn {
         self.dead.store(true, Ordering::Release);
         self.tx.lock().unwrap().take();
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl ChatSink for Conn {
+    fn chat_line(&self, id: u64, line: &str) {
+        self.send(ServerMsg::ChatLine { id, line: line.to_owned() });
+    }
+
+    fn chat_exited(&self, id: u64, exit: &ChatExit) {
+        self.send(ServerMsg::ChatExited { id, exit: exit.clone() });
     }
 }
 

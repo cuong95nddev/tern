@@ -54,6 +54,8 @@ pub enum TermEvent {
     /// A viewer (a phone) has the session: the PTY takes its size and
     /// typing here is dropped until taken back (`true`); or this has it.
     RemoteControl(bool),
+    /// What a Claude tab does, from its hooks (the daemon tracks them).
+    AgentStatus(Box<crate::claude_status::ClaudeStatus>),
 }
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;

@@ -1106,6 +1106,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.caffeine` | `status`; list `modes` (`label`, `detail`, `on`) | |
 | `menu.tabs` | list `tabs` (`label`, `on`) | |
 | `menu.git_log_filter` | list `options` (`label`, `on`) | |
+| `menu.chat_model` | `loaded`; list `models` (`label`, `detail`, `on`) | |
 | `menu.part` | `part`, `floating`, `popped`, `can_float`, `can_window` | |
 | `part_window` | | `part` |
 | `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |

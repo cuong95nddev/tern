@@ -8,24 +8,57 @@ use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant};
 
 use tern_mux::client::Open;
-use tern_mux::observer::Watcher;
+use tern_mux::observer::{WatchStream, Watched, Watcher};
 use tern_mux::paths;
 use tern_mux::proto::{self, ClientMsg, ServerMsg, SessionInfo};
+
+/// The next session list `stream` gets, past chat lists.
+fn sessions(stream: &mut WatchStream) -> Option<Vec<SessionInfo>> {
+    loop {
+        match stream.next()? {
+            Watched::Sessions(list) => return Some(list),
+            Watched::Chats(_) => {},
+        }
+    }
+}
 
 #[test]
 fn watcher_follows_the_list() {
     let d = daemon(Duration::from_secs(60));
     let (w, mut stream) = Watcher::connect(&d.dir).unwrap();
-    assert_eq!(stream.next(), Some(vec![]));
+    assert_eq!(sessions(&mut stream), Some(vec![]));
     let c = client(&d.dir);
     let (sink, ev) = sink();
     let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
-    while !stream.next().unwrap().iter().any(|i| i.id == id) {}
+    while !sessions(&mut stream).unwrap().iter().any(|i| i.id == id) {}
     drop(s);
     w.close(id);
-    while !stream.next().unwrap().is_empty() {}
+    while !sessions(&mut stream).unwrap().is_empty() {}
+}
+
+#[test]
+fn watcher_follows_the_chats() {
+    let d = daemon(Duration::from_secs(60));
+    let (w, mut stream) = Watcher::connect(&d.dir).unwrap();
+    let c = client(&d.dir);
+    let spec = proto::ChatSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), r#"echo '{"type":"user","message":{"content":"Fix the bug"}}'; read x"#.into()],
+        cwd: "/".into(),
+        ..Default::default()
+    };
+    let chat = c.open_chat(tern_mux::client::OpenChat::Spawn(spec), std::sync::Arc::new(|_| {}));
+    let working = |list: &[proto::ChatInfo]| {
+        list.iter()
+            .any(|i| i.attached && i.status == tern_term::status::ActivityStatus::Working && i.title.as_deref() == Some("Fix the bug"))
+    };
+    while !matches!(stream.next().unwrap(), Watched::Chats(l) if working(&l)) {}
+    let id = chat.id().unwrap();
+    drop(chat);
+    w.close_chat(id);
+    while !matches!(stream.next().unwrap(), Watched::Chats(l) if l.is_empty()) {}
 }
 
 #[test]
@@ -95,7 +128,7 @@ fn minor_0_daemon_is_polled() {
         }
     });
     let (w, mut stream) = Watcher::connect(tmp.path()).unwrap();
-    assert_eq!(stream.next().unwrap()[0].id, 7);
+    assert_eq!(sessions(&mut stream).unwrap()[0].id, 7);
     let t = Instant::now();
     assert!(!w.reveal(7));
     assert!(t.elapsed() < Duration::from_millis(100), "no waiting on an old daemon");

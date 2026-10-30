@@ -1,0 +1,13 @@
+[package]
+name = "tern-chat"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+getrandom = "0.4.3"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+similar = "2.7.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

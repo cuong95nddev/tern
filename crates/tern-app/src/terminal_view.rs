@@ -147,6 +147,9 @@ const AGENT_SCREEN_LINES: usize = 15;
 pub enum TerminalEvent {
     TitleChanged,
     StatusChanged(ActivityStatus),
+    /// A Claude tab's main agent ended its turn while its child work goes
+    /// on (the tab stays working): the turn is finished, once.
+    TurnFinished,
     Notify {
         title: Option<String>,
         body: String,
@@ -324,6 +327,13 @@ pub struct TerminalView {
     reports_status: bool,
     /// `status` follows Claude Code's session file, not its OSC 7501 reports.
     status_from_file: bool,
+    /// A Claude tab's status from its hooks (the daemon tracks them): over
+    /// its reports and its session file.
+    hook_status: Option<tern_term::claude_status::ClaudeStatus>,
+    /// The turn end last told as finished (see [`TerminalEvent::TurnFinished`]).
+    announced_turn: Option<u64>,
+    /// `Done` came as that told turn's work drained: not news.
+    done_told: bool,
     /// When `status` last changed.
     status_since: Instant,
     /// Its last turn ended and its tab has been seen since: no longer
@@ -529,6 +539,9 @@ impl TerminalView {
             status: ActivityStatus::None,
             reports_status: false,
             status_from_file: false,
+            hook_status: None,
+            announced_turn: None,
+            done_told: false,
             status_since: Instant::now(),
             seen_done: false,
             quiet_reads: 0,
@@ -746,6 +759,23 @@ impl TerminalView {
         self.agent
     }
 
+    /// A Claude tab's status from its hooks, once one came.
+    pub fn hook_status(&self) -> Option<&tern_term::claude_status::ClaudeStatus> {
+        self.hook_status.as_ref()
+    }
+
+    /// Working only because watch loops it left (background shells,
+    /// Monitors, session crons) run: not agent time.
+    pub fn monitoring(&self) -> bool {
+        self.status == ActivityStatus::Working && self.hook_status.as_ref().is_some_and(|h| h.monitoring)
+    }
+
+    /// Its `Done` was told already, when its turn ended while child work
+    /// went on (see [`TerminalEvent::TurnFinished`]).
+    pub fn done_told(&self) -> bool {
+        self.done_told && self.status == ActivityStatus::Done
+    }
+
     /// The shells the agent runs commands in, oldest first.
     pub fn shells(&self) -> &[AgentShell] {
         &self.shells
@@ -778,7 +808,7 @@ impl TerminalView {
     pub fn debug_info(&self) -> String {
         let size = self.session.as_ref().map(|s| s.size());
         format!(
-            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={} status={:?} from_file={} find={:?} offset={}",
+            "size={size:?} focus_reported={} focus_mode={} exited={:?} spawn_error={:?} history={} status={:?} from_file={} hook={:?} find={:?} offset={}",
             self.reported_focus,
             self.mode().contains(TermMode::FOCUS_IN_OUT),
             self.exited,
@@ -786,6 +816,7 @@ impl TerminalView {
             self.session.as_ref().map_or(0, |s| s.term().lock().grid().history_size()),
             self.status,
             self.status_from_file,
+            self.hook_status.as_ref().map(|h| (h.state, h.monitoring, h.wakeup, h.held, h.main_agent.map(|m| (m.state, m.outcome)))),
             self.find.as_ref().map(|f| (f.query.text.clone(), f.matches.count(), f.matches.current_match().cloned())),
             self.session.as_ref().map_or(0, |s| s.term().lock().grid().display_offset()),
         )
@@ -927,12 +958,15 @@ impl TerminalView {
             TermEvent::Exit(_) if crate::restart::ended_by_restart(self.started, cx) => {},
             TermEvent::Exit(code) => {
                 self.exited = Some(code);
+                self.hook_status = None;
                 self.set_status(ActivityStatus::None, cx);
                 let quick = self.started.elapsed() < Duration::from_secs(5);
                 let live = !self.attaching || self.output_since_ready;
                 cx.emit(TerminalEvent::Exited { code, quick, live });
                 cx.notify();
             },
+            // Its hooks tell a Claude tab's status.
+            TermEvent::Signal(OscSignal::ProgramStatus(_)) if self.hook_status.is_some() => {},
             TermEvent::Signal(sig @ OscSignal::ProgramStatus(_)) => {
                 self.reports_status = true;
                 // Claude Code's session file knows better when a turn has
@@ -957,6 +991,9 @@ impl TerminalView {
                 OscSignal::ProgramStatusProbe | OscSignal::ColorSchemeReports(_) | OscSignal::ColorSchemeQuery | OscSignal::VersionQuery,
             ) => {},
             TermEvent::Ready { token, status, .. } => {
+                // Its hooks' status follows, as it is now: not news either.
+                self.hook_status = None;
+                self.announced_turn = None;
                 // The status it had while no one watched (e.g. Done): shown,
                 // not notified again.
                 if self.status != status {
@@ -992,6 +1029,7 @@ impl TerminalView {
                 self.remote = on;
                 cx.notify();
             },
+            TermEvent::AgentStatus(st) => self.set_hook_status(*st, cx),
             TermEvent::ServerLost => {
                 self.remote = false;
                 // The connection went (the daemon dropped it, died, or handed
@@ -1045,10 +1083,46 @@ impl TerminalView {
         }
     }
 
+    /// A Claude tab's status from its hooks: its status from here on. A
+    /// turn that ended while child work goes on is told finished once, and
+    /// its later drain to done is not news.
+    fn set_hook_status(&mut self, st: tern_term::claude_status::ClaudeStatus, cx: &mut Context<Self>) {
+        use tern_term::claude_status::TurnState;
+        self.reports_status = true;
+        // The first after attaching tells what is, not what happened.
+        if self.hook_status.is_none() {
+            self.announced_turn = st.turn_completed_at;
+        }
+        if st.held_open()
+            && let Some(at) = st.turn_completed_at
+            && self.announced_turn != Some(at)
+        {
+            self.announced_turn = Some(at);
+            cx.emit(TerminalEvent::TurnFinished);
+        }
+        let status = match st.state {
+            TurnState::Working => ActivityStatus::Working,
+            TurnState::Waiting => ActivityStatus::Blocked,
+            // Started, resumed, cleared: no turn finished.
+            TurnState::Done if st.session_boundary => ActivityStatus::None,
+            TurnState::Done => ActivityStatus::Done,
+        };
+        self.done_told = status == ActivityStatus::Done && st.turn_completed_at.is_some() && st.turn_completed_at == self.announced_turn;
+        self.hook_status = Some(st);
+        // Done stays until its tab is seen.
+        if !(status == ActivityStatus::None && self.status == ActivityStatus::Done) {
+            self.set_status(status, cx);
+        }
+        cx.notify();
+    }
+
     /// The status Claude Code's session file gives (see
     /// `tern_term::status::claude_session_status`), `None` when it has
     /// none: then its OSC 7501 reports alone tell.
     fn set_session_file_status(&mut self, status: Option<ActivityStatus>, cx: &mut Context<Self>) {
+        if self.hook_status.is_some() {
+            return;
+        }
         self.status_from_file = status.is_some() && self.exited.is_none();
         let Some(status) = status.filter(|_| self.status_from_file) else { return };
         self.reports_status = true;

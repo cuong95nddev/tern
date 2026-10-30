@@ -18,6 +18,9 @@ pub struct ChangeBatch {
     /// Worktree roots of the repos whose `.git` changed (HEAD/index/refs):
     /// their git status is stale.
     pub git_repos: Vec<PathBuf>,
+    /// The OS dropped events (FSEvents overflowed): anything under the
+    /// root may have changed unreported.
+    pub rescan: bool,
 }
 
 pub struct FsWatcher {
@@ -57,12 +60,17 @@ fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duratio
         let mut deadline = start + window;
         let mut paths: HashSet<PathBuf> = HashSet::new();
         let mut git_repos: HashSet<PathBuf> = HashSet::new();
+        let mut rescan = false;
         // Whether `ev` kept a path: only that extends the wait, so a busy
         // `target/` or `.git/objects` can't hold a batch back.
         let mut absorb = |ev: notify::Event| {
             let mut kept = false;
             if matches!(ev.kind, EventKind::Access(_)) {
                 return kept;
+            }
+            if ev.need_rescan() {
+                rescan = true;
+                kept = true;
             }
             for p in ev.paths {
                 if let Some((repo, rel)) = git_internal(&p) {
@@ -89,14 +97,14 @@ fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duratio
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if paths.is_empty() && git_repos.is_empty() {
+        if paths.is_empty() && git_repos.is_empty() && !rescan {
             continue;
         }
         let mut paths: Vec<_> = paths.into_iter().collect();
         paths.sort();
         let mut git_repos: Vec<_> = git_repos.into_iter().collect();
         git_repos.sort();
-        on_batch(ChangeBatch { paths, git_repos });
+        on_batch(ChangeBatch { paths, git_repos, rescan });
     }
 }
 
@@ -121,8 +129,9 @@ fn is_git_status_file(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
     // `index.lock` too: when git gives up a lock without writing `index`,
     // its removal is the only sign that a skipped status can run now. And
-    // the config: it decides whether status is safe to run at all.
-    matches!(s.as_ref(), "HEAD" | "index" | "index.lock" | "config" | "config.worktree") || s.starts_with("refs/")
+    // the config: it decides whether status is safe to run at all. And
+    // `info/exclude`: it ignores files like a `.gitignore`.
+    matches!(s.as_ref(), "HEAD" | "index" | "index.lock" | "config" | "config.worktree" | "info/exclude") || s.starts_with("refs/")
 }
 
 #[cfg(test)]

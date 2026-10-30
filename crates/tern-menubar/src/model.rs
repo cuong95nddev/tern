@@ -1,8 +1,8 @@
-//! What the menu shows, from the daemon's session list.
+//! What the menu shows, from the daemon's session and chat lists.
 
 use std::path::Path;
 
-use tern_mux::proto::SessionInfo;
+use tern_mux::proto::{ChatInfo, SessionInfo};
 use tern_term::status::ActivityStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,8 @@ pub struct Row {
     /// Some Tern tab shows it.
     pub open: bool,
     pub exited: bool,
+    /// A chat tab's Claude, not a terminal.
+    pub chat: bool,
 }
 
 impl Row {
@@ -64,11 +66,28 @@ fn short(cwd: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// The menu's rows, the ones waiting for the user first.
-pub fn rows(list: &[SessionInfo], home: Option<&Path>) -> Vec<Row> {
+/// Chat `c` as the session list has it, to rank and word alike.
+fn as_session(c: &ChatInfo) -> SessionInfo {
+    let title = c.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "Claude chat".into());
+    SessionInfo {
+        id: c.id,
+        status: c.status,
+        title: Some(title),
+        cwd: Some(c.cwd.clone()),
+        attached: c.attached,
+        exited: c.exited,
+        ..Default::default()
+    }
+}
+
+/// The menu's rows (sessions and chats), the ones waiting for the user first.
+pub fn rows(list: &[SessionInfo], chats: &[ChatInfo], home: Option<&Path>) -> Vec<Row> {
+    let chats: Vec<SessionInfo> = chats.iter().map(as_session).collect();
     let mut rows: Vec<_> = list
         .iter()
-        .map(|s| {
+        .map(|s| (s, false))
+        .chain(chats.iter().map(|s| (s, true)))
+        .map(|(s, chat)| {
             let row = Row {
                 id: s.id,
                 glyph: glyph(s),
@@ -76,6 +95,7 @@ pub fn rows(list: &[SessionInfo], home: Option<&Path>) -> Vec<Row> {
                 cwd: s.cwd.as_deref().map(|c| short(c, home)),
                 open: s.attached,
                 exited: s.exited,
+                chat,
             };
             (rank(s), row)
         })
@@ -92,9 +112,9 @@ pub struct IconState {
     pub attention: bool,
 }
 
-pub fn icon(list: &[SessionInfo]) -> IconState {
-    let running = list.iter().filter(|s| !s.exited);
-    IconState { count: running.clone().count(), attention: running.into_iter().any(|s| s.status == ActivityStatus::Blocked) }
+pub fn icon(list: &[SessionInfo], chats: &[ChatInfo]) -> IconState {
+    let running = list.iter().map(|s| (s.exited, s.status)).chain(chats.iter().map(|c| (c.exited, c.status))).filter(|(exited, _)| !exited);
+    IconState { count: running.clone().count(), attention: running.into_iter().any(|(_, s)| s == ActivityStatus::Blocked) }
 }
 
 /// The text beside the icon: the count (none at 0), and a dot when
@@ -126,7 +146,7 @@ mod tests {
             s(5, ActivityStatus::Blocked, Some("needs you")),
             s(6, ActivityStatus::None, Some("a idle")),
         ];
-        let ids: Vec<_> = rows(&list, None).iter().map(|r| r.id).collect();
+        let ids: Vec<_> = rows(&list, &[], None).iter().map(|r| r.id).collect();
         assert_eq!(ids, [5, 4, 2, 6, 1, 3]);
     }
 
@@ -138,7 +158,7 @@ mod tests {
             SessionInfo { program: Some("vim".into()), cwd: Some("/tmp".into()), ..s(2, ActivityStatus::None, None) },
             SessionInfo { title: Some(String::new()), ..s(3, ActivityStatus::None, None) },
         ];
-        let r = rows(&list, Some(home));
+        let r = rows(&list, &[], Some(home));
         let by = |id| r.iter().find(|r| r.id == id).unwrap();
         assert_eq!(by(1).label, "✳ Fix bug");
         assert_eq!(by(1).cwd.as_deref(), Some("~/src/tern"));
@@ -150,12 +170,24 @@ mod tests {
     }
 
     #[test]
+    fn chats_are_rows_too() {
+        let chat =
+            ChatInfo { id: 9, cwd: "/w".into(), status: ActivityStatus::Blocked, title: Some("Fix it".into()), ..Default::default() };
+        let r = rows(&[s(1, ActivityStatus::Working, Some("w"))], std::slice::from_ref(&chat), None);
+        assert_eq!(r.iter().map(|r| (r.id, r.chat)).collect::<Vec<_>>(), [(9, true), (1, false)]);
+        assert_eq!(r[0].menu_title(), "●  Fix it — /w  (not open)");
+        let untitled = ChatInfo { id: 3, attached: true, ..Default::default() };
+        assert_eq!(rows(&[], &[untitled], None)[0].label, "Claude chat");
+        assert_eq!(icon(&[], &[chat]), IconState { count: 1, attention: true });
+    }
+
+    #[test]
     fn icon_counts_running_and_flags_waiting() {
-        assert_eq!(icon(&[]), IconState { count: 0, attention: false });
+        assert_eq!(icon(&[], &[]), IconState { count: 0, attention: false });
         let list = vec![s(1, ActivityStatus::Working, None), SessionInfo { exited: true, ..s(2, ActivityStatus::None, None) }];
-        assert_eq!(icon(&list), IconState { count: 1, attention: false });
+        assert_eq!(icon(&list, &[]), IconState { count: 1, attention: false });
         let list = vec![s(1, ActivityStatus::Blocked, None), s(2, ActivityStatus::None, None)];
-        assert_eq!(icon(&list), IconState { count: 2, attention: true });
+        assert_eq!(icon(&list, &[]), IconState { count: 2, attention: true });
         assert_eq!(icon_title(IconState { count: 0, attention: false }), "");
         assert_eq!(icon_title(IconState { count: 3, attention: false }), "3");
         assert_eq!(icon_title(IconState { count: 2, attention: true }), "2 •");

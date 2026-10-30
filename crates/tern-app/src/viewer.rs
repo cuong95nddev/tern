@@ -63,7 +63,7 @@ fn is_markdown(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["md", "markdown", "mdx"].iter().any(|m| e.eq_ignore_ascii_case(m)))
 }
 
-fn image_format(path: &Path) -> Option<ImageFormat> {
+pub(crate) fn image_format(path: &Path) -> Option<ImageFormat> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "png" => ImageFormat::Png,

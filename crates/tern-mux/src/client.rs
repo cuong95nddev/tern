@@ -21,8 +21,8 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 use crate::UnixStream;
 use crate::paths;
 use crate::proto::{
-    self, ASK_HANDOFF_MINOR, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR, MAJOR, MINOR, MUTE_MINOR, Role, ServerMsg,
-    SessionInfo,
+    self, ASK_HANDOFF_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR,
+    LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, Role, ServerMsg, SessionInfo,
 };
 
 /// What the client asks who runs in a session's foreground with: the PTY
@@ -61,6 +61,45 @@ pub enum Open {
     Spawn { cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>> },
     /// Attach to a running (or exited) session.
     Attach { id: u64 },
+}
+
+/// What a chat tab hears from the daemon.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatEvent {
+    /// Attached to chat `id`: when its program started (ms since the Unix
+    /// epoch), what it said so far, and how it ended if it did.
+    Attached {
+        id: u64,
+        started: u64,
+        lines: Vec<String>,
+        exited: Option<ChatExit>,
+    },
+    Line(String),
+    Exited(ChatExit),
+    /// No such chat (the daemon was restarted).
+    NotFound,
+    Error(String),
+    /// The connection ended (the daemon quit or handed off): attach again.
+    Lost,
+}
+
+/// Gets a chat's events, on the connection's reader thread.
+pub type ChatSink = Arc<dyn Fn(ChatEvent) + Send + Sync>;
+
+pub enum OpenChat {
+    Spawn(ChatSpec),
+    Attach { id: u64 },
+}
+
+/// One chat tab's state on the client side.
+struct ChatSlot {
+    sink: ChatSink,
+    /// Set once the daemon answered; while `None`, lines wait in `early`.
+    id: Mutex<Option<u64>>,
+    early: Mutex<Vec<String>>,
+    /// The tab let go of it before the answer: `close` says whether to end it.
+    gone: AtomicBool,
+    close: AtomicBool,
 }
 
 /// One tab's state on the client side.
@@ -116,7 +155,10 @@ struct Inner {
     next_req: AtomicU64,
     pending: Mutex<HashMap<u64, Arc<Slot>>>,
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
+    chat_pending: Mutex<HashMap<u64, Arc<ChatSlot>>>,
+    chats: Mutex<HashMap<u64, Arc<ChatSlot>>>,
     lists: Mutex<HashMap<u64, mpsc::Sender<Vec<SessionInfo>>>>,
+    chat_lists: Mutex<HashMap<u64, mpsc::Sender<Vec<ChatInfo>>>>,
     /// Handoffs asked for: each gets why it failed (dropped when the
     /// connection ends, as it does when one succeeds).
     handoffs: Mutex<HashMap<u64, mpsc::Sender<String>>>,
@@ -352,7 +394,10 @@ impl MuxClient {
             next_req: AtomicU64::new(1),
             pending: Mutex::default(),
             sessions: Mutex::default(),
+            chat_pending: Mutex::default(),
+            chats: Mutex::default(),
             lists: Mutex::default(),
+            chat_lists: Mutex::default(),
             handoffs: Mutex::default(),
             hooks,
             reveal,
@@ -455,6 +500,41 @@ impl MuxClient {
         RemoteSession { inner: self.inner.clone(), slot, closed: false }
     }
 
+    /// Whether the daemon runs chats.
+    pub fn runs_chats(&self) -> bool {
+        self.inner.server_minor >= CHAT_MINOR
+    }
+
+    /// Open a chat tab's chat. Returns at once: the sink gets `Attached`
+    /// (or `NotFound` / `Error` / `Lost`) when the daemon answers.
+    pub fn open_chat(&self, open: OpenChat, sink: ChatSink) -> RemoteChat {
+        let req = self.inner.req();
+        let slot = Arc::new(ChatSlot {
+            sink,
+            id: Mutex::new(None),
+            early: Mutex::new(Vec::new()),
+            gone: AtomicBool::new(false),
+            close: AtomicBool::new(false),
+        });
+        if !self.runs_chats() {
+            let message = format!(
+                "Tern's background daemon (Tern {}) is too old to run chats: use Restart Background Terminals",
+                self.inner.server_version
+            );
+            (slot.sink)(ChatEvent::Error(message));
+            return RemoteChat { inner: self.inner.clone(), slot, closed: false };
+        }
+        self.inner.chat_pending.lock().unwrap().insert(req, slot.clone());
+        let msg = match open {
+            OpenChat::Spawn(spec) => ClientMsg::SpawnChat { req, spec },
+            OpenChat::Attach { id } => ClientMsg::AttachChat { req, id },
+        };
+        if self.inner.send(msg).is_err() && self.inner.chat_pending.lock().unwrap().remove(&req).is_some() {
+            (slot.sink)(ChatEvent::Lost);
+        }
+        RemoteChat { inner: self.inner.clone(), slot, closed: false }
+    }
+
     /// The daemon's sessions.
     pub fn list(&self) -> io::Result<Vec<SessionInfo>> {
         let req = self.inner.req();
@@ -464,6 +544,25 @@ impl MuxClient {
         let r = rx.recv_timeout(LIST_TIMEOUT).map_err(|_| io::Error::from(io::ErrorKind::TimedOut));
         self.inner.lists.lock().unwrap().remove(&req);
         r
+    }
+
+    /// The chats the daemon runs (none from a daemon too old to say).
+    pub fn list_chats(&self) -> io::Result<Vec<ChatInfo>> {
+        if self.inner.server_minor < LIST_CHATS_MINOR {
+            return Ok(Vec::new());
+        }
+        let req = self.inner.req();
+        let (tx, rx) = mpsc::channel();
+        self.inner.chat_lists.lock().unwrap().insert(req, tx);
+        self.inner.send(ClientMsg::ListChats { req })?;
+        let r = rx.recv_timeout(LIST_TIMEOUT).map_err(|_| io::Error::from(io::ErrorKind::TimedOut));
+        self.inner.chat_lists.lock().unwrap().remove(&req);
+        r
+    }
+
+    /// End chat `id` (one this client has no tab for).
+    pub fn close_chat(&self, id: u64) {
+        let _ = self.inner.send(ClientMsg::CloseChat { id });
     }
 
     /// End session `id` (one this client has no tab for).
@@ -746,6 +845,11 @@ fn spawn() -> io::Result<()> {
     spawn_background(&["--server"], log_file().as_deref())
 }
 
+/// Start the daemon in the background (it runs this executable).
+pub fn spawn_daemon() -> io::Result<()> {
+    spawn()
+}
+
 /// Run this executable with `args`, detached from us, for a process that
 /// outlives the app (the daemon, `--web`).
 #[cfg(unix)]
@@ -904,7 +1008,9 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
             ServerMsg::Hello { .. } => {},
             ServerMsg::Reveal { id } => (inner.reveal)(id),
             // For observers.
-            ServerMsg::SessionsChanged { .. } | ServerMsg::Revealed { .. } => {},
+            ServerMsg::SessionsChanged { .. } | ServerMsg::ChatsChanged { .. } | ServerMsg::Revealed { .. } => {},
+            // For `services::Services`.
+            ServerMsg::ServiceStarted { .. } | ServerMsg::Text { .. } => {},
             ServerMsg::Attached { req, id, token, pid, fd, snapshot } => {
                 #[cfg(unix)]
                 let tty = if fd { reader.take_fd().map(Pty::from) } else { None };
@@ -950,11 +1056,45 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
             ServerMsg::NotFound { req, .. } => {
                 if let Some(slot) = inner.pending.lock().unwrap().remove(&req) {
                     (slot.sink)(TermEvent::NotFound);
+                } else if let Some(slot) = inner.chat_pending.lock().unwrap().remove(&req) {
+                    (slot.sink)(ChatEvent::NotFound);
                 }
             },
             ServerMsg::Error { req, message } => {
                 if let Some(slot) = inner.pending.lock().unwrap().remove(&req) {
                     (slot.sink)(TermEvent::SpawnError(message));
+                } else if let Some(slot) = inner.chat_pending.lock().unwrap().remove(&req) {
+                    (slot.sink)(ChatEvent::Error(message));
+                }
+            },
+            ServerMsg::ChatAttached { req, id, pid: _, started, lines, exited } => {
+                let Some(slot) = inner.chat_pending.lock().unwrap().remove(&req) else { continue };
+                let early = {
+                    let mut early = slot.early.lock().unwrap();
+                    *slot.id.lock().unwrap() = Some(id);
+                    std::mem::take(&mut *early)
+                };
+                if slot.gone.load(Ordering::SeqCst) {
+                    let msg = if slot.close.load(Ordering::SeqCst) { ClientMsg::CloseChat { id } } else { ClientMsg::DetachChat { id } };
+                    let _ = inner.send(msg);
+                    continue;
+                }
+                inner.chats.lock().unwrap().insert(id, slot.clone());
+                (slot.sink)(ChatEvent::Attached { id, started, lines, exited });
+                for line in early {
+                    let _ = inner.send(ClientMsg::ChatInput { id, line });
+                }
+            },
+            ServerMsg::ChatLine { id, line } => {
+                let slot = inner.chats.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    (slot.sink)(ChatEvent::Line(line));
+                }
+            },
+            ServerMsg::ChatExited { id, exit } => {
+                let slot = inner.chats.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    (slot.sink)(ChatEvent::Exited(exit));
                 }
             },
             ServerMsg::Output { id, bytes } => {
@@ -1001,10 +1141,21 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
                     let _ = tx.send(list);
                 }
             },
+            ServerMsg::Chats { req, list } => {
+                if let Some(tx) = inner.chat_lists.lock().unwrap().remove(&req) {
+                    let _ = tx.send(list);
+                }
+            },
             ServerMsg::Control { id, by } => {
                 let slot = inner.sessions.lock().unwrap().get(&id).cloned();
                 if let Some(slot) = slot {
                     (slot.sink)(TermEvent::RemoteControl(by == Controller::Viewer));
+                }
+            },
+            ServerMsg::AgentStatus { id, status } => {
+                let slot = inner.sessions.lock().unwrap().get(&id).cloned();
+                if let Some(slot) = slot {
+                    (slot.sink)(TermEvent::AgentStatus(status));
                 }
             },
             ServerMsg::HandOffFailed { req, message } => {
@@ -1024,6 +1175,64 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
         // Holding the PTY would keep its programs from getting a hangup.
         slot.tty.lock().unwrap().take();
         (slot.sink)(TermEvent::ServerLost);
+    }
+    let chats: Vec<_> =
+        inner.chat_pending.lock().unwrap().drain().map(|(_, s)| s).chain(inner.chats.lock().unwrap().drain().map(|(_, s)| s)).collect();
+    for slot in chats {
+        (slot.sink)(ChatEvent::Lost);
+    }
+}
+
+/// A chat tab's chat in the daemon. Dropped, the tab lets go of it (it
+/// runs on); [`Self::close`] ends it.
+pub struct RemoteChat {
+    inner: Arc<Inner>,
+    slot: Arc<ChatSlot>,
+    closed: bool,
+}
+
+impl RemoteChat {
+    /// The chat's id, once the daemon answered.
+    pub fn id(&self) -> Option<u64> {
+        *self.slot.id.lock().unwrap()
+    }
+
+    /// Write `line` (one JSON message) to its program; before the daemon
+    /// answered, it is kept and sent then.
+    pub fn send(&self, line: String) {
+        let id = {
+            let mut early = self.slot.early.lock().unwrap();
+            let id = *self.slot.id.lock().unwrap();
+            if id.is_none() {
+                early.push(line.clone());
+            }
+            id
+        };
+        if let Some(id) = id {
+            let _ = self.inner.send(ClientMsg::ChatInput { id, line });
+        }
+    }
+
+    /// End its program and forget it.
+    pub fn close(mut self) {
+        self.closed = true;
+        if let Some(id) = self.id() {
+            let _ = self.inner.send(ClientMsg::CloseChat { id });
+        }
+    }
+}
+
+impl Drop for RemoteChat {
+    fn drop(&mut self) {
+        // Before the daemon answered, the reader deals with it (see `gone`).
+        self.slot.close.store(self.closed, Ordering::SeqCst);
+        self.slot.gone.store(true, Ordering::SeqCst);
+        if let Some(id) = self.id() {
+            self.inner.chats.lock().unwrap().remove(&id);
+            if !self.closed {
+                let _ = self.inner.send(ClientMsg::DetachChat { id });
+            }
+        }
     }
 }
 

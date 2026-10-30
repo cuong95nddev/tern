@@ -36,6 +36,7 @@ pub fn install(cx: &mut App) {
 fn menus() -> Vec<Menu> {
     let mut file = vec![
         MenuItem::action("New Claude Tab", workspace::NewClaudeTab),
+        MenuItem::action("New Claude Chat", workspace::NewClaudeChat),
         MenuItem::action("New Shell Tab", workspace::NewShellTab),
         MenuItem::action("New Scratch File", workspace::NewScratch),
         MenuItem::separator(),

@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tern_term::claude_status::{ClaudeStatus, ClaudeTracker};
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
@@ -30,7 +31,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 9;
+pub const MINOR: u32 = 13;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -41,9 +42,16 @@ pub const GUARD_MINOR: u32 = 5;
 pub const ASK_HANDOFF_MINOR: u32 = 8;
 /// The first MINOR whose daemon takes `Mute`.
 pub const MUTE_MINOR: u32 = 9;
+/// The first MINOR whose daemon takes `RunService` and `ReadText`.
+pub const SERVICES_MINOR: u32 = 10;
+// MINOR 11: the daemon sends `AgentStatus` (older clients skip it).
+/// The first MINOR whose daemon runs chats (`SpawnChat` and the rest).
+pub const CHAT_MINOR: u32 = 12;
+/// The first MINOR whose daemon takes `ListChats`.
+pub const LIST_CHATS_MINOR: u32 = 13;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
-pub const HANDOFF_VERSION: u32 = 2;
+pub const HANDOFF_VERSION: u32 = 5;
 
 /// What a client is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,12 +164,109 @@ pub enum ClientMsg {
         id: u64,
         path: Option<String>,
     },
-    /// Session `id`'s tab mutes (or unmutes) its notifications: the daemon
+    /// Session (or chat) `id`'s tab mutes (or unmutes) its notifications: the daemon
     /// doesn't post them while no UI is attached either (MINOR 9).
     Mute {
         id: u64,
         muted: bool,
     },
+    /// Start `service` (a command an agent asked Tern to run, see
+    /// `tern --mcp`) without attaching to it; answered by `ServiceStarted`
+    /// or `Error` (MINOR 10).
+    RunService {
+        req: u64,
+        cfg: SpawnConfig,
+        service: ServiceSpec,
+    },
+    /// The last `lines` lines of session `id`'s screen and scrollback, as
+    /// text; answered by `Text` or `NotFound` (MINOR 10).
+    ReadText {
+        req: u64,
+        id: u64,
+        lines: u32,
+    },
+    /// Start a chat (Claude Code run headless, its stdin and stdout JSON
+    /// lines) and attach to it; answered by `ChatAttached` or `Error`
+    /// (MINOR 12).
+    SpawnChat {
+        req: u64,
+        spec: ChatSpec,
+    },
+    /// Attach to chat `id`: answered by `ChatAttached` (what it said so
+    /// far) or `NotFound`, then its lines as they come (MINOR 12).
+    AttachChat {
+        req: u64,
+        id: u64,
+    },
+    /// Write `line` (one JSON message) to chat `id`'s stdin.
+    ChatInput {
+        id: u64,
+        line: String,
+    },
+    DetachChat {
+        id: u64,
+    },
+    /// End chat `id`'s program and forget it.
+    CloseChat {
+        id: u64,
+    },
+    /// The chats it runs; answered by `Chats` (MINOR 13).
+    ListChats {
+        req: u64,
+    },
+}
+
+/// A chat's program: run directly (a shell that runs Claude), its stdio piped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: std::collections::HashMap<String, String>,
+    /// Claude's conversation, and the account it runs as: what a UI that
+    /// finds the chat without a tab opens one with.
+    #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub account: String,
+    /// Where the daemon keeps the lines of MCP forms (an elicitation, its
+    /// answer, taking it back), which Claude doesn't save: the UI's
+    /// history of the chat reads them back.
+    #[serde(default)]
+    pub record: Option<PathBuf>,
+}
+
+/// A chat the daemon runs (`ListChats`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatInfo {
+    pub id: u64,
+    pub cwd: PathBuf,
+    pub session: String,
+    pub account: String,
+    /// A UI holds it.
+    pub attached: bool,
+    pub exited: bool,
+    /// Waiting for the user, running a turn, or neither.
+    pub status: ActivityStatus,
+    /// The first message the user sent.
+    pub title: Option<String>,
+}
+
+/// A service: a command run for an agent, in a session of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    /// What the agent calls it (`web`, `api`, ...).
+    pub name: String,
+    /// The shell command it runs.
+    pub command: String,
+    /// The folder it runs in.
+    pub cwd: PathBuf,
+    /// The session whose program asked for it (its `TERN_SESSION_ID`).
+    #[serde(default)]
+    pub by: Option<u64>,
+    /// When it started, in seconds since the Unix epoch (set by the daemon).
+    #[serde(default)]
+    pub started: u64,
 }
 
 /// Who has a session, as told to one connection: whose size the PTY takes
@@ -267,6 +372,64 @@ pub enum ServerMsg {
         req: u64,
         message: String,
     },
+    /// `RunService` started session `id` (MINOR 10).
+    ServiceStarted {
+        req: u64,
+        id: u64,
+        pid: u32,
+    },
+    /// Answer to `ReadText` (MINOR 10).
+    Text {
+        req: u64,
+        id: u64,
+        text: String,
+    },
+    /// What Claude tab `id` does, from its hooks: sent to its owner when
+    /// that changes, and after `Attached` (MINOR 11).
+    AgentStatus {
+        id: u64,
+        status: Box<ClaudeStatus>,
+    },
+    /// Reply to `SpawnChat` and `AttachChat`: when the program started (ms
+    /// since the Unix epoch), what it wrote so far (stream deltas of
+    /// finished turns dropped) and the client lines that answered it, and
+    /// how it ended if it did (MINOR 12).
+    ChatAttached {
+        req: u64,
+        id: u64,
+        pid: u32,
+        started: u64,
+        lines: Vec<String>,
+        exited: Option<ChatExit>,
+    },
+    /// A line chat `id`'s program wrote.
+    ChatLine {
+        id: u64,
+        line: String,
+    },
+    ChatExited {
+        id: u64,
+        exit: ChatExit,
+    },
+    /// Reply to `ListChats`.
+    Chats {
+        req: u64,
+        list: Vec<ChatInfo>,
+    },
+    /// To a watcher: the chats, whenever they change (none at first)
+    /// (MINOR 13).
+    ChatsChanged {
+        list: Vec<ChatInfo>,
+    },
+}
+
+/// How a chat's program ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatExit {
+    /// Its exit status (unknown for one a previous daemon started).
+    pub code: Option<i32>,
+    /// The last lines it wrote to stderr.
+    pub stderr: String,
 }
 
 /// Between a daemon handing off its sessions and the one adopting them. The
@@ -285,9 +448,15 @@ pub enum HandoffMsg {
         run_dir: PathBuf,
         hook_port: Option<u16>,
         sessions: u32,
+        /// `Chat`s after the sessions (handoff 5).
+        #[serde(default)]
+        chats: u32,
     },
     /// Comes with the PTY master fd when `fd` is set (the program runs).
     Session(Box<HandedSession>),
+    /// Comes with the program's stdin, stdout and stderr fds while it runs
+    /// (handoff 5).
+    Chat(Box<HandedChat>),
     Restored,
     Commit,
     Committed,
@@ -322,6 +491,35 @@ pub struct HandedSession {
     /// Kitty graphics images its programs sent (handoff 2).
     #[serde(default)]
     pub images: Vec<HandedImage>,
+    /// The service it runs (handoff 3).
+    #[serde(default)]
+    pub service: Option<ServiceSpec>,
+    /// Its Claude's hook state (handoff 4).
+    #[serde(default)]
+    pub claude: Option<ClaudeTracker>,
+}
+
+/// A chat, as handed to the new daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandedChat {
+    pub id: u64,
+    pub pid: u32,
+    pub started: u64,
+    pub title: Option<String>,
+    pub lines: Vec<String>,
+    /// The start of a line not yet ended.
+    #[serde(with = "serde_bytes")]
+    pub partial: Vec<u8>,
+    pub stderr: String,
+    pub exited: Option<ChatExit>,
+    #[serde(default)]
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub account: String,
+    #[serde(default)]
+    pub record: Option<PathBuf>,
 }
 
 /// An image a session holds, as handed to the new daemon.
@@ -360,6 +558,12 @@ pub struct SessionInfo {
     /// `session_id` of its latest Claude hook event.
     #[serde(default)]
     pub claude_session: Option<String>,
+    /// The service it runs (MINOR 10).
+    #[serde(default)]
+    pub service: Option<ServiceSpec>,
+    /// Its program's exit status, once it ended with one (MINOR 10).
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 /// An image as the client needs it to draw placeholder cells.

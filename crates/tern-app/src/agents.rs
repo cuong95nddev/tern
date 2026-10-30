@@ -115,9 +115,11 @@ pub fn tokens_label(n: u64) -> String {
 /// ring around a dot while it waits for you (`needs`), a filled disc with the
 /// tick cut out and the title in bold once its turn is done (`done`), a quiet
 /// tick once its tab has been seen (`seen`), an empty ring before its first
-/// turn (`pending`), an amber dot after a bell rang in it unseen (`rang`); a
-/// dot on its corner once its turn is done while it left shells running in
-/// the background (`shell_dot`). `time`, how long it has been working or
+/// turn (`pending`), an amber dot after a bell rang in it unseen (`rang`), a
+/// pulse once its turn is done while only watch loops it left (background
+/// shells, Monitors, session crons) keep it working (`monitoring`, as Orca
+/// has it); a dot on its corner once its turn is done while it left shells
+/// running in the background (`shell_dot`). `time`, how long it has been working or
 /// since its turn ended; `tip`, all of it in words, with how full its
 /// context window is.
 pub fn ring_vars(
@@ -130,8 +132,16 @@ pub fn ring_vars(
     let (status, shells) = (view.status(), view.shells().len());
     let seen = view.seen_done() && status == ActivityStatus::None;
     let since = view.status_since().elapsed();
+    let monitoring = view.monitoring();
     let (word, _, _) = status_look(status, rang, since, theme);
-    let word = if seen && !rang { "Done".to_owned() } else { word };
+    let word = match view.hook_status() {
+        _ if seen && !rang => "Done".to_owned(),
+        Some(h) if status == ActivityStatus::Working => {
+            let word = if monitoring { format!("Monitoring background tasks {}", working_label(since)) } else { word };
+            hook_detail(word, h)
+        },
+        _ => word,
+    };
     let time = match status {
         ActivityStatus::Working => working_label(since),
         _ => ago_label(since),
@@ -149,13 +159,64 @@ pub fn ring_vars(
     scope
         .var("time", time)
         .var("tip", tip)
-        .var("working", status == ActivityStatus::Working)
+        .var("working", status == ActivityStatus::Working && !monitoring)
+        .var("monitoring", monitoring)
         .var("needs", status == ActivityStatus::Blocked)
         .var("done", status == ActivityStatus::Done)
         .var("rang", idle && rang)
         .var("seen", idle && !rang && seen)
         .var("pending", idle && !rang && !seen)
         .var("shell_dot", shell_dot)
+}
+
+/// [`ring_vars`] for a chat tab: its turn working, waiting for the user,
+/// done and not yet looked at, or idle.
+pub fn chat_ring_vars(scope: crate::template::Scope, view: &crate::chat_view::ChatView, theme: &Theme) -> crate::template::Scope {
+    let status = view.status();
+    let since = view.status_since().elapsed();
+    let seen = view.seen_done() && status == ActivityStatus::None;
+    let (word, _, _) = status_look(status, false, since, theme);
+    let tip = if seen { "Done".to_owned() } else { word };
+    let time = match status {
+        ActivityStatus::Working => working_label(since),
+        _ => ago_label(since),
+    };
+    let idle = status == ActivityStatus::None;
+    scope
+        .var("time", time)
+        .var("tip", tip)
+        .var("working", status == ActivityStatus::Working)
+        .var("monitoring", false)
+        .var("needs", status == ActivityStatus::Blocked)
+        .var("done", status == ActivityStatus::Done)
+        .var("rang", false)
+        .var("seen", idle && seen)
+        .var("pending", idle && !seen)
+        .var("shell_dot", false)
+}
+
+/// `word` with what keeps a Claude tab working besides its own turn.
+fn hook_detail(mut word: String, h: &tern_term::claude_status::ClaudeStatus) -> String {
+    use tern_term::claude_status::{TurnState, Wakeup};
+    let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    if h.main_agent.is_some_and(|m| m.state == TurnState::Done) {
+        word += " · turn ended";
+    }
+    if h.held.agents > 0 {
+        word += &format!(" · {} at work", plural(h.held.agents, "subagent"));
+    }
+    if h.held.shells {
+        word += " · background task running";
+    }
+    if h.held.cron {
+        word += " · session cron scheduled";
+    }
+    match h.wakeup {
+        Some(Wakeup::Notification) => word += " · a task ended; Claude is about to be told",
+        Some(Wakeup::FinishingTurn) => word += " · answering a background task",
+        None => {},
+    }
+    word
 }
 
 /// What a workspace's line says of its agents that wait for you, in place
@@ -176,6 +237,11 @@ const GLYPHS: &[(&str, &str)] = &[
     (
         "icons/agent-done-cut.svg",
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><mask id="m"><rect width="16" height="16" fill="white"/><path d="M5.1 8.2l2 2 3.8-4.1" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15.5" cy="0.5" r="4" fill="black"/></mask><circle cx="8" cy="8" r="7.2" fill="black" mask="url(#m)"/></svg>"#,
+    ),
+    // A pulse line: watching what it left running.
+    (
+        "icons/agent-activity.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="M1.5 8h3l2-5 3 10 2-5h3" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>"#,
     ),
     (
         "icons/agent-tick.svg",

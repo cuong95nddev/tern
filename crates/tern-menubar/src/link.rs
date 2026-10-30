@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use tern_mux::observer::Watcher;
-use tern_mux::proto::SessionInfo;
+use tern_mux::observer::{Watched, Watcher};
+use tern_mux::proto::{ChatInfo, SessionInfo};
 
 /// How often a lost or refused connection is tried again.
 pub const RETRY: Duration = Duration::from_secs(2);
@@ -13,6 +13,7 @@ pub enum LinkEvent {
     /// Requests (Open, End) go through this until `Lost`.
     Connected(Watcher),
     List(Vec<SessionInfo>),
+    Chats(Vec<ChatInfo>),
     /// No daemon (or it went away): show the empty state.
     Lost,
 }
@@ -22,8 +23,11 @@ pub fn follow_once(dir: &Path, post: &impl Fn(LinkEvent)) {
     match Watcher::connect(dir) {
         Ok((w, mut stream)) => {
             post(LinkEvent::Connected(w));
-            while let Some(list) = stream.next() {
-                post(LinkEvent::List(list));
+            while let Some(w) = stream.next() {
+                post(match w {
+                    Watched::Sessions(list) => LinkEvent::List(list),
+                    Watched::Chats(list) => LinkEvent::Chats(list),
+                });
             }
             log::info!("daemon connection lost");
         },

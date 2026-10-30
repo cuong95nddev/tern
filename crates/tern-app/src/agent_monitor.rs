@@ -133,7 +133,13 @@ pub fn hide(cx: &mut App) -> bool {
     true
 }
 
-/// An agent running in some terminal tab.
+/// Where an agent runs: a terminal tab, or a chat tab.
+enum AgentView {
+    Term(Entity<crate::terminal_view::TerminalView>),
+    Chat(Entity<crate::chat_view::ChatView>),
+}
+
+/// An agent running in some terminal or chat tab.
 struct Entry {
     handle: AnyWindowHandle,
     ws: Entity<Workspace>,
@@ -142,7 +148,7 @@ struct Entry {
     title: String,
     agent: Agent,
     status: ActivityStatus,
-    view: Entity<crate::terminal_view::TerminalView>,
+    view: AgentView,
 }
 
 /// Every agent, by window, workspace and tab order (so rows stay put).
@@ -161,7 +167,20 @@ fn entries(cx: &mut App) -> Vec<Entry> {
                 title: t.title,
                 agent,
                 status,
-                view: t.view,
+                view: AgentView::Term(t.view),
+            });
+        }
+        for (tab, title, view) in ws.read(cx).chat_tabs(cx) {
+            let status = view.read(cx).status();
+            out.push(Entry {
+                handle,
+                ws: ws.clone(),
+                workspace: workspace.clone(),
+                tab,
+                title,
+                agent: Agent::Claude,
+                status,
+                view: AgentView::Chat(view),
             });
         }
     }
@@ -284,7 +303,10 @@ impl Render for Monitor {
                 .var("label", crate::agents::display_name(&e.title, e.agent))
                 .var("shown", true)
                 .slot("icon", e.agent.icon(&theme));
-            let item = crate::agents::ring_vars(item, e.view.read(cx), false, None, &theme);
+            let item = match &e.view {
+                AgentView::Term(v) => crate::agents::ring_vars(item, v.read(cx), false, None, &theme),
+                AgentView::Chat(v) => crate::agents::chat_ring_vars(item, v.read(cx), &theme),
+            };
             items.push(item);
             rows.push(Row::Agent(e.handle, e.ws.clone(), e.tab));
         }

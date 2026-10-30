@@ -1,6 +1,8 @@
 //! Background sessions: the `tern --server` daemon that keeps terminals
 //! running while Tern is closed, and the client the UI talks to it with.
 
+mod chat;
+mod claude_probe;
 pub mod client;
 #[cfg(unix)]
 pub mod fdpass;
@@ -12,6 +14,7 @@ pub mod observer;
 pub mod paths;
 pub mod proto;
 pub mod server;
+pub mod services;
 pub mod viewer;
 
 /// The daemon's socket: a Unix domain socket, on Windows too (AF_UNIX,

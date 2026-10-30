@@ -7,6 +7,7 @@ mod agents;
 mod arrange;
 mod caffeine;
 mod changes_view;
+mod chat_view;
 #[cfg(debug_assertions)]
 mod control;
 mod diff_pane;
@@ -21,6 +22,7 @@ mod git_log_view;
 mod handoff;
 mod links;
 mod main_window;
+mod mcp;
 mod menus;
 mod palette;
 mod panes;
@@ -33,6 +35,7 @@ mod resources_view;
 mod restart;
 mod scratch;
 mod scratches_view;
+mod services_view;
 mod settings;
 mod settings_window;
 mod shells_view;
@@ -86,6 +89,10 @@ fn main() {
         std::process::exit(tern_bridge::relay::run(&settings));
     }
     env_logger::init();
+    // The MCP server agents run their dev servers through (on stdio).
+    if std::env::args().nth(1).as_deref() == Some("--mcp") {
+        std::process::exit(mcp::run());
+    }
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());
     // The background daemon that runs the terminals (started by the UI).

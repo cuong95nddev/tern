@@ -63,6 +63,49 @@ impl CursorState {
     }
 }
 
+impl Snapshot {
+    /// The last `lines` lines of the screen and its scrollback as text,
+    /// wrapped lines joined, trailing blanks and blank lines at the end
+    /// dropped. The primary grid when the alternate screen is up (a
+    /// program's log, not its full-screen view).
+    pub fn text(&self, lines: usize) -> String {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::term::cell::Flags;
+        let grid = &self.primary.as_ref().unwrap_or(&self.grid).grid;
+        let mut out: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let top = -(grid.history_size() as i32);
+        for l in top..grid.screen_lines() as i32 {
+            let row = &grid[Line(l)];
+            let mut wrapped = false;
+            let mut text = String::new();
+            for cell in row.into_iter() {
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+                if let Some(zw) = cell.zerowidth() {
+                    text.extend(zw);
+                }
+                wrapped = cell.flags.contains(Flags::WRAPLINE);
+            }
+            if wrapped {
+                current.push_str(&text);
+            } else {
+                current.push_str(text.trim_end());
+                out.push(std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        while out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.pop();
+        }
+        out[out.len().saturating_sub(lines)..].join("\n")
+    }
+}
+
 impl GridState {
     fn of(grid: &Grid<Cell>) -> Self {
         Self { grid: grid.clone(), cursor: CursorState::of(&grid.cursor), saved_cursor: CursorState::of(&grid.saved_cursor) }
@@ -246,6 +289,20 @@ mod tests {
     fn screen(term: &Term<VoidListener>) -> Vec<String> {
         let g = term.grid();
         (0..g.screen_lines() as i32).map(|l| g[Line(l)].into_iter().map(|c| c.c).collect::<String>().trim_end().to_owned()).collect()
+    }
+
+    #[test]
+    fn text_is_the_last_lines_with_wrapped_ones_joined() {
+        let mut t = term();
+        for i in 0..20 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        // Wraps at 40 columns: one logical line.
+        feed(&mut t, format!("{}\r\nend", "x".repeat(50)).as_bytes());
+        let snap = capture(&mut t, SIZE, None, ActivityStatus::None);
+        assert_eq!(snap.text(3), format!("line 19\n{}\nend", "x".repeat(50)));
+        assert!(snap.text(1000).starts_with("line 0\nline 1\n"));
+        assert_eq!(snap.text(0), "");
     }
 
     fn round_trip(src: &mut Term<VoidListener>) -> Term<VoidListener> {

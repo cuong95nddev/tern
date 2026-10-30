@@ -785,6 +785,7 @@ const SLOTS: &[&str] = &[
     "explorer",
     "scratches",
     "shells",
+    "services",
     "usage",
     "system",
     "center",
@@ -816,10 +817,11 @@ const SLOTS: &[&str] = &[
     "graph",
     "files",
     "panes",
+    "markdown",
 ];
 
 /// The parts a template may name.
-const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "system", "usage", "panes"];
+const PARTS: &[&str] = &["agents", "explorer", "scratches", "changes", "shells", "services", "system", "usage", "panes"];
 
 /// The zones a dock may take a drop in.
 const ZONES: &[&str] = &["before", "after", "edges", "stack"];
@@ -1654,9 +1656,9 @@ mod tests {
         assert_eq!(
             a.encode(),
             "group-1=agents;group-2=panes;group-3=usage;group-4=system;group-5=explorer;group-6=changes;group-7=scratches;\
-             group-8=shells;main=[c group-2@- [r group-3@- group-4@-]@32px];\
-             right=[c group-5@- group-6@260px group-7@220px group-8@180px];start=group-1;g:group-1=grid;g:group-2=grid;g:group-3=grid;g:group-4=grid;\
-             g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid"
+             group-8=shells;group-9=services;main=[c group-2@- [r group-3@- group-4@-]@32px];\
+             right=[c group-5@- group-6@260px group-7@220px group-8@180px group-9@160px];start=group-1;g:group-1=grid;g:group-2=grid;\
+             g:group-3=grid;g:group-4=grid;g:group-5=grid;g:group-6=grid;g:group-7=grid;g:group-8=grid;g:group-9=grid"
         );
         assert_eq!(crate::arrange::Arrangement::decode(&a.key, &a.encode()), Some(a));
         assert_eq!(t.dock_strip("workspace", "right").as_deref(), Some("right"));

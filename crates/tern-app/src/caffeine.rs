@@ -165,9 +165,14 @@ fn reconcile(cx: &mut App) {
 }
 
 fn any_working(cx: &mut App) -> bool {
-    crate::main_window::all_workspaces(cx)
-        .into_iter()
-        .any(|(_, ws)| ws.read(cx).term_tabs(cx).iter().any(|t| t.agent.is_some() && t.view.read(cx).status() == ActivityStatus::Working))
+    crate::main_window::all_workspaces(cx).into_iter().any(|(_, ws)| {
+        let ws = ws.read(cx);
+        ws.term_tabs(cx).iter().any(|t| {
+            let v = t.view.read(cx);
+            // A watch loop it left (a dev server) is not agent work.
+            t.agent.is_some() && v.status() == ActivityStatus::Working && !v.monitoring()
+        }) || ws.chat_tabs(cx).iter().any(|(_, _, v)| v.read(cx).status() == ActivityStatus::Working)
+    })
 }
 
 /// Asks the worker for `command`, spawning it on the first hold.

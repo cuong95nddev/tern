@@ -75,7 +75,8 @@
                   { "part": "explorer", "when": "explorer", "attach": false },
                   { "part": "changes", "when": "changes", "attach": false, "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
                   { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 },
-                  { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height", "min": 90, "max": 800 }
+                  { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height", "min": 90, "max": 800 },
+                  { "part": "services", "when": "services", "fixed": true, "size": "$services.start_height", "min": 90, "max": 800 }
                 ]
               }
             ]
@@ -111,6 +112,7 @@
   "changes.header": { "use": "panel_header", "element": "changes.header" },
   "scratches.header": { "use": "panel_header", "element": "scratches.header" },
   "shells.header": { "use": "panel_header", "element": "shells.header" },
+  "services.header": { "use": "panel_header", "element": "services.header" },
   "explorer.header.buttons": {
     "layout": "row",
     "align": "center",
@@ -224,6 +226,20 @@
       }
     ]
   },
+  "services.header.buttons": {
+    "layout": "row",
+    "align": "center",
+    "style": { "gap": "$services.header.gap" },
+    "children": [
+      {
+        "button": "hide",
+        "element": "services.header.button",
+        "size": "xsmall",
+        "icon": "close",
+        "tooltip": "Hide Services"
+      }
+    ]
+  },
   "explorer.row": {
     "frame": "row",
     "element": "explorer.row",
@@ -327,6 +343,29 @@
       { "grow": 1, "truncate": true, "text": "{command}" },
       { "when": "agent", "shrink": 0, "text": "{agent}", "style": { "font_size": "$shells.row.detail_font_size", "text": "$shells.row.detail_text" } },
       { "shrink": 0, "text": "{age}", "style": { "font_size": "$shells.row.detail_font_size", "text": "$shells.row.detail_text" } }
+    ]
+  },
+  "services.row": {
+    "frame": "row",
+    "element": "services.row",
+    "fill": true,
+    "layout": "row",
+    "align": "center",
+    "style": { "padding_left": "{indent}" },
+    "states": {
+      "selected": { "background": "$services.row.selected_background", "text": "$services.row.selected_text" },
+      "hover": { "background": "$services.row.hover_background" }
+    },
+    "children": [
+      { "slot": "icon" },
+      { "shrink": 0, "text": "{name}" },
+      { "grow": 1, "truncate": true, "text": "{command}", "style": { "font_size": "$services.row.detail_font_size", "text": "$services.row.detail_text" } },
+      { "when": "agent", "shrink": 0, "text": "{agent}", "style": { "font_size": "$services.row.detail_font_size", "text": "$services.row.detail_text" } },
+      { "when": "ports", "button": "open", "element": "services.row.button", "size": "xsmall", "label": "{ports}", "tooltip": "Open {port}" },
+      { "shrink": 0, "text": "{state}", "style": { "font_size": "$services.row.detail_font_size", "text": "$services.row.detail_text" } },
+      { "button": "restart", "element": "services.row.button", "size": "xsmall", "icon": "rotate-cw", "tooltip": "Restart" },
+      { "when": "!exited", "button": "stop", "element": "services.row.button", "size": "xsmall", "icon": "square", "tooltip": "Stop" },
+      { "when": "exited", "button": "stop", "element": "services.row.button", "size": "xsmall", "icon": "close", "tooltip": "Remove" }
     ]
   },
   "pane": {
@@ -895,6 +934,7 @@
             "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
             "children": [
               { "when": "working", "element": "agents.ring", "ring": "75" },
+              { "when": "monitoring", "icon": "agent-activity", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.monitoring" } },
               { "when": "needs", "icon": "agent-needs", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.needs" } },
               { "when": "rang", "icon": "agent-dot", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.bell" } },
               { "when": "done && !shell_dot", "icon": "agent-done", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
@@ -1910,6 +1950,12 @@
     "fill": true,
     "children": [{ "slot": "header" }, { "when": "empty", "use": "shells.empty" }, { "slot": "list" }]
   },
+  "services": {
+    "frame": "panel",
+    "element": "services",
+    "fill": true,
+    "children": [{ "slot": "header" }, { "when": "empty", "use": "services.empty" }, { "slot": "list" }]
+  },
   "panel_group": {
     "element": "panel_group",
     "fill": true,
@@ -1985,6 +2031,13 @@
     "align": "center",
     "justify": "center",
     "children": [{ "text": "No shells running" }, { "style": { "font_size": "$text_xs" }, "text": "Commands agents run show here" }]
+  },
+  "services.empty": {
+    "element": "services.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [{ "text": "No services" }, { "style": { "font_size": "$text_xs" }, "text": "Dev servers agents run through Tern show here" }]
   },
   "usage": {
     "element": "usage",
@@ -3029,6 +3082,7 @@
       { "action": "tern::OpenFolder", "label": "Open Workspace…" },
       { "separator": true },
       { "action": "workspace::NewClaudeTab", "label": "New Claude Tab" },
+      { "action": "workspace::NewClaudeChat", "label": "New Claude Chat" },
       { "action": "workspace::NewShellTab", "label": "New Shell Tab" },
       {
         "label": "Claude Options",
@@ -3088,7 +3142,7 @@
       { "when": "grouped", "button": "remove_from_group", "label": "Remove from Group" },
       { "separator": true },
       { "when": "renamable", "button": "rename", "label": "Rename…" },
-      { "when": "terminal && !muted", "button": "mute", "label": "Mute Notifications" },
+      { "when": "mutable && !muted", "button": "mute", "label": "Mute Notifications" },
       { "when": "muted", "button": "mute", "label": "Unmute Notifications" },
       { "when": "diff_file", "button": "open_file", "label": "Open File" },
       { "when": "has_path", "button": "copy_path", "label": "Copy Path" },
@@ -3136,5 +3190,444 @@
       { "use": "menu.tab_layout" }
     ]
   },
-  "menu.tabs": { "children": [{ "each": "tabs", "item": { "button": "show", "label": "{label}", "selected": "on" } }] }
+  "menu.tabs": { "children": [{ "each": "tabs", "item": { "button": "show", "label": "{label}", "selected": "on" } }] },
+  "chat": {
+    "frame": "chat",
+    "element": "chat",
+    "fill": true,
+    "children": [
+      { "when": "!empty", "grow": 1, "element": "chat.timeline", "children": [{ "slot": "list" }] },
+      { "when": "empty", "use": "chat.empty" },
+      { "use": "chat.composer" }
+    ]
+  },
+  "chat.empty": {
+    "element": "chat.empty",
+    "grow": 1,
+    "align": "center",
+    "justify": "center",
+    "children": [
+      { "icon": "sparkles", "element": "chat.empty.icon" },
+      { "text": "Send a message to start the conversation." },
+      { "element": "chat.empty.note", "text": "Claude Code runs here with your settings, tools, hooks and MCP servers." }
+    ]
+  },
+  "chat.composer": {
+    "element": "chat.composer.row",
+    "layout": "row",
+    "justify": "center",
+    "shrink": 0,
+    "children": [
+      {
+        "element": "chat.composer",
+        "grow": 1,
+        "children": [
+          { "when": "slash", "use": "chat.commands" },
+          {
+            "when": "attached",
+            "layout": "row",
+            "element": "chat.attachments",
+            "each": "attachments",
+            "item": {
+              "element": "chat.attachment",
+              "children": [
+                { "slot": "thumb" },
+                {
+                  "position": { "top": 2, "right": 2 },
+                  "children": [{ "button": "unattach", "element": "chat.attachment.remove", "size": "xsmall", "variant": "secondary", "icon": "close", "tooltip": "Remove {name}" }]
+                }
+              ]
+            }
+          },
+          { "slot": "input" },
+          {
+            "layout": "row",
+            "align": "center",
+            "element": "chat.composer.bar",
+            "children": [
+              { "button": "mode", "element": "chat.composer.button", "size": "xsmall", "icon": "shield-check", "label": "{mode}", "tooltip": "How Claude asks before it acts: click for the next" },
+              { "button": "model", "element": "chat.composer.button", "size": "xsmall", "icon": "sparkles", "label": "{model}", "tooltip": "The model Claude runs" },
+              { "grow": 1 },
+              { "button": "attach", "element": "chat.composer.button", "size": "xsmall", "icon": "image", "tooltip": "Attach images (or paste or drop them)" },
+              { "when": "!busy", "button": "send", "variant": "primary", "size": "small", "icon": "arrow-up", "disabled": "!typed", "tooltip": "Send (Enter)" },
+              { "when": "busy && typed", "button": "send", "size": "small", "icon": "arrow-up", "tooltip": "Queue after this turn (Enter)" },
+              { "when": "busy", "button": "stop", "variant": "secondary", "size": "small", "icon": "square", "tooltip": "Stop" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.commands": {
+    "element": "chat.commands",
+    "children": [
+      { "when": "slash_loading", "element": "chat.commands.note", "text": "Loading commands…" },
+      { "when": "!slash_loading && !matched", "element": "chat.commands.note", "text": "No command starts with that" },
+      {
+        "each": "commands",
+        "item": {
+          "frame": "command",
+          "element": "chat.commands.row",
+          "layout": "row",
+          "align": "center",
+          "states": {
+            "on": { "background": "$chat.commands.row.selected_background", "text": "$chat.commands.row.selected_text" },
+            "hover && !on": { "background": "$chat.commands.row.hover_background" }
+          },
+          "children": [
+            { "shrink": 0, "text": "/{name}" },
+            { "grow": 1, "truncate": true, "text": "{description}", "style": { "font_size": "$chat.commands.row.detail_font_size", "text": "$chat.commands.row.detail_text" } }
+          ]
+        }
+      }
+    ]
+  },
+  "menu.chat_model": {
+    "children": [
+      { "when": "!loaded", "text": "The models show once Claude has started" },
+      {
+        "each": "models",
+        "item": {
+          "button": "pick",
+          "label": "{label}",
+          "selected": "on",
+          "element": "chat.model",
+          "layout": "column",
+          "children": [
+            { "text": "{label}" },
+            { "when": "detail", "text": "{detail}", "style": { "font_size": "$chat.model.detail_font_size", "text": "$chat.model.detail_text" } }
+          ]
+        }
+      }
+    ]
+  },
+  "chat.user": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "align": "end",
+        "children": [
+          {
+            "when": "has_images",
+            "layout": "row",
+            "justify": "end",
+            "element": "chat.user.images",
+            "each": "images",
+            "item": { "element": "chat.user.image", "children": [{ "slot": "thumb" }] }
+          },
+          { "when": "has_text", "element": "chat.user", "wrap": true, "text": "{text}" }
+        ]
+      }
+    ]
+  },
+  "chat.raw": {
+    "element": "chat.work",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "frame": "toggle",
+            "element": "chat.tool",
+            "layout": "row",
+            "align": "center",
+            "states": { "hover": { "text": "$chat.tool.hover_text" } },
+            "children": [
+              { "icon": "file-braces", "element": "chat.tool.icon" },
+              { "grow": 1, "truncate": true, "text": "{title}" }
+            ]
+          },
+          { "when": "open", "element": "chat.detail", "wrap": true, "text": "{body}", "style": { "font_family": "{mono}" } }
+        ]
+      }
+    ]
+  },
+  "chat.elicit": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "element": "chat.ask",
+            "children": [
+              { "element": "chat.ask.title", "wrap": true, "text": "{title}" },
+              { "when": "message", "element": "chat.elicit.message", "wrap": true, "text": "{message}" },
+              {
+                "when": "url",
+                "layout": "row",
+                "align": "center",
+                "element": "chat.elicit.url",
+                "children": [
+                  { "grow": 1, "truncate": true, "text": "{url}", "style": { "font_family": "{mono}" } },
+                  { "button": "open_url", "element": "chat.ask.button", "variant": "outline", "size": "small", "icon": "square-arrow-out-up-right", "label": "Open" }
+                ]
+              },
+              {
+                "when": "!url",
+                "element": "chat.elicit.fields",
+                "each": "fields",
+                "item": {
+                  "children": [
+                    { "when": "label", "element": "chat.ask.question", "wrap": true, "text": "{label}" },
+                    { "when": "label && description && !input", "element": "chat.meta", "wrap": true, "text": "{description}" },
+                    { "when": "input", "element": "chat.elicit.input", "children": [{ "slot": "input" }] },
+                    { "when": "option && !picked", "button": "option", "element": "chat.ask.button", "variant": "outline", "size": "small", "label": "{option}" },
+                    { "when": "option && picked", "button": "option", "element": "chat.ask.button", "variant": "secondary", "size": "small", "icon": "check", "label": "{option}", "selected": true }
+                  ]
+                }
+              },
+              {
+                "layout": "row",
+                "align": "center",
+                "justify": "end",
+                "element": "chat.ask.buttons",
+                "children": [
+                  { "grow": 1, "truncate": true, "element": "chat.meta", "text": "{wanting}" },
+                  { "button": "decline", "element": "chat.ask.button", "variant": "ghost", "size": "small", "label": "Decline" },
+                  { "when": "url", "button": "submit", "element": "chat.ask.button", "variant": "primary", "size": "small", "label": "Done" },
+                  { "when": "!url", "button": "submit", "element": "chat.ask.button", "variant": "primary", "size": "small", "label": "Submit", "disabled": "!complete" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.text": {
+    "element": "chat.reply",
+    "layout": "row",
+    "justify": "center",
+    "children": [{ "element": "chat.lane",
+        "grow": 1, "children": [{ "slot": "markdown" }] }]
+  },
+  "chat.tool": {
+    "element": "chat.work",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "frame": "toggle",
+            "element": "chat.tool",
+            "layout": "row",
+            "align": "center",
+            "states": { "nested": { "padding_left": "$chat.tool.indent" }, "hover": { "text": "$chat.tool.hover_text" } },
+            "children": [
+              { "when": "!running", "icon": "{icon}", "element": "chat.tool.icon" },
+              { "when": "running", "icon": "loader", "element": "chat.tool.icon" },
+              { "grow": 1, "truncate": true, "text": "{label}" },
+              { "when": "error", "icon": "circle-alert", "element": "chat.tool.error" }
+            ]
+          },
+          {
+            "when": "open && detail",
+            "element": "chat.detail",
+            "wrap": true,
+            "text": "{detail}",
+            "style": { "font_family": "{mono}" },
+            "states": { "nested": { "margin_left": "$chat.tool.indent" } }
+          },
+          {
+            "when": "open && has_images",
+            "layout": "row",
+            "element": "chat.tool.images",
+            "each": "images",
+            "states": { "nested": { "margin_left": "$chat.tool.indent" } },
+            "item": { "element": "chat.tool.image", "children": [{ "slot": "thumb" }] }
+          },
+          {
+            "when": "open && has_diff",
+            "element": "chat.diff",
+            "style": { "height": "{diff_height}" },
+            "states": { "nested": { "margin_left": "$chat.tool.indent" } },
+            "children": [{ "slot": "diff" }]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.group": {
+    "element": "chat.work",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "frame": "toggle",
+            "element": "chat.tool",
+            "layout": "row",
+            "align": "center",
+            "states": { "hover": { "text": "$chat.tool.hover_text" } },
+            "children": [
+              { "when": "open", "icon": "chevron-down", "element": "chat.tool.icon" },
+              { "when": "!open", "icon": "chevron-right", "element": "chat.tool.icon" },
+              { "grow": 1, "truncate": true, "text": "{summary}" },
+              { "when": "error", "icon": "circle-alert", "element": "chat.tool.error" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.thinking": {
+    "element": "chat.work",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "frame": "toggle",
+            "element": "chat.tool",
+            "layout": "row",
+            "align": "center",
+            "states": { "hover": { "text": "$chat.tool.hover_text" } },
+            "children": [
+              { "icon": "brain", "element": "chat.tool.icon" },
+              { "grow": 1, "truncate": true, "text": "{label}" }
+            ]
+          },
+          { "when": "open && text", "element": "chat.thinking", "wrap": true, "text": "{text}" }
+        ]
+      }
+    ]
+  },
+  "chat.worked": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "frame": "toggle",
+            "element": "chat.fold",
+            "layout": "row",
+            "align": "center",
+            "states": { "hover": { "text": "$chat.fold.hover_text" } },
+            "children": [
+              { "when": "open", "icon": "chevron-down", "element": "chat.tool.icon" },
+              { "when": "!open", "icon": "chevron-right", "element": "chat.tool.icon" },
+              { "text": "Worked for {time}" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.working": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "element": "chat.fold",
+            "layout": "row",
+            "align": "center",
+            "children": [
+              { "when": "!waiting", "icon": "loader", "element": "chat.tool.icon" },
+              { "when": "waiting", "icon": "message-circle-question-mark", "element": "chat.tool.icon" },
+              { "text": "{label}" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.notice": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "element": "chat.notice",
+            "layout": "row",
+            "align": "center",
+            "states": { "error": { "text": "$chat.notice.error_text", "background": "$chat.notice.error_background" } },
+            "children": [
+              { "when": "error", "icon": "circle-alert", "element": "chat.tool.icon" },
+              { "grow": 1, "wrap": true, "text": "{text}" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chat.ask": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "element": "chat.ask",
+            "children": [
+              { "element": "chat.ask.title", "wrap": true, "text": "{title}" },
+              { "when": "detail", "element": "chat.detail", "wrap": true, "text": "{detail}", "style": { "font_family": "{mono}" } },
+              { "when": "has_diff", "element": "chat.diff", "style": { "height": "{diff_height}" }, "children": [{ "slot": "diff" }] },
+              { "when": "plan", "element": "chat.ask.plan", "children": [{ "slot": "markdown" }] },
+              {
+                "when": "questions",
+                "element": "chat.ask.options",
+                "each": "options",
+                "item": {
+                  "children": [
+                    { "when": "question", "element": "chat.ask.question", "wrap": true, "text": "{question}" },
+                    { "when": "question && any", "element": "chat.meta", "text": "Choose any" },
+                    { "when": "!picked", "button": "option", "element": "chat.ask.button", "variant": "outline", "size": "small", "label": "{label}" },
+                    { "when": "picked", "button": "option", "element": "chat.ask.button", "variant": "secondary", "size": "small", "icon": "check", "label": "{label}", "selected": true }
+                  ]
+                }
+              },
+              {
+                "layout": "row",
+                "align": "center",
+                "justify": "end",
+                "element": "chat.ask.buttons",
+                "children": [
+                  { "button": "deny", "element": "chat.ask.button", "variant": "ghost", "size": "small", "label": "{deny_label}" },
+                  { "when": "session && !questions", "button": "allow_session", "element": "chat.ask.button", "variant": "outline", "size": "small", "label": "Allow for this session" },
+                  { "when": "!questions", "button": "allow", "element": "chat.ask.button", "variant": "primary", "size": "small", "label": "{allow_label}" },
+                  { "when": "multi", "button": "submit", "element": "chat.ask.button", "variant": "primary", "size": "small", "label": "Submit", "disabled": "!complete" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
 }

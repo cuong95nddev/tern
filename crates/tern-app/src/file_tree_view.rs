@@ -167,6 +167,7 @@ impl FileTreeView {
                 for b in rx.try_iter() {
                     batch.paths.extend(b.paths);
                     batch.git_repos.extend(b.git_repos);
+                    batch.rescan |= b.rescan;
                 }
                 tern_web::live::changed(&batch.paths);
                 let ok = this.update(cx, |view, cx| {

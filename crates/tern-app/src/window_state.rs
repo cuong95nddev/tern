@@ -321,6 +321,13 @@ pub enum SavedTab {
         from: Option<String>,
     },
     GitLog,
+    /// A Claude chat: its conversation, the account it runs as (`None` is
+    /// the default one), and its chat in the daemon.
+    Chat {
+        session: String,
+        account: Option<String>,
+        mux: Option<u64>,
+    },
 }
 
 /// A tab group of a saved workspace.
@@ -354,14 +361,14 @@ pub struct SavedWorkspace {
 /// The side panels, the same in every workspace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedPanels {
-    /// Side panels the user hid: `explorer`, `changes`, `scratches`, `shells`.
+    /// Side panels the user hid: `explorer`, `changes`, `scratches`, `shells`, `services`.
     pub hidden: Vec<String>,
     /// Panel arrangements as `(key, Arrangement::encode text)`, kept opaque here.
     pub arrangements: Vec<(String, String)>,
 }
 
 /// The panels hidden until the user shows them.
-const HIDDEN_AT_FIRST: &[&str] = &["explorer", "changes", "scratches", "shells"];
+const HIDDEN_AT_FIRST: &[&str] = &["explorer", "changes", "scratches", "shells", "services"];
 
 impl Default for SavedPanels {
     fn default() -> Self {
@@ -471,6 +478,9 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                         format!("commit_diff\t{}\t{}\t{}\t{}", path(repo), field(hash), field(rel), opt(from))
                     },
                     SavedTab::GitLog => "git_log".to_owned(),
+                    SavedTab::Chat { session, account, mux } => {
+                        format!("chat\t{}\t{}\t{}", field(session), opt(account), mux.map(|m| m.to_string()).unwrap_or_default())
+                    },
                 };
                 out.push_str(&format!("\t\t{group}{line}\n"));
             }
@@ -506,6 +516,7 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "scratch" => SavedTab::Scratch(next()?.into()),
         "commit_diff" => SavedTab::CommitDiff { repo: next()?.into(), hash: next()?, rel: next()?, from: next() },
         "git_log" => SavedTab::GitLog,
+        "chat" => SavedTab::Chat { session: next()?, account: next(), mux: next().and_then(|m| m.parse().ok()) },
         _ => return None,
     })
 }
@@ -544,7 +555,7 @@ fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usi
         let place = match &tab {
             SavedTab::Claude { .. } | SavedTab::Shell { .. } => merged.cwds.get(i).cloned().flatten().map_or(0, |c| home(&c)),
             SavedTab::File(p) | SavedTab::Diff(p) | SavedTab::CommitDiff { repo: p, .. } => home(p),
-            SavedTab::Scratch(_) | SavedTab::GitLog => 0,
+            SavedTab::Scratch(_) | SavedTab::GitLog | SavedTab::Chat { .. } => 0,
         };
         let to = &mut out[place];
         if i == ws.active {
@@ -780,8 +791,10 @@ mod tests {
                                 guard: Some((70, false)),
                                 handoff: Some("h.md".into()),
                             },
+                            SavedTab::Chat { session: "c-1".into(), account: None, mux: Some(9) },
+                            SavedTab::Chat { session: "c-2".into(), account: Some("account-2".into()), mux: None },
                         ],
-                        tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None, None, None],
+                        tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None, None, None, None, None],
                         groups: vec![
                             SavedGroup { name: "api".into(), color: "blue".into(), collapsed: false },
                             SavedGroup { name: String::new(), color: "red".into(), collapsed: true },

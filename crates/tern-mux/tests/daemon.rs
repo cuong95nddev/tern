@@ -525,6 +525,60 @@ fn claude_session_comes_from_hooks() {
     s.close();
 }
 
+/// The Claude statuses `ev` got from the daemon, in order.
+fn agent_statuses(ev: &Mutex<Vec<TermEvent>>) -> Vec<tern_term::claude_status::ClaudeStatus> {
+    ev.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            TermEvent::AgentStatus(s) => Some((**s).clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_claude_tabs_status_comes_from_its_hooks() {
+    use tern_term::claude_status::{TurnState, Wakeup};
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (tab, ev) = sink();
+    // Hooks as Claude Code posts them: a background shell is started, the
+    // turn ends while it runs, it ends, and its notification wakes the main
+    // agent, whose turn then ends with nothing left.
+    let post = |body: &str| format!(r#"curl -s -X POST -H 'content-type: application/json' -d '{body}' "$url" >/dev/null; "#);
+    let mut script = r#"url=$(sed -n 's/.*"url": *"\([^"]*\)".*/\1/p' {tern-settings} | head -1); "#.to_owned();
+    script += &post(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"run it"}"#);
+    script += &post(r#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_response":{"backgroundTaskId":"b1"}}"#);
+    script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"b1","type":"shell","status":"running"}]}"#);
+    script += "read x; ";
+    script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[]}"#);
+    script += "read y; ";
+    script += &post(
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>"}"#,
+    );
+    script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[]}"#);
+    script += "read z";
+    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None }, SIZE, 1000, tab);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    let last = || agent_statuses(&ev).last().cloned();
+    wait_until("monitoring", || last().is_some_and(|s| s.monitoring && s.turn_completed_at.is_some()));
+    assert_eq!(c.list().unwrap().iter().find(|i| i.id == id).unwrap().status, tern_term::status::ActivityStatus::Working);
+    // The shell is gone: Claude owes the main agent its notification.
+    s.write(b"\n".to_vec());
+    wait_until("owed", || last().is_some_and(|s| s.state == TurnState::Working && s.wakeup == Some(Wakeup::Notification)));
+    s.write(b"\n".to_vec());
+    wait_until("done", || last().is_some_and(|s| s.state == TurnState::Done));
+    assert_eq!(c.list().unwrap().iter().find(|i| i.id == id).unwrap().status, tern_term::status::ActivityStatus::Done);
+    // Attached again, it hears the status as it is.
+    drop(s);
+    let (tab, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, tab);
+    wait_until("status on attach", || agent_statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Done));
+    s.close();
+}
+
 #[test]
 fn the_users_handoff_is_typed_to_an_idle_agent() {
     let d = daemon(Duration::from_secs(60));
@@ -541,4 +595,91 @@ fn the_users_handoff_is_typed_to_an_idle_agent() {
     c.resume_handoff(id, Some("docs/h.md".into()));
     wait_until("the clear", || screen(&s).contains("then:/clear"));
     s.close();
+}
+
+#[test]
+fn services_run_unattached_and_show_their_output() {
+    use tern_mux::proto::ServiceSpec;
+    use tern_mux::services::Services;
+    let d = daemon(Duration::from_secs(60));
+    let mut s = Services::connect(&d.dir, false).unwrap();
+    let spec = ServiceSpec { name: "web".into(), command: "dev".into(), cwd: "/tmp".into(), by: Some(7), started: 0 };
+    let (id, pid) = s.run(sh("echo serving in $TERN_SESSION_ID; read x"), spec).unwrap();
+    assert!(alive(pid));
+    wait_until("output", || s.text(id, 10).unwrap().unwrap_or_default().contains(&format!("serving in {id}")));
+    let info = s.list().unwrap().into_iter().find(|i| i.id == id).unwrap();
+    let service = info.service.unwrap();
+    assert_eq!((service.name.as_str(), service.by), ("web", Some(7)));
+    assert!(service.started > 0);
+    assert!(!info.attached && !info.exited);
+
+    // A UI doesn't hold it: it runs on with none connected.
+    let c = client(&d.dir);
+    drop(c);
+    assert!(alive(pid));
+
+    // One that ends keeps its output and exit code.
+    let spec = ServiceSpec { name: "build".into(), command: "b".into(), cwd: "/tmp".into(), by: None, started: 0 };
+    let (done, _) = s.run(sh("echo built; exit 3"), spec).unwrap();
+    wait_until("ended", || s.list().unwrap().iter().any(|i| i.id == done && i.exited));
+    assert_eq!(s.list().unwrap().iter().find(|i| i.id == done).unwrap().exit_code, Some(3));
+    assert_eq!(s.text(done, 5).unwrap().as_deref(), Some("built"));
+
+    s.close(id).unwrap();
+    wait_until("stopped", || !alive(pid));
+    assert_eq!(s.text(id, 5).unwrap(), None);
+}
+
+#[test]
+fn chats_run_on_without_a_tab() {
+    use tern_mux::client::{ChatEvent, OpenChat};
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let events = || {
+        let ev = Arc::new(Mutex::new(Vec::<ChatEvent>::new()));
+        let e = ev.clone();
+        (Arc::new(move |x| e.lock().unwrap().push(x)) as tern_mux::client::ChatSink, ev)
+    };
+    let spec = proto::ChatSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), r#"while read l; do echo "{\"echo\":\"$l\"}"; done"#.into()],
+        cwd: "/".into(),
+        env: Default::default(),
+        session: "conv-1".into(),
+        account: "acct".into(),
+        record: None,
+    };
+    let (sink, ev) = events();
+    let chat = c.open_chat(OpenChat::Spawn(spec), sink);
+    // Sent before the daemon answered: kept, then sent.
+    chat.send("a".into());
+    wait_until("echo", || ev.lock().unwrap().iter().any(|e| *e == ChatEvent::Line(r#"{"echo":"a"}"#.into())));
+    let id = chat.id().unwrap();
+    // A user message starts a turn: the chat works.
+    chat.send(r#"{"type":"user"}"#.into());
+    drop(chat); // the tab goes; the chat runs on
+
+    // Listed for a UI to adopt: whose it is, unattached, working.
+    wait_until("listed", || {
+        c.list_chats().unwrap().iter().any(|i| {
+            i.id == id
+                && i.session == "conv-1"
+                && i.account == "acct"
+                && i.cwd == std::path::Path::new("/")
+                && !i.attached
+                && i.status == tern_term::status::ActivityStatus::Working
+        })
+    });
+
+    let (sink, ev) = events();
+    let chat = c.open_chat(OpenChat::Attach { id }, sink);
+    wait_until("replay", || {
+        ev.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::Attached { lines, exited: None, .. } if lines.first().map(String::as_str) == Some(r#"{"echo":"a"}"#)))
+    });
+    chat.send("b".into());
+    wait_until("echo b", || ev.lock().unwrap().iter().any(|e| *e == ChatEvent::Line(r#"{"echo":"b"}"#.into())));
+    chat.close();
+    let (sink, ev) = events();
+    let _gone = c.open_chat(OpenChat::Attach { id }, sink);
+    wait_until("gone", || ev.lock().unwrap().contains(&ChatEvent::NotFound));
 }

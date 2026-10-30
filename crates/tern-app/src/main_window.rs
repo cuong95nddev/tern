@@ -140,7 +140,9 @@ pub fn restore_session(cx: &mut App) -> bool {
         .flat_map(|w| &w.workspaces)
         .flat_map(|ws| &ws.tabs)
         .filter_map(|t| match t {
-            window_state::SavedTab::Claude { mux, .. } | window_state::SavedTab::Shell { mux, .. } => *mux,
+            window_state::SavedTab::Claude { mux, .. }
+            | window_state::SavedTab::Shell { mux, .. }
+            | window_state::SavedTab::Chat { mux, .. } => *mux,
             _ => None,
         })
         .collect();
@@ -148,9 +150,10 @@ pub fn restore_session(cx: &mut App) -> bool {
     !saved.is_empty()
 }
 
-/// Background sessions no saved tab knows (the session wasn't saved before
-/// a crash): running ones open as tabs in the first window, so nothing runs
-/// unseen; ended ones go.
+/// Background sessions and chats no saved tab knows (the session wasn't
+/// saved before a crash): running ones open as tabs in the first window, so
+/// nothing runs unseen; ended ones go. Services stay as they are: the
+/// Services panel shows them.
 pub fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
     let mux = cx.global::<AppServices>().0.mux.clone();
     // Asking the daemon can take a while: off the UI thread.
@@ -158,21 +161,54 @@ pub fn adopt_orphans(known: std::collections::HashSet<u64>, cx: &mut App) {
         let client = mux.existing()?;
         let list = client.list().ok()?;
         let mut live = vec![];
-        for s in list.into_iter().filter(|s| !known.contains(&s.id)) {
+        for s in list.into_iter().filter(|s| !known.contains(&s.id) && s.service.is_none()) {
             if s.exited {
                 client.close(s.id);
             } else {
                 live.push(s);
             }
         }
-        Some(live)
+        let mut chats = vec![];
+        for c in client.list_chats().unwrap_or_default().into_iter().filter(|c| !known.contains(&c.id) && !c.attached) {
+            if c.exited {
+                client.close_chat(c.id);
+            } else {
+                chats.push(c);
+            }
+        }
+        Some((live, chats))
     });
     cx.spawn(async move |cx| {
-        if let Some(live) = task.await.filter(|l| !l.is_empty()) {
-            cx.update(|cx| adopt(live, cx));
+        if let Some((live, chats)) = task.await {
+            if !live.is_empty() {
+                cx.update(|cx| adopt(live, cx));
+            }
+            if !chats.is_empty() {
+                cx.update(|cx| adopt_chats(chats, cx));
+            }
         }
     })
     .detach();
+}
+
+/// Chats running without a tab: each opens in the first window, attached
+/// to, in the workspace of its folder if one is open.
+fn adopt_chats(chats: Vec<tern_mux::proto::ChatInfo>, cx: &mut App) {
+    log::info!("adopting {} background chats", chats.len());
+    if windows(cx).is_empty() {
+        open_folder(chats[0].cwd.clone(), cx);
+    }
+    let Some((handle, main)) = windows(cx).into_iter().next() else { return };
+    let _ = handle.update(cx, |_, window, cx| {
+        main.update(cx, |m, cx| {
+            for c in &chats {
+                let ws = m.slots.iter().find(|s| s.ws.read(cx).root() == c.cwd).or(m.slots.get(m.active)).map(|s| s.ws.clone());
+                if let Some(ws) = ws {
+                    ws.update(cx, |w, cx| w.adopt_chat(c, window, cx));
+                }
+            }
+        })
+    });
 }
 
 fn adopt(live: Vec<tern_mux::proto::SessionInfo>, cx: &mut App) {
@@ -233,11 +269,17 @@ pub fn reveal_target(tabs: &[Vec<Vec<Option<u64>>>], id: u64, known: bool) -> Re
 /// showing it, else adopt it into the active workspace, else into a new
 /// window at its folder. Nothing if it has ended.
 pub fn reveal_session(id: u64, cx: &mut App) {
-    let info = cx.global::<AppServices>().0.mux.existing().and_then(|c| c.list().ok()).and_then(|l| l.into_iter().find(|s| s.id == id));
+    let client = cx.global::<AppServices>().0.mux.existing();
+    let info = client.as_ref().and_then(|c| c.list().ok()).and_then(|l| l.into_iter().find(|s| s.id == id));
+    // Not a session: a chat, maybe.
+    let chat = match (&info, &client) {
+        (None, Some(c)) => c.list_chats().ok().and_then(|l| l.into_iter().find(|c| c.id == id && !c.exited)),
+        _ => None,
+    };
     let wins = windows(cx);
     let tabs: Vec<Vec<Vec<Option<u64>>>> =
         wins.iter().map(|(_, m)| m.read(cx).slots.iter().map(|s| s.ws.read(cx).mux_ids(cx)).collect()).collect();
-    let target = reveal_target(&tabs, id, info.is_some());
+    let target = reveal_target(&tabs, id, info.is_some() || chat.is_some());
     log::info!("show session {id}: {target:?}");
     match target {
         RevealTarget::Nothing => log::info!("session {id} is gone; nothing to show"),
@@ -254,6 +296,11 @@ pub fn reveal_session(id: u64, cx: &mut App) {
             });
         },
         RevealTarget::AdoptIntoActive | RevealTarget::NewWindow => {
+            if let Some(chat) = chat {
+                adopt_chats(vec![chat], cx);
+                cx.activate(true);
+                return;
+            }
             let Some(info) = info else { return };
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
             // The active window, else the first (as `open_folder` picks).

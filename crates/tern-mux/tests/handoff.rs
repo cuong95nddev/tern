@@ -141,6 +141,52 @@ fn ended_sessions_and_claude_tabs_carry_over() {
 }
 
 #[test]
+fn a_claude_tabs_hook_state_carries_over() {
+    use tern_term::claude_status::TurnState;
+    let statuses = |ev: &Mutex<Vec<TermEvent>>| -> Vec<tern_term::claude_status::ClaudeStatus> {
+        ev.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::AgentStatus(s) => Some((**s).clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = sink();
+    // A turn that ended with a background shell running; after the handoff
+    // its inventory drops the shell, which the main agent is then owed.
+    let post = |body: &str| format!(r#"curl -s -X POST -H 'content-type: application/json' -d '{body}' "$url" >/dev/null; "#);
+    let mut script = r#"url=$(sed -n 's/.*"url": *"\([^"]*\)".*/\1/p' {tern-settings} | head -1); "#.to_owned();
+    script += &post(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"run it"}"#);
+    script += &post(r#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_response":{"backgroundTaskId":"b1"}}"#);
+    script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"b1","type":"shell","status":"running"}]}"#);
+    // Posted until it reaches the new daemon: here the old one, in the same
+    // process, still takes some (a real one has exited).
+    script += "read x; while :; do ";
+    script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[]}"#);
+    script += "sleep 0.1; done";
+    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None }, SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    wait_until("monitoring", || statuses(&ev1).last().is_some_and(|s| s.monitoring));
+    let id = s.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let c = client(&p.dir);
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("status after the handoff", || statuses(&ev2).last().is_some_and(|s| s.monitoring));
+    s.write(b"\n".to_vec());
+    // Only a tracker that knew of b1 owes its notification.
+    wait_until("owed", || statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Working && s.held.owed));
+    s.close();
+}
+
+#[test]
 fn kitty_images_carry_over() {
     let p = daemon_pair();
     let c = client(&p.dir);
@@ -222,4 +268,70 @@ fn a_seeded_terminal_starts_below_the_old_screen() {
         .collect();
     assert_eq!(history, ["old line one", "old line two", "$"]);
     assert!(g[Line(0)].into_iter().map(|c| c.c).collect::<String>().starts_with("fresh"));
+}
+
+#[test]
+fn services_carry_over() {
+    use tern_mux::proto::ServiceSpec;
+    use tern_mux::services::Services;
+    let p = daemon_pair();
+    let spec = ServiceSpec { name: "web".into(), command: "dev".into(), cwd: "/tmp".into(), by: Some(3), started: 0 };
+    let (id, pid) = Services::connect(&p.dir, false).unwrap().run(sh("echo up; read x"), spec).unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let mut s = Services::connect(&p.dir, false).unwrap();
+    let info = s.list().unwrap().into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(info.pid, pid);
+    assert_eq!(info.service.map(|s| (s.name, s.by)), Some(("web".into(), Some(3))));
+    wait_until("output", || s.text(id, 5).unwrap().is_some_and(|t| t.contains("up")));
+}
+
+/// A chat's sink, and what it heard.
+fn chat_sink() -> (tern_mux::client::ChatSink, Arc<Mutex<Vec<tern_mux::client::ChatEvent>>>) {
+    let ev = Arc::new(Mutex::new(Vec::new()));
+    let e = ev.clone();
+    (Arc::new(move |x| e.lock().unwrap().push(x)), ev)
+}
+
+fn chat_spec(script: &str) -> proto::ChatSpec {
+    proto::ChatSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: "/".into(), ..Default::default() }
+}
+
+#[test]
+fn a_running_chat_moves_to_the_new_daemon() {
+    use tern_mux::client::{ChatEvent, OpenChat};
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = chat_sink();
+    let spec = proto::ChatSpec { session: "conv-1".into(), ..chat_spec(r#"echo '{"n":1}'; read a; echo "{\"got\":\"$a\"}"; read b"#) };
+    let chat = c.open_chat(OpenChat::Spawn(spec), sink1);
+    let attached = |ev: &Arc<Mutex<Vec<ChatEvent>>>| {
+        ev.lock().unwrap().iter().find_map(|e| match e {
+            ChatEvent::Attached { id, lines, .. } => Some((*id, lines.clone())),
+            _ => None,
+        })
+    };
+    wait_until("attached", || attached(&ev1).is_some());
+    wait_until("first line", || {
+        attached(&ev1).is_some_and(|(_, l)| !l.is_empty()) || ev1.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::Line(_)))
+    });
+    let id = chat.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+    wait_until("lost", || ev1.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::Lost)));
+
+    let c = client(&p.dir);
+    // Whose it is came along.
+    assert_eq!(c.list_chats().unwrap().iter().map(|i| (i.id, i.session.as_str())).collect::<Vec<_>>(), [(id, "conv-1")]);
+    let (sink2, ev2) = chat_sink();
+    let chat = c.open_chat(OpenChat::Attach { id }, sink2);
+    wait_until("reattached", || attached(&ev2).is_some());
+    assert_eq!(attached(&ev2).unwrap().1, [r#"{"n":1}"#]);
+    chat.send("hi".into());
+    wait_until("answer", || ev2.lock().unwrap().iter().any(|e| *e == ChatEvent::Line(r#"{"got":"hi"}"#.into())));
+    chat.close();
+    let _ = ev1;
 }

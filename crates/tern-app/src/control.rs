@@ -38,6 +38,12 @@
 //!   term-screen      the active terminal's visible text
 //!   term-info        its size, focus reporting, exit; tabs that rang; what runs
 //!   term-paste-path P1|P2   paste paths as a file drop does
+//!   chat-new         open a Claude chat tab (default account)
+//!   chat-open ID     open conversation ID in a chat tab (as a restored one)
+//!   chat-send TEXT   send TEXT in the active chat tab
+//!   chat-state       the active chat's rows, busy, mode
+//!   chat-answer allow|session|deny   answer its open permission request
+//!   chat-mode MODE   set its permission mode (`default`, `acceptEdits`, `plan`, `auto`)
 //!   @N CMD           send CMD to window N instead of the active one
 
 use std::io::{BufRead, BufReader, Read, Write};

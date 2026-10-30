@@ -5,8 +5,10 @@ edition.workspace = true
 
 [dependencies]
 ignore = "0.4.33"
+log = "0.4.34"
 notify = "8.2.0"
 regex = "1.13"
+regex-syntax = "0.8.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = "0.3.2"

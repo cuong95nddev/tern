@@ -27,6 +27,7 @@ use crate::accounts;
 use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_view::{ChangesEvent, ChangesView};
+use crate::chat_view::{ChatEvent, ChatView};
 use crate::diff_pane::{DiffPane, InCommit};
 use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
@@ -37,6 +38,7 @@ use crate::panes::{self, Edge, Layout, PaneId, Zone};
 use crate::platform::bind;
 use crate::scratch::{self, Scratch};
 use crate::scratches_view::{ScratchesEvent, ScratchesView};
+use crate::services_view::{ServiceRow, ServicesEvent, ServicesView};
 use crate::settings;
 use crate::shells_view::{ShellRow, ShellsEvent, ShellsView};
 use crate::style;
@@ -58,6 +60,7 @@ actions!(
     workspace,
     [
         NewClaudeTab,
+        NewClaudeChat,
         NewShellTab,
         NewScratch,
         OpenScratchesFolder,
@@ -72,6 +75,7 @@ actions!(
         GoToFile,
         SearchInFiles,
         ToggleShells,
+        ToggleServices,
         ToggleSystem,
         ShowResources,
         ToggleUsage,
@@ -187,17 +191,43 @@ struct TermTab {
 /// scratch file, or the Git Log.
 enum CenterTab {
     Term(TermTab),
-    File { view: Entity<Viewer>, _subs: Vec<Subscription> },
+    File {
+        view: Entity<Viewer>,
+        _subs: Vec<Subscription>,
+    },
     Diff(Entity<DiffPane>),
-    Scratch { view: Entity<Scratch>, _sub: Subscription },
-    Log { view: Entity<GitLog>, _sub: Subscription },
+    Scratch {
+        view: Entity<Scratch>,
+        _sub: Subscription,
+    },
+    Log {
+        view: Entity<GitLog>,
+        _sub: Subscription,
+    },
+    /// `muted`: shows no notifications (and tells its daemon chat not to).
+    Chat {
+        view: Entity<ChatView>,
+        muted: bool,
+        _sub: Subscription,
+    },
 }
 
 impl CenterTab {
+    /// Its notifications are off (a terminal or a chat).
+    fn muted(&self) -> bool {
+        match self {
+            CenterTab::Term(t) => t.muted,
+            CenterTab::Chat { muted, .. } => *muted,
+            _ => false,
+        }
+    }
+
     fn term(&self) -> Option<&TermTab> {
         match self {
             CenterTab::Term(t) => Some(t),
-            CenterTab::File { .. } | CenterTab::Diff(_) | CenterTab::Scratch { .. } | CenterTab::Log { .. } => None,
+            CenterTab::File { .. } | CenterTab::Diff(_) | CenterTab::Scratch { .. } | CenterTab::Log { .. } | CenterTab::Chat { .. } => {
+                None
+            },
         }
     }
 
@@ -208,6 +238,7 @@ impl CenterTab {
             CenterTab::Diff(d) => d.focus_handle(cx),
             CenterTab::Scratch { view: s, .. } => s.focus_handle(cx),
             CenterTab::Log { view, .. } => view.focus_handle(cx),
+            CenterTab::Chat { view, .. } => view.focus_handle(cx),
         }
     }
 
@@ -218,13 +249,14 @@ impl CenterTab {
             CenterTab::Diff(d) => d.entity_id(),
             CenterTab::Scratch { view, .. } => view.entity_id(),
             CenterTab::Log { view, .. } => view.entity_id(),
+            CenterTab::Chat { view, .. } => view.entity_id(),
         }
     }
 
     /// The file a file, diff or scratch tab shows.
     fn file_path(&self, cx: &App) -> Option<PathBuf> {
         match self {
-            CenterTab::Term(_) | CenterTab::Log { .. } => None,
+            CenterTab::Term(_) | CenterTab::Log { .. } | CenterTab::Chat { .. } => None,
             CenterTab::File { view, .. } => view.read(cx).path().map(Path::to_owned),
             CenterTab::Diff(d) => Some(d.read(cx).path().to_owned()),
             CenterTab::Scratch { view, .. } => Some(view.read(cx).path().to_owned()),
@@ -351,6 +383,7 @@ pub struct Workspace {
     changes: Entity<ChangesView>,
     scratches: Entity<ScratchesView>,
     shells: Entity<ShellsView>,
+    services_view: Entity<ServicesView>,
     usage: Entity<UsageView>,
     system: Entity<SystemView>,
     tabs: Vec<CenterTab>,
@@ -377,6 +410,7 @@ pub struct Workspace {
     /// kept, so a search is still there when it opens again.
     palette: Option<(Entity<Palette>, Subscription)>,
     show_shells: bool,
+    show_services: bool,
     show_system: bool,
     show_usage: bool,
     show_agents: bool,
@@ -496,7 +530,40 @@ fn on_ws_shown(
 }
 
 /// `s` as one word of the shell Claude tabs run in (see `platform::shell`).
-fn shell_quote(s: &str) -> String {
+/// The environment a Claude of `account` runs with (its config folder),
+/// and the account it runs as: the default one when `account` is gone.
+pub(crate) fn claude_env<'a>(account: &'a str, cx: &mut App) -> (&'a str, std::collections::HashMap<String, String>) {
+    let mut env = std::collections::HashMap::new();
+    let account = if accounts::listed(account, cx) { account } else { accounts::DEFAULT };
+    if let Some(dir) = accounts::config_dir(account) {
+        // Made when the account was added, and kept up at start; made
+        // again only when it went missing.
+        if !dir.is_dir()
+            && let Err(e) = accounts::prepare(account)
+        {
+            log::warn!("accounts: prepare {account}: {e}");
+        }
+        env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
+    }
+    // Hooks post to 127.0.0.1; keep them off the user's proxy.
+    let no_proxy = ["NO_PROXY", "no_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
+    let no_proxy = match no_proxy {
+        Some(v) => format!("{v},127.0.0.1,localhost"),
+        None => "127.0.0.1,localhost".to_owned(),
+    };
+    env.insert("NO_PROXY".into(), no_proxy.clone());
+    env.insert("no_proxy".into(), no_proxy);
+    (account, env)
+}
+
+/// `--mcp-config` for Tern's MCP server, which runs an agent's dev servers
+/// as services (JSON).
+pub(crate) fn tern_mcp_config() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(serde_json::json!({ "mcpServers": { "tern": { "command": exe, "args": ["--mcp"] } } }).to_string())
+}
+
+pub(crate) fn shell_quote(s: &str) -> String {
     if cfg!(windows) {
         // PowerShell: inside single quotes only `'` is special, and it takes
         // the curly quotes U+2018–U+201B for one too. Double them all.
@@ -549,6 +616,7 @@ impl Workspace {
         let changes = cx.new(|cx| ChangesView::new(root.clone(), window, cx));
         let scratches = cx.new(ScratchesView::new);
         let shells = cx.new(ShellsView::new);
+        let services_view = cx.new(|cx| ServicesView::new(root.clone(), services.mux.clone(), cx));
         let usage = cx.new(UsageView::new);
         let system = cx.new(SystemView::new);
 
@@ -602,6 +670,18 @@ impl Workspace {
                 this.panels_changed(cx);
             },
         });
+        let services_sub = cx.subscribe_in(&services_view, window, |this, _, ev: &ServicesEvent, window, cx| match ev {
+            ServicesEvent::Open(row) => this.open_service(row, window, cx),
+            ServicesEvent::Started if !this.show_services => {
+                this.show_services = true;
+                this.panels_changed(cx);
+            },
+            ServicesEvent::Started => {},
+            ServicesEvent::Hide => {
+                this.show_services = false;
+                this.panels_changed(cx);
+            },
+        });
         let usage_sub = cx.subscribe_in(&usage, window, |this, _, ev: &UsageEvent, window, cx| match ev {
             UsageEvent::UseHere(id) => this.switch_account(id, window, cx),
             UsageEvent::NewTab(id) => this.new_claude_tab_as(id, window, cx),
@@ -622,6 +702,7 @@ impl Workspace {
             changes,
             scratches,
             shells,
+            services_view,
             usage,
             system,
             tabs: vec![],
@@ -639,6 +720,7 @@ impl Workspace {
             show_scratches: shown("scratches"),
             palette: None,
             show_shells: shown("shells"),
+            show_services: shown("services"),
             show_system: shown("system"),
             show_usage: shown("usage"),
             show_agents: shown("agents"),
@@ -661,7 +743,15 @@ impl Workspace {
             agents: None,
             part_windows: HashMap::new(),
             focus: cx.focus_handle(),
-            _subs: vec![tree_sub, changes_sub, scratches_sub, shells_sub, usage_sub, cx.observe_global::<Panels>(Self::follow_panels)],
+            _subs: vec![
+                tree_sub,
+                changes_sub,
+                scratches_sub,
+                shells_sub,
+                services_sub,
+                usage_sub,
+                cx.observe_global::<Panels>(Self::follow_panels),
+            ],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
         // Saved tab index → the tab it became (some don't come back).
@@ -686,6 +776,10 @@ impl Workspace {
                     }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
+                SavedTab::Chat { session, account, mux } => {
+                    let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
+                    this.add_chat(&account, Some(session), mux, window, cx);
+                },
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
                 SavedTab::CommitDiff { repo, hash, rel, from } => {
@@ -698,10 +792,12 @@ impl Workspace {
             }
             if this.tabs.len() > before {
                 made.push((i, this.tabs[before].entity_id()));
-                if saved.muted.contains(&i)
-                    && let CenterTab::Term(t) = &mut this.tabs[before]
-                {
-                    t.muted = true;
+                if saved.muted.contains(&i) {
+                    match &mut this.tabs[before] {
+                        CenterTab::Term(t) => t.muted = true,
+                        CenterTab::Chat { muted, .. } => *muted = true,
+                        _ => {},
+                    }
                 }
             }
             if this.tabs.len() > before
@@ -769,6 +865,14 @@ impl Workspace {
                 },
                 CenterTab::Scratch { view, .. } => SavedTab::Scratch(view.read(cx).path().to_owned()),
                 CenterTab::Log { .. } => SavedTab::GitLog,
+                CenterTab::Chat { view, .. } => {
+                    let v = view.read(cx);
+                    SavedTab::Chat {
+                        session: v.session().to_owned(),
+                        account: (v.account() != accounts::DEFAULT).then(|| v.account().to_owned()),
+                        mux: v.chat_id(),
+                    }
+                },
             })
             .collect();
         let groups = self
@@ -787,7 +891,7 @@ impl Workspace {
         } else {
             Default::default()
         };
-        let muted = (0..self.tabs.len()).filter(|&i| self.tabs[i].term().is_some_and(|t| t.muted)).collect();
+        let muted = (0..self.tabs.len()).filter(|&i| self.tabs[i].muted()).collect();
         SavedWorkspace { folder: self.root.clone(), tabs, tab_groups, groups, active: self.active, panes, tab_panes, pane_active, muted }
     }
 
@@ -798,6 +902,7 @@ impl Workspace {
             ("changes", self.show_changes),
             ("scratches", self.show_scratches),
             ("shells", self.show_shells),
+            ("services", self.show_services),
             ("system", self.show_system),
             ("usage", self.show_usage),
             ("agents", self.show_agents),
@@ -822,10 +927,20 @@ impl Workspace {
             self.show_changes,
             self.show_scratches,
             self.show_shells,
+            self.show_services,
             self.show_system,
             self.show_usage,
             self.show_agents,
-        ) = (shown("explorer"), shown("changes"), shown("scratches"), shown("shells"), shown("system"), shown("usage"), shown("agents"));
+        ) = (
+            shown("explorer"),
+            shown("changes"),
+            shown("scratches"),
+            shown("shells"),
+            shown("services"),
+            shown("system"),
+            shown("usage"),
+            shown("agents"),
+        );
         self.arrangements = Kept::new(p.saved.arrangements.iter().map(|(k, e)| (k.as_str(), e.as_str())));
         // Fit again: the docks' splits start over from the new arrangement.
         self.arranged_for = None;
@@ -890,9 +1005,12 @@ impl Workspace {
     /// Terminals and hook registrations go when the workspace is dropped.
     /// End every terminal's program (the workspace or its window was
     /// closed). Quitting Tern doesn't: they keep running in the background.
+    /// Services run on.
     pub fn end_terminals(&mut self, cx: &mut Context<Self>) {
         for t in self.tabs.iter().filter_map(CenterTab::term) {
-            t.view.update(cx, |v, _| v.close());
+            if !self.shows_service(t, cx) {
+                t.view.update(cx, |v, _| v.close());
+            }
         }
     }
 
@@ -918,26 +1036,22 @@ impl Workspace {
     /// One removed since runs as the default account.
     fn spawn_config(&self, kind: TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, &'static str) {
         let shell = crate::platform::shell();
-        let mut env = std::collections::HashMap::new();
+        let (account, mut env) = claude_env(account, cx);
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
-        let account = if accounts::listed(account, cx) { account } else { accounts::DEFAULT };
-        if let Some(dir) = accounts::config_dir(account) {
-            // Made when the account was added, and kept up at start; made
-            // again only when it went missing.
-            if !dir.is_dir()
-                && let Err(e) = accounts::prepare(account)
-            {
-                log::warn!("accounts: prepare {account}: {e}");
-            }
-            env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
-        }
         let (args, title) = match kind {
-            TabKind::Shell => (crate::platform::shell_args(), "shell"),
+            TabKind::Shell => {
+                // Only Claude's hooks need the proxy bypass.
+                env.remove("NO_PROXY");
+                env.remove("no_proxy");
+                (crate::platform::shell_args(), "shell")
+            },
             TabKind::Claude => {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
                 // the placeholder (or drops the flag without hooks).
-                let settings = " --settings {tern-settings}";
+                // And Tern's MCP server, which runs its dev servers as services.
+                let mcp = tern_mcp_config().map(|config| format!(" --mcp-config {}", shell_quote(&config)));
+                let settings = format!("{} --settings {{tern-settings}}", mcp.unwrap_or_default());
                 // The user's own arguments, as typed (shell syntax).
                 let args = window_state::claude_args();
                 let claude = if args.is_empty() { format!("claude{settings}") } else { format!("claude {args}{settings}") };
@@ -951,14 +1065,6 @@ impl Workspace {
                     (None, Some(id)) => format!("{claude} --resume {}", shell_quote(id)),
                     (None, None) => claude,
                 };
-                // Hooks post to 127.0.0.1; keep them off the user's proxy.
-                let no_proxy = ["NO_PROXY", "no_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
-                let no_proxy = match no_proxy {
-                    Some(v) => format!("{v},127.0.0.1,localhost"),
-                    None => "127.0.0.1,localhost".to_owned(),
-                };
-                env.insert("NO_PROXY".into(), no_proxy.clone());
-                env.insert("no_proxy".into(), no_proxy);
                 (crate::platform::shell_command_args(&claude), "claude")
             },
         };
@@ -1003,6 +1109,59 @@ impl Workspace {
         });
         let note = format!("This tab runs as {name}: pick the account it switches to");
         self.pick_account(format!("Turn Off {name}").into(), note.into(), Some(id), then, window, cx);
+    }
+
+    /// A new Claude chat, running as the active account or as the one the
+    /// user picks when several are.
+    fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
+        match active.as_slice() {
+            [one] => self.add_chat(&one.clone(), None, None, window, cx),
+            _ => {
+                let then: PickThen = Rc::new(|this, id, window, cx| this.add_chat(id, None, None, window, cx));
+                let note = "Turn accounts on or off in the account panel at the bottom of the window";
+                self.pick_account("New Claude Chat As".into(), note.into(), None, then, window, cx)
+            },
+        }
+    }
+
+    /// A Claude chat tab running as `account`: conversation `session`, or a
+    /// new one; attached to the daemon's chat `mux` when it still runs.
+    fn add_chat(&mut self, account: &str, session: Option<String>, mux: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        let (account, _) = claude_env(account, cx);
+        let account = account.to_owned();
+        let root = self.root.clone();
+        let connector = self.services.mux.clone();
+        let view = cx.new(|cx| ChatView::new(root, account, session, mux, connector, window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, view, ev: &ChatEvent, window, cx| match ev {
+            ChatEvent::Title => cx.notify(),
+            // Attached (maybe to a new daemon): its id goes into the saved
+            // session, and the daemon keeps its mute.
+            ChatEvent::Chat => {
+                if let Some(id) = view.read(cx).chat_id()
+                    && this.tabs.iter().any(|t| matches!(t, CenterTab::Chat { view: v, muted: true, .. } if v == view))
+                {
+                    this.services.mux.set_muted(id, true);
+                }
+                cx.emit(WorkspaceEvent::TabsChanged)
+            },
+            ChatEvent::Status => {
+                let status = view.read(cx).status();
+                crate::dock_badge::status_changed(view, status, window, cx);
+                crate::caffeine::settle(cx);
+                // Finished or waiting out of sight: say so, titled by its task.
+                let muted = this.tabs.iter().any(|t| matches!(t, CenterTab::Chat { view: v, muted: true, .. } if v == view));
+                if !muted && (!window.is_window_active() || !this.tab_shown(view.entity_id())) {
+                    let task = tern_term::status::task_name(view.read(cx).title(), "Claude Chat");
+                    if let Some((title, body)) = tern_term::status::status_notification(status, "Claude", task.as_deref()) {
+                        notify_system(&title, &body, cx);
+                    }
+                }
+                cx.notify();
+            },
+        });
+        let ix = self.push_tab(CenterTab::Chat { view, muted: false, _sub: sub });
+        self.activate(ix, window, cx);
     }
 
     /// A new Claude tab running as `account`.
@@ -1258,6 +1417,28 @@ impl Workspace {
         rows
     }
 
+    /// What the agents panel calls the agent in each terminal tab, by its
+    /// background session.
+    fn agent_names(&self, cx: &App) -> HashMap<u64, String> {
+        let mut names = HashMap::new();
+        for (i, t) in self.tabs.iter().enumerate() {
+            let Some(term) = t.term() else { continue };
+            let v = term.view.read(cx);
+            if let (Some(agent), Some(id)) = (v.agent(), v.mux_id()) {
+                names.insert(id, crate::agents::display_name(&self.tab_info(i, cx).0, agent));
+            }
+        }
+        names
+    }
+
+    /// Show service `row`'s terminal: the tab showing it, else a new one.
+    fn open_service(&mut self, row: &ServiceRow, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.mux_ids(cx).iter().position(|id| *id == Some(row.id)) {
+            return self.activate(ix, window, cx);
+        }
+        self.add_term(TabKind::Shell, Some(row.spec.name.clone()), None, Some(row.id), accounts::DEFAULT, window, cx);
+    }
+
     /// Show what shell `row` runs: a tab following its output file (the
     /// one already open, else a new one), or its agent's tab when its
     /// output goes to no file.
@@ -1299,6 +1480,13 @@ impl Workspace {
         self.activate(ix, window, cx);
     }
 
+    /// A tab for background chat `c` that no tab shows, attached to it.
+    pub fn adopt_chat(&mut self, c: &tern_mux::proto::ChatInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let account = if c.account.is_empty() { accounts::DEFAULT } else { c.account.as_str() };
+        let session = (!c.session.is_empty()).then(|| c.session.clone());
+        self.add_chat(account, session, Some(c.id), window, cx);
+    }
+
     /// A tab for background session `s` that no tab shows. A Claude one
     /// runs as the account its `claude` does, and resumes its conversation
     /// if it has to start again.
@@ -1322,7 +1510,13 @@ impl Workspace {
 
     /// Each tab's background session id (`None` for other tabs), by index.
     pub fn mux_ids(&self, cx: &App) -> Vec<Option<u64>> {
-        self.tabs.iter().map(|t| t.term().and_then(|t| t.view.read(cx).mux_id())).collect()
+        self.tabs
+            .iter()
+            .map(|t| match t {
+                CenterTab::Chat { view, .. } => view.read(cx).chat_id(),
+                t => t.term().and_then(|t| t.view.read(cx).mux_id()),
+            })
+            .collect()
     }
 
     /// Make tab `ix` the active one.
@@ -1403,7 +1597,8 @@ impl Workspace {
     /// (not the `tail` following an agent's shell: it opens again).
     fn running_in(&self, ix: usize, cx: &App) -> Option<String> {
         let t = self.tabs.get(ix)?.term()?;
-        if t.follows.is_some() {
+        // Closing a service's tab leaves it running.
+        if t.follows.is_some() || self.shows_service(t, cx) {
             return None;
         }
         let v = t.view.read(cx);
@@ -1413,6 +1608,11 @@ impl Workspace {
             },
             TabKind::Shell => v.foreground_job(),
         }
+    }
+
+    /// Whether `t` shows a service's terminal (see [`ServicesView`]).
+    fn shows_service(&self, t: &TermTab, cx: &App) -> bool {
+        t.view.read(cx).mux_id().is_some_and(|id| self.services_view.read(cx).is_service(id))
     }
 
     /// Everything closing this workspace would end (see `running_in`).
@@ -1447,8 +1647,14 @@ impl Workspace {
         if let CenterTab::Scratch { view, .. } = &tab {
             view.update(cx, |s, cx| s.close(cx));
         }
+        if let CenterTab::Chat { view, .. } = &tab {
+            view.update(cx, |v, _| v.close());
+        }
         if let Some(t) = tab.term() {
-            t.view.update(cx, |v, _| v.close());
+            // A service's terminal runs on: its tab only lets go of it.
+            if !self.shows_service(t, cx) {
+                t.view.update(cx, |v, _| v.close());
+            }
         }
         if self.tabs.is_empty() {
             cx.emit(WorkspaceEvent::TabsChanged);
@@ -1942,7 +2148,7 @@ impl Workspace {
                 CenterTab::File { view, .. } => view.update(cx, |v, cx| v.files_changed(&batch.paths, window, cx)),
                 CenterTab::Diff(d) => diffs.push(d.clone()),
                 CenterTab::Log { view, .. } => view.update(cx, |v, cx| v.files_changed(batch, cx)),
-                CenterTab::Term(_) | CenterTab::Scratch { .. } => {},
+                CenterTab::Term(_) | CenterTab::Scratch { .. } | CenterTab::Chat { .. } => {},
             }
         }
         for d in diffs.into_iter().chain(preview) {
@@ -2027,7 +2233,12 @@ impl Workspace {
 
     /// Whether `view` is the tab shown in one of the panes.
     fn is_shown(&self, view: &Entity<TerminalView>) -> bool {
-        self.shown_panes().into_iter().any(|p| self.pane_active_ix(p).and_then(|i| self.tabs[i].term()).is_some_and(|t| &t.view == view))
+        self.tab_shown(view.entity_id())
+    }
+
+    /// The tab whose view is `id` is on screen.
+    fn tab_shown(&self, id: EntityId) -> bool {
+        self.shown_panes().into_iter().any(|p| self.pane_active_ix(p).is_some_and(|i| self.tabs[i].entity_id() == id))
     }
 
     fn term_tab_mut(&mut self, view: &Entity<TerminalView>) -> Option<&mut TermTab> {
@@ -2114,10 +2325,19 @@ impl Workspace {
 
     /// Mute tab `ix`'s notifications, or unmute them.
     fn toggle_mute(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(CenterTab::Term(t)) = self.tabs.get_mut(ix) else { return };
-        t.muted = !t.muted;
-        if let Some(id) = t.view.read(cx).mux_id() {
-            self.services.mux.set_muted(id, t.muted);
+        let (id, muted) = match self.tabs.get_mut(ix) {
+            Some(CenterTab::Term(t)) => {
+                t.muted = !t.muted;
+                (t.view.read(cx).mux_id(), t.muted)
+            },
+            Some(CenterTab::Chat { view, muted, .. }) => {
+                *muted = !*muted;
+                (view.read(cx).chat_id(), *muted)
+            },
+            _ => return,
+        };
+        if let Some(id) = id {
+            self.services.mux.set_muted(id, muted);
         }
         cx.emit(WorkspaceEvent::TabsChanged);
         cx.notify();
@@ -2212,13 +2432,23 @@ impl Workspace {
                 if *status == ActivityStatus::Done && window.is_window_active() && self.is_shown(view) {
                     view.update(cx, |v, cx| v.clear_done_status(cx));
                 }
-                if !window.is_window_active() || !self.is_shown(view) {
+                // A turn told finished as it ended (`TurnFinished`): its
+                // work draining is not news.
+                if (!window.is_window_active() || !self.is_shown(view)) && !view.read(cx).done_told() {
                     let (agent, task) = self.task_of(view, cx);
                     if let Some((title, body)) = tern_term::status::status_notification(*status, &agent, task.as_deref()) {
                         self.notify_for(view, &title, &body, cx);
                     }
                 }
                 cx.notify();
+            },
+            TerminalEvent::TurnFinished => {
+                if !window.is_window_active() || !self.is_shown(view) {
+                    let (agent, task) = self.task_of(view, cx);
+                    if let Some((title, body)) = tern_term::status::status_notification(ActivityStatus::Done, &agent, task.as_deref()) {
+                        self.notify_for(view, &title, &body, cx);
+                    }
+                }
             },
             TerminalEvent::Notify { title, body } => {
                 if !window.is_window_active() || !self.is_shown(view) {
@@ -2316,7 +2546,7 @@ impl Workspace {
             return;
         }
         self.tree.update(cx, |t, cx| t.mark_claude_edit(&paths, cx));
-        let batch = ChangeBatch { paths, git_repos: vec![] };
+        let batch = ChangeBatch { paths, git_repos: vec![], rescan: false };
         self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
         self.files_changed(&batch, window, cx);
     }
@@ -2340,30 +2570,51 @@ impl Workspace {
             .collect()
     }
 
-    /// The terminal tabs running an agent, as the window's agents panel lists
-    /// them under this workspace's folder, in tab order: each one's entity
-    /// and its `sidebar.tab` values. `here` is whether this workspace is the
-    /// shown one.
+    /// The chat tabs, in tab order: the agents the monitor lists besides
+    /// the terminals'. Each one's entity, title and view.
+    pub fn chat_tabs(&self, cx: &App) -> Vec<(EntityId, String, Entity<ChatView>)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tab)| match tab {
+                CenterTab::Chat { view, .. } => Some((tab.entity_id(), self.tab_info(i, cx).0, view.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tabs running an agent (terminals and chats), as the window's
+    /// agents panel lists them under this workspace's folder, in tab order:
+    /// each one's entity and its `sidebar.tab` values. `here` is whether
+    /// this workspace is the shown one.
     pub fn sidebar_tabs(&self, here: bool, cx: &App) -> Vec<(EntityId, template::Scope, ActivityStatus)> {
         let close_key = crate::platform::shortcut("⌘W").to_string();
         (0..self.tabs.len())
-            .filter(|&i| self.tabs[i].term().is_some_and(|t| t.kind == TabKind::Claude || t.view.read(cx).agent().is_some()))
-            .map(|i| {
+            .filter_map(|i| {
                 let (label, _, _) = self.tab_info(i, cx);
                 let id = self.tabs[i].entity_id();
-                let Some(t) = self.tabs[i].term() else { unreachable!("filtered to terminals") };
-                let v = t.view.read(cx);
-                let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
-                let label = crate::agents::display_name(&label, agent);
-                let mut scope = template::Scope::new(format!("side-tab-{}", id.as_u64()))
-                    .var("label", label)
-                    .var("active", here && i == self.active)
-                    .var("shown", self.pane_active.get(&self.pane_of(i)) == Some(&id))
-                    .var("close_key", close_key.clone())
-                    .var("buttons", true)
-                    .slot_opt("icon", self.tab_icon(i, None, cx));
-                scope = crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme());
-                (id, scope, now)
+                let row = |label: String| {
+                    template::Scope::new(format!("side-tab-{}", id.as_u64()))
+                        .var("label", label)
+                        .var("active", here && i == self.active)
+                        .var("shown", self.pane_active.get(&self.pane_of(i)) == Some(&id))
+                        .var("close_key", close_key.clone())
+                        .var("buttons", true)
+                        .slot_opt("icon", self.tab_icon(i, None, cx))
+                };
+                match &self.tabs[i] {
+                    CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => {
+                        let v = t.view.read(cx);
+                        let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
+                        let scope = row(crate::agents::display_name(&label, agent));
+                        Some((id, crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme()), now))
+                    },
+                    CenterTab::Chat { view, .. } => {
+                        let v = view.read(cx);
+                        Some((id, crate::agents::chat_ring_vars(row(label), v, cx.theme()), v.status()))
+                    },
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -2449,6 +2700,21 @@ impl Workspace {
                 return (format!("{}{dot}", s.title()), s.title().to_string().into(), None);
             },
             CenterTab::Log { .. } => return ("Git Log".into(), "Git Log".into(), None),
+            CenterTab::Chat { view, .. } => {
+                let v = view.read(cx);
+                let mut label = v.title().to_owned();
+                if label.chars().count() > 28 {
+                    label = label.chars().take(27).collect::<String>() + "…";
+                }
+                let badge = if v.waiting() {
+                    Some(("! ", theme.danger))
+                } else if v.busy() {
+                    Some(("● ", theme.warning))
+                } else {
+                    None
+                };
+                return (label.clone(), format!("✦ {label}").into(), badge);
+            },
         };
         let v = t.view.read(cx);
         let badge = match v.status() {
@@ -2500,6 +2766,7 @@ impl Workspace {
             CenterTab::Log { .. } => {
                 return Some(Icon::new(AssetIcon::GitCommitHorizontal).text_color(mono).small().flex_shrink_0().into_any_element());
             },
+            CenterTab::Chat { .. } => return Some(Agent::Claude.icon(theme).into_any_element()),
         };
         let agent = t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude));
         Some(match agent {
@@ -2517,6 +2784,7 @@ impl Workspace {
             "scratches" => ("sticky-note", self.show_scratches, format!("Scratches ({})", shortcut("⌘⇧S"))),
             "changes" => ("git-branch", self.show_changes, format!("Changes ({})", shortcut("⌘⇧G"))),
             "shells" => ("square-terminal", self.show_shells, "Shells".to_owned()),
+            "services" => ("server", self.show_services, "Services".to_owned()),
             "system" => ("cpu", self.show_system, "System".to_owned()),
             "usage" => ("chart-pie", self.show_usage, "Usage".to_owned()),
             "agents" => ("bot", self.show_agents, "Agents".to_owned()),
@@ -2569,6 +2837,7 @@ impl Workspace {
             "explorer" => |this, w, cx| this.toggle_explorer(&ToggleExplorer, w, cx),
             "scratches" => |this, w, cx| this.toggle_scratches(&ToggleScratches, w, cx),
             "shells" => |this, w, cx| this.toggle_shells(&ToggleShells, w, cx),
+            "services" => |this, w, cx| this.toggle_services(&ToggleServices, w, cx),
             "system" => |this, w, cx| this.toggle_system(&ToggleSystem, w, cx),
             "usage" => |this, w, cx| this.toggle_usage(&ToggleUsage, w, cx),
             "agents" => |this, w, cx| this.toggle_agents(&ToggleAgents, w, cx),
@@ -2596,7 +2865,7 @@ impl Workspace {
                 })
                 .collect(),
             _ if side == "left" => vec!["explorer".into(), "scratches".into()],
-            _ => vec!["changes".into(), "shells".into()],
+            _ => vec!["changes".into(), "shells".into(), "services".into()],
         };
         parts.into_iter().filter_map(|p| self.part_button(&p).map(|b| (p, b))).collect()
     }
@@ -3044,7 +3313,8 @@ impl Workspace {
             .var("grouped", own.is_some())
             .var("renamable", matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }))
             .var("terminal", tab.term().is_some())
-            .var("muted", tab.term().is_some_and(|t| t.muted))
+            .var("mutable", matches!(tab, CenterTab::Term(_) | CenterTab::Chat { .. }))
+            .var("muted", tab.muted())
             .var("diff_file", matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()))
             .var("has_path", path.is_some())
             .var("reveal", crate::platform::REVEAL)
@@ -3362,6 +3632,7 @@ impl Workspace {
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
+                    "services" => self.show_services = true,
                     "system" => self.show_system = true,
                     "usage" => self.show_usage = true,
                     "agents" => self.show_agents = true,
@@ -3452,6 +3723,7 @@ impl Workspace {
                     "scratches" => self.show_scratches = true,
                     "changes" => self.show_changes = true,
                     "shells" => self.show_shells = true,
+                    "services" => self.show_services = true,
                     "system" => self.show_system = true,
                     "usage" => self.show_usage = true,
                     "agents" => self.show_agents = true,
@@ -3638,6 +3910,7 @@ impl Workspace {
             "scratches" => self.show_scratches,
             "changes" => self.show_changes,
             "shells" => self.show_shells,
+            "services" => self.show_services,
             "system" => self.show_system,
             "usage" => self.show_usage,
             "agents" => self.show_agents,
@@ -3652,6 +3925,7 @@ impl Workspace {
             .var("scratches", self.show_scratches)
             .var("changes", self.show_changes)
             .var("shells", self.show_shells)
+            .var("services", self.show_services)
             .var("system", self.show_system)
             .var("usage", self.show_usage)
             .var("agents", self.show_agents)
@@ -3660,6 +3934,7 @@ impl Workspace {
             .slot("scratches", self.scratches.clone().cached(cache_layout()))
             .slot("changes", self.changes.clone().cached(cache_layout()))
             .slot("shells", self.shells.clone().cached(cache_layout()))
+            .slot("services", self.services_view.clone().cached(cache_layout()))
             .slot("system", self.system.clone().cached(cache_layout()))
             .slot("usage", self.usage.clone().cached(cache_layout()))
             // Cached like the others: drawn again when its window or a
@@ -3762,6 +4037,11 @@ impl Workspace {
 
     fn toggle_shells(&mut self, _: &ToggleShells, _: &mut Window, cx: &mut Context<Self>) {
         self.show_shells = !self.show_shells;
+        self.panels_changed(cx);
+    }
+
+    fn toggle_services(&mut self, _: &ToggleServices, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_services = !self.show_services;
         self.panels_changed(cx);
     }
 
@@ -4175,6 +4455,7 @@ impl Workspace {
             Some(CenterTab::Diff(d)) => d.clone().cached(cache_layout()).into_any_element(),
             Some(CenterTab::Scratch { view: s, .. }) => s.clone().cached(cache_layout()).into_any_element(),
             Some(CenterTab::Log { view, .. }) => view.clone().cached(cache_layout()).into_any_element(),
+            Some(CenterTab::Chat { view, .. }) => view.clone().into_any_element(),
             None => self.empty_pane(pane, cx).into_any_element(),
         };
         let scope = template::Scope::new(format!("pane-{pane}"))
@@ -4441,6 +4722,7 @@ impl Workspace {
                             CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state()),
                             CenterTab::Diff(d) => format!("diff:{}", d.read(cx).path().display()),
                             CenterTab::Log { view, .. } => format!("git_log:{}", view.read(cx).root().display()),
+                            CenterTab::Chat { view, .. } => format!("chat:{}", view.read(cx).session()),
                             CenterTab::Scratch { view: s, .. } => {
                                 let s = s.read(cx);
                                 format!("scratch:{}{}", s.path().display(), if s.is_dirty() { "*" } else { "" })
@@ -4706,6 +4988,38 @@ impl Workspace {
                 self.show_resources(&ShowResources, window, cx);
                 "ok".into()
             },
+            // What the menu bar's Open does for session or chat ID.
+            cmd if cmd.starts_with("reveal ") => {
+                let Ok(id) = cmd["reveal ".len()..].trim().parse::<u64>() else { return "error: reveal ID".into() };
+                cx.defer(move |cx| crate::main_window::reveal_session(id, cx));
+                "ok".into()
+            },
+            "chat-new" => {
+                self.add_chat(accounts::DEFAULT, None, None, window, cx);
+                "ok".into()
+            },
+            cmd if cmd.starts_with("chat-open ") => {
+                self.add_chat(accounts::DEFAULT, Some(cmd["chat-open ".len()..].trim().to_owned()), None, window, cx);
+                "ok".into()
+            },
+            cmd if cmd.starts_with("chat-") => {
+                let Some(CenterTab::Chat { view, .. }) = self.tabs.get(self.active) else {
+                    return "error: the active tab is no chat".into();
+                };
+                let view = view.clone();
+                let (name, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+                match name {
+                    "chat-send" => {
+                        view.update(cx, |v, cx| v.debug_send(arg, window, cx));
+                        "ok".into()
+                    },
+                    "chat-state" => view.read(cx).debug_state(cx),
+                    "chat-mode" => view.update(cx, |v, cx| v.debug_mode(arg, cx)),
+                    // Click button NAME on the last open request (`allow`, `deny`, ...).
+                    "chat-answer" => view.update(cx, |v, cx| v.debug_answer(arg, cx)),
+                    _ => format!("error: unknown command {name:?}"),
+                }
+            },
             // What dropping PART in DOCK does: before, after, onto or on a side of TARGET, or at its end.
             cmd if cmd.starts_with("part-move ") => {
                 let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
@@ -4785,7 +5099,7 @@ fn cache_layout() -> StyleRefinement {
     StyleRefinement::default().size_full()
 }
 
-fn notify_system(title: &str, body: &str, cx: &mut App) {
+pub(crate) fn notify_system(title: &str, body: &str, cx: &mut App) {
     cx.show_system_notification(SystemNotification {
         tag: "tern".into(),
         title: title.to_owned().into(),
@@ -4804,6 +5118,9 @@ impl Render for Workspace {
         // of a change by notifying this): the panel redraws only on a change.
         let shells = self.shell_rows(cx);
         self.shells.update(cx, |s, cx| s.set(shells, cx));
+        // The services name the agent that started each.
+        let agents = self.agent_names(cx);
+        self.services_view.update(cx, |s, cx| s.set_agents(agents, cx));
         // A drag that ended outside every drop target leaves these behind.
         if !cx.has_active_drag() {
             self.tab_drag = false;
@@ -4914,6 +5231,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::pop_out))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
+            .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))
             .on_action(cx.listener(|_, _: &OpenScratchesFolder, _, cx| {
@@ -4948,6 +5266,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoToFile, w, cx| this.open_palette(palette::Mode::Files, w, cx)))
             .on_action(cx.listener(|this, _: &SearchInFiles, w, cx| this.open_palette(palette::Mode::Search, w, cx)))
             .on_action(cx.listener(Self::toggle_shells))
+            .on_action(cx.listener(Self::toggle_services))
             .on_action(cx.listener(Self::toggle_system))
             .on_action(cx.listener(Self::show_resources))
             .on_action(cx.listener(Self::toggle_usage))

@@ -1,5 +1,6 @@
 //! Terminal core: PTY session, VT state, key encoding, OSC and graphics taps. No UI deps.
 
+pub mod claude_status;
 pub mod env;
 pub mod graphics;
 pub mod keys;

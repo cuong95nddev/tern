@@ -3,18 +3,18 @@
 
 use gpui_kit::*;
 
-use crate::terminal_view::{ActivityStatus, TerminalView};
+use crate::terminal_view::ActivityStatus;
 
-/// The agents that finished or began waiting while Tern was in the
-/// background.
+/// The agents (terminal or chat tabs) that finished or began waiting while
+/// Tern was in the background.
 #[derive(Default)]
-struct Pending(Vec<WeakEntity<TerminalView>>);
+struct Pending(Vec<AnyWeakEntity>);
 
 impl Global for Pending {}
 
 /// An agent's status changed: badge it (and bounce the Dock icon once) when
 /// it finished or waits while Tern is in the background; else unbadge it.
-pub fn status_changed(view: &Entity<TerminalView>, status: ActivityStatus, window: &mut Window, cx: &mut App) {
+pub fn status_changed<V: 'static>(view: &Entity<V>, status: ActivityStatus, window: &mut Window, cx: &mut App) {
     let active = app_active(cx);
     let pending = &mut cx.default_global::<Pending>().0;
     pending.retain(|v| v.upgrade().is_some());
@@ -22,7 +22,7 @@ pub fn status_changed(view: &Entity<TerminalView>, status: ActivityStatus, windo
     let wants = matches!(status, ActivityStatus::Blocked | ActivityStatus::Done);
     match at {
         None if wants && !active => {
-            pending.push(view.downgrade());
+            pending.push(view.downgrade().into());
             window.request_attention();
         },
         Some(ix) if !wants => {

@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn reads_the_hook_url() {
-        let s = crate::claude_settings_json("http://127.0.0.1:9/hook/t", None, None);
+        let s = crate::claude_settings_json("http://127.0.0.1:9/hook/t", None, None, None);
         assert_eq!(hook_url(s.as_bytes()).as_deref(), Some("http://127.0.0.1:9/hook/t"));
     }
 

@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSString, ns_string};
 use tern_mux::observer::Watcher;
-use tern_mux::proto::SessionInfo;
+use tern_mux::proto::{ChatInfo, SessionInfo};
 
 use crate::link::{self, LinkEvent};
 use crate::model;
@@ -24,6 +24,7 @@ struct Ui {
     /// Set while connected.
     watcher: Option<Watcher>,
     list: Vec<SessionInfo>,
+    chats: Vec<ChatInfo>,
 }
 
 thread_local! {
@@ -85,7 +86,7 @@ pub fn run(mux_dir: PathBuf) -> ! {
             button.setImage(Some(&image));
         }
     }
-    let ui = Ui { item, target: Target::new(mtm), watcher: None, list: vec![] };
+    let ui = Ui { item, target: Target::new(mtm), watcher: None, list: vec![], chats: vec![] };
     UI.with(|u| *u.borrow_mut() = Some(ui));
     refresh(mtm);
     std::thread::Builder::new()
@@ -104,9 +105,11 @@ fn apply(ev: LinkEvent) {
         match ev {
             LinkEvent::Connected(w) => ui.watcher = Some(w),
             LinkEvent::List(list) => ui.list = list,
+            LinkEvent::Chats(chats) => ui.chats = chats,
             LinkEvent::Lost => {
                 ui.watcher = None;
                 ui.list.clear();
+                ui.chats.clear();
             },
         }
     });
@@ -130,15 +133,15 @@ fn refresh(mtm: MainThreadMarker) {
     UI.with(|u| {
         let u = u.borrow();
         let Some(ui) = u.as_ref() else { return };
-        let state = model::icon(&ui.list);
+        let state = model::icon(&ui.list, &ui.chats);
         if let Some(button) = ui.item.button(mtm) {
             button.setTitle(&NSString::from_str(&model::icon_title(state)));
         }
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let rows = model::rows(&ui.list, home.as_deref());
+        let rows = model::rows(&ui.list, &ui.chats, home.as_deref());
         let menu = NSMenu::new(mtm);
         if rows.is_empty() {
-            let empty = menu_item("No background terminals", None, 0, &ui.target, mtm);
+            let empty = menu_item("No background terminals or chats", None, 0, &ui.target, mtm);
             empty.setEnabled(false);
             menu.addItem(&empty);
         }
@@ -198,15 +201,19 @@ fn open_tern() {
 
 fn end_session(id: u64) {
     let mtm = MainThreadMarker::new().expect("main thread");
-    let label = UI.with(|u| {
+    let row = UI.with(|u| {
         let u = u.borrow();
-        let list = u.as_ref().map(|ui| ui.list.clone()).unwrap_or_default();
-        model::rows(&list, None).into_iter().find(|r| r.id == id).map(|r| r.label)
+        let (list, chats) = u.as_ref().map(|ui| (ui.list.clone(), ui.chats.clone())).unwrap_or_default();
+        model::rows(&list, &chats, None).into_iter().find(|r| r.id == id)
     });
-    let Some(label) = label else { return }; // ended meanwhile
+    let Some(row) = row else { return }; // ended meanwhile
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(&format!("End \"{label}\"?")));
-    alert.setInformativeText(ns_string!("The program running in this terminal stops."));
+    alert.setMessageText(&NSString::from_str(&format!("End \"{}\"?", row.label)));
+    alert.setInformativeText(if row.chat {
+        ns_string!("Claude stops; the conversation stays, to resume in a chat tab.")
+    } else {
+        ns_string!("The program running in this terminal stops.")
+    });
     alert.addButtonWithTitle(ns_string!("End"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
     // An accessory app's alert would open behind other apps. (`activate`
@@ -216,6 +223,6 @@ fn end_session(id: u64) {
     if alert.runModal() == NSAlertFirstButtonReturn
         && let Some(w) = watcher()
     {
-        w.close(id);
+        if row.chat { w.close_chat(id) } else { w.close(id) }
     }
 }

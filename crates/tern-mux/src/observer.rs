@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
+use crate::proto::{self, ChatInfo, ClientMsg, FrameReader, MAJOR, MINOR, Role, ServerMsg, SessionInfo};
 
 /// How often a MINOR 0 daemon (no `Watch`) is asked for its list.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -43,7 +43,14 @@ pub struct Watcher {
     inner: Arc<Inner>,
 }
 
-/// The session lists the daemon sends, until the connection ends.
+/// What the daemon sends a watcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watched {
+    Sessions(Vec<SessionInfo>),
+    Chats(Vec<ChatInfo>),
+}
+
+/// The session and chat lists the daemon sends, until the connection ends.
 pub struct WatchStream {
     inner: Arc<Inner>,
     reader: FrameReader,
@@ -95,7 +102,7 @@ impl Watcher {
         Ok((Watcher { inner: inner.clone() }, WatchStream { inner, reader }))
     }
 
-    /// Ask the UI to show session `id`. False when no UI got it (none
+    /// Ask the UI to show session or chat `id`. False when no UI got it (none
     /// connected, an old daemon, the connection lost, no answer in 2 s).
     pub fn reveal(&self, id: u64) -> bool {
         if self.inner.minor < 1 {
@@ -113,15 +120,21 @@ impl Watcher {
     pub fn close(&self, id: u64) {
         let _ = self.inner.send(&ClientMsg::Close { id });
     }
+
+    /// End chat `id`.
+    pub fn close_chat(&self, id: u64) {
+        let _ = self.inner.send(&ClientMsg::CloseChat { id });
+    }
 }
 
 impl WatchStream {
     /// The next list; `None` once the connection is gone.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<Vec<SessionInfo>> {
+    pub fn next(&mut self) -> Option<Watched> {
         loop {
             match self.reader.read::<ServerMsg>() {
-                Ok(Some(ServerMsg::SessionsChanged { list } | ServerMsg::Sessions { list, .. })) => return Some(list),
+                Ok(Some(ServerMsg::SessionsChanged { list } | ServerMsg::Sessions { list, .. })) => return Some(Watched::Sessions(list)),
+                Ok(Some(ServerMsg::ChatsChanged { list })) => return Some(Watched::Chats(list)),
                 Ok(Some(ServerMsg::Revealed { req, delivered })) => {
                     if let Some(tx) = self.inner.reveals.lock().unwrap().remove(&req) {
                         let _ = tx.send(delivered);

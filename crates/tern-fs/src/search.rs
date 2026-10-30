@@ -73,7 +73,7 @@ pub fn search(root: &Path, q: &Query, limit: usize, cancel: &AtomicBool) -> Resu
                 return WalkState::Quit;
             }
             let Ok(entry) = entry else { return WalkState::Continue };
-            if !entry.file_type().is_some_and(|t| t.is_file()) || entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
                 return WalkState::Continue;
             }
             let lines = search_file(entry.path(), &re, q.whole_word);
@@ -124,9 +124,48 @@ pub fn files(root: &Path, limit: usize, cancel: &AtomicBool) -> Vec<PathBuf> {
     files
 }
 
+/// Search `paths` (relative to `root`, sorted) for `re`: the first `limit`
+/// matching lines in path order. Stops early once `cancel` is set.
+pub(crate) fn search_files(root: &Path, paths: &[PathBuf], re: &Regex, whole_word: bool, limit: usize, cancel: &AtomicBool) -> Results {
+    // In rounds of files searched side by side, so the lines kept are the
+    // first ones whatever order the threads finish in.
+    const ROUND: usize = 512;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    let mut matches = vec![];
+    let mut truncated = false;
+    for round in paths.chunks(ROUND) {
+        if cancel.load(Ordering::Relaxed) {
+            truncated = true;
+            break;
+        }
+        let per = round.len().div_ceil(threads);
+        let found: Vec<Vec<Line>> = std::thread::scope(|s| {
+            let handles: Vec<_> = round
+                .chunks(per)
+                .map(|part| s.spawn(move || part.iter().map(|p| search_file(&root.join(p), re, whole_word)).collect::<Vec<_>>()))
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        for (path, lines) in round.iter().zip(found) {
+            matches.extend(lines.into_iter().map(|(line, text, ranges)| Match { path: path.clone(), line, text, ranges }));
+        }
+        if matches.len() > limit {
+            break;
+        }
+    }
+    truncated |= matches.len() > limit;
+    matches.truncate(limit);
+    Results { matches, truncated }
+}
+
 /// A walk of `root` as the explorer shows it: .gitignore honored, hidden
 /// files in, `.git` out.
-fn walker(root: &Path) -> WalkBuilder {
+pub(crate) fn walker(root: &Path) -> WalkBuilder {
+    walker_keeping(root, |_| true)
+}
+
+/// [`walker`], going only into the entries `keep` lets through.
+pub(crate) fn walker_keeping(root: &Path, keep: impl Fn(&Path) -> bool + Send + Sync + 'static) -> WalkBuilder {
     let mut w = WalkBuilder::new(root);
     w.hidden(false)
         .git_ignore(true)
@@ -134,16 +173,26 @@ fn walker(root: &Path) -> WalkBuilder {
         .git_exclude(true)
         .parents(true)
         .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != ".DS_Store");
+        .filter_entry(move |e| e.file_name() != ".git" && e.file_name() != ".DS_Store" && keep(e.path()));
     w
 }
 
-/// The lines of the file at `path` that `re` matches: number, text, ranges.
-fn search_file(path: &Path, re: &Regex, whole_word: bool) -> Vec<(u32, String, Vec<Range<usize>>)> {
-    let Ok(bytes) = std::fs::read(path) else { return vec![] };
-    if bytes[..bytes.len().min(BINARY_PROBE)].contains(&0) {
-        return vec![];
+/// The bytes of the file at `path`, if it is one a search reads: not too
+/// big, not binary.
+pub(crate) fn read_text(path: &Path) -> Option<Vec<u8>> {
+    if std::fs::metadata(path).ok()?.len() > MAX_FILE_BYTES {
+        return None;
     }
+    let bytes = std::fs::read(path).ok()?;
+    (!bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)).then_some(bytes)
+}
+
+/// A matching line: number, text, ranges.
+type Line = (u32, String, Vec<Range<usize>>);
+
+/// The lines of the file at `path` that `re` matches.
+fn search_file(path: &Path, re: &Regex, whole_word: bool) -> Vec<Line> {
+    let Some(bytes) = read_text(path) else { return vec![] };
     let text = String::from_utf8_lossy(&bytes);
     let mut out = vec![];
     for (i, line) in text.lines().enumerate() {
