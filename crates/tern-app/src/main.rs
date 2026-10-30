@@ -115,6 +115,10 @@ fn main() {
     let control_socket = std::env::var_os("TERN_CONTROL").map(PathBuf::from);
     // SAFETY: no other thread runs yet.
     unsafe { tern_term::env::prepare_process_env() };
+    // Scratches and answers to MCP forms are the user's alone.
+    if let Err(e) = tern_mux::paths::make_private_dir(&dirs::data()) {
+        log::warn!("can't make {} private: {e}", dirs::data().display());
+    }
     // A folder argument opens just that folder. Otherwise the last session's
     // windows come back, plus the cwd when started from a shell (from Finder
     // or the Dock the cwd is `/`); with no session, the last folder or the

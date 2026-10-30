@@ -150,6 +150,27 @@ pub fn socket_path_of(dir: &Path, major: u32) -> PathBuf {
     dir.join(format!("mux-{major}.sock"))
 }
 
+/// Create `dir` (0700) for files others shouldn't read (logs, notes,
+/// answers to MCP forms), and close one of ours that is open to others (made
+/// with the umask's 0755 on Linux, where the home folder may be readable).
+#[cfg(unix)]
+pub fn make_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let meta = std::fs::metadata(dir)?;
+    // SAFETY: getuid can't fail.
+    if meta.uid() == unsafe { libc::getuid() } && meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Create `dir`: under `%APPDATA%` or `%LOCALAPPDATA%`, only the user (and
+/// administrators) can open it.
+#[cfg(windows)]
+pub fn make_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
 /// Create `dir` (0700), or check that it is a directory only we can use.
 #[cfg(unix)]
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
@@ -209,6 +230,19 @@ mod tests {
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(ensure_private_dir(&dir).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_kept_dir_is_made_ours_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("share/tern");
+        make_private_dir(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        // Made by an older Tern with the umask's 0755: closed.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private_dir(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]

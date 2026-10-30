@@ -335,8 +335,10 @@ fn handle(stream: TcpStream, slot: http::Slot, shared: &Shared) -> io::Result<()
             // A page may sit idle for hours; dead peers show up as write errors.
             reader.get_mut().lift()?;
             let sender = Arc::new(ws::Sender::new(w));
-            shared.touch(&device);
+            // Listed before the access is read again: a role changed or a
+            // device revoked since its cookie was checked ends the page now.
             shared.opened(&device, role, &sender);
+            shared.touch(&device);
             bridge::serve(reader, sender.clone(), &shared.mux_dir, role);
             shared.closed(&sender);
             Ok(())

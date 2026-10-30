@@ -956,7 +956,7 @@ pub fn spawn_detached_exe(exe: &Path, args: &[&str], log: Option<&Path>) -> io::
 /// `<name>.log` in [`paths::logs`] (`<name>-dev.log` for debug builds).
 pub fn log_path(name: &str) -> Option<PathBuf> {
     let dir = paths::logs();
-    std::fs::create_dir_all(&dir).ok()?;
+    paths::make_private_dir(&dir).ok()?;
     Some(dir.join(if cfg!(debug_assertions) { format!("{name}-dev.log") } else { format!("{name}.log") }))
 }
 
