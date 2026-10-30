@@ -40,6 +40,7 @@
 //!   term-paste-path P1|P2   paste paths as a file drop does
 //!   chat-new         open a Claude chat tab (default account)
 //!   chat-open ID     open conversation ID in a chat tab (as a restored one)
+//!   claude-switch    show the active Claude tab the other way (terminal ⇄ chat)
 //!   chat-send TEXT   send TEXT in the active chat tab
 //!   chat-state       the active chat's rows, busy, mode
 //!   chat-answer allow|session|deny   answer its open permission request

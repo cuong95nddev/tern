@@ -444,6 +444,22 @@
     "style": { "padding_left": 4 },
     "children": [
       {
+        "when": "to_chat",
+        "button": "switch_view",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "message-square-text",
+        "tooltip": "Show as Chat"
+      },
+      {
+        "when": "to_terminal",
+        "button": "switch_view",
+        "element": "pane_tab_bar.button",
+        "size": "xsmall",
+        "icon": "square-terminal",
+        "tooltip": "Show in Terminal"
+      },
+      {
         "button": "split",
         "element": "pane_tab_bar.button",
         "size": "xsmall",
@@ -3153,6 +3169,8 @@
       { "when": "renamable", "button": "rename", "label": "Rename…" },
       { "when": "mutable && !muted", "button": "mute", "label": "Mute Notifications" },
       { "when": "muted", "button": "mute", "label": "Unmute Notifications" },
+      { "when": "to_chat", "button": "switch_view", "label": "Show as Chat" },
+      { "when": "to_terminal", "button": "switch_view", "label": "Show in Terminal" },
       { "when": "diff_file", "button": "open_file", "label": "Open File" },
       { "when": "has_path", "button": "copy_path", "label": "Copy Path" },
       { "when": "has_path", "button": "reveal", "label": "{reveal}" },

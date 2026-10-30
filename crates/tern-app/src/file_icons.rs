@@ -52,6 +52,7 @@ gpui_kit::assets::icon_assets!(
         ListChecks,
         PanelTop,
         MessageCircleQuestionMark,
+        MessageSquareText,
         Maximize2,
         Regex,
         Rows3,

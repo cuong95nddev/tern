@@ -61,6 +61,7 @@ actions!(
     [
         NewClaudeTab,
         NewClaudeChat,
+        SwitchClaudeView,
         NewShellTab,
         NewScratch,
         OpenScratchesFolder,
@@ -579,6 +580,23 @@ pub(crate) fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
     }
+}
+
+/// Why a Claude tab can't show its conversation the other way now (a
+/// terminal as a chat with `to_chat`, a chat in a terminal), or `None` when
+/// it can. `status` is the tab's, `session` its conversation, `bg` whether
+/// that conversation runs in the background (`/bg`).
+fn switch_blocker(status: ActivityStatus, session: Option<&str>, bg: bool, to_chat: bool) -> Option<&'static str> {
+    if matches!(status, ActivityStatus::Working | ActivityStatus::Blocked) {
+        return Some("Claude is in the middle of a turn: switch once it waits for you.");
+    }
+    if to_chat && session.is_none() {
+        return Some("Claude hasn't started a conversation in this tab yet.");
+    }
+    if to_chat && bg {
+        return Some("This conversation runs in the background (/bg): only a terminal can attach to it.");
+    }
+    None
 }
 
 /// The background job (`/bg`) running conversation `session`, if one still
@@ -1631,6 +1649,76 @@ impl Workspace {
                 }
             }),
         }
+    }
+
+    /// Whether tab `ix` is a Claude terminal or chat, which can show its
+    /// conversation the other way: `Some(to_chat)`.
+    fn claude_view_switch(&self, ix: usize) -> Option<bool> {
+        match self.tabs.get(ix)? {
+            CenterTab::Term(t) if t.kind == TabKind::Claude => Some(true),
+            CenterTab::Chat { .. } => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Show tab `ix`'s Claude conversation the other way, in its place: a
+    /// terminal's as a chat, a chat's in a terminal (resumed there). Its
+    /// program ends first, so two never write the conversation.
+    fn switch_claude_view(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(to_chat) = self.claude_view_switch(ix) else { return };
+        let (status, session, account) = match &self.tabs[ix] {
+            CenterTab::Term(t) => (t.view.read(cx).status(), t.session.clone(), t.account.clone()),
+            CenterTab::Chat { view, .. } => {
+                let v = view.read(cx);
+                (v.status(), Some(v.session().to_owned()).filter(|s| !s.is_empty()), v.account().to_owned())
+            },
+            _ => return,
+        };
+        let bg = to_chat
+            && session
+                .as_deref()
+                .is_some_and(|s| accounts::claude_dir(&account).is_some_and(|d| claude_bg_job(&d.join("sessions"), s).is_some()));
+        if let Some(why) = switch_blocker(status, session.as_deref(), bg, to_chat) {
+            window.push_notification(why, cx);
+            return;
+        }
+        let muted = self.tabs[ix].muted();
+        match &self.tabs[ix] {
+            CenterTab::Term(t) => t.view.update(cx, |v, _| v.close()),
+            CenterTab::Chat { view, .. } => view.update(cx, |v, _| v.close()),
+            _ => {},
+        }
+        // Made in the old tab's pane, then put in its place.
+        self.focused = self.pane_of(ix);
+        if to_chat {
+            self.add_chat(&account, session, None, window, cx);
+        } else {
+            self.add_term(TabKind::Claude, None, session, None, &account, window, cx);
+        }
+        let Some(mut new) = self.tabs.pop() else { return };
+        match &mut new {
+            CenterTab::Term(t) => t.muted = muted,
+            CenterTab::Chat { muted: m, .. } => *m = muted,
+            _ => {},
+        }
+        let (old_id, new_id) = (self.tabs[ix].entity_id(), new.entity_id());
+        self.tabs[ix] = new;
+        self.tab_pane.remove(&new_id);
+        if let Some(pane) = self.tab_pane.remove(&old_id) {
+            self.tab_pane.insert(new_id, pane);
+        }
+        if let Some(group) = self.tab_group.remove(&old_id) {
+            self.tab_group.insert(new_id, group);
+        }
+        for shown in self.pane_active.values_mut() {
+            if *shown == old_id {
+                *shown = new_id;
+            }
+        }
+        self.sync_panes();
+        self.activate(ix, window, cx);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
     }
 
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2901,8 +2989,12 @@ impl Workspace {
     /// The values `pane.buttons` reads for pane `pane`, on `scope`.
     fn pane_vars(&self, pane: PaneId, scope: template::Scope) -> template::Scope {
         let shortcut = |k| crate::platform::shortcut(k).to_string();
+        // The Claude tab it shows can switch terminal ⇄ chat.
+        let switch = self.pane_active_ix(pane).and_then(|ix| self.claude_view_switch(ix));
         scope
             .var("panes", self.layout.panes().len())
+            .var("to_chat", switch == Some(true))
+            .var("to_terminal", switch == Some(false))
             .var("zoomed", self.zoomed == Some(pane))
             // The pane layout menu sits on the top right pane.
             .var("corner", self.zoomed.unwrap_or_else(|| self.layout.top_right()) == pane)
@@ -2930,6 +3022,12 @@ impl Workspace {
                 this.toggle_zoom(cx);
             })),
             "close_pane" => b.on_click(on(|this, pane, window, cx| this.close_pane(pane, window, cx))),
+            "switch_view" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane_state(pane);
+                if let Some(ix) = this.pane_active_ix(pane) {
+                    this.switch_claude_view(ix, window, cx);
+                }
+            })),
             "new_claude" => b.on_click(on(|this, pane, window, cx| {
                 this.focus_pane_state(pane);
                 this.add_tab(TabKind::Claude, window, cx);
@@ -3314,6 +3412,8 @@ impl Workspace {
             .var("renamable", matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }))
             .var("terminal", tab.term().is_some())
             .var("mutable", matches!(tab, CenterTab::Term(_) | CenterTab::Chat { .. }))
+            .var("to_chat", this.claude_view_switch(ix) == Some(true))
+            .var("to_terminal", this.claude_view_switch(ix) == Some(false))
             .var("muted", tab.muted())
             .var("diff_file", matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()))
             .var("has_path", path.is_some())
@@ -3336,6 +3436,7 @@ impl Workspace {
                 "remove_from_group" => Self::remove_from_group,
                 "rename" => Self::rename_tab,
                 "mute" => Self::toggle_mute,
+                "switch_view" => Self::switch_claude_view,
                 "open_file" => Self::open_tab_file,
                 "copy_path" => Self::copy_tab_path,
                 "reveal" => Self::reveal_tab_file,
@@ -4998,6 +5099,10 @@ impl Workspace {
                 self.add_chat(accounts::DEFAULT, None, None, window, cx);
                 "ok".into()
             },
+            "claude-switch" => {
+                self.switch_claude_view(self.active, window, cx);
+                "ok".into()
+            },
             cmd if cmd.starts_with("chat-open ") => {
                 self.add_chat(accounts::DEFAULT, Some(cmd["chat-open ".len()..].trim().to_owned()), None, window, cx);
                 "ok".into()
@@ -5232,6 +5337,7 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
+            .on_action(cx.listener(|this, _: &SwitchClaudeView, w, cx| this.switch_claude_view(this.active, w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))
             .on_action(cx.listener(|_, _: &OpenScratchesFolder, _, cx| {
@@ -5323,7 +5429,25 @@ pub fn services(terminal: TerminalConfig) -> Services {
 
 #[cfg(test)]
 mod tests {
-    use super::claude_bg_job;
+    use super::{ActivityStatus, claude_bg_job, switch_blocker};
+
+    #[test]
+    fn a_claude_tab_switches_only_while_it_waits() {
+        use ActivityStatus as S;
+        // A terminal with a conversation, waiting or done: to a chat.
+        assert_eq!(switch_blocker(S::None, Some("s"), false, true), None);
+        assert_eq!(switch_blocker(S::Done, Some("s"), false, true), None);
+        // Mid-turn, or asking for a permission: that turn would be cut.
+        assert!(switch_blocker(S::Working, Some("s"), false, true).is_some());
+        assert!(switch_blocker(S::Blocked, Some("s"), false, false).is_some());
+        // No conversation yet: nothing a chat could resume.
+        assert!(switch_blocker(S::None, None, false, true).is_some());
+        // Moved to the background: only `claude attach` (a terminal) reaches it.
+        assert!(switch_blocker(S::None, Some("s"), true, true).is_some());
+        // A chat goes to a terminal, even one that never started.
+        assert_eq!(switch_blocker(S::None, None, false, false), None);
+        assert_eq!(switch_blocker(S::Done, Some("s"), true, false), None);
+    }
 
     #[test]
     fn finds_the_background_job_of_a_live_session() {

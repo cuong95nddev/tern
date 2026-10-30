@@ -1100,7 +1100,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.pane_layout` | `panes`; list `presets` (`label`, `on`) | |
 | `menu.tab_layout` | list `layouts` (`label`, `on`) | |
 | `menu.new_tab` | as `menu.pane_layout`, `menu.tab_layout`, `menu.new_scratch`; `scratch_count`; lists `flags` (`label`, `flag`, `on`), `scratch_files` (`name`) | |
-| `menu.tab` | `others`, `right`, `file_tabs`, `grouped`, `renamable`, `diff_file`, `has_path`, `reveal`; lists `groups` (`title`, `color`), `layouts` | |
+| `menu.tab` | `others`, `right`, `file_tabs`, `grouped`, `renamable`, `mutable`, `muted`, `to_chat`, `to_terminal`, `diff_file`, `has_path`, `reveal`; lists `groups` (`title`, `color`), `layouts` | |
 | `menu.tab_group` | `collapsed`, `all`; list `colors` (`label`, `color`, `on`) | |
 | `menu.tab_bar` | as `menu.pane_layout` and `menu.tab_layout` | |
 | `menu.caffeine` | `status`; list `modes` (`label`, `detail`, `on`) | |

@@ -78,6 +78,7 @@ const COMMANDS: &[Command] = &[
     Command { title: "Search in Files", key: "⌘⇧F", run: Do::Show(Mode::Search) },
     cmd!("New Claude Tab", "⌘T", workspace::NewClaudeTab),
     cmd!("New Claude Chat", "", workspace::NewClaudeChat),
+    cmd!("Switch Claude Tab: Terminal ⇄ Chat", "", workspace::SwitchClaudeView),
     cmd!("New Shell Tab", "⌘⇧T", workspace::NewShellTab),
     cmd!("New Scratch File", "⌘N", workspace::NewScratch),
     cmd!("Toggle Explorer", "⌘B", workspace::ToggleExplorer),
