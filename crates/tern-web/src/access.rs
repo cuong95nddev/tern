@@ -43,6 +43,27 @@ pub struct Pairing {
     pub expires: u64,
 }
 
+/// What a paired device may do with the terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Watch them: no typing, no taking a session, no resizing it.
+    View,
+    /// Also type into them and take them (which runs code on this machine).
+    Drive,
+}
+
+impl Role {
+    /// A device paired before there were roles could do everything.
+    fn before_roles() -> Self {
+        Role::Drive
+    }
+
+    pub fn may_type(self) -> bool {
+        self == Role::Drive
+    }
+}
+
 /// A paired device: one browser.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Device {
@@ -55,6 +76,9 @@ pub struct Device {
     /// Unix seconds.
     pub paired: u64,
     pub last_seen: u64,
+    /// A new device only watches until allowed to type in Settings.
+    #[serde(default = "Role::before_roles")]
+    pub role: Role,
 }
 
 impl Device {
@@ -110,6 +134,21 @@ pub fn revoke(id: &str) -> io::Result<()> {
     change(&dir(), |a| a.devices.retain(|d| d.id != id)).map(drop)
 }
 
+/// Let a device do what `role` allows; its open pages end, and come back
+/// with it.
+pub fn set_role(id: &str, role: Role) -> io::Result<()> {
+    set_role_in(&dir(), id, role)
+}
+
+pub(crate) fn set_role_in(dir: &Path, id: &str, role: Role) -> io::Result<()> {
+    change(dir, |a| {
+        if let Some(d) = a.devices.iter_mut().find(|d| d.id == id) {
+            d.role = role;
+        }
+    })
+    .map(drop)
+}
+
 /// Unpair every device, and stop every pairing link.
 pub fn revoke_all() -> io::Result<()> {
     change(&dir(), |a| *a = Access::default()).map(drop)
@@ -135,7 +174,15 @@ pub(crate) fn redeem(dir: &Path, code: &str, user_agent: &str, ip: &str) -> io::
         let i = a.pairings.iter().position(|p| crate::auth::same(&p.hash, &h))?;
         a.pairings.remove(i);
         let t = now();
-        let d = Device { id: id.clone(), hash: hash(&secret), name: device_name(user_agent), ip: ip.to_owned(), paired: t, last_seen: t };
+        let d = Device {
+            id: id.clone(),
+            hash: hash(&secret),
+            name: device_name(user_agent),
+            ip: ip.to_owned(),
+            paired: t,
+            last_seen: t,
+            role: Role::View,
+        };
         a.devices.push(d.clone());
         Some(d)
     })?;
@@ -304,6 +351,24 @@ mod tests {
         assert!(read(&dir).pairings.is_empty());
         assert!(redeem(&dir, &p.code, "", "").unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_device_only_views_until_allowed_to_type() {
+        let dir = temp_dir();
+        let p = pair_in(&dir).unwrap();
+        let (cookie, d) = redeem(&dir, &p.code, "", "").unwrap().unwrap();
+        assert_eq!(d.role, Role::View);
+        set_role_in(&dir, &d.id, Role::Drive).unwrap();
+        assert_eq!(check(&read(&dir), &cookie).map(|d| d.role), Some(Role::Drive));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn devices_paired_before_roles_keep_typing() {
+        let json = r#"{"devices":[{"id":"a","hash":"h","name":"n","ip":"i","paired":1,"last_seen":1}]}"#;
+        let a: Access = serde_json::from_str(json).unwrap();
+        assert_eq!(a.devices[0].role, Role::Drive);
     }
 
     #[test]

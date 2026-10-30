@@ -1193,7 +1193,7 @@
                   { "element": "settings.row.title", "text": "Pair a device" },
                   {
                     "element": "settings.row.description",
-                    "text": "Make a link for your phone or another computer. It works once, for 5 minutes; the device then stays paired until you revoke it."
+                    "text": "Make a link for your phone or another computer. It works once, for 5 minutes; the device then stays paired until you revoke it, and only watches until you let it type."
                   }
                 ]
               },
@@ -1255,7 +1255,16 @@
           { "element": "settings.row.description", "truncate": true, "text": "{detail}" }
         ]
       },
-      { "button": "revoke", "variant": "outline", "size": "small", "label": "Revoke", "tooltip": "Unpair this device", "disabled": "busy" }
+      {
+        "layout": "row",
+        "shrink": 0,
+        "style": { "gap": 8 },
+        "children": [
+          { "when": "may_type", "button": "role", "variant": "outline", "size": "small", "label": "View Only", "tooltip": "Stop it typing: it only watches your terminals", "disabled": "busy" },
+          { "when": "!may_type", "button": "role", "variant": "outline", "size": "small", "label": "Allow Typing", "tooltip": "Let it type into your terminals: it can then run commands on this machine", "disabled": "busy" },
+          { "button": "revoke", "variant": "outline", "size": "small", "label": "Revoke", "tooltip": "Unpair this device", "disabled": "busy" }
+        ]
+      }
     ]
   },
   "editor.wrap": {

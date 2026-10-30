@@ -27,6 +27,18 @@ pub fn same_origin(origin: Option<&str>, host: Option<&str>) -> bool {
     }
 }
 
+/// Whether `host` (a `Host` header) names this machine by its loopback
+/// address or `localhost`. A page of another site that points its own name
+/// at 127.0.0.1 (DNS rebinding) sends that name, and is refused.
+pub fn loopback_host(host: Option<&str>) -> bool {
+    let Some(host) = host else { return false };
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map_or("", |(ip, _)| ip),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    name.eq_ignore_ascii_case("localhost") || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Wrong pairing codes by address, so they can't be guessed (they're also
 /// long, used once and short-lived).
 #[derive(Default)]
@@ -64,6 +76,17 @@ mod tests {
         assert!(!same_origin(Some("http://evil:1"), Some("h:1")));
         assert!(!same_origin(Some("http://h:1"), None));
         assert!(!same_origin(Some("null"), Some("h:1")));
+    }
+
+    #[test]
+    fn knows_loopback_hosts() {
+        for h in ["127.0.0.1:5500", "127.0.0.1", "localhost:5500", "LOCALHOST", "[::1]:5500", "[::1]"] {
+            assert!(loopback_host(Some(h)), "{h}");
+        }
+        for h in ["evil.example:5500", "evil.example", "localhost.evil.example", "192.168.1.2:5500", "[::1", ""] {
+            assert!(!loopback_host(Some(h)), "{h}");
+        }
+        assert!(!loopback_host(None));
     }
 
     #[test]

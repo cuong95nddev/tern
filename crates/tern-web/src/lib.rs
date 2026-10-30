@@ -26,34 +26,36 @@ use std::time::{Duration, SystemTime};
 pub const DEFAULT_PORT: u16 = 7317;
 /// How often the server looks for devices the app revoked.
 const WATCH: Duration = Duration::from_secs(1);
+/// Connections still sending their request, at most: the rest wait to be
+/// accepted. Open pages don't count.
+const MAX_PENDING: usize = 64;
+/// How long a client has to send its whole request.
+const REQUEST_TIME: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
-Usage: tern --web [--bind <address>] [--port <port>] [--no-pair]
+Usage: tern --web [--port <port>] [--no-pair]
 
-Serves Tern's terminals to a browser on another device (over Tailscale).
+Serves Tern's terminals to a browser on another device, over Tailscale: on
+this machine's Tailscale address, else only to this machine (127.0.0.1).
+Never on other networks: it serves plain HTTP.
 
-  --bind <address>  Address to listen on. Default: this machine's Tailscale
-                    address, else 127.0.0.1. 0.0.0.0 listens everywhere
-                    (plain HTTP: only on a network you trust).
   --port <port>     Port to listen on (default 7317).
   --no-pair         Don't print a pairing link.
 
-A device pairs once, with a link that works once, for 5 minutes. Tern's
-Settings > Connections makes more links, lists the paired devices and
-revokes them.";
+A device pairs once, with a link that works once, for 5 minutes, and then
+only watches. Tern's Settings > Connections lets it type, makes more links,
+lists the paired devices and revokes them.";
 
 struct Opts {
-    bind: Option<IpAddr>,
     port: u16,
     no_pair: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Opts, String> {
-    let mut opts = Opts { bind: None, port: DEFAULT_PORT, no_pair: false };
+    let mut opts = Opts { port: DEFAULT_PORT, no_pair: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--bind" => opts.bind = Some(it.next().and_then(|v| v.parse().ok()).ok_or("--bind takes an IP address")?),
             "--port" => opts.port = it.next().and_then(|v| v.parse().ok()).ok_or("--port takes a port number")?,
             "--no-pair" => opts.no_pair = true,
             "-h" | "--help" => return Err(String::new()),
@@ -114,20 +116,19 @@ fn serve(opts: Opts) -> io::Result<()> {
     // The one secret link of old: its browsers pair again.
     let _ = std::fs::remove_file(mux_dir.join("web-token"));
     let tailnet = tailscale_self();
-    let ip = opts.bind.or(tailnet.as_ref().map(|t| t.ip)).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let ip = tailnet.as_ref().map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |t| t.ip);
     let listener = TcpListener::bind(SocketAddr::new(ip, opts.port))?;
     let port = listener.local_addr()?.port();
 
     let base = |host: &str| format!("http://{host}:{port}/");
-    let on_tailnet = tailnet.as_ref().filter(|t| t.ip == ip || ip.is_unspecified());
+    let on_tailnet = tailnet.as_ref();
     let addr = match ip {
         IpAddr::V6(v6) => format!("[{v6}]"),
-        ip if ip.is_unspecified() => on_tailnet.map(|t| t.ip).or_else(lan_ip).map_or_else(|| "127.0.0.1".into(), |ip| ip.to_string()),
         ip => ip.to_string(),
     };
     println!("Tern is serving its terminals on http://{}", SocketAddr::new(ip, port));
     if ip.is_loopback() {
-        println!("Only this machine can reach it: no Tailscale address was found (pass --bind to choose one).");
+        println!("Only this machine can reach it: no Tailscale address was found (start Tailscale, then this again).");
     }
     if !opts.no_pair {
         let pairing = access::pair_in(&mux_dir)?;
@@ -149,7 +150,6 @@ fn serve(opts: Opts) -> io::Result<()> {
     let status = service::Serving {
         pid: std::process::id(),
         links,
-        all_networks: ip.is_unspecified(),
         local_only: ip.is_loopback(),
         connected: Vec::new(),
         build: Some(tern_mux::paths::build_id().to_owned()),
@@ -163,6 +163,7 @@ fn serve(opts: Opts) -> io::Result<()> {
         status: Mutex::new(status),
         pages: Mutex::default(),
         tries: auth::Tries::default(),
+        pending: http::Slots::new(MAX_PENDING),
     });
     {
         let state = state.clone();
@@ -181,9 +182,12 @@ fn serve(opts: Opts) -> io::Result<()> {
                 continue;
             },
         };
+        // A flood of connections that never finish a request can't take a
+        // thread each.
+        let Some(slot) = state.pending.take() else { continue };
         let state = state.clone();
         let _ = std::thread::Builder::new().name("web client".into()).spawn(move || {
-            if let Err(e) = handle(stream, &state) {
+            if let Err(e) = handle(stream, slot, &state) {
                 log::info!("web client: {e}");
             }
         });
@@ -198,23 +202,26 @@ struct Shared {
     /// Who has access, and when its file last changed.
     access: Mutex<(access::Access, Option<SystemTime>)>,
     status: Mutex<service::Serving>,
-    /// The open pages, by device.
-    pages: Mutex<Vec<(String, Arc<ws::Sender>)>>,
+    /// The open pages, by device, with the role each was opened with.
+    pages: Mutex<Vec<(String, access::Role, Arc<ws::Sender>)>>,
     tries: auth::Tries,
+    pending: http::Slots,
 }
 
 impl Shared {
-    /// The paired device a request comes from: its id.
-    fn device(&self, req: &http::Request) -> Option<String> {
+    /// The paired device a request comes from: its id and role.
+    fn device(&self, req: &http::Request) -> Option<(String, access::Role)> {
         let cookie = req.cookie(&self.cookie)?;
-        access::check(&self.access.lock().unwrap().0, cookie).map(|d| d.id.clone())
+        access::check(&self.access.lock().unwrap().0, cookie).map(|d| (d.id.clone(), d.role))
     }
 
     /// Read who has access again (when its file changed, or `now`), and end
-    /// the pages of devices that lost it.
+    /// the pages of devices that lost it, or whose role changed (they come
+    /// back with the new one).
     fn reload(&self, now: bool) {
         let stamp = modified(&self.mux_dir);
-        let ended: Vec<Arc<ws::Sender>> = {
+        // Pages to end, and whether their device was unpaired.
+        let ended: Vec<(bool, Arc<ws::Sender>)> = {
             let mut a = self.access.lock().unwrap();
             let t = access::now();
             // Sessions also run out.
@@ -223,28 +230,39 @@ impl Shared {
             }
             *a = (access::read(&self.mux_dir), stamp);
             a.0.devices.retain(|d| d.expires() > t);
-            let alive = |id: &str| a.0.devices.iter().any(|d| d.id == id);
-            self.pages.lock().unwrap().iter().filter(|(id, _)| !alive(id)).map(|(_, s)| s.clone()).collect()
+            let role = |id: &str| a.0.devices.iter().find(|d| d.id == id).map(|d| d.role);
+            self.pages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|p| match role(&p.0) {
+                    None => Some((true, p.2.clone())),
+                    Some(r) if r != p.1 => Some((false, p.2.clone())),
+                    Some(_) => None,
+                })
+                .collect()
         };
-        for s in ended {
-            let _ = s.text(r#"{"t":"revoked"}"#);
+        for (revoked, s) in ended {
+            if revoked {
+                let _ = s.text(r#"{"t":"revoked"}"#);
+            }
             s.close();
         }
     }
 
-    fn opened(&self, device: &str, sender: &Arc<ws::Sender>) {
-        self.pages.lock().unwrap().push((device.to_owned(), sender.clone()));
+    fn opened(&self, device: &str, role: access::Role, sender: &Arc<ws::Sender>) {
+        self.pages.lock().unwrap().push((device.to_owned(), role, sender.clone()));
         self.write_connected();
     }
 
     fn closed(&self, sender: &Arc<ws::Sender>) {
-        self.pages.lock().unwrap().retain(|(_, s)| !Arc::ptr_eq(s, sender));
+        self.pages.lock().unwrap().retain(|(_, _, s)| !Arc::ptr_eq(s, sender));
         self.write_connected();
     }
 
     /// Say in the status which devices have a page open, for Settings.
     fn write_connected(&self) {
-        let mut ids: Vec<String> = self.pages.lock().unwrap().iter().map(|(id, _)| id.clone()).collect();
+        let mut ids: Vec<String> = self.pages.lock().unwrap().iter().map(|(id, _, _)| id.clone()).collect();
         ids.sort();
         ids.dedup();
         let mut status = self.status.lock().unwrap();
@@ -292,20 +310,20 @@ fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
 
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'";
 
-fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+fn handle(stream: TcpStream, slot: http::Slot, shared: &Shared) -> io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let _ = stream.set_nodelay(true);
     let peer = stream.peer_addr()?.ip();
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(http::Deadline::new(stream.try_clone()?, REQUEST_TIME));
     let mut w = stream;
     let Some(req) = http::read_request(&mut reader)? else { return Ok(()) };
+    drop(slot);
     let device = shared.device(&req);
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/ws") => {
             let key = req.header("sec-websocket-key");
             let upgrade = req.header("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
-            let Some(device) = device.filter(|_| auth::same_origin(req.header("origin"), req.header("host"))) else {
+            let Some((device, role)) = device.filter(|_| auth::same_origin(req.header("origin"), req.header("host"))) else {
                 return http::respond(&mut w, "403 Forbidden", &[], b"");
             };
             let (true, Some(key)) = (upgrade, key) else { return http::respond(&mut w, "400 Bad Request", &[], b"") };
@@ -315,11 +333,11 @@ fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
             );
             w.write_all(head.as_bytes())?;
             // A page may sit idle for hours; dead peers show up as write errors.
-            w.set_read_timeout(None)?;
+            reader.get_mut().lift()?;
             let sender = Arc::new(ws::Sender::new(w));
             shared.touch(&device);
-            shared.opened(&device, &sender);
-            bridge::serve(reader, sender.clone(), &shared.mux_dir);
+            shared.opened(&device, role, &sender);
+            bridge::serve(reader, sender.clone(), &shared.mux_dir, role);
             shared.closed(&sender);
             Ok(())
         },
@@ -351,7 +369,7 @@ fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
             }
         },
         ("GET", "/session") => match (device, req.cookie(&shared.cookie)) {
-            (Some(device), Some(value)) => {
+            (Some((device, _)), Some(value)) => {
                 shared.touch(&device);
                 let cookie = shared.set_cookie(value);
                 let headers = [("Content-Type", "application/json"), ("Cache-Control", "no-store"), ("Set-Cookie", cookie.as_str())];
@@ -370,14 +388,6 @@ fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
         },
         _ => http::respond(&mut w, "405 Method Not Allowed", &[], b""),
     }
-}
-
-/// This machine's address on its local network: the one it would reach
-/// the internet from (a UDP socket only picks a route; nothing is sent).
-fn lan_ip() -> Option<IpAddr> {
-    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
-    Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 /// This machine on the tailnet.
@@ -451,11 +461,11 @@ mod tests {
     #[test]
     fn parses_options() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let o = parse_args(&args(&["--bind", "0.0.0.0", "--port", "9000", "--no-pair"])).unwrap();
-        assert_eq!((o.bind, o.port, o.no_pair), (Some("0.0.0.0".parse().unwrap()), 9000, true));
-        let o = parse_args(&[]).unwrap();
-        assert_eq!((o.bind, o.port), (None, DEFAULT_PORT));
-        assert!(parse_args(&args(&["--bind", "nope"])).is_err());
+        let o = parse_args(&args(&["--port", "9000", "--no-pair"])).unwrap();
+        assert_eq!((o.port, o.no_pair), (9000, true));
+        assert_eq!(parse_args(&[]).unwrap().port, DEFAULT_PORT);
+        // Only Tailscale's network (or this machine): no other address.
+        assert!(parse_args(&args(&["--bind", "0.0.0.0"])).is_err());
         assert!(parse_args(&args(&["--what"])).is_err());
     }
 

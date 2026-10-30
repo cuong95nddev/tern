@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 const LOCK: &str = "web.lock";
 const STATUS: &str = "web.json";
 /// The app's own choice, kept to start the server again at its next launch:
-/// `tailscale` or `all`. Missing: off. A server started by hand leaves it be.
+/// there (any content) or missing (off). A server started by hand leaves it
+/// be.
 const WANTED: &str = "web-wanted";
 
 /// What a running server serves.
@@ -21,8 +22,6 @@ pub struct Serving {
     /// Where it is (`http://host:port/`), the address first (then
     /// MagicDNS): a pairing link goes on one of these.
     pub links: Vec<String>,
-    /// Listening on every network, not just Tailscale.
-    pub all_networks: bool,
     /// Only this machine can reach it (no Tailscale address was found).
     pub local_only: bool,
     /// The paired devices with a page open (see [`crate::access`]).
@@ -61,7 +60,6 @@ pub(crate) fn write_status(dir: &Path, s: &Serving) -> io::Result<()> {
     let v = serde_json::json!({
         "pid": s.pid,
         "links": s.links,
-        "all_networks": s.all_networks,
         "local_only": s.local_only,
         "connected": s.connected,
         "build": s.build,
@@ -88,7 +86,6 @@ fn serving_in(dir: &Path) -> Option<Serving> {
         pid: v.get("pid")?.as_u64()? as u32,
         // A server of old gave its secret link.
         links: v.get("links")?.as_array()?.iter().filter_map(|l| Some(l.as_str()?.split('#').next()?.to_owned())).collect(),
-        all_networks: v.get("all_networks").and_then(|b| b.as_bool()).unwrap_or(false),
         local_only: v.get("local_only").and_then(|b| b.as_bool()).unwrap_or(false),
         connected: v
             .get("connected")
@@ -99,21 +96,20 @@ fn serving_in(dir: &Path) -> Option<Serving> {
     })
 }
 
-/// Start a server in the background, on every network or on Tailscale's,
-/// and remember to start it at the app's next launch. Returns before it
-/// listens: watch [`serving`].
-pub fn start(all_networks: bool) -> io::Result<()> {
+/// Start a server in the background, on Tailscale's network, and remember
+/// to start it at the app's next launch. Returns before it listens: watch
+/// [`serving`].
+pub fn start() -> io::Result<()> {
     let dir = dir();
     tern_mux::paths::ensure_private_dir(&dir)?;
-    std::fs::write(dir.join(WANTED), if all_networks { "all" } else { "tailscale" })?;
+    std::fs::write(dir.join(WANTED), "tailscale")?;
     // The app makes its own pairing links.
-    let args: &[&str] = if all_networks { &["--web", "--no-pair", "--bind", "0.0.0.0"] } else { &["--web", "--no-pair"] };
-    tern_mux::client::spawn_background(args, log_file().as_deref())
+    tern_mux::client::spawn_background(&["--web", "--no-pair"], log_file().as_deref())
 }
 
-/// Replace a running server of another build with one of this build, on
-/// the same networks. Its pages reconnect, and reload for the new page.
-pub fn replace_outdated(all_networks: bool) -> io::Result<()> {
+/// Replace a running server of another build with one of this build. Its
+/// pages reconnect, and reload for the new page.
+pub fn replace_outdated() -> io::Result<()> {
     let dir = dir();
     let Some(old) = serving_in(&dir).filter(Serving::outdated) else { return Ok(()) };
     tern_mux::client::kill_process(old.pid)?;
@@ -125,7 +121,7 @@ pub fn replace_outdated(all_networks: bool) -> io::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    start(all_networks)
+    start()
 }
 
 /// End the running server (fine when none runs), and don't start it at
@@ -138,13 +134,10 @@ pub fn stop() -> io::Result<()> {
     }
 }
 
-/// The app turned it on last: `Some(all_networks)`.
-pub fn wanted() -> Option<bool> {
-    match std::fs::read_to_string(dir().join(WANTED)).ok()?.trim() {
-        "all" => Some(true),
-        "tailscale" => Some(false),
-        _ => None,
-    }
+/// The app turned it on last. One that listened on every network (`all`,
+/// before only Tailscale's) comes back on Tailscale's.
+pub fn wanted() -> bool {
+    dir().join(WANTED).is_file()
 }
 
 /// The server's log.
@@ -177,7 +170,6 @@ mod tests {
         let s = Serving {
             pid: 42,
             links: vec!["http://a:1/".into()],
-            all_networks: true,
             local_only: false,
             connected: vec!["d1".into()],
             build: Some("abc".into()),
@@ -199,7 +191,6 @@ mod tests {
         let s = |build: Option<&str>| Serving {
             pid: 1,
             links: Vec::new(),
-            all_networks: false,
             local_only: false,
             connected: Vec::new(),
             build: build.map(str::to_owned),

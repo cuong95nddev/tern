@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::http;
+use crate::{auth, http};
 
 /// Ports tried first, so a page keeps its address across runs (VS Code's
 /// Live Server starts at 5500 too).
@@ -105,6 +105,9 @@ fn handle(stream: TcpStream, shared: &Shared) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let Some(req) = http::read_request(&mut reader)? else { return Ok(()) };
     let mut w = stream;
+    if !auth::loopback_host(req.header("host")) {
+        return send(&mut w, "403 Forbidden", "text/plain", b"forbidden", false);
+    }
     if req.method != "GET" && req.method != "HEAD" {
         return send(&mut w, "405 Method Not Allowed", "text/plain", b"method not allowed", false);
     }
@@ -292,8 +295,12 @@ mod tests {
     use std::io::{BufRead, Read};
 
     fn get(port: u16, path: &str) -> String {
+        get_from(port, path, &format!("127.0.0.1:{port}"))
+    }
+
+    fn get_from(port: u16, path: &str, host: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         out
@@ -334,11 +341,12 @@ mod tests {
         assert!(get(port, "/../secret").starts_with("HTTP/1.1 404"));
         assert!(get(port, "/%2e%2e/secret").starts_with("HTTP/1.1 404"));
         assert!(get(port, "/missing.html").starts_with("HTTP/1.1 404"));
+        assert!(get_from(port, "/", &format!("localhost:{port}")).contains("home<script>"));
 
         let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         // Fail, not hang, when no reload comes.
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        write!(&s, "GET {EVENTS} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        write!(&s, "GET {EVENTS} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
         let mut r = BufReader::new(s);
         let mut line = String::new();
         while line != ": hi\n" {
@@ -354,5 +362,19 @@ mod tests {
             }
         }
         assert_eq!(line, "data: reload\n");
+    }
+
+    #[test]
+    fn other_sites_names_are_refused() {
+        // A page of another site whose name it pointed at 127.0.0.1 (DNS
+        // rebinding) would read the folder as its own.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::write(root.join(".env"), "SECRET=1").unwrap();
+        let port = open(&root).unwrap();
+        assert!(get_from(port, "/.env", &format!("evil.example:{port}")).starts_with("HTTP/1.1 403"));
+        assert!(get_from(port, "/", "evil.example").starts_with("HTTP/1.1 403"));
+        assert!(get_from(port, EVENTS, &format!("evil.example:{port}")).starts_with("HTTP/1.1 403"));
+        assert!(get_from(port, "/.env", &format!("[::1]:{port}")).ends_with("SECRET=1"));
     }
 }

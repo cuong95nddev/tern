@@ -121,10 +121,12 @@ pub fn input(line: &str, cx: &mut App) -> String {
 /// an update left behind, which would keep serving its own, older page.
 pub fn start_remote_at_launch(cx: &mut App) {
     cx.background_spawn(async move {
-        let Some(all_networks) = tern_web::wanted() else { return };
+        if !tern_web::wanted() {
+            return;
+        }
         let started = match tern_web::serving() {
-            None => tern_web::start(all_networks),
-            Some(_) => tern_web::replace_outdated(all_networks),
+            None => tern_web::start(),
+            Some(_) => tern_web::replace_outdated(),
         };
         if let Err(e) = started {
             log::warn!("can't start serving the terminals: {e}");
@@ -243,8 +245,6 @@ struct Remote {
     /// Starting or stopping the server, or changing who has access.
     busy: bool,
     error: Option<String>,
-    /// Listen on every network (else Tailscale's); used at the next start.
-    all_networks: bool,
     copied: Option<Instant>,
 }
 
@@ -261,9 +261,9 @@ fn look_up_permissions() -> Granted {
     Granted { notifications: permissions::notifications(), screen_recording: permissions::screen_recording() }
 }
 
-/// Whether the server runs, the choice it starts with and who has access.
-fn look_up() -> (Option<tern_web::Serving>, Option<bool>, Access) {
-    (tern_web::serving(), tern_web::wanted(), access::load())
+/// Whether the server runs and who has access.
+fn look_up() -> (Option<tern_web::Serving>, Access) {
+    (tern_web::serving(), access::load())
 }
 
 pub struct SettingsView {
@@ -332,12 +332,9 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn found(&mut self, (serving, wanted, access): (Option<tern_web::Serving>, Option<bool>, Access), cx: &mut Context<Self>) {
+    fn found(&mut self, (serving, access): (Option<tern_web::Serving>, Access), cx: &mut Context<Self>) {
         if self.remote.busy {
             return;
-        }
-        if !self.remote.checked {
-            self.remote.all_networks = serving.as_ref().map(|s| s.all_networks).or(wanted).unwrap_or(false);
         }
         self.remote.checked = true;
         if self.remote.serving != serving || self.remote.access != access {
@@ -590,36 +587,20 @@ impl SettingsView {
                      the desk. It keeps serving after Tern quits."
                 .to_owned(),
             Some(s) if s.local_only => {
-                "On, but no Tailscale address was found: only this machine can reach it. Start Tailscale, or listen on all networks."
+                "On, but no Tailscale address was found: only this machine can reach it. Start Tailscale, then turn this off and on."
                     .to_owned()
             },
-            Some(s) if s.all_networks => "On: reachable on every network this machine is on.".to_owned(),
-            Some(_) => "On: reachable over Tailscale.".to_owned(),
+            Some(_) => "On: reachable over Tailscale, the private network between your devices.".to_owned(),
         };
         let mut access = Row::new("Network access", description)
             .switch(r.serving.is_some(), |v, _, cx| if v.remote.serving.is_some() { v.stop_remote(cx) } else { v.start_remote(cx) })
             .busy(r.busy || !r.checked);
         access.problem = r.error.clone();
-        let all = Row::new(
-            "Listen on all networks",
-            "Off: only over Tailscale, a private network between your devices. On: on any network, over plain HTTP: only on networks you trust.",
-        )
-        .switch(r.all_networks, |v, _, cx| {
-            v.remote.all_networks = !v.remote.all_networks;
-            // A running server moves over.
-            if v.remote.serving.is_some() {
-                v.start_remote(cx);
-            }
-            cx.notify();
-        })
-        .busy(r.busy);
-        vec![access, all]
+        vec![access]
     }
 
-    /// (Re)start the server with the current choice; then wait for it to
-    /// listen.
+    /// (Re)start the server; then wait for it to listen.
     fn start_remote(&mut self, cx: &mut Context<Self>) {
-        let all_networks = self.remote.all_networks;
         let was_running = self.remote.serving.is_some();
         self.remote.busy = true;
         self.remote.error = None;
@@ -630,7 +611,7 @@ impl SettingsView {
                     if was_running {
                         tern_web::stop().map_err(|e| format!("can't stop the server: {e}"))?;
                     }
-                    tern_web::start(all_networks).map_err(|e| format!("can't start the server: {e}"))
+                    tern_web::start().map_err(|e| format!("can't start the server: {e}"))
                 })
                 .await;
             let result = match result {
@@ -743,9 +724,11 @@ impl SettingsView {
             .map(|d| {
                 let on = connected(&d.id);
                 let used = if on { "Connected".to_owned() } else { format!("Last used {}", ago(now, d.last_seen)) };
+                let role = if d.role.may_type() { "Can type" } else { "View only" };
                 template::Scope::new(format!("device-{}", d.id))
                     .var("name", d.name.clone())
-                    .var("detail", format!("{} · {used} · Paired {}", d.ip, ago(now, d.paired)))
+                    .var("detail", format!("{role} · {} · {used} · Paired {}", d.ip, ago(now, d.paired)))
+                    .var("may_type", d.role.may_type())
                     .var("connected", on)
                     .var("busy", r.busy)
             })
@@ -771,6 +754,7 @@ impl SettingsView {
             .slot_opt("qr", link.map(|l| qr_code(&l, cx)));
         let me = cx.entity().downgrade();
         let ids: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+        let roles: Vec<access::Role> = devices.iter().map(|d| d.role).collect();
         let pairing_id = r.pairing.as_ref().map(|p| p.id.clone());
         Some(template::render(
             "settings.remote",
@@ -794,6 +778,17 @@ impl SettingsView {
                     b.on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| {
                         let id = id.clone();
                         v.change_access(move || access::revoke(&id).map(|()| None), cx);
+                    }))
+                    .into_any_element()
+                },
+                ("role", Framed::Button(b)) => {
+                    let Some((id, role)) = ix.and_then(|i| Some((ids.get(i)?.clone(), *roles.get(i)?))) else {
+                        return b.into_any_element();
+                    };
+                    let to = if role.may_type() { access::Role::View } else { access::Role::Drive };
+                    b.on_click(on_event(&me, move |v, _: &ClickEvent, _, cx| {
+                        let id = id.clone();
+                        v.change_access(move || access::set_role(&id, to).map(|()| None), cx);
                     }))
                     .into_any_element()
                 },

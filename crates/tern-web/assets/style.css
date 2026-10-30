@@ -258,6 +258,8 @@ body.wide #list-view { flex: none; width: 260px; border-right: 1px solid var(--l
   color: var(--muted);
 }
 #control[hidden] { display: none; }
+/* A device that only watches: nothing to type with. */
+body.view-only #keys, body.view-only #compose, body.view-only #drive { display: none; }
 #control-text { flex: 1; min-width: 0; }
 #control button { flex: none; padding: 4px 10px; color: var(--accent); }
 

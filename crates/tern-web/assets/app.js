@@ -30,6 +30,9 @@ const FIT_AT_ONCE = !TOUCH;
 let fitted = FIT_AT_ONCE;
 // Who has the session shown, as `control` said last.
 let controller = "you";
+// This device may type (Settings ▸ Connections lets it); else it only
+// watches, and the server drops what it would send.
+let mayType = false;
 
 let socket = null;
 let retry = 0;
@@ -120,6 +123,7 @@ function onText(m) {
     case "hello":
       if (build != null && m.build !== build) return location.reload();
       build = m.build;
+      setRole(m.role);
       theme = m.theme;
       document.documentElement.style.setProperty("--bg", theme.background);
       document.documentElement.style.setProperty("--fg", theme.foreground);
@@ -142,7 +146,7 @@ function onText(m) {
       term.resize(m.cols, m.rows);
       snapshotNext = true;
       setBanner(null);
-      fitted = FIT_AT_ONCE;
+      fitted = FIT_AT_ONCE && mayType;
       setControl("you");
       layout();
       fit(true);
@@ -493,6 +497,7 @@ function ensureTerm() {
     cursorBlink: false,
     macOptionIsMeta: true,
     theme: theme || undefined,
+    disableStdin: !mayType,
     cols: size.cols,
     rows: size.rows,
   });
@@ -606,7 +611,17 @@ function quietReplies(t) {
 }
 
 function input(d) {
-  if (current != null && pending == null) send({ t: "input", d });
+  if (mayType && current != null && pending == null) send({ t: "input", d });
+}
+
+// What this device may do: a device that only watches gets no keyboard,
+// and leaves the session at the desktop's size.
+function setRole(role) {
+  mayType = role !== "view";
+  document.body.classList.toggle("view-only", !mayType);
+  if (!mayType) fitted = false;
+  if (term) term.options.disableStdin = !mayType;
+  if (current != null) setControl(controller);
 }
 
 // The size of one cell at font size `fs`, as xterm.js draws it. It rounds
@@ -694,7 +709,7 @@ function fit(now) {
 }
 
 function ask(again) {
-  if (!fitted || !term || current == null || pending != null || $("term-view").hidden) return;
+  if (!mayType || !fitted || !term || current == null || pending != null || $("term-view").hidden) return;
   const want = fitting();
   const key = `${current} ${want.cols} ${want.rows}`;
   if (again || key !== asked) {
@@ -857,7 +872,11 @@ $("compose").onsubmit = (e) => {
 function setControl(by) {
   controller = by;
   $("control").hidden = by === "you" && fitted;
-  $("control-text").textContent = by === "viewer" ? "Another device has this terminal." : "Shown at the desktop's size.";
+  $("control-text").textContent = !mayType
+    ? "View only: Tern's Settings ▸ Connections can let this device type."
+    : by === "viewer"
+      ? "Another device has this terminal."
+      : "Shown at the desktop's size.";
   layout();
   fit();
 }

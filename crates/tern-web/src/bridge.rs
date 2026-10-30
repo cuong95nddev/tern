@@ -14,7 +14,6 @@
 //! don't fit a JavaScript number.
 
 use std::io::BufReader;
-use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +26,7 @@ use tern_term::mirror::Marker;
 use tern_term::palette::{Palette, PaletteFile};
 use tern_term::vt::vte::ansi::Rgb;
 
+use crate::access::Role;
 use crate::ws::{self, Message, Sender};
 
 #[derive(Deserialize)]
@@ -50,6 +50,15 @@ enum FromPage {
     },
 }
 
+/// Whether a device with `role` may send `msg`: one that only watches
+/// can't type, take a session or change its size.
+fn allowed(msg: &FromPage, role: Role) -> bool {
+    match msg {
+        FromPage::View { .. } | FromPage::Leave => true,
+        FromPage::Drive | FromPage::Input { .. } | FromPage::Resize { .. } => role.may_type(),
+    }
+}
+
 /// The page's view.
 #[derive(Default)]
 struct State {
@@ -65,9 +74,13 @@ impl State {
     }
 }
 
-pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Path) {
+/// Serve a page of a device with `role` (a change of role ends the page).
+pub fn serve(mut reader: BufReader<crate::http::Deadline>, sender: Arc<Sender>, mux_dir: &Path, role: Role) {
     let palette = PaletteFile::new(tern_mux::paths::palette_path()).get();
-    if sender.text(&json!({ "t": "hello", "theme": theme(&palette), "build": tern_mux::paths::build_id() }).to_string()).is_err() {
+    if sender
+        .text(&json!({ "t": "hello", "theme": theme(&palette), "build": tern_mux::paths::build_id(), "role": role }).to_string())
+        .is_err()
+    {
         return;
     }
     let (viewer, mut stream) = match Viewer::connect(mux_dir) {
@@ -115,6 +128,11 @@ pub fn serve(mut reader: BufReader<TcpStream>, sender: Arc<Sender>, mux_dir: &Pa
                 continue;
             },
         };
+        if !allowed(&msg, role) {
+            // Not what it typed: that may be a secret.
+            log::info!("refused typing from a device that only watches");
+            continue;
+        }
         let mut st = state.lock().unwrap();
         match msg {
             FromPage::View { id } => {
@@ -267,6 +285,24 @@ mod tests {
         let m: FromPage = serde_json::from_str(r#"{"t":"resize","cols":45,"rows":30,"cell_width":24,"cell_height":45}"#).unwrap();
         assert!(matches!(m, FromPage::Resize { cols: 45, rows: 30, cell_width: 24, cell_height: 45 }));
         assert!(serde_json::from_str::<FromPage>(r#"{"t":"view","id":12}"#).is_err());
+    }
+
+    #[test]
+    fn a_viewer_only_watches() {
+        let m = |j: &str| serde_json::from_str::<FromPage>(j).unwrap();
+        let typing = [
+            m(r#"{"t":"input","d":"rm -rf ~\r"}"#),
+            m(r#"{"t":"drive"}"#),
+            m(r#"{"t":"resize","cols":45,"rows":30,"cell_width":24,"cell_height":45}"#),
+        ];
+        let watching = [m(r#"{"t":"view","id":"1"}"#), m(r#"{"t":"leave"}"#)];
+        for msg in &typing {
+            assert!(!allowed(msg, Role::View));
+            assert!(allowed(msg, Role::Drive));
+        }
+        for msg in &watching {
+            assert!(allowed(msg, Role::View));
+        }
     }
 
     #[test]
