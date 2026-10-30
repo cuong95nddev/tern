@@ -97,7 +97,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 }
 
 fn tools() -> Value {
-    let name = json!({ "type": "string", "description": "The service's name, as given to run_service (or its id)." });
+    let name = json!({ "type": "string", "description": "The service's name, as given to run_service (a service of your folder), or its id (any folder's)." });
     json!([
         {
             "name": "run_service",
@@ -258,19 +258,34 @@ fn spawn_config(spec: &ServiceSpec) -> SpawnConfig {
     }
 }
 
-/// The service `name` (or id) is: of those so named, the one in the
-/// caller's folder, a running one, the newest.
+/// The service `name` (or id) is: see [`pick`].
 fn find(s: &mut Services, ctx: &Context, name: &str) -> Result<SessionInfo, String> {
-    let list = s.list().map_err(|e| e.to_string())?;
-    let mut named: Vec<SessionInfo> = list
-        .into_iter()
-        .filter(|i| i.service.as_ref().is_some_and(|sv| sv.name == name) || (i.service.is_some() && i.id.to_string() == name))
-        .collect();
-    named.sort_by_key(|i| {
-        let sv = i.service.as_ref().unwrap();
-        (!related(&sv.cwd, &ctx.cwd), i.exited, std::cmp::Reverse(sv.started))
-    });
-    named.into_iter().next().ok_or_else(|| format!("no service {name} (list_services lists them)"))
+    pick(s.list().map_err(|e| e.to_string())?, &ctx.cwd, name)
+}
+
+/// The service an agent in `cwd` means by `name`: of those so named in its
+/// folder, a running one, the newest. Another folder's service only by its
+/// id, so an agent can't stop or read another project's by a name they share
+/// (as Orca's CLI keeps to the caller's worktree unless asked).
+fn pick(list: Vec<SessionInfo>, cwd: &Path, name: &str) -> Result<SessionInfo, String> {
+    let services = list.into_iter().filter(|i| i.service.is_some());
+    let (by_id, named): (Vec<SessionInfo>, Vec<SessionInfo>) = services
+        .filter(|i| i.id.to_string() == name || i.service.as_ref().is_some_and(|sv| sv.name == name))
+        .partition(|i| i.id.to_string() == name);
+    if let Some(info) = by_id.into_iter().next() {
+        return Ok(info);
+    }
+    let (mut here, elsewhere): (Vec<SessionInfo>, Vec<SessionInfo>) =
+        named.into_iter().partition(|i| related(&i.service.as_ref().unwrap().cwd, cwd));
+    here.sort_by_key(|i| (i.exited, std::cmp::Reverse(i.service.as_ref().unwrap().started)));
+    if let Some(info) = here.into_iter().next() {
+        return Ok(info);
+    }
+    if elsewhere.is_empty() {
+        return Err(format!("no service {name} (list_services lists them)"));
+    }
+    let others: Vec<String> = elsewhere.iter().map(|i| format!("{} (id {})", i.service.as_ref().unwrap().cwd.display(), i.id)).collect();
+    Err(format!("no service {name} in this folder. Another folder has one: {}. Pass its id as `name` to use it.", others.join(", ")))
 }
 
 /// One folder is in the other.
@@ -371,6 +386,35 @@ mod tests {
         let running = SessionInfo { exited: false, ..info };
         let ports = [(42, vec![5173])].into_iter().collect();
         assert!(describe(&running, &ports).ends_with("listening: http://localhost:5173"));
+    }
+
+    fn service(id: u64, name: &str, cwd: &str, exited: bool, started: u64) -> SessionInfo {
+        SessionInfo {
+            id,
+            exited,
+            service: Some(ServiceSpec { name: name.into(), command: "x".into(), cwd: cwd.into(), by: None, started }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_name_finds_only_this_folders_services() {
+        let list = || {
+            vec![
+                service(1, "dev", "/w/other", false, 5),
+                service(2, "web", "/w/app", true, 1),
+                service(3, "web", "/w/app/site", false, 2),
+                service(4, "web", "/w/app", true, 3),
+            ]
+        };
+        let cwd = Path::new("/w/app");
+        // A running one first, then the newest.
+        assert_eq!(pick(list(), cwd, "web").unwrap().id, 3);
+        // Another folder's `dev` is not this folder's: named by its id only.
+        let err = pick(list(), cwd, "dev").unwrap_err();
+        assert!(err.contains("no service dev in this folder") && err.contains("/w/other (id 1)"), "{err}");
+        assert_eq!(pick(list(), cwd, "1").unwrap().id, 1);
+        assert!(pick(list(), cwd, "nope").unwrap_err().starts_with("no service nope"));
     }
 
     #[test]
