@@ -1141,8 +1141,7 @@ impl ChatView {
             },
             Row::Text(i) => {
                 let Some(Entry::Text { text, streaming }) = entry(*i) else { return div().into_any_element() };
-                let md =
-                    TextView::markdown(SharedString::from(format!("chat-{id}-{i}")), text.clone()).selectable(true).stream_fade(*streaming);
+                let md = markdown(SharedString::from(format!("chat-{id}-{i}")), text.clone()).selectable(true).stream_fade(*streaming);
                 template::render_plain("chat.text", template::Scope::new("chat.text").slot("markdown", md), cx)
             },
             Row::Thinking(i) => {
@@ -1426,6 +1425,7 @@ impl ChatView {
             .var("title", format!("{server} asks for your input"))
             .var("message", e.message.as_str())
             .var("url", e.url.clone().unwrap_or_default())
+            .var("openable", e.url.as_deref().is_some_and(web_url))
             .var("mono", mono)
             .var("wanting", wanting.clone())
             .var("complete", wanting.is_empty())
@@ -1442,9 +1442,10 @@ impl ChatView {
                 ("decline", Framed::Button(b)) => b
                     .on_click(on_event(&me, move |this: &mut Self, _: &ClickEvent, _, cx| this.answer_form(ix, false, cx)))
                     .into_any_element(),
-                ("open_url", Framed::Button(b)) => {
-                    let url = url.clone().unwrap_or_default();
-                    b.on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()
+                // Only a web page: the server chose the URL.
+                ("open_url", Framed::Button(b)) => match url.clone().filter(|u| web_url(u)) {
+                    Some(url) => b.on_click(move |_, _, cx| cx.open_url(&url)).into_any_element(),
+                    None => b.into_any_element(),
                 },
                 ("option", Framed::Button(b)) => {
                     let Some((fi, value)) = item.and_then(|i| options.get(i)).cloned().flatten() else { return b.into_any_element() };
@@ -1530,7 +1531,7 @@ impl ChatView {
             scope = scope.var("has_diff", true).var("diff_height", height).slot("diff", diff);
         }
         if let Some(plan) = plan {
-            scope = scope.slot("markdown", TextView::markdown(SharedString::from(format!("chat-plan-{id}-{ix}")), plan).selectable(true));
+            scope = scope.slot("markdown", markdown(SharedString::from(format!("chat-plan-{id}-{ix}")), plan).selectable(true));
         }
         let me = me.clone();
         template::render(
@@ -1638,6 +1639,23 @@ fn tool_for(ask: &Ask) -> tern_chat::Tool {
 }
 
 /// Where `account`'s Claude saved conversation `id` started in `root`.
+/// Claude's Markdown, whose links open only when they are web pages (a
+/// reply can carry links from pages Claude read).
+fn markdown(id: SharedString, text: impl Into<SharedString>) -> TextView {
+    TextView::markdown(id, text.into()).on_link_click(|url, _, _, cx| {
+        if web_url(url) {
+            cx.open_url(url);
+        }
+    })
+}
+
+/// `url` is a web page (`http` or `https`): what a chat may open from what
+/// Claude or an MCP server sent, not a file or another app's scheme.
+fn web_url(url: &str) -> bool {
+    let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    matches!(scheme.as_deref(), Some("http" | "https")) && url[url.find(':').unwrap_or(0)..].starts_with("://")
+}
+
 /// Where the daemon keeps conversation `session`'s MCP forms, which Claude
 /// doesn't save (see `ChatSpec::record`).
 fn record_path(session: &str) -> Option<PathBuf> {
@@ -1835,7 +1853,16 @@ fn thumb_key(image: &UserImage) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::command_matches;
+    use super::{command_matches, web_url};
+
+    #[test]
+    fn a_form_opens_only_web_pages() {
+        assert!(web_url("https://example.com/login") && web_url("HTTP://example.com"));
+        for url in ["file:///etc/passwd", "tern://session/1", "x-apple.systempreferences:com.apple", "javascript:alert(1)", "https:/x", ""]
+        {
+            assert!(!web_url(url), "{url}");
+        }
+    }
 
     #[test]
     fn every_tool_icon_is_bundled() {

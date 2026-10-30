@@ -3370,7 +3370,7 @@
                 "element": "chat.elicit.url",
                 "children": [
                   { "grow": 1, "truncate": true, "text": "{url}", "style": { "font_family": "{mono}" } },
-                  { "button": "open_url", "element": "chat.ask.button", "variant": "outline", "size": "small", "icon": "square-arrow-out-up-right", "label": "Open" }
+                  { "when": "openable", "button": "open_url", "element": "chat.ask.button", "variant": "outline", "size": "small", "icon": "square-arrow-out-up-right", "label": "Open" }
                 ]
               },
               {
