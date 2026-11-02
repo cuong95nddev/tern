@@ -23,6 +23,8 @@ mod cursor;
 mod decorations;
 #[path = "editor/diagnostics.rs"]
 mod diagnostics;
+#[path = "editor/gutter_markers.rs"]
+mod gutter_markers;
 #[path = "editor/display_map/mod.rs"]
 mod display_map;
 mod editor;
@@ -92,6 +94,7 @@ pub use diagnostics::{
 };
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange, WrappingIndent};
 pub use editor::{Editor, EditorState};
+pub use gutter_markers::{GutterMarker, GutterMarkerHandler, GutterMarkerTooltip};
 pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
     InputHighlighterFactory, SharedHighlightStyleResolver, SyntaxContext, SyntaxContextProvider,

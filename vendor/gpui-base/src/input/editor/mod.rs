@@ -39,6 +39,7 @@ impl InputModeKind for EditorMode {
         state.extras.hover_popover = None;
         state.extras.decorations.clear();
         state.extras.range_decorations.clear();
+        state.extras.gutter_markers.clear();
     }
 
     fn editing_syntax_context(state: &InputBaseState<Self>, offset: usize) -> super::SyntaxContext {
@@ -55,6 +56,7 @@ impl InputModeKind for EditorMode {
             .extras
             .range_decorations
             .adjust_for_edit(range, new_len);
+        state.extras.gutter_markers.adjust_for_edit(range, new_len);
     }
 
     fn refresh_language_features(
@@ -275,5 +277,21 @@ impl crate::input::InputExtras for super::EditorExtras {
             self.lsp.definition_provider.is_some(),
             !self.lsp.code_action_providers.is_empty(),
         )
+    }
+
+    fn gutter_markers_shown(&self) -> bool {
+        self.gutter_markers.reserved || !self.gutter_markers.is_empty()
+    }
+
+    fn gutter_markers_on(&self, text: &ropey::Rope, line: usize) -> Vec<super::GutterMarker> {
+        self.gutter_markers.on_line(text, line).cloned().collect()
+    }
+
+    fn gutter_marker_handler(&self) -> Option<super::GutterMarkerHandler> {
+        self.gutter_markers.handler.clone()
+    }
+
+    fn gutter_marker_tooltip(&self) -> Option<super::GutterMarkerTooltip> {
+        self.gutter_markers.tooltip.clone()
     }
 }

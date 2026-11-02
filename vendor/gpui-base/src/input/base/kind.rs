@@ -121,6 +121,26 @@ pub trait InputExtras: Default + 'static {
     fn context_menu_capabilities(&self) -> (bool, bool) {
         (false, false)
     }
+
+    /// Whether the gutter has a column for gutter markers.
+    fn gutter_markers_shown(&self) -> bool {
+        false
+    }
+
+    /// The gutter markers on buffer line `line` of `text`.
+    fn gutter_markers_on(&self, _text: &Rope, _line: usize) -> Vec<crate::input::GutterMarker> {
+        Vec::new()
+    }
+
+    /// What a click on a gutter marker does.
+    fn gutter_marker_handler(&self) -> Option<crate::input::GutterMarkerHandler> {
+        None
+    }
+
+    /// How a gutter marker's tooltip is shown.
+    fn gutter_marker_tooltip(&self) -> Option<crate::input::GutterMarkerTooltip> {
+        None
+    }
 }
 
 /// A mode with nothing extra to render.
@@ -358,6 +378,7 @@ pub struct EditorExtras {
     pub(crate) context_menu_content: ContextMenuContent,
     pub(crate) hover_popover: Option<HoverPopoverState>,
     pub(crate) hover_definition: HoverDefinition,
+    pub(crate) gutter_markers: super::gutter_markers::GutterMarkers,
     pub(crate) context_menu_task: Task<anyhow::Result<()>>,
 }
 
@@ -371,6 +392,7 @@ impl Default for EditorExtras {
             context_menu_content: ContextMenuContent::default(),
             hover_popover: None,
             hover_definition: HoverDefinition::default(),
+            gutter_markers: Default::default(),
             context_menu_task: Task::ready(Ok(())),
         }
     }

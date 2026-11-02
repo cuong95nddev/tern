@@ -54,6 +54,10 @@ pub struct Lsp {
     ///
     /// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#window_showDocument
     pub show_document: Option<ShowDocumentHandler>,
+    /// Called with the byte offset of a secondary+alt click (⌘⌥-click) on
+    /// the text, as go to definition is for a secondary click (go to
+    /// implementations, in an IDE).
+    pub alt_click: Option<Rc<dyn Fn(usize, &mut Window, &mut App)>>,
 
     /// Display options for the completion popover.
     pub completion_menu: CompletionMenuOptions,
@@ -80,6 +84,7 @@ impl Default for Lsp {
             completion_menu: CompletionMenuOptions::default(),
             semantic_tokens_provider: None,
             show_document: None,
+            alt_click: None,
             document_colors: vec![],
             semantic_tokens: vec![],
             _hover_task: Task::ready(Ok(())),

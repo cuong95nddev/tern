@@ -73,3 +73,22 @@ cursor still sits right after it (not one in the last column). Test:
 ## gpui-base 0.7.3
 
 Left out: `Cargo.lock`.
+
+`src/input/editor/gutter_markers.rs` (new), `src/input/base/element.rs`
+(`layout_line_numbers`, `layout_gutter_markers`), `src/input/base/kind.rs`
+(`InputExtras::gutter_markers_*`): the code editor had no way to put an icon
+in a line's gutter, which file tabs need for "is implemented by" / "overrides"
+markers (as in IntelliJ). `EditorState::set_gutter_markers` takes markers by
+line; each is tracked by its line's byte range through edits (with the same
+`adjust_range_for_edit` the decorations use), so it stays on its line while
+the user types and goes with the line when deleted. They are drawn in a
+16px column between the line numbers and the fold icons; a click calls the
+host's `GutterMarkerHandler`, a hover shows the host's tooltip view.
+
+`src/input/editor/lsp/definitions.rs`, `handle_click_hover_definition`, and
+`Lsp::alt_click`: a ⌘⌥-click (Ctrl+Alt on Windows / Linux) on the text was
+ignored; it now calls `Lsp::alt_click` with the clicked offset when the host
+set one (go to implementations).
+
+The crate's own tests need its dev-dependencies (criterion, gpui-fast), which
+are not built here, so these changes are covered by the app's tests and use.

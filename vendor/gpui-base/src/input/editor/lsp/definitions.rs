@@ -143,8 +143,15 @@ impl InputBaseState<EditorMode> {
         window: &mut Window,
         cx: &mut Context<InputBaseState<EditorMode>>,
     ) -> bool {
-        if !event.modifiers.secondary() || event.modifiers.alt {
+        if !event.modifiers.secondary() {
             return false;
+        }
+        if event.modifiers.alt {
+            let Some(alt_click) = self.extras.lsp.alt_click.clone() else {
+                return false;
+            };
+            alt_click(offset, window, cx);
+            return true;
         }
 
         if self.extras.hover_definition.is_empty() {

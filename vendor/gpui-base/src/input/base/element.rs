@@ -51,6 +51,9 @@ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(6.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
+/// Room for one gutter marker, between the line numbers and the fold icons.
+const GUTTER_MARKER_WIDTH: Pixels = px(16.);
+const GUTTER_MARKER_ICON_WIDTH: Pixels = px(12.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 const MIN_LINE_NUMBER_DIGITS: usize = 3;
 const MAX_LINE_NUMBER_DIGITS: usize = 7;
@@ -1121,6 +1124,10 @@ impl<M: InputModeKind> TextElement<M> {
             px(0.)
         };
 
+        if state.extras.gutter_markers_shown() {
+            line_number_width += GUTTER_MARKER_WIDTH;
+        }
+
         if state.mode.is_folding() {
             // Add extra space for fold icons
             line_number_width += FOLD_ICON_HITBOX_WIDTH
@@ -1415,6 +1422,105 @@ impl<M: InputModeKind> TextElement<M> {
         }
 
         icon_layout
+    }
+
+    /// Prepaint the gutter markers of the visible lines: right of the line
+    /// numbers, left of the fold icons, side by side when a line has several.
+    fn layout_gutter_markers(
+        &self,
+        origin_x: Pixels,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        use gpui::{StatefulInteractiveElement as _, prelude::FluentBuilder as _};
+
+        let (rows, handler, tooltip_view) = {
+            let state = self.state.read(cx);
+            if !state.extras.gutter_markers_shown() {
+                return vec![];
+            }
+            let mut rows = vec![];
+            let mut offset_y = last_layout.visible_top;
+            for (line, &buffer_line) in last_layout
+                .lines
+                .iter()
+                .zip(last_layout.visible_buffer_lines.iter())
+            {
+                let markers = state.extras.gutter_markers_on(&state.text, buffer_line);
+                if !markers.is_empty() {
+                    rows.push((offset_y, markers));
+                }
+                offset_y += line.wrapped_lines.len() * last_layout.line_height;
+            }
+            (
+                rows,
+                state.extras.gutter_marker_handler(),
+                state.extras.gutter_marker_tooltip(),
+            )
+        };
+
+        let line_height = last_layout.line_height;
+        let fold = if self.state.read(cx).mode.is_folding() {
+            FOLD_ICON_HITBOX_WIDTH
+        } else {
+            px(0.)
+        };
+        let column_x = origin_x + last_layout.line_number_width
+            - LINE_NUMBER_RIGHT_MARGIN
+            - fold
+            - GUTTER_MARKER_WIDTH;
+        let mut out = vec![];
+        for (offset_y, markers) in rows {
+            let count = markers.len();
+            let width = GUTTER_MARKER_WIDTH / count as f32;
+            for (ix, marker) in markers.into_iter().enumerate() {
+                let origin = point(
+                    column_x + width * ix as f32 + (width - GUTTER_MARKER_ICON_WIDTH.min(width)).half(),
+                    bounds.origin.y + offset_y + (line_height - GUTTER_MARKER_ICON_WIDTH).half(),
+                );
+                let icon_size = GUTTER_MARKER_ICON_WIDTH.min(width);
+                let (path, color, id) = (marker.icon.clone(), marker.color, marker.id);
+                let tooltip = marker.tooltip.clone();
+                let mut element = gpui::div()
+                    .id(("gutter-marker", id))
+                    .size(icon_size)
+                    .cursor_pointer()
+                    .child(
+                        gpui::canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                let color = color.unwrap_or(window.text_style().color);
+                                let _ = window.paint_svg(
+                                    bounds,
+                                    path.clone(),
+                                    None,
+                                    gpui::TransformationMatrix::default(),
+                                    color,
+                                    cx,
+                                );
+                            },
+                        )
+                        .size(icon_size),
+                    )
+                    .when_some(
+                        tooltip_view.clone().filter(|_| !tooltip.is_empty()),
+                        |el, view| el.tooltip(move |window, cx| view(tooltip.clone(), window, cx)),
+                    )
+                    .when_some(handler.clone(), |el, handler| {
+                        el.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            let bounds = Bounds::new(origin, size(icon_size, icon_size));
+                            handler(id, bounds, window, cx);
+                        })
+                    })
+                    .into_any_element();
+                element.prepaint_as_root(origin, size(icon_size, icon_size).into(), window, cx);
+                out.push(element);
+            }
+        }
+        out
     }
 
     /// Paint fold icons using prepaint hitboxes.
@@ -2305,6 +2411,8 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
+    /// Gutter markers, prepainted.
+    gutter_markers: Vec<AnyElement>,
     // Inline completion rendering data
     /// Shaped ghost lines to paint after cursor row (completion lines 2+)
     ghost_lines: Vec<ShapedLine>,
@@ -2972,6 +3080,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             )));
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let gutter_markers =
+            self.layout_gutter_markers(original_x, &bounds, &last_layout, window, cx);
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
@@ -2994,6 +3104,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             range_decoration_frames,
             indent_guides_path,
             fold_icon_layout,
+            gutter_markers,
             ghost_first_line,
             ghost_lines,
             ghost_lines_height,
@@ -3289,6 +3400,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     offset_y += prepaint.ghost_lines_height;
                 }
             }
+        }
+
+        for marker in prepaint.gutter_markers.iter_mut() {
+            marker.paint(window, cx);
         }
 
         // Paint fold icons (only visible on hover or for current line)
