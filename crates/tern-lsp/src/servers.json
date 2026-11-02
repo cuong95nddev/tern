@@ -1,0 +1,98 @@
+[
+  {
+    "name": "rust-analyzer",
+    "languages": ["rust"],
+    "command": "rust-analyzer",
+    "root_markers": ["Cargo.toml", "rust-project.json"],
+    "install_hint": "rustup component add rust-analyzer"
+  },
+  {
+    "name": "clangd",
+    "languages": ["c", "cpp"],
+    "command": "clangd",
+    "args": ["--background-index", "--header-insertion=never"],
+    "root_markers": ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "meson.build", "Makefile"],
+    "install_hint": "Install clangd (LLVM): brew install llvm, apt install clangd, or https://clangd.llvm.org/installation"
+  },
+  {
+    "name": "gopls",
+    "languages": ["go"],
+    "command": "gopls",
+    "root_markers": ["go.work", "go.mod"],
+    "install_hint": "go install golang.org/x/tools/gopls@latest"
+  },
+  {
+    "name": "jdtls",
+    "languages": ["java"],
+    "command": "jdtls",
+    "root_markers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "build.xml", ".project"],
+    "initialization_options": {
+      "settings": {
+        "java": {
+          "autobuild": { "enabled": true },
+          "maven": { "downloadSources": true, "updateSnapshots": false },
+          "eclipse": { "downloadSources": true },
+          "configuration": { "updateBuildConfiguration": "automatic" },
+          "project": { "referencedLibraries": ["lib/**/*.jar"] },
+          "import": {
+            "generatesMetadataFilesAtProjectRoot": false,
+            "exclusions": ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"],
+            "maven": { "enabled": true },
+            "gradle": { "enabled": true, "wrapper": { "enabled": true } }
+          }
+        }
+      }
+    },
+    "install_hint": "Install Eclipse JDT Language Server (brew install jdtls, or https://github.com/eclipse-jdtls/eclipse.jdt.ls); requires JDK 21+"
+  },
+  {
+    "name": "vtsls",
+    "languages": ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+    "command": "vtsls",
+    "args": ["--stdio"],
+    "root_markers": ["tsconfig.json", "jsconfig.json", "package.json"],
+    "install_hint": "npm i -g @vtsls/language-server"
+  },
+  {
+    "name": "typescript-language-server",
+    "languages": ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+    "command": "typescript-language-server",
+    "args": ["--stdio"],
+    "root_markers": ["tsconfig.json", "jsconfig.json", "package.json"],
+    "fallback": true,
+    "install_hint": "npm i -g typescript@6 typescript-language-server"
+  },
+  {
+    "name": "basedpyright",
+    "languages": ["python"],
+    "command": "basedpyright-langserver",
+    "args": ["--stdio"],
+    "root_markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "pyrightconfig.json"],
+    "install_hint": "pip install basedpyright (or: uv tool install basedpyright)"
+  },
+  {
+    "name": "pyright",
+    "languages": ["python"],
+    "command": "pyright-langserver",
+    "args": ["--stdio"],
+    "root_markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "pyrightconfig.json"],
+    "fallback": true,
+    "install_hint": "npm i -g pyright (or: pip install pyright)"
+  },
+  {
+    "name": "ty",
+    "languages": ["python"],
+    "command": "ty",
+    "args": ["server"],
+    "root_markers": ["ty.toml", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"],
+    "fallback": true,
+    "install_hint": "uv tool install ty (or: pip install ty)"
+  },
+  {
+    "name": "sourcekit-lsp",
+    "languages": ["swift"],
+    "command": "sourcekit-lsp",
+    "root_markers": ["Package.swift", "buildServer.json", "compile_commands.json", ".sourcekit-lsp"],
+    "install_hint": "Ships with the Swift toolchain / Xcode (xcrun sourcekit-lsp); https://www.swift.org/install"
+  }
+]
