@@ -16,6 +16,23 @@ use crate::text::Encoding;
 use crate::uri::path_to_uri;
 use crate::{LspError, LspEvent};
 
+/// Larger files aren't read from disk (as the file tab won't show them).
+pub(crate) const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The text of the source file at `path`: none for what isn't a regular
+/// file (a device a server pointed at would never end) or is too large.
+pub(crate) fn read_text(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// How long to wait for a server, and how often to restart one.
 #[derive(Clone, Debug)]
 pub struct Timeouts {
@@ -395,7 +412,7 @@ impl Manager {
         }
         let (text, version) = match self.docs.lock().unwrap().get(path) {
             Some(doc) => (doc.text.clone(), doc.version),
-            None => (std::fs::read_to_string(path).map_err(|e| LspError::Unavailable(e.to_string()))?, 1),
+            None => (read_text(path).ok_or_else(|| LspError::Unavailable(format!("cannot read {}", path.display())))?, 1),
         };
         let language = language_id(path).unwrap_or("plaintext");
         server.conn.notify(
@@ -411,7 +428,7 @@ impl Manager {
         if let Some(doc) = self.docs.lock().unwrap().get(path) {
             return Some(doc.text.clone());
         }
-        std::fs::read_to_string(path).ok()
+        read_text(path)
     }
 }
 
@@ -524,4 +541,23 @@ fn client_capabilities() -> Value {
             "didChangeWatchedFiles": {"dynamicRegistration": false},
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_text_refuses_what_is_no_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_text(dir.path()), None, "a folder");
+        let big = dir.path().join("big.rs");
+        std::fs::File::create(&big).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        assert_eq!(read_text(&big), None, "too large");
+        let small = dir.path().join("a.rs");
+        std::fs::write(&small, "fn a() {}\n").unwrap();
+        assert_eq!(read_text(&small).as_deref(), Some("fn a() {}\n"));
+        #[cfg(unix)]
+        assert_eq!(read_text(Path::new("/dev/zero")), None, "a device");
+    }
 }

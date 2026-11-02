@@ -28,6 +28,13 @@ pub struct HierarchyItem {
     raw: Value,
 }
 
+impl HierarchyItem {
+    /// An item not from a server (tests, callers' own).
+    pub fn new(name: String, kind: SymbolKind, path: PathBuf, range: Range, selection_range: Range) -> Self {
+        Self { name, kind, path, range, selection_range, raw: Value::Null }
+    }
+}
+
 /// A capability, by its key in the server's capabilities.
 #[derive(Clone, Copy)]
 enum Cap {

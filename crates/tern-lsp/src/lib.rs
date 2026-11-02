@@ -4,6 +4,7 @@
 
 pub mod config;
 mod manager;
+pub mod nav;
 mod requests;
 mod rpc;
 pub mod text;
