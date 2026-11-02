@@ -188,3 +188,19 @@ fn files_changed_are_sent_as_watched_files() {
     assert_eq!(changes[0]["type"], 2); // Changed
     assert_eq!(changes[1]["type"], 3); // Deleted
 }
+
+#[cfg(unix)]
+#[test]
+fn exiting_at_start_reports_failed_with_hint() {
+    // A rustup proxy for a component that isn't installed runs, then exits.
+    let f = Fixture::new();
+    let config = ServerConfig { command: "/usr/bin/false".into(), ..f.mock("ra", json!({})) };
+    let t = Timeouts { restart_backoff: Duration::from_secs(60), ..fast() };
+    let (m, rx) = f.manager_with(vec![config], t);
+    assert!(matches!(hover(&m, &f.main_rs()), Err(LspError::Unavailable(_))));
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(
+        matches!(&events[..], [LspEvent::Failed { server, hint, .. }] if server == "ra" && hint.as_deref() == Some("install ra")),
+        "{events:?}"
+    );
+}

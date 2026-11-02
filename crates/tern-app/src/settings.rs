@@ -74,6 +74,40 @@ pub struct SettingsFile {
     /// `blue-500/50`.
     #[schemars(with = "ThemeConfigColors")]
     pub colors: BTreeMap<String, String>,
+    /// Language servers for file tabs (go to definition, implementations,
+    /// super method, gutter icons).
+    pub lsp: LspSettings,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct LspSettings {
+    /// The gutter's "is implemented by" / "implements" icons (default true).
+    pub gutter_icons: Option<bool>,
+    /// Language servers by name over the built-in ones
+    /// (`reference/language-servers.json`): an entry replaces the built-in
+    /// server of its name, `null` turns it off, a new name adds one.
+    /// `{"gopls": null, "zls": {"languages": ["zig"], "command": "zls"}}`.
+    pub servers: BTreeMap<String, Option<tern_lsp::ServerConfig>>,
+}
+
+/// The language servers and gutter icons, as the settings make them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LspConfig {
+    pub gutter_icons: bool,
+    pub servers: Vec<tern_lsp::ServerConfig>,
+}
+
+impl Global for LspConfig {}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        lsp_config(&LspSettings::default())
+    }
+}
+
+pub fn lsp_config(s: &LspSettings) -> LspConfig {
+    LspConfig { gutter_icons: s.gutter_icons.unwrap_or(true), servers: tern_lsp::resolve(&tern_lsp::builtin(), &s.servers) }
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -455,6 +489,10 @@ fn load(cx: &mut App) {
     cx.set_global(templates);
     cx.set_global(crate::dock::LayoutLock(settings.layout.locked));
     cx.set_global(crate::diff_pane::DiffSplit(settings.editor.diff_split));
+    let lsp = lsp_config(&settings.lsp);
+    if cx.try_global::<LspConfig>() != Some(&lsp) {
+        cx.set_global(lsp);
+    }
 
     let t = &settings.terminal;
     cx.set_global(TerminalLook {
@@ -775,6 +813,7 @@ fn write_reference_files(dir: &Path, cx: &App) -> std::io::Result<()> {
     write_if_changed(&dir.join(SCHEMA), &serde_json::to_string_pretty(&schema).unwrap_or_default())?;
     write_if_changed(&dir.join(REFERENCE).join(ELEMENTS_DOC), &elements_doc())?;
     write_if_changed(&dir.join(REFERENCE).join("templates.json"), crate::template::builtin_text())?;
+    write_if_changed(&dir.join(REFERENCE).join("language-servers.json"), tern_lsp::builtin_text())?;
     write_if_changed(&dir.join(REFERENCE).join("actions.md"), &actions_doc(cx))?;
     write_if_changed(&dir.join(README), &readme(dir))?;
     let settings = dir.join(SETTINGS);
@@ -1301,8 +1340,8 @@ mod tests {
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
     use super::{
-        BUILTIN_SETS, SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, parse_theme_set, read_theme_set, see_through,
-        terminal_palette, with_value,
+        BUILTIN_SETS, LspSettings, SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, lsp_config, parse_theme_set,
+        read_theme_set, see_through, terminal_palette, with_value,
     };
 
     /// The session and window places live next to the settings on Windows:
@@ -1406,6 +1445,24 @@ mod tests {
         assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": "x", "terminal": {"font_size": 12}}"#).is_ok());
         assert!(serde_json::from_str::<SettingsFile>(r#"{"them": "x"}"#).is_err());
         assert!(serde_json::from_str::<SettingsFile>(r#"{"terminal": {"colours": {}}}"#).is_err());
+    }
+
+    #[test]
+    fn lsp_servers_override_by_name() {
+        let s: SettingsFile = serde_json::from_str(
+            r#"{"lsp": {"gutter_icons": false, "servers": {"gopls": null, "zls": {"languages": ["zig"], "command": "zls"}}}}"#,
+        )
+        .unwrap();
+        let config = lsp_config(&s.lsp);
+        assert!(!config.gutter_icons);
+        assert!(!config.servers.iter().any(|c| c.name == "gopls"));
+        assert!(config.servers.iter().any(|c| c.name == "rust-analyzer"));
+        assert_eq!(config.servers.last().unwrap().name, "zls");
+        assert!(lsp_config(&LspSettings::default()).gutter_icons, "on by default");
+        assert!(
+            serde_json::from_str::<SettingsFile>(r#"{"lsp": {"servers": {"x": {"command": "x"}}}}"#).is_err(),
+            "languages are required"
+        );
     }
 
     #[test]

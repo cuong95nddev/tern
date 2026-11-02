@@ -93,9 +93,11 @@ pub enum ViewerEvent {
     OpenFileAt { path: PathBuf, line: u32, col: u32 },
 }
 
-/// Go to definition for the open file, from the workspace's [`symbols::Index`].
+/// Go to definition for the open file: from its language server, else (no
+/// server, not ready, nothing found) from the workspace's [`symbols::Index`].
 struct Definitions {
     index: Arc<symbols::Index>,
+    lsp: Arc<tern_lsp::Manager>,
     path: PathBuf,
 }
 
@@ -107,8 +109,25 @@ impl DefinitionProvider for Definitions {
             return Task::ready(Ok(vec![]));
         }
         let origin = lsp_types::Range::new(text.offset_to_position(range.start), text.offset_to_position(range.end));
-        let (index, path, text) = (self.index.clone(), self.path.clone(), text.clone());
+        let at = text.offset_to_position(offset);
+        let (index, lsp, path, text) = (self.index.clone(), self.lsp.clone(), self.path.clone(), text.clone());
         cx.background_spawn(async move {
+            if lsp.supports(&path)
+                && let Ok(found) = lsp.definition(&path, at).await
+                && !found.is_empty()
+            {
+                return Ok(found
+                    .into_iter()
+                    .filter_map(|l| {
+                        Some(lsp_types::LocationLink {
+                            origin_selection_range: Some(origin),
+                            target_uri: symbols::path_to_uri(&l.path)?,
+                            target_range: l.range,
+                            target_selection_range: l.range,
+                        })
+                    })
+                    .collect());
+            }
             let hits = index.lookup(&name, &path, &text, (origin.start.line, origin.start.character));
             Ok(hits
                 .into_iter()
@@ -129,6 +148,10 @@ impl DefinitionProvider for Definitions {
 pub struct Viewer {
     root: PathBuf,
     symbols: Arc<symbols::Index>,
+    /// The workspace's language servers.
+    lsp: Arc<tern_lsp::Manager>,
+    /// The file the language servers were told this tab shows.
+    lsp_doc: Option<PathBuf>,
     path: Option<PathBuf>,
     editor: Entity<EditorState>,
     /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
@@ -318,11 +341,21 @@ fn link_target(root: &Path, dir: &Path, target: &str) -> Option<PathBuf> {
 }
 
 impl Viewer {
-    pub fn new(root: PathBuf, symbols: Arc<symbols::Index>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        symbols: Arc<symbols::Index>,
+        lsp: Arc<tern_lsp::Manager>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let wrap = crate::window_state::word_wrap();
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(wrap));
         let sub = cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Change) && !this.loading && !this.dirty {
+            if !matches!(ev, InputEvent::Change) || this.loading {
+                return;
+            }
+            this.lsp_sync(cx);
+            if !this.dirty {
                 this.dirty = true;
                 cx.notify();
             }
@@ -331,6 +364,8 @@ impl Viewer {
         Self {
             root,
             symbols,
+            lsp,
+            lsp_doc: None,
             path: None,
             editor,
             wrap,
@@ -346,7 +381,13 @@ impl Viewer {
             message: None,
             focus: cx.focus_handle(),
             // The decoded image stays in the app's asset cache until removed.
-            _subs: vec![sub, cx.on_release(|this: &mut Self, cx| this.set_image(None, cx))],
+            _subs: vec![
+                sub,
+                cx.on_release(|this: &mut Self, cx| {
+                    this.set_image(None, cx);
+                    this.lsp_hide();
+                }),
+            ],
             _load: None,
         }
     }
@@ -368,14 +409,38 @@ impl Viewer {
         self.reload(window, cx);
     }
 
+    /// Tell the language servers the editor's text: the file it shows is
+    /// opened with them first (and the one it showed before closed).
+    fn lsp_sync(&mut self, cx: &App) {
+        let Some(path) = self.path.clone() else { return };
+        let text = self.editor.read(cx).value().to_string();
+        if self.lsp_doc.as_ref() == Some(&path) {
+            self.lsp.change(&path, text);
+        } else {
+            self.lsp_hide();
+            self.lsp.open(&path, text);
+            self.lsp_doc = Some(path);
+        }
+    }
+
+    /// The language servers no longer hear of this tab's file.
+    fn lsp_hide(&mut self) {
+        if let Some(path) = self.lsp_doc.take() {
+            self.lsp.close(&path);
+        }
+    }
+
     /// Point go to definition at `path`, the file about to be shown.
     fn set_definitions(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let supported = symbols::supports(path);
-        if supported {
+        if self.lsp_doc.as_deref() != Some(path) {
+            self.lsp_hide();
+        }
+        let supported = symbols::supports(path) || self.lsp.supports(path);
+        if symbols::supports(path) {
             self.symbols.warm(cx);
         }
         let provider: Option<Rc<dyn DefinitionProvider>> =
-            supported.then(|| Rc::new(Definitions { index: self.symbols.clone(), path: path.to_path_buf() }) as _);
+            supported.then(|| Rc::new(Definitions { index: self.symbols.clone(), lsp: self.lsp.clone(), path: path.to_path_buf() }) as _);
         let (me, here) = (cx.entity().downgrade(), path.to_path_buf());
         // A definition in this file is the editor's to go to; another file
         // opens in a tab.
@@ -463,6 +528,7 @@ impl Viewer {
                         if let Some(f) = focused {
                             window.focus(&f, cx);
                         }
+                        this.lsp_sync(cx);
                         if let Some(pos) = this.go_to.take() {
                             this.mode = Mode::Edit;
                             this.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
@@ -606,7 +672,10 @@ impl Viewer {
         let Some(path) = self.path.clone() else { return };
         let text = self.editor.read(cx).value().to_string();
         match std::fs::write(&path, text) {
-            Ok(()) => self.dirty = false,
+            Ok(()) => {
+                self.dirty = false;
+                self.lsp.save(&path);
+            },
             Err(e) => self.message = Some(format!("Save failed: {e}").into()),
         }
         cx.notify();
@@ -676,6 +745,7 @@ impl Viewer {
         });
         self.loading = false;
         self.dirty = true;
+        self.lsp_sync(cx);
         match self.mode {
             Mode::Diff => self.show_diff(cx),
             Mode::Preview => self.sync_preview(cx),
@@ -685,8 +755,10 @@ impl Viewer {
     }
 
     #[cfg(debug_assertions)]
-    pub fn debug_state(&self) -> String {
-        format!("{:?}:{}", self.mode, self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default())
+    pub fn debug_state(&self, cx: &App) -> String {
+        let at = self.editor.read(cx).cursor_position();
+        let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        format!("{:?}:{path}@{}:{}", self.mode, at.line + 1, at.character + 1)
     }
 }
 

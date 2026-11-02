@@ -379,6 +379,11 @@ pub struct Workspace {
     root: PathBuf,
     /// Definitions in the workspace's files, for go to definition in file tabs.
     symbols: Arc<crate::symbols::Index>,
+    /// The language servers of file tabs.
+    lsp: Arc<tern_lsp::Manager>,
+    /// Servers already reported failing to start.
+    lsp_failed: HashSet<String>,
+    _lsp_events: Task<()>,
     services: Services,
     tree: Entity<FileTreeView>,
     changes: Entity<ChangesView>,
@@ -712,8 +717,21 @@ impl Workspace {
             UsageEvent::ResumeHandoff => this.resume_handoff(cx),
         });
 
+        let (lsp_tx, lsp_rx) = flume::unbounded();
+        let lsp = tern_lsp::Manager::new(root.clone(), cx.try_global::<settings::LspConfig>().cloned().unwrap_or_default().servers, lsp_tx);
+        lsp.set_path_provider(Arc::new(crate::platform::login_path));
+        let _lsp_events = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = lsp_rx.recv_async().await {
+                if this.update_in(cx, |this, window, cx| this.lsp_event(event, window, cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let mut this = Self {
             symbols: crate::symbols::Index::new(root.clone()),
+            lsp,
+            lsp_failed: HashSet::new(),
+            _lsp_events,
             root,
             services,
             tree,
@@ -769,6 +787,9 @@ impl Workspace {
                 services_sub,
                 usage_sub,
                 cx.observe_global::<Panels>(Self::follow_panels),
+                cx.observe_global::<settings::LspConfig>(|this, cx| {
+                    this.lsp.set_configs(cx.global::<settings::LspConfig>().servers.clone())
+                }),
             ],
         };
         let (panes, tab_panes, pane_active) = (saved.panes, saved.tab_panes, saved.pane_active);
@@ -989,7 +1010,7 @@ impl Workspace {
                 let state = view.read(cx).state(cx);
                 let root = self.root.clone();
                 *view = cx.new(|cx| {
-                    let mut v = Viewer::new(root, self.symbols.clone(), window, cx);
+                    let mut v = Viewer::new(root, self.symbols.clone(), self.lsp.clone(), window, cx);
                     v.restore(state, window, cx);
                     v
                 });
@@ -2226,9 +2247,29 @@ impl Workspace {
         }
     }
 
+    /// What the language servers report.
+    fn lsp_event(&mut self, event: tern_lsp::LspEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            tern_lsp::LspEvent::Missing { server, hint } => {
+                let hint = hint.map(|h| format!(" To install it: {h}")).unwrap_or_default();
+                window.push_notification(format!("{server} is not installed: navigation uses names only.{hint}"), cx);
+            },
+            tern_lsp::LspEvent::Failed { server, message, hint } => {
+                log::warn!("language server {server}: {message}");
+                // Once a session: it is tried again now and then, failing the same way.
+                if self.lsp_failed.insert(server.clone()) {
+                    let hint = hint.map(|h| format!(" If it isn't installed: {h}")).unwrap_or_default();
+                    window.push_notification(format!("{server} could not start: navigation uses names only.{hint}"), cx);
+                }
+            },
+            tern_lsp::LspEvent::Settled => {},
+        }
+    }
+
     /// Reload open files and diffs (tabs and the preview popup) affected by `batch`.
     fn files_changed(&mut self, batch: &ChangeBatch, window: &mut Window, cx: &mut Context<Self>) {
         self.symbols.changed(&batch.paths);
+        self.lsp.files_changed(&batch.paths);
         let preview = self.preview.as_ref().and_then(|p| p.upgrade());
         let mut diffs = vec![];
         for t in &self.tabs {
@@ -2290,7 +2331,7 @@ impl Workspace {
         }
         let root = self.root.clone();
         let view = cx.new(|cx| {
-            let mut v = Viewer::new(root, self.symbols.clone(), window, cx);
+            let mut v = Viewer::new(root, self.symbols.clone(), self.lsp.clone(), window, cx);
             v.open(path, window, cx);
             v
         });
@@ -4820,7 +4861,7 @@ impl Workspace {
                             CenterTab::Term(t) => {
                                 format!("term:{}", t.rename.clone().unwrap_or_else(|| t.view.read(cx).title().to_string().into()))
                             },
-                            CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state()),
+                            CenterTab::File { view, .. } => format!("file:{}", view.read(cx).debug_state(cx)),
                             CenterTab::Diff(d) => format!("diff:{}", d.read(cx).path().display()),
                             CenterTab::Log { view, .. } => format!("git_log:{}", view.read(cx).root().display()),
                             CenterTab::Chat { view, .. } => format!("chat:{}", view.read(cx).session()),
@@ -5165,6 +5206,17 @@ impl Workspace {
                     DraggedPart { part: (*part).to_owned().into(), kind: kind.into(), title: "".into(), floating: false, popped: false };
                 self.drop_part_beside(&p, &target, edge, &Self::pane_dock(cx), window, cx);
                 "ok".into()
+            },
+            // Open a file with the cursor at 1-based LINE and COL.
+            cmd if cmd.starts_with("file-at ") => {
+                let mut parts = cmd["file-at ".len()..].split_whitespace();
+                match (parts.next(), parts.next().and_then(|l| l.parse().ok()), parts.next().and_then(|c| c.parse().ok())) {
+                    (Some(rel), Some(line), Some(col)) => {
+                        self.open_file_at(self.root.join(rel), line, Some(col), window, cx);
+                        "ok".into()
+                    },
+                    _ => "error: file-at REL LINE COL".into(),
+                }
             },
             cmd if cmd.starts_with("file-open ") => {
                 let path = self.root.join(cmd["file-open ".len()..].trim());

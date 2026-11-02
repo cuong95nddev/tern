@@ -13,7 +13,7 @@ pub mod uri;
 use std::path::PathBuf;
 
 pub use config::{ServerConfig, builtin, builtin_text, find_root, language_id, resolve, servers_for};
-pub use manager::{Manager, Timeouts};
+pub use manager::{Manager, PathProvider, Timeouts};
 pub use requests::HierarchyItem;
 
 /// Why a server couldn't answer.
@@ -53,8 +53,9 @@ impl std::error::Error for LspError {}
 pub enum LspEvent {
     /// The file's server isn't on `PATH` (reported once per server).
     Missing { server: String, hint: Option<String> },
-    /// A server failed to start or exited.
-    Failed { server: String, message: String },
+    /// A server failed to start or exited (a rustup proxy of a component
+    /// that isn't installed exits at once: the hint helps there too).
+    Failed { server: String, message: String, hint: Option<String> },
     /// A server finished its work in progress (indexing): what it answered
     /// before may be incomplete.
     Settled,

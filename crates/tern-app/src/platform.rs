@@ -149,6 +149,50 @@ pub fn windows_powershell() -> std::path::PathBuf {
     root.unwrap_or_else(|| r"C:\Windows".into()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
+/// Printed before `$PATH` by [`login_path`]'s shell, after what rc files print.
+const PATH_MARKER: &str = "__TERN_PATH__=";
+
+/// `PATH` as the user's login shell sets it, which an app started from the
+/// Finder lacks (`~/.cargo/bin`, Homebrew): where language servers are.
+/// Asked once (blocking, so off the UI thread); `None` on Windows, where
+/// apps get the user's `PATH`, or when the shell doesn't answer.
+pub fn login_path() -> Option<String> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        if cfg!(windows) {
+            return None;
+        }
+        let mut child = std::process::Command::new(shell())
+            .args(["-lic", &format!("printf '\\n{PATH_MARKER}%s\\n' \"$PATH\"")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let start = std::time::Instant::now();
+        while child.try_wait().ok()?.is_none() {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                let _ = child.kill();
+                let _ = child.wait();
+                log::warn!("the login shell took too long to tell its PATH");
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+        parse_login_path(&out)
+    })
+    .clone()
+}
+
+/// The `PATH` after [`PATH_MARKER`] in a login shell's output.
+fn parse_login_path(out: &str) -> Option<String> {
+    let rest = &out[out.rfind(PATH_MARKER)? + PATH_MARKER.len()..];
+    let path = rest.lines().next().unwrap_or("").trim();
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
 /// Arguments for an interactive shell: a login shell on Unix.
 pub fn shell_args() -> Vec<String> {
     vec![if cfg!(windows) { "-NoLogo" } else { "-l" }.to_owned()]
@@ -221,7 +265,16 @@ pub fn set_blur_radius(window: &Window, radius: u32) {
 mod tests {
     #[cfg(windows)]
     use super::shell_command_args;
-    use super::{shortcut_one, translate};
+
+    #[test]
+    fn login_path_is_read_after_its_marker() {
+        // A login shell's rc files may print first.
+        let out = format!("Welcome!\n{PATH_MARKER}/opt/homebrew/bin:/usr/bin\n");
+        assert_eq!(parse_login_path(&out).as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(parse_login_path("no marker"), None);
+        assert_eq!(parse_login_path(&format!("{PATH_MARKER}\n")), None);
+    }
+    use super::{PATH_MARKER, parse_login_path, shortcut_one, translate};
 
     #[test]
     fn translates_shortcuts() {

@@ -6684,6 +6684,7 @@ dependencies = [
  "tern-bridge",
  "tern-chat",
  "tern-fs",
+ "tern-lsp",
  "tern-menubar",
  "tern-mux",
  "tern-term",

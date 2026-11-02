@@ -79,6 +79,9 @@ struct Slot {
     failure: String,
 }
 
+/// Gives the `PATH` servers are found on.
+pub type PathProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// A server by name, and its project root.
 type SlotKey = (String, PathBuf);
 
@@ -95,8 +98,9 @@ pub struct Manager {
     configs: Mutex<Vec<ServerConfig>>,
     events: flume::Sender<LspEvent>,
     timeouts: Timeouts,
-    /// `PATH` to find servers on (the user's login shell's), else Tern's own.
-    path_env: Mutex<Option<String>>,
+    /// Tells the `PATH` to find servers on (the user's login shell's), else
+    /// Tern's own is used. Called when a server starts, off the UI thread.
+    path_env: Mutex<Option<PathProvider>>,
     slots: Mutex<HashMap<SlotKey, Arc<AsyncMutex<Slot>>>>,
     docs: Mutex<HashMap<PathBuf, Doc>>,
     /// Servers reported missing (once each).
@@ -131,9 +135,9 @@ impl Manager {
         &self.timeouts
     }
 
-    /// Find servers on `path` (a `PATH` value) from now on.
-    pub fn set_path_env(&self, path: Option<String>) {
-        *self.path_env.lock().unwrap() = path;
+    /// Find servers on the `PATH` `provider` gives from now on.
+    pub fn set_path_provider(&self, provider: PathProvider) {
+        *self.path_env.lock().unwrap() = Some(provider);
     }
 
     /// New server configs: servers whose config changed are shut down (the
@@ -332,7 +336,11 @@ impl Manager {
             slot.server = None;
             slot.failed_at = Some(Instant::now());
             slot.failure = format!("{} exited", config.name);
-            let _ = self.events.send(LspEvent::Failed { server: config.name.clone(), message: slot.failure.clone() });
+            let _ = self.events.send(LspEvent::Failed {
+                server: config.name.clone(),
+                message: slot.failure.clone(),
+                hint: config.install_hint.clone(),
+            });
         }
         if let Some(at) = slot.failed_at
             && at.elapsed() < self.timeouts.restart_backoff
@@ -349,7 +357,11 @@ impl Manager {
             Err(e) => {
                 slot.failed_at = Some(Instant::now());
                 slot.failure = format!("{}: {e}", config.name);
-                let _ = self.events.send(LspEvent::Failed { server: config.name.clone(), message: slot.failure.clone() });
+                let _ = self.events.send(LspEvent::Failed {
+                    server: config.name.clone(),
+                    message: slot.failure.clone(),
+                    hint: config.install_hint.clone(),
+                });
                 Err(LspError::Unavailable(slot.failure.clone()))
             },
         }
@@ -358,7 +370,8 @@ impl Manager {
     /// Spawn and initialize `config`'s server for `root`.
     async fn launch(&self, config: &ServerConfig, root: &Path) -> Result<Arc<Server>, LspError> {
         let mut env: Vec<(String, String)> = config.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        if let Some(path) = self.path_env.lock().unwrap().clone()
+        let provider = self.path_env.lock().unwrap().clone();
+        if let Some(path) = provider.and_then(|p| p())
             && !config.env.contains_key("PATH")
         {
             env.push(("PATH".into(), path));
