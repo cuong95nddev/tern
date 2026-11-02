@@ -11,8 +11,8 @@ pub enum Encoding {
 
 impl Encoding {
     /// The `positionEncoding` a server chose (UTF-16 when it said none).
-    pub fn from_lsp(kind: Option<&lsp_types::PositionEncodingKind>) -> Self {
-        match kind.map(|k| k.as_str()) {
+    pub fn from_name(name: Option<&str>) -> Self {
+        match name {
             Some("utf-8") => Self::Utf8,
             Some("utf-32") => Self::Utf32,
             _ => Self::Utf16,

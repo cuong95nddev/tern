@@ -4,6 +4,7 @@
 
 pub mod config;
 mod manager;
+mod requests;
 mod rpc;
 pub mod text;
 pub mod uri;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 
 pub use config::{ServerConfig, builtin, builtin_text, find_root, language_id, resolve, servers_for};
 pub use manager::{Manager, Timeouts};
+pub use requests::HierarchyItem;
 
 /// Why a server couldn't answer.
 #[derive(Debug, Clone, PartialEq)]

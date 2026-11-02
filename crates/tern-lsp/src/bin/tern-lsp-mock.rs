@@ -4,6 +4,8 @@
 //! - `capabilities`: the `initialize` result's capabilities;
 //! - `responses`: results by `method`, or by `method@line:col` for a
 //!   position (tried first);
+//! - `errors`: error messages by `method` or `method@line:col`, answered
+//!   instead of a result;
 //! - `delays_ms`: how long to wait before answering, by method;
 //! - `crash_after`: exit after answering this many requests (not counting
 //!   `initialize`);
@@ -89,12 +91,17 @@ fn main() {
                 let pos = &msg["params"]["position"];
                 let keyed = format!("{m}@{}:{}", pos["line"], pos["character"]);
                 let result = script["responses"].get(&keyed).or_else(|| script["responses"].get(m)).cloned().unwrap_or(Value::Null);
+                let error = script["errors"].get(&keyed).or_else(|| script["errors"].get(m)).cloned();
                 let delay = script["delays_ms"][m].as_u64().unwrap_or(0);
                 let crash_after = script["crash_after"].as_u64().map(|n| n as usize);
                 let (out, answered) = (out.clone(), answered.clone());
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(delay));
-                    write_message(&out, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                    let reply = match error {
+                        Some(message) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": message}}),
+                        None => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    };
+                    write_message(&out, &reply);
                     let n = answered.fetch_add(1, Ordering::SeqCst) + 1;
                     if crash_after.is_some_and(|c| n >= c) {
                         std::process::exit(3);

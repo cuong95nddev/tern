@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use futures::lock::Mutex as AsyncMutex;
-use lsp_types::ServerCapabilities;
 use serde_json::{Value, json};
 
 use crate::config::{ServerConfig, find_root, language_id, servers_for};
@@ -47,7 +46,8 @@ impl Default for Timeouts {
 pub(crate) struct Server {
     pub(crate) config: ServerConfig,
     pub(crate) conn: Arc<Connection>,
-    pub(crate) caps: ServerCapabilities,
+    /// Its capabilities as it sent them (`lsp-types` lacks some, like type hierarchy).
+    pub(crate) caps: Value,
     pub(crate) encoding: Encoding,
     /// Documents it has been sent `didOpen` for.
     opened: Mutex<HashSet<PathBuf>>,
@@ -61,6 +61,9 @@ struct Slot {
     failed_at: Option<Instant>,
     failure: String,
 }
+
+/// A server by name, and its project root.
+type SlotKey = (String, PathBuf);
 
 /// A file open in a tab (or several).
 struct Doc {
@@ -77,7 +80,7 @@ pub struct Manager {
     timeouts: Timeouts,
     /// `PATH` to find servers on (the user's login shell's), else Tern's own.
     path_env: Mutex<Option<String>>,
-    slots: Mutex<HashMap<(String, PathBuf), Arc<AsyncMutex<Slot>>>>,
+    slots: Mutex<HashMap<SlotKey, Arc<AsyncMutex<Slot>>>>,
     docs: Mutex<HashMap<PathBuf, Doc>>,
     /// Servers reported missing (once each).
     reported: Mutex<HashSet<String>>,
@@ -105,6 +108,10 @@ impl Manager {
             docs: Mutex::default(),
             reported: Mutex::default(),
         })
+    }
+
+    pub(crate) fn timeouts(&self) -> &Timeouts {
+        &self.timeouts
     }
 
     /// Find servers on `path` (a `PATH` value) from now on.
@@ -368,16 +375,16 @@ impl Manager {
                 return Err(e);
             },
         };
-        let result: lsp_types::InitializeResult = serde_json::from_value(result).map_err(|e| {
+        let Some(caps) = result.get("capabilities").filter(|c| c.is_object()).cloned() else {
             conn.kill();
-            LspError::Unavailable(format!("bad initialize answer: {e}"))
-        })?;
+            return Err(LspError::Unavailable("bad initialize answer".into()));
+        };
         conn.notify("initialized", json!({}));
         if let Some(settings) = &config.settings {
             conn.notify("workspace/didChangeConfiguration", json!({"settings": settings}));
         }
-        let encoding = Encoding::from_lsp(result.capabilities.position_encoding.as_ref());
-        Ok(Arc::new(Server { config: config.clone(), conn, caps: result.capabilities, encoding, opened: Mutex::default() }))
+        let encoding = Encoding::from_name(caps["positionEncoding"].as_str());
+        Ok(Arc::new(Server { config: config.clone(), conn, caps, encoding, opened: Mutex::default() }))
     }
 
     /// Send `path` to `server` if it hasn't got it: the tab's text, else the file's.
@@ -478,10 +485,8 @@ impl ServerState {
                     Some("begin") => {
                         progress.insert(token);
                     },
-                    Some("end") => {
-                        if progress.remove(&token) && progress.is_empty() {
-                            let _ = self.events.send(LspEvent::Settled);
-                        }
+                    Some("end") if progress.remove(&token) && progress.is_empty() => {
+                        let _ = self.events.send(LspEvent::Settled);
                     },
                     _ => {},
                 }
