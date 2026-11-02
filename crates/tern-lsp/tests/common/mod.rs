@@ -39,6 +39,7 @@ impl Fixture {
             env: [("MOCK_LSP_SCRIPT".to_owned(), path.display().to_string())].into(),
             root_markers: vec!["Cargo.toml".into()],
             require_root_marker: false,
+            outermost_root: false,
             fallback: false,
             initialization_options: None,
             settings: None,

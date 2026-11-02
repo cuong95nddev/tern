@@ -4,6 +4,7 @@
     "languages": ["rust"],
     "command": "rust-analyzer",
     "root_markers": ["Cargo.toml", "rust-project.json"],
+    "outermost_root": true,
     "install_hint": "rustup component add rust-analyzer"
   },
   {
@@ -12,6 +13,7 @@
     "command": "clangd",
     "args": ["--background-index", "--header-insertion=never"],
     "root_markers": ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "meson.build", "Makefile"],
+    "outermost_root": true,
     "install_hint": "Install clangd (LLVM): brew install llvm, apt install clangd, or https://clangd.llvm.org/installation"
   },
   {
@@ -26,6 +28,7 @@
     "languages": ["java"],
     "command": "jdtls",
     "root_markers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "build.xml", ".project"],
+    "outermost_root": true,
     "initialization_options": {
       "settings": {
         "java": {

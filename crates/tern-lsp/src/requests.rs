@@ -93,7 +93,7 @@ impl Manager {
     fn server_pos(&self, server: &Server, path: &Path, pos: Position) -> Value {
         let character = match server.encoding {
             Encoding::Utf32 => pos.character,
-            enc => to_server(Lines::default().line(self, path, pos.line), pos.character, enc),
+            enc => to_server(&self.line_of(path, pos.line), pos.character, enc),
         };
         json!({"line": pos.line, "character": character})
     }
@@ -133,6 +133,16 @@ impl Manager {
 
     pub async fn definition(&self, path: &Path, pos: Position) -> Result<Vec<Location>, LspError> {
         self.goto("textDocument/definition", Cap::Definition, path, pos).await
+    }
+
+    /// Like [`Self::definition`], but without waiting for a server to start
+    /// (it is started meanwhile): the caller has another answer (tree-sitter).
+    pub async fn definition_now(&self, path: &Path, pos: Position) -> Result<Vec<Location>, LspError> {
+        if !self.is_running_for(path) {
+            self.start_soon(path);
+            return Err(LspError::Unavailable("the language server is starting".into()));
+        }
+        self.definition(path, pos).await
     }
 
     pub async fn declaration(&self, path: &Path, pos: Position) -> Result<Vec<Location>, LspError> {

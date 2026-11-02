@@ -91,6 +91,21 @@ fn initialize_timeout_falls_back() {
 }
 
 #[test]
+fn definition_now_does_not_wait_for_a_starting_server() {
+    let f = Fixture::new();
+    let script = json!({"delays_ms": {"initialize": 1500}, "capabilities": {"definitionProvider": true}, "responses": {"textDocument/definition": []}});
+    let (m, _) = f.manager(vec![f.mock("a", script)]);
+    m.open(&f.main_rs(), "fn main() {}\n".into());
+    wait_for("the start", || f.methods().contains(&"initialize".to_owned()));
+    // A tab's F12 while its server starts: names (tree-sitter) answer at once.
+    let start = Instant::now();
+    assert!(matches!(block_on(m.definition_now(&f.main_rs(), lsp_types::Position::new(0, 3))), Err(LspError::Unavailable(_))));
+    assert!(start.elapsed() < Duration::from_millis(500), "waited {:?}", start.elapsed());
+    wait_for("the server", || f.methods().contains(&"initialized".to_owned()));
+    assert_eq!(block_on(m.definition_now(&f.main_rs(), lsp_types::Position::new(0, 3))), Ok(vec![]));
+}
+
+#[test]
 fn request_timeout() {
     let f = Fixture::new();
     let t = Timeouts { request: Duration::from_millis(200), ..fast() };
@@ -111,6 +126,18 @@ fn crashed_server_fails_pending_and_restarts() {
     assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
     assert!(matches!(slow.join().unwrap(), Err(LspError::Unavailable(_))));
     // Restarted on the next use.
+    assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
+    assert_eq!(f.methods().iter().filter(|m| *m == "initialize").count(), 2);
+}
+
+#[test]
+fn crash_after_running_restarts_at_once() {
+    let f = Fixture::new();
+    let t = Timeouts { restart_backoff: Duration::from_millis(500), ..fast() };
+    let (m, _) = f.manager_with(vec![f.mock("a", json!({"crash_after": 1, "responses": {"textDocument/definition": 2}}))], t);
+    assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
+    // It ran longer than the backoff before it crashed: the next use restarts it.
+    std::thread::sleep(Duration::from_millis(700));
     assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
     assert_eq!(f.methods().iter().filter(|m| *m == "initialize").count(), 2);
 }

@@ -81,6 +81,9 @@ pub(crate) struct Server {
 #[derive(Default)]
 struct Slot {
     server: Option<Arc<Server>>,
+    /// When it was last started: a server that exits is started again a
+    /// backoff after that, not after its exit is noticed.
+    started_at: Option<Instant>,
     /// When it last failed to start or exited, for the backoff.
     failed_at: Option<Instant>,
     failure: String,
@@ -109,6 +112,9 @@ pub struct Manager {
     /// Tern's own is used. Called when a server starts, off the UI thread.
     path_env: Mutex<Option<PathProvider>>,
     slots: Mutex<HashMap<SlotKey, Arc<AsyncMutex<Slot>>>>,
+    /// The servers started, by slot: what document sync talks to, without
+    /// waiting on a slot that is starting or being looked up.
+    servers: Mutex<HashMap<SlotKey, Arc<Server>>>,
     docs: Mutex<HashMap<PathBuf, Doc>>,
     /// Servers reported missing (once each).
     reported: Mutex<HashSet<String>>,
@@ -133,6 +139,7 @@ impl Manager {
             timeouts,
             path_env: Mutex::default(),
             slots: Mutex::default(),
+            servers: Mutex::default(),
             docs: Mutex::default(),
             reported: Mutex::default(),
         })
@@ -196,10 +203,32 @@ impl Manager {
             doc.text = text;
             doc.version = 1;
         }
+        self.start_soon(path);
+    }
+
+    /// Start the server for `path` off this thread, if it isn't running.
+    pub(crate) fn start_soon(&self, path: &Path) {
         let (Some(me), path) = (self.me.upgrade(), path.to_path_buf()) else { return };
         std::thread::spawn(move || {
             let _ = futures::executor::block_on(me.server_for(&path));
         });
+    }
+
+    /// Whether a server for `path` is up, so asking it won't wait for one to start.
+    pub(crate) fn is_running_for(&self, path: &Path) -> bool {
+        let Some(language) = language_id(path) else { return false };
+        let configs: Vec<ServerConfig> = servers_for(&self.configs.lock().unwrap(), language).into_iter().cloned().collect();
+        let servers = self.servers.lock().unwrap();
+        let alive = |s: &Arc<Server>| s.conn.is_alive();
+        if !path.starts_with(&self.workspace) {
+            return servers.values().any(|s| alive(s) && s.config.languages.iter().any(|l| l == language));
+        }
+        configs.iter().any(|c| self.root_for(c, path).is_some_and(|root| servers.get(&(c.name.clone(), root)).is_some_and(alive)))
+    }
+
+    /// The project root `config`'s server for `path` runs in.
+    fn root_for(&self, config: &ServerConfig, path: &Path) -> Option<PathBuf> {
+        find_root(path, &config.root_markers, &self.workspace, config.require_root_marker, config.outermost_root)
     }
 
     /// The text of open `path` changed.
@@ -266,9 +295,12 @@ impl Manager {
         }
     }
 
+    fn register(&self, key: SlotKey, server: &Arc<Server>) {
+        self.servers.lock().unwrap().insert(key, server.clone());
+    }
+
     fn running(&self) -> Vec<Arc<Server>> {
-        let slots: Vec<_> = self.slots.lock().unwrap().values().cloned().collect();
-        slots.iter().filter_map(|s| s.try_lock().and_then(|s| s.server.clone())).filter(|s| s.conn.is_alive()).collect()
+        self.servers.lock().unwrap().values().filter(|s| s.conn.is_alive()).cloned().collect()
     }
 
     fn servers_with(&self, path: &Path) -> Vec<Arc<Server>> {
@@ -309,7 +341,7 @@ impl Manager {
         }
         let mut last = LspError::NotFound;
         for config in &configs {
-            let Some(root) = find_root(path, &config.root_markers, &self.workspace, config.require_root_marker) else {
+            let Some(root) = self.root_for(config, path) else {
                 last = LspError::Unsupported;
                 continue;
             };
@@ -334,14 +366,16 @@ impl Manager {
 
     /// The running server of `config` at `root`, started if it isn't.
     async fn start(&self, config: &ServerConfig, root: &Path) -> Result<Arc<Server>, LspError> {
-        let slot = self.slots.lock().unwrap().entry((config.name.clone(), root.to_path_buf())).or_default().clone();
+        let key: SlotKey = (config.name.clone(), root.to_path_buf());
+        let slot = self.slots.lock().unwrap().entry(key.clone()).or_default().clone();
         let mut slot = slot.lock().await;
         if let Some(server) = &slot.server {
             if server.conn.is_alive() {
                 return Ok(server.clone());
             }
             slot.server = None;
-            slot.failed_at = Some(Instant::now());
+            self.servers.lock().unwrap().remove(&key);
+            slot.failed_at = Some(slot.started_at.unwrap_or_else(Instant::now));
             slot.failure = format!("{} exited", config.name);
             let _ = self.events.send(LspEvent::Failed {
                 server: config.name.clone(),
@@ -355,9 +389,11 @@ impl Manager {
         {
             return Err(LspError::Unavailable(slot.failure.clone()));
         }
+        slot.started_at = Some(Instant::now());
         match self.launch(config, root).await {
             Ok(server) => {
                 slot.server = Some(server.clone());
+                self.register(key, &server);
                 Ok(server)
             },
             Err(LspError::NotFound) => Err(LspError::NotFound),
@@ -442,6 +478,14 @@ impl Manager {
         Ok(())
     }
 
+    /// Line `line` of `path` as the servers have it, without copying the rest.
+    pub(crate) fn line_of(&self, path: &Path, line: u32) -> String {
+        if let Some(doc) = self.docs.lock().unwrap().get(path) {
+            return doc.text.lines().nth(line as usize).unwrap_or_default().to_owned();
+        }
+        read_text(path).and_then(|t| t.lines().nth(line as usize).map(str::to_owned)).unwrap_or_default()
+    }
+
     /// The text of `path` as the servers have it: the tab's, else the file's.
     pub(crate) fn text_of(&self, path: &Path) -> Option<String> {
         if let Some(doc) = self.docs.lock().unwrap().get(path) {
@@ -453,6 +497,7 @@ impl Manager {
 
 impl Drop for Manager {
     fn drop(&mut self) {
+        self.servers.get_mut().unwrap().clear();
         let slots: Vec<_> = self.slots.get_mut().unwrap().drain().map(|(_, s)| s).collect();
         let timeouts = self.timeouts.clone();
         std::thread::spawn(move || {
@@ -565,6 +610,49 @@ fn client_capabilities() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sync notifications reach a running server even while its slot is
+    /// locked (a request starting or looking up its server).
+    #[cfg(unix)]
+    #[test]
+    fn edits_reach_servers_whose_slot_is_busy() {
+        let (tx, _rx) = flume::unbounded();
+        let m = Manager::new("/w".into(), vec![], tx);
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let heard = seen.clone();
+        // `cat` sends back what it is sent: what it echoes is what went out.
+        let conn = Connection::spawn(
+            "cat",
+            &[],
+            &[],
+            Path::new("/"),
+            "cat",
+            Box::new(move |_, msg| {
+                if let Incoming::Notification { method, .. } = msg {
+                    heard.lock().unwrap().push(method);
+                }
+            }),
+        )
+        .unwrap();
+        let config =
+            ServerConfig { name: "cat".into(), ..serde_json::from_value(json!({"languages": ["rust"], "command": "cat"})).unwrap() };
+        let server = Arc::new(Server { config, conn, caps: json!({}), encoding: Encoding::Utf16, opened: Mutex::default() });
+        let path = Path::new("/w/a.rs");
+        server.opened.lock().unwrap().insert(path.to_path_buf());
+        m.docs.lock().unwrap().insert(path.to_path_buf(), Doc { text: String::new(), version: 1, tabs: 1 });
+        let key: SlotKey = ("cat".into(), "/w".into());
+        let slot = Arc::new(AsyncMutex::new(Slot { server: Some(server.clone()), ..Default::default() }));
+        m.slots.lock().unwrap().insert(key.clone(), slot.clone());
+        m.register(key, &server);
+        let _busy = futures::executor::block_on(slot.lock());
+        m.change(path, "x".into());
+        let start = Instant::now();
+        while !seen.lock().unwrap().iter().any(|s| s == "textDocument/didChange") {
+            assert!(start.elapsed() < Duration::from_secs(5), "no didChange: {:?}", seen.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        server.conn.kill();
+    }
 
     #[cfg(unix)]
     #[test]

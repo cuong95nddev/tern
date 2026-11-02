@@ -37,6 +37,11 @@ pub struct ServerConfig {
     /// Without a root marker, no server (else the workspace is the root).
     #[serde(default)]
     pub require_root_marker: bool,
+    /// The outermost folder holding a marker is the root, not the nearest:
+    /// for projects of nested ones (a Cargo workspace's crates, CMake
+    /// subfolders, Maven modules), which one server serves whole.
+    #[serde(default)]
+    pub outermost_root: bool,
     /// Used only when the servers before it for the language aren't installed.
     #[serde(default)]
     pub fallback: bool,
@@ -110,23 +115,28 @@ pub fn language_id(path: &Path) -> Option<&'static str> {
 }
 
 /// The project root of `file` for a server with `markers`: the nearest
-/// folder from the file's up to `workspace` holding one of them; else
-/// `workspace`, unless `require`. `None` for a file outside `workspace`.
-pub fn find_root(file: &Path, markers: &[String], workspace: &Path, require: bool) -> Option<PathBuf> {
+/// folder from the file's up to `workspace` holding one of them (the
+/// outermost one when `outermost`); else `workspace`, unless `require`.
+/// `None` for a file outside `workspace`.
+pub fn find_root(file: &Path, markers: &[String], workspace: &Path, require: bool, outermost: bool) -> Option<PathBuf> {
     if !file.starts_with(workspace) {
         return None;
     }
+    let mut found = None;
     let mut dir = file.parent();
     while let Some(d) = dir {
         if markers.iter().any(|m| d.join(m).exists()) {
-            return Some(d.to_path_buf());
+            found = Some(d.to_path_buf());
+            if !outermost {
+                break;
+            }
         }
         if d == workspace {
             break;
         }
         dir = d.parent();
     }
-    (!require).then(|| workspace.to_path_buf())
+    found.or_else(|| (!require).then(|| workspace.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -182,10 +192,27 @@ mod tests {
         std::fs::create_dir_all(ws.join("a/src")).unwrap();
         std::fs::write(ws.join("a/Cargo.toml"), "").unwrap();
         let markers = vec!["Cargo.toml".to_string()];
-        assert_eq!(find_root(&ws.join("a/src/x.rs"), &markers, &ws, false), Some(ws.join("a")));
-        assert_eq!(find_root(&ws.join("b/x.rs"), &markers, &ws, false), Some(ws.clone()));
-        assert_eq!(find_root(&ws.join("b/x.rs"), &markers, &ws, true), None);
-        assert_eq!(find_root(&dir.path().join("out/x.rs"), &markers, &ws, false), None);
+        assert_eq!(find_root(&ws.join("a/src/x.rs"), &markers, &ws, false, false), Some(ws.join("a")));
+        assert_eq!(find_root(&ws.join("b/x.rs"), &markers, &ws, false, false), Some(ws.clone()));
+        assert_eq!(find_root(&ws.join("b/x.rs"), &markers, &ws, true, false), None);
+        assert_eq!(find_root(&dir.path().join("out/x.rs"), &markers, &ws, false, false), None);
+    }
+
+    #[test]
+    fn nested_projects_share_the_outermost_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join("crates/a/src")).unwrap();
+        std::fs::write(ws.join("Cargo.toml"), "").unwrap();
+        std::fs::write(ws.join("crates/a/Cargo.toml"), "").unwrap();
+        let markers = vec!["Cargo.toml".to_string()];
+        let file = ws.join("crates/a/src/x.rs");
+        assert_eq!(find_root(&file, &markers, &ws, false, true), Some(ws.clone()));
+        assert_eq!(find_root(&file, &markers, &ws, false, false), Some(ws.join("crates/a")));
+        // One rust-analyzer per Cargo workspace, one clangd per CMake tree, one jdtls per multi-module build.
+        let b = builtin();
+        let outermost: Vec<&str> = b.iter().filter(|s| s.outermost_root).map(|s| s.name.as_str()).collect();
+        assert_eq!(outermost, ["rust-analyzer", "clangd", "jdtls"]);
     }
 
     #[test]

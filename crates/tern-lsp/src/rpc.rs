@@ -3,8 +3,9 @@
 //! and the server's own requests and notifications to a handler.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -34,6 +35,22 @@ pub(crate) struct Connection {
     child: Mutex<Child>,
 }
 
+/// The file `command` runs on Windows: there `Command` finds only `.exe`
+/// files on `PATH`, and npm's servers are `.cmd` (jdtls a `.bat`), so it is
+/// looked up the way the shell does, directory by directory in `PATHEXT`
+/// order. A command with an extension or a folder is taken as it is.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_program(command: &str, path: &OsStr, pathext: &str) -> Option<PathBuf> {
+    if command.contains(['/', '\\']) || Path::new(command).extension().is_some() {
+        return Some(PathBuf::from(command));
+    }
+    let exts: Vec<String> = pathext.split(';').filter(|e| !e.is_empty()).map(str::to_ascii_lowercase).collect();
+    std::env::split_paths(path)
+        .filter(|d| d.is_absolute())
+        .flat_map(|d| exts.iter().map(move |e| d.join(format!("{command}{e}"))))
+        .find(|p| p.is_file())
+}
+
 impl Connection {
     /// Start `program` in `cwd`. `handler` gets what the server sends that
     /// isn't a response, on the reader thread.
@@ -45,6 +62,14 @@ impl Connection {
         name: &str,
         handler: Handler,
     ) -> std::io::Result<Arc<Connection>> {
+        #[cfg(windows)]
+        let program = {
+            let path = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).map(|(_, v)| v.into()).or_else(|| std::env::var_os("PATH"));
+            let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+            // Rust runs a `.cmd` / `.bat` through cmd.exe, its arguments escaped.
+            windows_program(program, &path.unwrap_or_default(), &pathext)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{program} is not on PATH")))?
+        };
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
@@ -226,5 +251,31 @@ fn read_loop(mut r: impl BufRead, conn: Weak<Connection>, pending: &Pending, ali
     alive.store(false, Ordering::SeqCst);
     for (_, tx) in pending.lock().unwrap().drain() {
         let _ = tx.send(Err(LspError::Unavailable("the server has exited".into())));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_finds_cmd_and_bat_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        // npm puts a shell script beside the .cmd: never the one to run.
+        std::fs::write(a.join("vtsls"), "").unwrap();
+        std::fs::write(b.join("vtsls.cmd"), "").unwrap();
+        std::fs::write(b.join("jdtls.bat"), "").unwrap();
+        std::fs::write(a.join("clangd.exe"), "").unwrap();
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        let ext = ".COM;.EXE;.BAT;.CMD";
+        assert_eq!(windows_program("vtsls", &path, ext), Some(b.join("vtsls.cmd")));
+        assert_eq!(windows_program("jdtls", &path, ext), Some(b.join("jdtls.bat")));
+        assert_eq!(windows_program("clangd", &path, ext), Some(a.join("clangd.exe")));
+        assert_eq!(windows_program("gopls", &path, ext), None);
+        assert_eq!(windows_program("C:\\bin\\x.exe", &path, ext), Some(PathBuf::from("C:\\bin\\x.exe")));
+        assert_eq!(windows_program("x.cmd", &path, ext), Some(PathBuf::from("x.cmd")));
     }
 }

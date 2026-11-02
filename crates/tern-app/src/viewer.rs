@@ -120,7 +120,7 @@ impl DefinitionProvider for Definitions {
         let (index, lsp, path, text) = (self.index.clone(), self.lsp.clone(), self.path.clone(), text.clone());
         cx.background_spawn(async move {
             if lsp.supports(&path)
-                && let Ok(found) = lsp.definition(&path, at).await
+                && let Ok(found) = lsp.definition_now(&path, at).await
                 && !found.is_empty()
             {
                 return Ok(found
@@ -544,7 +544,7 @@ impl Viewer {
         let (at, name) = (text.offset_to_position(offset), text.word_at(offset));
         let lsp = self.lsp.clone();
         self._nav = Some(cx.spawn_in(window, async move |this, cx| {
-            let found = lsp.implementation(&path, at).await;
+            let found = cx.background_spawn(async move { lsp.implementation(&path, at).await }).await;
             let _ = this.update_in(cx, |this, window, cx| match found {
                 Ok(found) => {
                     let title = format!("Choose Implementation of {name} ({} found)", found.len());
@@ -562,35 +562,41 @@ impl Viewer {
         let at = self.editor.read(cx).cursor_position();
         let lsp = self.lsp.clone();
         self._nav = Some(cx.spawn_in(window, async move |this, cx| {
-            let outline = lsp.outline(&path).await.unwrap_or_default();
-            let (method, ty) = tern_lsp::nav::member_at(&outline, at);
-            let (name, mut found) = match (method, ty) {
-                (Some(m), Some(t)) => {
-                    let supers = tern_lsp::nav::super_method_targets(&path, t.selection_range.start, &m.name, lsp.as_ref()).await;
-                    (tern_lsp::nav::base_name(&m.name), supers.into_iter().map(|s| s.location).collect())
-                },
-                (None, Some(t)) => {
-                    let supers = lsp.supertypes(&path, t.selection_range.start).await.unwrap_or_default();
-                    (t.name.clone(), supers.into_iter().map(|s| tern_lsp::Location { path: s.path, range: s.selection_range }).collect())
-                },
-                _ => (String::new(), vec![]),
-            };
-            // Without a type hierarchy (rust-analyzer, gopls), another request answers.
-            let fallback = tern_lsp::language_id(&path).and_then(tern_lsp::nav::super_fallback_kind);
-            if found.is_empty()
-                && let Some(kind) = fallback
-            {
-                let answer = match kind {
-                    tern_lsp::nav::GotoKind::Implementation => lsp.implementation(&path, at).await,
-                    _ => lsp.declaration(&path, at).await,
-                };
-                found = answer.unwrap_or_default().into_iter().filter(|l| !(l.path == path && l.range.start.line == at.line)).collect();
-            }
+            let (name, found) = cx.background_spawn(async move { Self::super_targets(&lsp, &path, at).await }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let title = format!("Choose Super Method of {name} ({} found)", found.len());
                 this.show_targets(title, found, "No super method found", window, cx);
             });
         }));
+    }
+
+    /// What Super Method goes to from `at` in `path`: the name looked for and its places.
+    async fn super_targets(lsp: &tern_lsp::Manager, path: &Path, at: Position) -> (String, Vec<tern_lsp::Location>) {
+        let outline = lsp.outline(path).await.unwrap_or_default();
+        let (method, ty) = tern_lsp::nav::member_at(&outline, at);
+        let (name, mut found) = match (method, ty) {
+            (Some(m), Some(t)) => {
+                let supers = tern_lsp::nav::super_method_targets(path, t.selection_range.start, &m.name, lsp).await;
+                (tern_lsp::nav::base_name(&m.name), supers.into_iter().map(|s| s.location).collect())
+            },
+            (None, Some(t)) => {
+                let supers = lsp.supertypes(path, t.selection_range.start).await.unwrap_or_default();
+                (t.name.clone(), supers.into_iter().map(|s| tern_lsp::Location { path: s.path, range: s.selection_range }).collect())
+            },
+            _ => (String::new(), vec![]),
+        };
+        // Without a type hierarchy (rust-analyzer, gopls), another request answers.
+        let fallback = tern_lsp::language_id(path).and_then(tern_lsp::nav::super_fallback_kind);
+        if found.is_empty()
+            && let Some(kind) = fallback
+        {
+            let answer = match kind {
+                tern_lsp::nav::GotoKind::Implementation => lsp.implementation(path, at).await,
+                _ => lsp.declaration(path, at).await,
+            };
+            found = answer.unwrap_or_default().into_iter().filter(|l| !(l.path == path && l.range.start.line == at.line)).collect();
+        }
+        (name, found)
     }
 
     /// Go to the one place in `found`, offer several, or say there are none.
@@ -653,20 +659,29 @@ impl Viewer {
                 (this.markers.begin(), this.lsp.clone(), text, view, this.markers.outline().cloned())
             })
             .ok()?;
-        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-        let (outline, candidates) = match outline {
-            Some(known) => known,
-            None => {
-                let outline = lsp.outline(&path).await.ok()?;
-                let line_text = |l: u32| lines.get(l as usize).cloned().unwrap_or_default();
-                let candidates = tern_lsp::nav::candidates(&outline, line_text);
+        // The server and the files are asked off the UI thread.
+        let (lsp2, path2, known) = (lsp.clone(), path.clone(), outline.is_some());
+        let (lines, asked) = cx
+            .background_spawn(async move {
+                let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+                if known {
+                    return (lines, Some(None));
+                }
+                let Ok(outline) = lsp2.outline(&path2).await else { return (lines, None) };
+                let candidates = tern_lsp::nav::candidates(&outline, |l| lines.get(l as usize).cloned().unwrap_or_default());
+                (lines, Some(Some((outline, candidates))))
+            })
+            .await;
+        let (outline, candidates) = match (asked?, outline) {
+            (Some((outline, candidates)), _) => {
                 this.update(cx, |this, _| this.markers.set_outline(generation, outline.clone(), candidates.clone())).ok()?.then_some(())?;
                 (outline, candidates)
             },
+            (None, known) => known?,
         };
         let visible = crate::markers::visible_candidates(&candidates, view.start as u32, view.end as u32);
         let (down, up) = this.update(cx, |this, _| this.markers.wanted(&visible)).ok()?;
-        let filled = crate::markers::fill(&lsp, &path, &outline, &lines, down, up).await;
+        let filled = cx.background_spawn(crate::markers::run(lsp, path, outline, lines, down, up)).await;
         this.update(cx, |this, cx| {
             if this.markers.apply(generation, filled) {
                 let shown = this.markers.shown();

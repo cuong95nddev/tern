@@ -4,9 +4,10 @@
 //! pass that asks the language server. The viewer schedules passes and draws
 //! what [`Markers::shown`] gives.
 
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lsp_types::{DocumentSymbol, Position};
 use tern_lsp::nav::{self, Candidate, LineMarker, SuperDeps};
@@ -153,37 +154,37 @@ fn unavailable(e: &LspError) -> bool {
 struct PassDeps<'a> {
     lsp: &'a Manager,
     path: &'a Path,
-    supertypes: RefCell<HashMap<(PathBuf, u32, u32), Vec<HierarchyItem>>>,
-    outlines: RefCell<HashMap<PathBuf, Vec<DocumentSymbol>>>,
+    supertypes: Mutex<HashMap<(PathBuf, u32, u32), Vec<HierarchyItem>>>,
+    outlines: Mutex<HashMap<PathBuf, Vec<DocumentSymbol>>>,
     /// No type hierarchy for this file.
-    unsupported: Cell<bool>,
+    unsupported: AtomicBool,
 }
 
 impl SuperDeps for PassDeps<'_> {
     async fn supertypes(&self, path: &Path, pos: Position) -> Vec<HierarchyItem> {
         let key = (path.to_path_buf(), pos.line, pos.character);
-        if let Some(found) = self.supertypes.borrow().get(&key) {
-            return found.clone();
+        if let Some(found) = self.supertypes.lock().unwrap().get(&key).cloned() {
+            return found;
         }
         let found = match self.lsp.supertypes(path, pos).await {
             Ok(found) => found,
             Err(e) => {
                 if path == self.path && unavailable(&e) {
-                    self.unsupported.set(true);
+                    self.unsupported.store(true, Ordering::Relaxed);
                 }
                 vec![]
             },
         };
-        self.supertypes.borrow_mut().insert(key, found.clone());
+        self.supertypes.lock().unwrap().insert(key, found.clone());
         found
     }
 
     async fn outline(&self, path: &Path) -> Vec<DocumentSymbol> {
-        if let Some(found) = self.outlines.borrow().get(path) {
-            return found.clone();
+        if let Some(found) = self.outlines.lock().unwrap().get(path).cloned() {
+            return found;
         }
         let found = self.lsp.outline(path).await.unwrap_or_default();
-        self.outlines.borrow_mut().insert(path.to_path_buf(), found.clone());
+        self.outlines.lock().unwrap().insert(path.to_path_buf(), found.clone());
         found
     }
 }
@@ -212,14 +213,14 @@ pub async fn fill(
         lsp,
         path,
         supertypes: Default::default(),
-        outlines: RefCell::new(HashMap::from([(path.to_path_buf(), outline.to_vec())])),
-        unsupported: Cell::new(false),
+        outlines: Mutex::new(HashMap::from([(path.to_path_buf(), outline.to_vec())])),
+        unsupported: AtomicBool::new(false),
     };
     let mut supers = vec![];
     for c in &up {
         let owner = c.owner.expect("wanted: methods with an owner");
         supers.push(nav::super_method_targets(path, owner, &c.symbol, &deps).await);
-        if deps.unsupported.get() {
+        if deps.unsupported.load(Ordering::Relaxed) {
             filled.unsupported.push(Group::Supers);
             supers.clear();
             break;
@@ -241,6 +242,19 @@ pub async fn fill(
         filled.supers.push((c.key(), nav::supers_marker(c, found, &files)));
     }
     filled
+}
+
+/// [`fill`] as a task of its own, for the background executor: a pass
+/// asks a lot and reads files, none of it on the UI thread.
+pub async fn run(
+    lsp: std::sync::Arc<Manager>,
+    path: PathBuf,
+    outline: Vec<DocumentSymbol>,
+    lines: Vec<String>,
+    down: Vec<Candidate>,
+    up: Vec<Candidate>,
+) -> Filled {
+    fill(&lsp, &path, &outline, &lines, down, up).await
 }
 
 #[cfg(test)]
@@ -272,6 +286,14 @@ mod tests {
             tooltip: "Is overridden in B".into(),
             chooser_title: String::new(),
         }
+    }
+
+    #[test]
+    fn pass_runs_off_the_ui_thread() {
+        fn off_thread<F: std::future::Future + Send + 'static>(_: &F) {}
+        let (tx, _rx) = flume::unbounded();
+        let lsp = Manager::new("/w".into(), vec![], tx);
+        off_thread(&run(lsp, "/w/a.rs".into(), vec![], vec![], vec![], vec![]));
     }
 
     #[test]
