@@ -240,6 +240,23 @@ pub fn target_name(lines: Option<&Vec<String>>, target: &Location, method: bool)
     enclosing_type_name(lines, target)
 }
 
+/// How a place is shown in a chooser: the name declared there, and the type
+/// it is in (none when it is that type).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Described {
+    pub name: String,
+    pub container: String,
+}
+
+/// The name at `target` and the type around it, from `lines` of its file.
+pub fn describe(target: &Location, lines: &dyn Fn(&Path) -> Option<Vec<String>>) -> Described {
+    let text = lines(&target.path);
+    let name = target_name(text.as_ref(), target, false);
+    let container = enclosing_type_name(text.as_ref(), target);
+    let container = if container == name || text.is_none() { String::new() } else { container };
+    Described { name, container }
+}
+
 /// `A, B, C`, sorted and without repeats, at most [`MAX_NAMES`] of them.
 pub fn name_list(names: &[String]) -> String {
     let mut unique: Vec<&String> = names.iter().collect::<HashSet<_>>().into_iter().collect();
@@ -693,6 +710,17 @@ mod tests {
     fn names_list_caps_at_eight() {
         let names: Vec<String> = ["J", "I", "H", "G", "F", "E", "D", "C", "B", "A", "A"].iter().map(|s| s.to_string()).collect();
         assert_eq!(name_list(&names), "A, B, C, D, E, F, G, H and 2 more");
+    }
+
+    #[test]
+    fn describe_names_targets_and_their_types() {
+        let lines = |p: &Path| files().get(p).cloned();
+        let d = describe(&loc("/p/Circle.java", 2, 18), &lines);
+        assert_eq!((d.name.as_str(), d.container.as_str()), ("area", "Circle"));
+        let d = describe(&loc("/p/Circle.java", 0, 13), &lines);
+        assert_eq!((d.name.as_str(), d.container.as_str()), ("Circle", ""), "a type is its own container");
+        let d = describe(&loc("/p/Gone.java", 3, 0), &lines);
+        assert_eq!((d.name.as_str(), d.container.as_str()), ("Gone", ""));
     }
 
     #[test]

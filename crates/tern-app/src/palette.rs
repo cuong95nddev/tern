@@ -42,6 +42,23 @@ pub enum Mode {
     Commands,
     Files,
     Search,
+    /// A choice of places to go (implementations, super methods), set with [`open_targets`].
+    Targets,
+}
+
+/// A place [`Mode::Targets`] offers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub path: PathBuf,
+    /// 1-based.
+    pub line: u32,
+    pub col: u32,
+    /// The declaration's name.
+    pub name: String,
+    /// The type it is in, if it isn't the type itself.
+    pub container: String,
+    /// Where it is: the path (relative to the workspace) and line.
+    pub detail: String,
 }
 
 pub enum PaletteEvent {
@@ -101,6 +118,8 @@ const COMMANDS: &[Command] = &[
     cmd!("Reset Layout", "", workspace::ResetLayout),
     cmd!("Clear Terminal", "⌘K", terminal_view::Clear),
     cmd!("Toggle Word Wrap", "⌥Z", crate::viewer::ToggleWordWrap),
+    cmd!("Go to Implementation(s)", "⌥⌘B", crate::viewer::GoToImplementation),
+    cmd!("Go to Super Method", "⌘U", crate::viewer::GoToSuper),
     cmd!("Agent Monitor", "", agent_monitor::ToggleAgentMonitor),
     cmd!("Next Workspace", "", main_window::NextWorkspace),
     cmd!("Previous Workspace", "", main_window::PrevWorkspace),
@@ -131,6 +150,21 @@ fn filter_commands(query: &str) -> Vec<usize> {
     found.into_iter().map(|(_, i)| i).collect()
 }
 
+/// The targets `query` matches, in their order: every word of it is in the
+/// name, the container or the path, in any case.
+fn filter_targets(query: &str, targets: &[Target]) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    targets
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            let hay = format!("{} {} {}", t.name, t.container, t.detail).to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// A row of the search results: a file (its first match, its count) or a match.
 #[derive(Clone, Copy)]
 enum Row {
@@ -154,6 +188,11 @@ pub struct Palette {
     commands_input: Entity<InputState>,
     files_input: Entity<InputState>,
     search_input: Entity<InputState>,
+    targets_input: Entity<InputState>,
+    /// What [`Mode::Targets`] offers, its title, and the ones matching.
+    targets: Vec<Target>,
+    targets_title: String,
+    target_hits: Vec<usize>,
     /// Indices into [`COMMANDS`], as filtered.
     commands: Vec<usize>,
     /// The workspace's files (relative, `/` between folders), read again
@@ -195,6 +234,7 @@ impl Palette {
         let commands_input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
         let files_input = cx.new(|cx| InputState::new(window, cx).placeholder("Go to file"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in files"));
+        let targets_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
         let subs = vec![
             cx.subscribe_in(&commands_input, window, |this, input, ev: &InputEvent, window, cx| match ev {
                 InputEvent::Change => {
@@ -214,6 +254,14 @@ impl Palette {
                 InputEvent::PressEnter { .. } => this.confirm(window, cx),
                 _ => {},
             }),
+            cx.subscribe_in(&targets_input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    this.target_hits = filter_targets(&input.read(cx).value(), &this.targets);
+                    this.select(0, cx);
+                },
+                InputEvent::PressEnter { .. } => this.confirm(window, cx),
+                _ => {},
+            }),
         ];
         Self {
             index: Arc::new(SearchIndex::new(root.clone())),
@@ -222,6 +270,10 @@ impl Palette {
             commands_input,
             files_input,
             search_input,
+            targets_input,
+            targets: vec![],
+            targets_title: String::new(),
+            target_hits: vec![],
             commands: filter_commands(""),
             files: Arc::default(),
             listing: false,
@@ -255,6 +307,7 @@ impl Palette {
             // The list so far shows until the new one is read.
             Mode::Files => self.list_files(cx),
             Mode::Search => self.index.warm(),
+            Mode::Targets => self.target_hits = filter_targets(&input.read(cx).value(), &self.targets),
         }
         self.select(0, cx);
     }
@@ -264,6 +317,7 @@ impl Palette {
             Mode::Commands => &self.commands_input,
             Mode::Files => &self.files_input,
             Mode::Search => &self.search_input,
+            Mode::Targets => &self.targets_input,
         }
     }
 
@@ -273,12 +327,13 @@ impl Palette {
             Mode::Commands => self.commands.len(),
             Mode::Files => self.hits.len(),
             Mode::Search => self.results.matches.len(),
+            Mode::Targets => self.target_hits.len(),
         }
     }
 
     fn row_of(&self, entry: usize) -> usize {
         match self.mode {
-            Mode::Commands | Mode::Files => entry,
+            Mode::Commands | Mode::Files | Mode::Targets => entry,
             Mode::Search => self.match_row.get(entry).copied().unwrap_or(0),
         }
     }
@@ -304,7 +359,7 @@ impl Palette {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             Mode::Files | Mode::Search => self.show(Mode::Commands, window, cx),
-            Mode::Commands => cx.emit(PaletteEvent::Close),
+            Mode::Commands | Mode::Targets => cx.emit(PaletteEvent::Close),
         }
     }
 
@@ -326,6 +381,10 @@ impl Palette {
                 let Some(m) = self.results.matches.get(self.selected) else { return };
                 let col = m.ranges.first().map_or(1, |r| m.text[..r.start].chars().count() as u32 + 1);
                 cx.emit(PaletteEvent::Open { path: self.root.join(&m.path), line: m.line, col });
+            },
+            Mode::Targets => {
+                let Some(t) = self.target_hits.get(self.selected).and_then(|&i| self.targets.get(i)) else { return };
+                cx.emit(PaletteEvent::Open { path: t.path.clone(), line: t.line, col: t.col });
             },
         }
     }
@@ -430,6 +489,7 @@ impl Palette {
     fn empty_text(&self) -> Option<&'static str> {
         match self.mode {
             Mode::Commands if self.commands.is_empty() => Some("No matching commands"),
+            Mode::Targets if self.target_hits.is_empty() => Some("No matching places"),
             Mode::Files if self.hits.is_empty() && !self.listing => Some("No matching files"),
             Mode::Search if self.results.matches.is_empty() => match self.status {
                 Status::Done => Some("No results found"),
@@ -470,6 +530,18 @@ impl Palette {
                             .list("dir", runs(0, name_at.saturating_sub(1)))
                             .slot("icon", style::row_icon("palette.row", icon, color, cx));
                         ("palette.path", scope, Some(ix))
+                    },
+                    Mode::Targets => {
+                        let t = self.targets.get(*self.target_hits.get(ix)?)?;
+                        let file = t.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        let (icon, color) = file_icons::file_icon(&file, cx.theme());
+                        let scope = template::Scope::new("palette.target")
+                            .var("selected", ix == self.selected)
+                            .var("name", t.name.clone())
+                            .var("container", t.container.clone())
+                            .var("detail", t.detail.clone())
+                            .slot("icon", style::row_icon("palette.row", icon, color, cx));
+                        ("palette.target", scope, Some(ix))
                     },
                     Mode::Search => match *self.rows.get(ix)? {
                         Row::File(first, count) => {
@@ -584,9 +656,13 @@ impl Render for Palette {
             Mode::Commands => self.commands.len(),
             Mode::Files => self.hits.len(),
             Mode::Search => self.rows.len(),
+            Mode::Targets => self.target_hits.len(),
         };
         let list = uniform_list("palette", count, cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1();
-        let (status, error) = self.status_text().filter(|_| search).unwrap_or_default();
+        let (status, error) = match self.mode {
+            Mode::Targets => (self.targets_title.clone(), false),
+            _ => self.status_text().filter(|_| search).unwrap_or_default(),
+        };
         let field = Input::new(self.input()).appearance(false);
         let scope = template::Scope::new("palette")
             .var("search", search)
@@ -597,7 +673,7 @@ impl Render for Palette {
             .var("error", error)
             .var("empty", self.empty_text().unwrap_or_default())
             .var("enter_label", if commands { "Run" } else { "Open" })
-            .var("escape_label", if commands { "Close" } else { "Back" })
+            .var("escape_label", if commands || self.mode == Mode::Targets { "Close" } else { "Back" })
             .slot("input", field)
             .slot("list", style::el("palette.list", cx).apply(list));
         let me = cx.entity().downgrade();
@@ -636,6 +712,16 @@ impl Render for Palette {
     }
 }
 
+/// Offer `targets` under `title` in `palette`'s dialog.
+pub fn open_targets(palette: &Entity<Palette>, title: String, targets: Vec<Target>, window: &mut Window, cx: &mut App) {
+    palette.update(cx, |p, cx| {
+        p.targets = targets;
+        p.targets_title = title;
+        p.targets_input.update(cx, |i, cx| i.set_value("", window, cx));
+    });
+    open(palette, Mode::Targets, window, cx);
+}
+
 /// Show `palette` in `mode` in a dialog over the window (or switch the open one to `mode`).
 pub fn open(palette: &Entity<Palette>, mode: Mode, window: &mut Window, cx: &mut App) {
     if !window.has_active_dialog(cx) {
@@ -659,7 +745,25 @@ mod tests {
 
     use tern_fs::search::Match;
 
-    use super::{COMMANDS, KEEP, filter_commands, filter_files, hit_runs, segments};
+    use super::{COMMANDS, KEEP, Target, filter_commands, filter_files, filter_targets, hit_runs, segments};
+
+    #[test]
+    fn targets_filter_by_name_container_and_path() {
+        let t = |name: &str, container: &str, path: &str| Target {
+            path: PathBuf::from(path),
+            line: 1,
+            col: 1,
+            name: name.into(),
+            container: container.into(),
+            detail: path.into(),
+        };
+        let all = [t("area", "Circle", "src/circle.h"), t("area", "Square", "src/square.h"), t("Square", "", "lib/square.h")];
+        assert_eq!(filter_targets("", &all), [0, 1, 2], "all, in order");
+        assert_eq!(filter_targets("squ", &all), [1, 2]);
+        assert_eq!(filter_targets("lib squ", &all), [2], "every word");
+        assert_eq!(filter_targets("CIRCLE", &all), [0], "any case");
+        assert!(filter_targets("zzz", &all).is_empty());
+    }
 
     fn titles(q: &str) -> Vec<&'static str> {
         filter_commands(q).into_iter().map(|i| COMMANDS[i].title).collect()

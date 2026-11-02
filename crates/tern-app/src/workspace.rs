@@ -992,6 +992,7 @@ impl Workspace {
             cx.subscribe_in(viewer, window, |this, _, ev: &ViewerEvent, window, cx| match ev {
                 ViewerEvent::OpenFile(p) => this.open_file(p.clone(), false, window, cx),
                 ViewerEvent::OpenFileAt { path, line, col } => this.open_file_at(path.clone(), *line, Some(*col), window, cx),
+                ViewerEvent::ChooseTargets { title, targets } => this.choose_targets(title.clone(), targets.clone(), window, cx),
             }),
             // Dirty marker in the tab label.
             cx.observe(viewer, |_, _, cx| cx.notify()),
@@ -4141,6 +4142,18 @@ impl Workspace {
 
     /// Show the command palette, or Search in Files.
     fn open_palette(&mut self, mode: palette::Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let p = self.palette(window, cx);
+        palette::open(&p, mode, window, cx);
+    }
+
+    /// Offer `targets` (implementations, super methods) in the palette.
+    fn choose_targets(&mut self, title: String, targets: Vec<palette::Target>, window: &mut Window, cx: &mut Context<Self>) {
+        let p = self.palette(window, cx);
+        palette::open_targets(&p, title, targets, window, cx);
+    }
+
+    /// The palette, made the first time.
+    fn palette(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Palette> {
         if self.palette.is_none() {
             let root = self.root.clone();
             let p = cx.new(|cx| Palette::new(root, window, cx));
@@ -4160,9 +4173,7 @@ impl Workspace {
             });
             self.palette = Some((p, sub));
         }
-        if let Some((p, _)) = &self.palette {
-            palette::open(p, mode, window, cx);
-        }
+        self.palette.as_ref().map(|(p, _)| p.clone()).expect("made above")
     }
 
     /// Open `path` (as a preview) with the cursor at 1-based `line`, `col`.

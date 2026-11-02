@@ -21,7 +21,7 @@ pub(crate) const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// The text of the source file at `path`: none for what isn't a regular
 /// file (a device a server pointed at would never end) or is too large.
-pub(crate) fn read_text(path: &Path) -> Option<String> {
+pub fn read_text(path: &Path) -> Option<String> {
     use std::io::Read as _;
     let file = std::fs::File::open(path).ok()?;
     let meta = file.metadata().ok()?;
@@ -31,6 +31,13 @@ pub(crate) fn read_text(path: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES).read_to_end(&mut bytes).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `path` (a `PATH` value) without its empty and relative entries: a server
+/// runs in its project's root, where those would find a program the
+/// project's authors put there instead of the one installed.
+pub(crate) fn absolute_path_entries(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    std::env::join_paths(std::env::split_paths(path).filter(|p| p.is_absolute())).unwrap_or_default()
 }
 
 /// How long to wait for a server, and how often to restart one.
@@ -370,11 +377,10 @@ impl Manager {
     /// Spawn and initialize `config`'s server for `root`.
     async fn launch(&self, config: &ServerConfig, root: &Path) -> Result<Arc<Server>, LspError> {
         let mut env: Vec<(String, String)> = config.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let provider = self.path_env.lock().unwrap().clone();
-        if let Some(path) = provider.and_then(|p| p())
-            && !config.env.contains_key("PATH")
-        {
-            env.push(("PATH".into(), path));
+        if !config.env.contains_key("PATH") {
+            let provider = self.path_env.lock().unwrap().clone();
+            let path = provider.and_then(|p| p()).map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+            env.push(("PATH".into(), absolute_path_entries(&path).to_string_lossy().into_owned()));
         }
         let state = Arc::new(ServerState { settings: config.settings.clone(), progress: Mutex::default(), events: self.events.clone() });
         let handler_state = state.clone();
@@ -559,6 +565,15 @@ fn client_capabilities() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_absolute_path_entries_are_searched() {
+        // `.`, empty and relative entries would find a program in the project
+        // root (the server's working folder), planted by its authors.
+        let path = std::ffi::OsString::from("/opt/bin::.:node_modules/.bin:/usr/bin");
+        assert_eq!(absolute_path_entries(&path), std::ffi::OsString::from("/opt/bin:/usr/bin"));
+    }
 
     #[test]
     fn read_text_refuses_what_is_no_source_file() {

@@ -72,6 +72,8 @@ fn menus() -> Vec<Menu> {
         MenuItem::action("Focus Terminal", workspace::FocusTerminal),
         MenuItem::action("Agent Monitor", agent_monitor::ToggleAgentMonitor),
         MenuItem::action("Word Wrap", crate::viewer::ToggleWordWrap),
+        MenuItem::action("Go to Implementation(s)", crate::viewer::GoToImplementation),
+        MenuItem::action("Go to Super Method", crate::viewer::GoToSuper),
         MenuItem::separator(),
         MenuItem::action("Split Right", workspace::SplitRight),
         MenuItem::action("Split Down", workspace::SplitDown),

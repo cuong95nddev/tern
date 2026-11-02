@@ -238,3 +238,14 @@ fn nest(flat: Vec<SymbolInformation>) -> Vec<DocumentSymbol> {
     }
     top
 }
+
+/// The super method search, asking the servers (nothing when they can't tell).
+impl crate::nav::SuperDeps for Manager {
+    async fn supertypes(&self, path: &Path, pos: Position) -> Vec<HierarchyItem> {
+        Manager::supertypes(self, path, pos).await.unwrap_or_default()
+    }
+
+    async fn outline(&self, path: &Path) -> Vec<DocumentSymbol> {
+        Manager::outline(self, path).await.unwrap_or_default()
+    }
+}

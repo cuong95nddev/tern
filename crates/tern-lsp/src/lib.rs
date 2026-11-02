@@ -13,7 +13,7 @@ pub mod uri;
 use std::path::PathBuf;
 
 pub use config::{ServerConfig, builtin, builtin_text, find_root, language_id, resolve, servers_for};
-pub use manager::{Manager, PathProvider, Timeouts};
+pub use manager::{Manager, PathProvider, Timeouts, read_text};
 pub use requests::HierarchyItem;
 
 /// Why a server couldn't answer.

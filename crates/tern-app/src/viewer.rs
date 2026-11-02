@@ -20,7 +20,7 @@ use crate::template::{Framed, on_event};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
-actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal, ToggleWordWrap]);
+actions!(viewer, [Save, ToggleDiff, TogglePreview, OpenExternal, ToggleWordWrap, GoToImplementation, GoToSuper]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -32,6 +32,9 @@ pub fn bind_keys(cx: &mut App) {
         bind("cmd-shift-o", OpenExternal, None),
         // Only where an editor has focus: in a terminal, Option-Z is typed.
         bind("alt-z", ToggleWordWrap, Some("Viewer")),
+        // As in IntelliJ; ⌘⌥-click goes to implementations too.
+        bind("cmd-alt-b", GoToImplementation, Some("Viewer")),
+        bind("cmd-u", GoToSuper, Some("Viewer")),
         bind("alt-z", ToggleWordWrap, Some("Scratch")),
     ]);
 }
@@ -91,6 +94,8 @@ pub enum ViewerEvent {
     OpenFile(PathBuf),
     /// Go to definition landed in another file: open it at 1-based `line`, `col`.
     OpenFileAt { path: PathBuf, line: u32, col: u32 },
+    /// Several places to go (implementations, super methods): offer them.
+    ChooseTargets { title: String, targets: Vec<crate::palette::Target> },
 }
 
 /// Go to definition for the open file: from its language server, else (no
@@ -176,6 +181,8 @@ pub struct Viewer {
     focus: FocusHandle,
     _subs: Vec<Subscription>,
     _load: Option<Task<()>>,
+    /// Go to implementations / super method, asking the language server.
+    _nav: Option<Task<()>>,
 }
 
 impl EventEmitter<ViewerEvent> for Viewer {}
@@ -310,6 +317,31 @@ fn image_markdown(dir: &Path, file: &Path) -> String {
     format!("![{alt}]({dest})")
 }
 
+/// How the chooser shows `found`: names and their types read from the files.
+fn targets(root: &Path, found: &[tern_lsp::Location]) -> Vec<crate::palette::Target> {
+    let files: std::cell::RefCell<HashMap<PathBuf, Option<Vec<String>>>> = Default::default();
+    let read = |p: &Path| {
+        let mut files = files.borrow_mut();
+        files.entry(p.to_path_buf()).or_insert_with(|| tern_lsp::read_text(p).map(|t| t.lines().map(str::to_owned).collect())).clone()
+    };
+    found
+        .iter()
+        .map(|l| {
+            let d = tern_lsp::nav::describe(l, &read);
+            let line = l.range.start.line + 1;
+            let rel = l.path.strip_prefix(root).unwrap_or(&l.path).display().to_string();
+            crate::palette::Target {
+                path: l.path.clone(),
+                line,
+                col: l.range.start.character + 1,
+                name: d.name,
+                container: d.container,
+                detail: format!("{rel}:{line}"),
+            }
+        })
+        .collect()
+}
+
 /// Resolve `.` and `..` lexically, so a linked path compares equal to the
 /// same file opened from the tree.
 pub fn normalize(path: &Path) -> PathBuf {
@@ -389,6 +421,7 @@ impl Viewer {
                 }),
             ],
             _load: None,
+            _nav: None,
         }
     }
 
@@ -453,11 +486,98 @@ impl Viewer {
             let (line, col) = (start.line + 1, start.character + 1);
             me.update(cx, |_, cx| cx.emit(ViewerEvent::OpenFileAt { path, line, col })).is_ok()
         });
+        let me = cx.entity().downgrade();
+        let alt_click = Rc::new(move |offset: usize, window: &mut Window, cx: &mut App| {
+            let _ = me.update(cx, |this, cx| this.go_to_implementations(offset, window, cx));
+        });
         self.editor.update(cx, |ed, _| {
             let lsp = ed.lsp_mut();
             lsp.definition_provider = provider;
             lsp.show_document = Some(show);
+            lsp.alt_click = Some(alt_click);
         });
+    }
+
+    /// Go to the implementations of the symbol at byte `offset`.
+    fn go_to_implementations(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else { return };
+        let text = self.editor.read(cx).text().clone();
+        let (at, name) = (text.offset_to_position(offset), text.word_at(offset));
+        let lsp = self.lsp.clone();
+        self._nav = Some(cx.spawn_in(window, async move |this, cx| {
+            let found = lsp.implementation(&path, at).await;
+            let _ = this.update_in(cx, |this, window, cx| match found {
+                Ok(found) => {
+                    let title = format!("Choose Implementation of {name} ({} found)", found.len());
+                    this.show_targets(title, found, "No implementations found", window, cx);
+                },
+                Err(e) => window.push_notification(format!("No implementations found: {e}"), cx),
+            });
+        }));
+    }
+
+    /// Go to the super method of the method at the cursor, or the supertypes
+    /// of the type there.
+    fn go_to_super(&mut self, _: &GoToSuper, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else { return };
+        let at = self.editor.read(cx).cursor_position();
+        let lsp = self.lsp.clone();
+        self._nav = Some(cx.spawn_in(window, async move |this, cx| {
+            let outline = lsp.outline(&path).await.unwrap_or_default();
+            let (method, ty) = tern_lsp::nav::member_at(&outline, at);
+            let (name, mut found) = match (method, ty) {
+                (Some(m), Some(t)) => {
+                    let supers = tern_lsp::nav::super_method_targets(&path, t.selection_range.start, &m.name, lsp.as_ref()).await;
+                    (tern_lsp::nav::base_name(&m.name), supers.into_iter().map(|s| s.location).collect())
+                },
+                (None, Some(t)) => {
+                    let supers = lsp.supertypes(&path, t.selection_range.start).await.unwrap_or_default();
+                    (t.name.clone(), supers.into_iter().map(|s| tern_lsp::Location { path: s.path, range: s.selection_range }).collect())
+                },
+                _ => (String::new(), vec![]),
+            };
+            // Without a type hierarchy (rust-analyzer, gopls), another request answers.
+            let fallback = tern_lsp::language_id(&path).and_then(tern_lsp::nav::super_fallback_kind);
+            if found.is_empty()
+                && let Some(kind) = fallback
+            {
+                let answer = match kind {
+                    tern_lsp::nav::GotoKind::Implementation => lsp.implementation(&path, at).await,
+                    _ => lsp.declaration(&path, at).await,
+                };
+                found = answer.unwrap_or_default().into_iter().filter(|l| !(l.path == path && l.range.start.line == at.line)).collect();
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                let title = format!("Choose Super Method of {name} ({} found)", found.len());
+                this.show_targets(title, found, "No super method found", window, cx);
+            });
+        }));
+    }
+
+    /// Go to the one place in `found`, offer several, or say there are none.
+    fn show_targets(&mut self, title: String, found: Vec<tern_lsp::Location>, none: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match found.as_slice() {
+            [] => window.push_notification(none.to_owned(), cx),
+            [one] => self.go_to_location(one, window, cx),
+            _ => {
+                let root = self.root.clone();
+                self._nav = Some(cx.spawn_in(window, async move |this, cx| {
+                    let targets = cx.background_spawn(async move { targets(&root, &found) }).await;
+                    let _ = this.update(cx, |_, cx| cx.emit(ViewerEvent::ChooseTargets { title, targets }));
+                }));
+            },
+        }
+    }
+
+    fn go_to_location(&mut self, l: &tern_lsp::Location, window: &mut Window, cx: &mut Context<Self>) {
+        let (line, col) = (l.range.start.line + 1, l.range.start.character + 1);
+        if self.path.as_ref() == Some(&l.path) {
+            self.go_to(line, Some(col), window, cx);
+            let pos = l.range.start;
+            self.editor.update(cx, |ed, cx| ed.set_cursor_position(pos, window, cx));
+        } else {
+            cx.emit(ViewerEvent::OpenFileAt { path: l.path.clone(), line, col });
+        }
     }
 
     /// Show `image` (or none), dropping the one shown before from the app's
@@ -834,6 +954,11 @@ impl Render for Viewer {
                     .on_action(cx.listener(Self::toggle_preview))
                     .on_action(cx.listener(Self::open_external))
                     .on_action(cx.listener(Self::toggle_word_wrap))
+                    .on_action(cx.listener(|this, _: &GoToImplementation, window, cx| {
+                        let offset = this.editor.read(cx).cursor();
+                        this.go_to_implementations(offset, window, cx);
+                    }))
+                    .on_action(cx.listener(Self::go_to_super))
                     .when(markdown && !diff_mode && !is_image, |d| d.on_drop(cx.listener(Self::drop_images)))
                     .into_any_element(),
                 ("preview", Framed::Button(b)) => {
