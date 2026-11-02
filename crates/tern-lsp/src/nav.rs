@@ -44,6 +44,8 @@ fn re(pattern: &str) -> Regex {
 static NOT_INHERITABLE: LazyLock<Regex> = LazyLock::new(|| re(r"\b(private|static|final)\b"));
 static NOT_OVERRIDING: LazyLock<Regex> = LazyLock::new(|| re(r"\b(private|static)\b"));
 static ABSTRACT: LazyLock<Regex> = LazyLock::new(|| re(r"\babstract\b"));
+/// A C++ pure virtual declaration: `... ) const = 0;`.
+static PURE_VIRTUAL: LazyLock<Regex> = LazyLock::new(|| re(r"\)[^;{}]*=\s*0\s*;"));
 /// An interface method with a body (Java `default`).
 static DEFAULT: LazyLock<Regex> = LazyLock::new(|| re(r"\bdefault\b"));
 static ANNOTATION: LazyLock<Regex> = LazyLock::new(|| re(r"@[\w.]+(\([^)]*\))?"));
@@ -172,7 +174,7 @@ pub fn candidates(outline: &[DocumentSymbol], line_text: impl Fn(u32) -> String)
                 let in_abstract = ABSTRACT_TYPES.contains(&parent.kind);
                 out.push(base(
                     true,
-                    (in_abstract && !DEFAULT.is_match(&p)) || ABSTRACT.is_match(&p),
+                    (in_abstract && !DEFAULT.is_match(&p)) || ABSTRACT.is_match(&p) || PURE_VIRTUAL.is_match(&line_text(at.line)),
                     INHERITABLE_TYPES.contains(&parent.kind) && !NOT_INHERITABLE.is_match(&p),
                     !NOT_OVERRIDING.is_match(&p),
                     Some(parent.selection_range.start),
@@ -302,7 +304,9 @@ fn is_abstract_super(s: &SuperMethod, files: &HashMap<PathBuf, Vec<String>>) -> 
     let lines = files.get(&s.location.path);
     let line_text = |l: u32| lines.and_then(|ls| ls.get(l as usize)).cloned().unwrap_or_default();
     let prefix = declaration_prefix(&s.method, &line_text);
-    (ABSTRACT_TYPES.contains(&s.owner.kind) && !DEFAULT.is_match(&prefix)) || ABSTRACT.is_match(&prefix)
+    (ABSTRACT_TYPES.contains(&s.owner.kind) && !DEFAULT.is_match(&prefix))
+        || ABSTRACT.is_match(&prefix)
+        || PURE_VIRTUAL.is_match(&line_text(s.method.selection_range.start.line))
 }
 
 /// ↑ marker of method `c` from its super methods; none without any.
@@ -554,6 +558,47 @@ mod tests {
         let base = candidates(&base_outline(), lines(BASE));
         let got: Vec<_> = base.iter().map(|c| (c.name.as_str(), c.is_abstract)).collect();
         assert_eq!(got, [("Base", true), ("run", true), ("label", false)]);
+    }
+
+    #[test]
+    fn cpp_pure_virtual_methods_are_abstract() {
+        const SHAPE_H: &[&str] = &[
+            "class Shape {",
+            "public:",
+            "    virtual double area() const = 0;",
+            "    virtual const char *name() const { return \"shape\"; }",
+            "};",
+        ];
+        let outline = vec![item(
+            "Shape",
+            K::CLASS,
+            0,
+            4,
+            vec![item("area", K::METHOD, 2, 2, vec![], 19), item("name", K::METHOD, 3, 3, vec![], 24)],
+            6,
+        )];
+        let got: Vec<_> = candidates(&outline, lines(SHAPE_H)).iter().map(|c| (c.name.clone(), c.is_abstract)).collect();
+        assert_eq!(got, [("Shape".to_owned(), false), ("area".to_owned(), true), ("name".to_owned(), false)]);
+        // Square::area over it implements it.
+        let files = HashMap::from([(PathBuf::from("/p/shape.h"), SHAPE_H.iter().map(|s| s.to_string()).collect::<Vec<_>>())]);
+        let sq = Candidate {
+            symbol: "area".into(),
+            name: "area".into(),
+            line: 6,
+            col: 11,
+            method: true,
+            is_abstract: false,
+            inheritable: true,
+            overriding: true,
+            owner: None,
+        };
+        let area = item("area", K::METHOD, 2, 2, vec![], 19);
+        let supers = [SuperMethod {
+            location: Location { path: "/p/shape.h".into(), range: area.selection_range },
+            owner: hier("Shape", K::CLASS, "/p/shape.h", 0),
+            method: area,
+        }];
+        assert_eq!(supers_marker(&sq, &supers, &files).unwrap().kind, MarkerKind::Implementing);
     }
 
     #[test]

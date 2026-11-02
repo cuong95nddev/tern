@@ -383,6 +383,8 @@ pub struct Workspace {
     lsp: Arc<tern_lsp::Manager>,
     /// Servers already reported failing to start.
     lsp_failed: HashSet<String>,
+    /// When each language server's exit was last told: not again for a while.
+    lsp_exited: HashMap<String, std::time::Instant>,
     _lsp_events: Task<()>,
     services: Services,
     tree: Entity<FileTreeView>,
@@ -731,6 +733,7 @@ impl Workspace {
             symbols: crate::symbols::Index::new(root.clone()),
             lsp,
             lsp_failed: HashSet::new(),
+            lsp_exited: HashMap::new(),
             _lsp_events,
             root,
             services,
@@ -2263,10 +2266,23 @@ impl Workspace {
                     window.push_notification(format!("{server} could not start: navigation uses names only.{hint}"), cx);
                 }
             },
-            tern_lsp::LspEvent::Settled => {
-                for t in &self.tabs {
-                    if let CenterTab::File { view, .. } = t {
-                        view.update(cx, |v, cx| v.lsp_settled(cx));
+            tern_lsp::LspEvent::Exited { server } => {
+                log::warn!("language server {server} exited");
+                let told = self.lsp_exited.get(&server).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(600));
+                if !told {
+                    self.lsp_exited.insert(server.clone(), std::time::Instant::now());
+                    window
+                        .push_notification(format!("{server} stopped: it starts again when needed, navigation uses names meanwhile."), cx);
+                }
+            },
+            tern_lsp::LspEvent::Settled { server } => {
+                // Asked again where it shows; a hidden tab asks once it scrolls, changes or is focused.
+                let shown: HashSet<usize> = self.shown_panes().into_iter().filter_map(|p| self.pane_active_ix(p)).collect();
+                for (i, t) in self.tabs.iter().enumerate() {
+                    if let CenterTab::File { view, .. } = t
+                        && view.read(cx).path().is_some_and(|p| self.lsp.serves(p, &server))
+                    {
+                        view.update(cx, |v, cx| v.lsp_settled(shown.contains(&i), cx));
                     }
                 }
             },

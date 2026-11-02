@@ -134,12 +134,14 @@ fn crashed_server_fails_pending_and_restarts() {
 fn crash_after_running_restarts_at_once() {
     let f = Fixture::new();
     let t = Timeouts { restart_backoff: Duration::from_millis(500), ..fast() };
-    let (m, _) = f.manager_with(vec![f.mock("a", json!({"crash_after": 1, "responses": {"textDocument/definition": 2}}))], t);
+    let (m, events) = f.manager_with(vec![f.mock("a", json!({"crash_after": 1, "responses": {"textDocument/definition": 2}}))], t);
     assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
     // It ran longer than the backoff before it crashed: the next use restarts it.
     std::thread::sleep(Duration::from_millis(700));
     assert_eq!(block_on(m.request(&f.main_rs(), "textDocument/definition", json!({}))).unwrap(), 2);
     assert_eq!(f.methods().iter().filter(|m| *m == "initialize").count(), 2);
+    // It started, then stopped: said as that, not as a failed start.
+    assert_eq!(events.try_iter().collect::<Vec<_>>(), [LspEvent::Exited { server: "a".into() }]);
 }
 
 #[test]
@@ -177,6 +179,28 @@ fn answers_workspace_configuration() {
 }
 
 #[test]
+fn answers_workspace_folders_with_the_root() {
+    let f = Fixture::new();
+    let (m, _) = f.manager(vec![f.mock("a", json!({"ask_folders": true}))]);
+    m.open(&f.main_rs(), "x".into());
+    wait_for("the folders answer", || f.received().iter().any(|m| m["id"] == "w1"));
+    let answer = f.received().into_iter().find(|m| m["id"] == "w1").unwrap();
+    let uri = tern_lsp::uri::path_to_uri(&f.ws).unwrap();
+    assert_eq!(answer["result"], json!([{"uri": uri.as_str(), "name": "ws"}]));
+}
+
+#[test]
+fn settled_names_its_server() {
+    let f = Fixture::new();
+    let (m, events) = f.manager(vec![f.mock("a", json!({"progress": true}))]);
+    m.open(&f.main_rs(), "x".into());
+    let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(event, LspEvent::Settled { server: "a".into() });
+    assert!(m.serves(&f.main_rs(), "a"));
+    assert!(!m.serves(&f.main_rs(), "b"));
+}
+
+#[test]
 fn outside_workspace_reuses_running_server_or_unavailable() {
     let f = Fixture::new();
     let outside = f.ws.parent().unwrap().join("dep/lib.rs");
@@ -201,6 +225,54 @@ fn drop_shuts_servers_down() {
     drop(m);
     wait_for("exit", || marker.exists());
     assert!(f.methods().contains(&"shutdown".to_owned()));
+}
+
+#[test]
+fn shutting_down_waits_for_servers_to_exit() {
+    let f = Fixture::new();
+    let marker = f.ws.parent().unwrap().join("exited");
+    let (m, _) = f.manager(vec![f.mock("a", json!({"exit_marker": marker}))]);
+    hover(&m, &f.main_rs()).unwrap();
+    // As at quit: done only once the server has gone.
+    m.shut_down_servers();
+    assert!(marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn killing_a_server_takes_its_children() {
+    let f = Fixture::new();
+    let pid_file = f.ws.parent().unwrap().join("child.pid");
+    let t = Timeouts { shutdown: Duration::from_millis(300), exit: Duration::from_millis(300), ..fast() };
+    let (m, _) = f.manager_with(vec![f.mock("a", json!({"ignore_exit": true, "child_pid_file": pid_file}))], t);
+    hover(&m, &f.main_rs()).unwrap();
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    m.shut_down_servers();
+    let alive = || std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success();
+    wait_for("the child to go", || !alive());
+}
+
+#[test]
+fn files_opened_without_a_tab_are_closed_again() {
+    let f = Fixture::new();
+    let (m, _) = f.manager(vec![f.mock("a", json!({}))]);
+    m.open(&f.main_rs(), "fn main() {}\n".into());
+    // Outlines of supertypes and the like, in files no tab shows.
+    for i in 0..40 {
+        let p = f.ws.join(format!("src/f{i}.rs"));
+        std::fs::write(&p, "fn f() {}\n").unwrap();
+        hover(&m, &p).unwrap();
+    }
+    hover(&m, &f.main_rs()).unwrap();
+    let closed: Vec<String> = f
+        .received()
+        .iter()
+        .filter(|m| m["method"] == "textDocument/didClose")
+        .filter_map(|m| m["params"]["textDocument"]["uri"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(closed.len(), 8, "{closed:?}");
+    assert!(closed[0].ends_with("/src/f0.rs"));
+    assert!(!closed.iter().any(|u| u.ends_with("/main.rs")), "a tab's file stays open");
 }
 
 #[test]

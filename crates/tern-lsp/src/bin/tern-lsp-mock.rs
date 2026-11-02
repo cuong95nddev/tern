@@ -11,8 +11,12 @@
 //!   `initialize`);
 //! - `log`: a file each message received is appended to, one JSON per line;
 //! - `exit_marker`: a file written on `exit`;
+//! - `ignore_exit`: stay on after `exit` (until killed);
+//! - `child_pid_file`: start a child process (`sleep`) and write its pid here;
 //! - `ask_configuration`: after `initialized`, ask `workspace/configuration`
-//!   for this section (the answer is logged like any message).
+//!   for this section (the answer is logged like any message);
+//! - `ask_folders`: after `initialized`, ask `workspace/workspaceFolders`;
+//! - `progress`: after `initialized`, report work done (begin, end).
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,6 +62,11 @@ fn main() {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let answered = Arc::new(AtomicUsize::new(0));
     let log = script["log"].as_str().map(|p| Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(p).unwrap()));
+    let _child = script["child_pid_file"].as_str().map(|p| {
+        let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        std::fs::write(p, child.id().to_string()).unwrap();
+        child
+    });
     let mut input = BufReader::new(std::io::stdin());
     while let Some(msg) = read_message(&mut input) {
         if let Some(log) = &log {
@@ -70,9 +79,22 @@ fn main() {
                 if let Some(p) = script["exit_marker"].as_str() {
                     let _ = std::fs::write(p, "exit");
                 }
-                std::process::exit(0);
+                if script["ignore_exit"].as_bool() != Some(true) {
+                    std::process::exit(0);
+                }
             },
             ("initialized", None) => {
+                if script["progress"].as_bool() == Some(true) {
+                    for kind in ["begin", "end"] {
+                        write_message(
+                            &out,
+                            &json!({"jsonrpc": "2.0", "method": "$/progress", "params": {"token": "t", "value": {"kind": kind}}}),
+                        );
+                    }
+                }
+                if script["ask_folders"].as_bool() == Some(true) {
+                    write_message(&out, &json!({"jsonrpc": "2.0", "id": "w1", "method": "workspace/workspaceFolders", "params": null}));
+                }
                 if let Some(section) = script["ask_configuration"].as_str() {
                     let ask = json!({"jsonrpc": "2.0", "id": "c1", "method": "workspace/configuration", "params": {"items": [{"section": section}]}});
                     write_message(&out, &ask);

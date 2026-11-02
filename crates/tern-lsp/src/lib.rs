@@ -13,7 +13,7 @@ pub mod uri;
 use std::path::PathBuf;
 
 pub use config::{ServerConfig, builtin, builtin_text, find_root, language_id, resolve, servers_for};
-pub use manager::{Manager, PathProvider, Timeouts, read_text};
+pub use manager::{Manager, PathProvider, Timeouts, read_text, shut_down_all};
 pub use requests::HierarchyItem;
 
 /// Why a server couldn't answer.
@@ -56,9 +56,12 @@ pub enum LspEvent {
     /// A server failed to start or exited (a rustup proxy of a component
     /// that isn't installed exits at once: the hint helps there too).
     Failed { server: String, message: String, hint: Option<String> },
-    /// A server finished its work in progress (indexing): what it answered
-    /// before may be incomplete.
-    Settled,
+    /// A server that was running exited (crashed): it starts again on the
+    /// next use, after the backoff.
+    Exited { server: String },
+    /// Server `server` finished its work in progress (indexing): what it
+    /// answered before may be incomplete.
+    Settled { server: String },
 }
 
 /// A place in a file: its range in characters, as the editor counts.

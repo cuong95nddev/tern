@@ -119,7 +119,7 @@ impl Manager {
         let mut out: Vec<Location> = locations
             .into_iter()
             .filter_map(|l| {
-                let path = uri_to_path(&l.uri)?;
+                let path = self.local_path(uri_to_path(&l.uri)?);
                 let range = lines.range(self, &path, l.range, server.encoding);
                 Some(Location { path, range })
             })
@@ -211,7 +211,7 @@ impl Manager {
             .flatten()
             .filter_map(|raw| {
                 let item: lsp_types::TypeHierarchyItem = serde_json::from_value(raw.clone()).ok()?;
-                let path = uri_to_path(&item.uri)?;
+                let path = self.local_path(uri_to_path(&item.uri)?);
                 Some(HierarchyItem {
                     name: item.name,
                     kind: item.kind,

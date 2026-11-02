@@ -485,6 +485,10 @@ impl Viewer {
         let Some(path) = self.path.clone() else { return };
         self.markers.note_edit();
         self.schedule_markers(cx);
+        // No server for it: no copy of the text per keystroke.
+        if !self.lsp.supports(&path) {
+            return;
+        }
         let text = self.editor.read(cx).value().to_string();
         if self.lsp_doc.as_ref() == Some(&path) {
             self.lsp.change(&path, text);
@@ -626,9 +630,12 @@ impl Viewer {
     }
 
     /// The language servers finished indexing: what they answered before may be incomplete.
-    pub fn lsp_settled(&mut self, cx: &mut Context<Self>) {
+    /// Only a tab on screen asks again now.
+    pub fn lsp_settled(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.markers.invalidate();
-        self.schedule_markers(cx);
+        if shown {
+            self.schedule_markers(cx);
+        }
     }
 
     /// Ask about the gutter icons once edits and scrolling pause.

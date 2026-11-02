@@ -364,6 +364,9 @@ fn confirm_quit(cx: &mut App, done: impl FnOnce(bool, &mut App) + 'static) {
 
 fn quit_now(cx: &mut App) {
     cx.default_global::<main_window::Session>().quitting = true;
+    // The language servers hear `shutdown` / `exit` before Tern goes (a few
+    // seconds at most): quitting wouldn't wait for them otherwise.
+    tern_lsp::shut_down_all();
     #[cfg(target_os = "macos")]
     terminate::approve();
     cx.quit()

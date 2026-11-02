@@ -75,7 +75,13 @@ pub(crate) struct Server {
     pub(crate) encoding: Encoding,
     /// Documents it has been sent `didOpen` for.
     opened: Mutex<HashSet<PathBuf>>,
+    /// Of those, the ones no tab showed when opened (asked about for an
+    /// outline, a target's line), oldest first: closed again past [`MAX_BORROWED`].
+    borrowed: Mutex<std::collections::VecDeque<PathBuf>>,
 }
+
+/// Documents opened for requests and not by a tab that a server keeps open.
+const MAX_BORROWED: usize = 32;
 
 /// One (server, root) and what became of starting it.
 #[derive(Default)]
@@ -105,6 +111,8 @@ struct Doc {
 pub struct Manager {
     me: Weak<Manager>,
     workspace: PathBuf,
+    /// The workspace's real path, when it is opened through a link.
+    workspace_real: Option<PathBuf>,
     configs: Mutex<Vec<ServerConfig>>,
     events: flume::Sender<LspEvent>,
     timeouts: Timeouts,
@@ -131,8 +139,9 @@ impl Manager {
         events: flume::Sender<LspEvent>,
         timeouts: Timeouts,
     ) -> Arc<Manager> {
-        Arc::new_cyclic(|me| Manager {
+        let manager = Arc::new_cyclic(|me| Manager {
             me: me.clone(),
+            workspace_real: workspace.canonicalize().ok().filter(|r| *r != workspace),
             workspace,
             configs: Mutex::new(configs),
             events,
@@ -142,7 +151,11 @@ impl Manager {
             servers: Mutex::default(),
             docs: Mutex::default(),
             reported: Mutex::default(),
-        })
+        });
+        let mut all = MANAGERS.lock().unwrap();
+        all.retain(|m| m.strong_count() > 0);
+        all.push(Arc::downgrade(&manager));
+        manager
     }
 
     pub(crate) fn timeouts(&self) -> &Timeouts {
@@ -224,6 +237,25 @@ impl Manager {
             return servers.values().any(|s| alive(s) && s.config.languages.iter().any(|l| l == language));
         }
         configs.iter().any(|c| self.root_for(c, path).is_some_and(|root| servers.get(&(c.name.clone(), root)).is_some_and(alive)))
+    }
+
+    /// Whether server `name` is up for `path`'s project.
+    pub fn serves(&self, path: &Path, name: &str) -> bool {
+        let configs = self.configs.lock().unwrap().clone();
+        let servers = self.servers.lock().unwrap();
+        configs
+            .iter()
+            .filter(|c| c.name == name)
+            .any(|c| self.root_for(c, path).is_some_and(|root| servers.get(&(c.name.clone(), root)).is_some_and(|s| s.conn.is_alive())))
+    }
+
+    /// A path a server gave as Tern names it: servers resolve links, so one
+    /// in the workspace's real folder is put back under the workspace.
+    pub(crate) fn local_path(&self, path: PathBuf) -> PathBuf {
+        match self.workspace_real.as_ref().and_then(|real| path.strip_prefix(real).ok()) {
+            Some(rest) => self.workspace.join(rest),
+            None => path,
+        }
     }
 
     /// The project root `config`'s server for `path` runs in.
@@ -377,11 +409,7 @@ impl Manager {
             self.servers.lock().unwrap().remove(&key);
             slot.failed_at = Some(slot.started_at.unwrap_or_else(Instant::now));
             slot.failure = format!("{} exited", config.name);
-            let _ = self.events.send(LspEvent::Failed {
-                server: config.name.clone(),
-                message: slot.failure.clone(),
-                hint: config.install_hint.clone(),
-            });
+            let _ = self.events.send(LspEvent::Exited { server: config.name.clone() });
         }
         if let Some(at) = slot.failed_at
             && at.elapsed() < self.timeouts.restart_backoff
@@ -418,7 +446,16 @@ impl Manager {
             let path = provider.and_then(|p| p()).map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
             env.push(("PATH".into(), absolute_path_entries(&path).to_string_lossy().into_owned()));
         }
-        let state = Arc::new(ServerState { settings: config.settings.clone(), progress: Mutex::default(), events: self.events.clone() });
+        let root_uri = path_to_uri(root).map(|u| u.as_str().to_owned());
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let folders = json!([{"uri": root_uri, "name": name}]);
+        let state = Arc::new(ServerState {
+            name: config.name.clone(),
+            settings: config.settings.clone(),
+            folders: folders.clone(),
+            progress: Mutex::default(),
+            events: self.events.clone(),
+        });
         let handler_state = state.clone();
         let conn = Connection::spawn(
             &config.command,
@@ -429,14 +466,12 @@ impl Manager {
             Box::new(move |conn, msg| handler_state.handle(conn, msg)),
         )
         .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { LspError::NotFound } else { LspError::Unavailable(e.to_string()) })?;
-        let root_uri = path_to_uri(root).map(|u| u.as_str().to_owned());
-        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let params = json!({
             "processId": std::process::id(),
             "clientInfo": {"name": "Tern"},
             "rootUri": root_uri,
             "rootPath": root,
-            "workspaceFolders": [{"uri": root_uri, "name": name}],
+            "workspaceFolders": folders,
             "initializationOptions": config.initialization_options,
             "capabilities": client_capabilities(),
         });
@@ -456,7 +491,7 @@ impl Manager {
             conn.notify("workspace/didChangeConfiguration", json!({"settings": settings}));
         }
         let encoding = Encoding::from_name(caps["positionEncoding"].as_str());
-        Ok(Arc::new(Server { config: config.clone(), conn, caps, encoding, opened: Mutex::default() }))
+        Ok(Arc::new(Server { config: config.clone(), conn, caps, encoding, opened: Mutex::default(), borrowed: Mutex::default() }))
     }
 
     /// Send `path` to `server` if it hasn't got it: the tab's text, else the file's.
@@ -465,10 +500,24 @@ impl Manager {
         if opened.contains(path) {
             return Ok(());
         }
-        let (text, version) = match self.docs.lock().unwrap().get(path) {
+        let docs = self.docs.lock().unwrap();
+        let (text, version) = match docs.get(path) {
             Some(doc) => (doc.text.clone(), doc.version),
-            None => (read_text(path).ok_or_else(|| LspError::Unavailable(format!("cannot read {}", path.display())))?, 1),
+            None => {
+                let text = read_text(path).ok_or_else(|| LspError::Unavailable(format!("cannot read {}", path.display())))?;
+                let mut borrowed = server.borrowed.lock().unwrap();
+                borrowed.push_back(path.to_path_buf());
+                while borrowed.len() > MAX_BORROWED {
+                    let Some(old) = borrowed.pop_front() else { break };
+                    // A tab may show it since: then it stays.
+                    if !docs.contains_key(&old) && opened.remove(&old) {
+                        server.conn.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&old)}}));
+                    }
+                }
+                (text, 1)
+            },
         };
+        drop(docs);
         let language = language_id(path).unwrap_or("plaintext");
         server.conn.notify(
             "textDocument/didOpen",
@@ -495,24 +544,46 @@ impl Manager {
     }
 }
 
+impl Manager {
+    /// Shut every server down (`shutdown`, `exit`, then kill), returning once they are gone.
+    pub fn shut_down_servers(&self) {
+        let servers: Vec<_> = self.servers.lock().unwrap().drain().map(|(_, s)| s).collect();
+        shut_down_each(servers, &self.timeouts);
+    }
+}
+
+/// Every manager made, so quitting can shut their servers down.
+static MANAGERS: Mutex<Vec<Weak<Manager>>> = Mutex::new(Vec::new());
+
+/// Shut down the servers of every manager, all at once, returning once
+/// they are gone (or killed): for quitting, which won't wait otherwise.
+pub fn shut_down_all() {
+    let managers: Vec<Arc<Manager>> = MANAGERS.lock().unwrap().iter().filter_map(Weak::upgrade).collect();
+    let threads: Vec<_> = managers.into_iter().map(|m| std::thread::spawn(move || m.shut_down_servers())).collect();
+    for t in threads {
+        let _ = t.join();
+    }
+}
+
+fn shut_down_each(servers: Vec<Arc<Server>>, t: &Timeouts) {
+    let threads: Vec<_> = servers
+        .into_iter()
+        .map(|s| {
+            let t = t.clone();
+            std::thread::spawn(move || shut_down(&s, &t))
+        })
+        .collect();
+    for t in threads {
+        let _ = t.join();
+    }
+}
+
 impl Drop for Manager {
     fn drop(&mut self) {
-        self.servers.get_mut().unwrap().clear();
-        let slots: Vec<_> = self.slots.get_mut().unwrap().drain().map(|(_, s)| s).collect();
+        let servers: Vec<_> = self.servers.get_mut().unwrap().drain().map(|(_, s)| s).collect();
+        self.slots.get_mut().unwrap().clear();
         let timeouts = self.timeouts.clone();
-        std::thread::spawn(move || {
-            let servers: Vec<_> = slots.iter().filter_map(|s| futures::executor::block_on(s.lock()).server.take()).collect();
-            let threads: Vec<_> = servers
-                .into_iter()
-                .map(|s| {
-                    let t = timeouts.clone();
-                    std::thread::spawn(move || shut_down(&s, &t))
-                })
-                .collect();
-            for t in threads {
-                let _ = t.join();
-            }
-        });
+        std::thread::spawn(move || shut_down_each(servers, &timeouts));
     }
 }
 
@@ -533,7 +604,10 @@ fn uri(path: &Path) -> String {
 
 /// What a server's own requests and notifications need.
 struct ServerState {
+    name: String,
     settings: Option<Value>,
+    /// Its workspace folders, as `initialize` gave them.
+    folders: Value,
     /// Work-done progress tokens begun and not ended.
     progress: Mutex<HashSet<String>>,
     events: flume::Sender<LspEvent>,
@@ -554,7 +628,7 @@ impl ServerState {
                     | "client/registerCapability"
                     | "client/unregisterCapability"
                     | "window/showMessageRequest" => Ok(Value::Null),
-                    "workspace/workspaceFolders" => Ok(Value::Null),
+                    "workspace/workspaceFolders" => Ok(self.folders.clone()),
                     _ => Err((-32601, format!("{method} is not supported"))),
                 };
                 conn.respond(id, result);
@@ -567,7 +641,7 @@ impl ServerState {
                         progress.insert(token);
                     },
                     Some("end") if progress.remove(&token) && progress.is_empty() => {
-                        let _ = self.events.send(LspEvent::Settled);
+                        let _ = self.events.send(LspEvent::Settled { server: self.name.clone() });
                     },
                     _ => {},
                 }
@@ -636,7 +710,14 @@ mod tests {
         .unwrap();
         let config =
             ServerConfig { name: "cat".into(), ..serde_json::from_value(json!({"languages": ["rust"], "command": "cat"})).unwrap() };
-        let server = Arc::new(Server { config, conn, caps: json!({}), encoding: Encoding::Utf16, opened: Mutex::default() });
+        let server = Arc::new(Server {
+            config,
+            conn,
+            caps: json!({}),
+            encoding: Encoding::Utf16,
+            opened: Mutex::default(),
+            borrowed: Mutex::default(),
+        });
         let path = Path::new("/w/a.rs");
         server.opened.lock().unwrap().insert(path.to_path_buf());
         m.docs.lock().unwrap().insert(path.to_path_buf(), Doc { text: String::new(), version: 1, tabs: 1 });

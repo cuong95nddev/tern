@@ -26,6 +26,25 @@ fn caps() -> Value {
     serde_json::from_str(ALL).unwrap()
 }
 
+/// A workspace opened through a symlink: servers answer with real paths,
+/// which come back as the workspace's (so a declaration isn't its own
+/// implementation, and the tab already open is the one jumped to).
+#[cfg(unix)]
+#[test]
+fn answers_in_a_linked_workspace_use_its_paths() {
+    let f = Fixture::new();
+    let link = f.ws.parent().unwrap().join("link");
+    std::os::unix::fs::symlink(&f.ws, &link).unwrap();
+    let real = f.ws.canonicalize().unwrap();
+    let script = json!({"capabilities": caps(), "responses": {
+        "textDocument/implementation": [{"uri": uri(&real.join("src/main.rs")), "range": range(0, 3, 7)}],
+    }});
+    let (tx, _rx) = flume::unbounded();
+    let m = tern_lsp::Manager::with_timeouts(link.clone(), vec![f.mock("a", script)], tx, fast());
+    let found = block_on(m.implementation(&link.join("src/main.rs"), Position::new(0, 3))).unwrap();
+    assert_eq!(found, [Location { path: link.join("src/main.rs"), range: r(0, 3, 7) }]);
+}
+
 #[test]
 fn definition_handles_scalar_array_and_links() {
     let f = Fixture::new();

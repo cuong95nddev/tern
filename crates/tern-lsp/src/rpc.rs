@@ -75,6 +75,10 @@ impl Connection {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+        // A group of its own, so killing it takes what it started (a wrapper's
+        // server, `cargo check`).
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         let mut child = cmd.spawn()?;
         let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (out, outgoing) = flume::unbounded::<Vec<u8>>();
@@ -98,9 +102,7 @@ impl Connection {
         if let Some(stderr) = stderr {
             let name = name.to_owned();
             std::thread::Builder::new().name(format!("lsp-err-{name}")).spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    log::debug!("{name}: {line}");
-                }
+                log_lines(BufReader::new(stderr), |line| log::debug!("{name}: {line}"));
             })?;
         }
         if let Some(stdout) = stdout {
@@ -142,6 +144,11 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
         let mut guard = CancelGuard { conn: self, id, done: false };
+        // The reader may have exited (and failed what was pending) since the check above.
+        if !self.alive.load(Ordering::SeqCst) {
+            guard.done = true;
+            return Err(LspError::Unavailable("the server has exited".into()));
+        }
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         let result = futures::select! {
             r = rx.fuse() => r.unwrap_or_else(|_| Err(LspError::Unavailable("the server has exited".into()))),
@@ -152,9 +159,22 @@ impl Connection {
         result
     }
 
-    /// Kill the process now.
+    /// Kill the process and the ones it started, now.
     pub(crate) fn kill(&self) {
         let mut child = self.child.lock().unwrap();
+        // Not reaped yet, so its id (its group's) isn't anyone else's.
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: a plain signal to the group the server leads.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        #[cfg(windows)]
+        {
+            let mut tree = Command::new("taskkill");
+            tree.args(["/T", "/F", "/PID", &child.id().to_string()]).stdout(Stdio::null()).stderr(Stdio::null());
+            std::os::windows::process::CommandExt::creation_flags(&mut tree, 0x0800_0000); // CREATE_NO_WINDOW
+            let _ = tree.status();
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -190,6 +210,20 @@ impl Drop for CancelGuard<'_> {
     }
 }
 
+/// Each line of a server's stderr, as text even when it isn't UTF-8.
+/// (A reader that stopped at a bad line would close the pipe, and the
+/// server's next write there would kill it.)
+fn log_lines(mut r: impl BufRead, mut log: impl FnMut(String)) {
+    let mut line = vec![];
+    while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+        log(String::from_utf8_lossy(&line).trim_end().to_owned());
+        line.clear();
+    }
+}
+
+/// The largest message read from a server.
+const MAX_MESSAGE: usize = 256 * 1024 * 1024;
+
 fn read_message(r: &mut impl BufRead) -> Option<Value> {
     loop {
         let mut len = None;
@@ -209,6 +243,11 @@ fn read_message(r: &mut impl BufRead) -> Option<Value> {
             }
         }
         let Some(len) = len else { continue };
+        // A length no answer has: the stream is broken, not worth the memory.
+        if len > MAX_MESSAGE {
+            log::warn!("lsp: message of {len} bytes, giving up on the server");
+            return None;
+        }
         let mut buf = vec![0; len];
         r.read_exact(&mut buf).ok()?;
         match serde_json::from_slice(&buf) {
@@ -257,6 +296,20 @@ fn read_loop(mut r: impl BufRead, conn: Weak<Connection>, pending: &Pending, ali
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_lines_that_are_not_utf8_keep_the_pipe_read() {
+        let mut lines = vec![];
+        log_lines(&b"a\n\xff\xfe bad\nb\n"[..], |l| lines.push(l));
+        assert_eq!(lines, ["a", "\u{fffd}\u{fffd} bad", "b"]);
+    }
+
+    #[test]
+    fn huge_content_length_ends_the_stream() {
+        let msg = format!("Content-Length: {}\r\n\r\n{{}}", usize::MAX / 2);
+        assert_eq!(read_message(&mut msg.as_bytes()), None);
+        assert_eq!(read_message(&mut &b"Content-Length: 2\r\n\r\n{}"[..]), Some(json!({})));
+    }
 
     #[test]
     fn windows_finds_cmd_and_bat_on_path() {
