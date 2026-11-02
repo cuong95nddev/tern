@@ -27,6 +27,9 @@ pub struct ServerConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables over Tern's.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     /// Files or folders that mark a project root (`Cargo.toml`): the nearest
     /// folder above a file holding one is its server's root.
     #[serde(default)]

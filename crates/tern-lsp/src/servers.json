@@ -38,7 +38,7 @@
             "generatesMetadataFilesAtProjectRoot": false,
             "exclusions": ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"],
             "maven": { "enabled": true },
-            "gradle": { "enabled": true, "wrapper": { "enabled": true } }
+            "gradle": { "enabled": true, "wrapper": { "enabled": false } }
           }
         }
       }
