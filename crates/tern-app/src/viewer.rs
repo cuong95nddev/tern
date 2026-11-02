@@ -6,7 +6,9 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::component::input::{DefinitionProvider, Editor, EditorState, GoToDefinition, InputEvent, Position, Rope, RopeExt};
+use gpui_kit::component::input::{
+    DefinitionProvider, Editor, EditorState, GoToDefinition, GutterMarker, InputEvent, Position, Rope, RopeExt,
+};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -183,6 +185,12 @@ pub struct Viewer {
     _load: Option<Task<()>>,
     /// Go to implementations / super method, asking the language server.
     _nav: Option<Task<()>>,
+    /// Inheritance gutter icons: what is known, what the gutter shows (by
+    /// id), the viewport the last pass was for, and the pass under way.
+    markers: crate::markers::Markers,
+    shown_markers: Vec<tern_lsp::nav::LineMarker>,
+    markers_view: Option<std::ops::Range<usize>>,
+    _markers: Option<Task<()>>,
 }
 
 impl EventEmitter<ViewerEvent> for Viewer {}
@@ -383,6 +391,11 @@ impl Viewer {
         let wrap = crate::window_state::word_wrap();
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).soft_wrap(wrap));
         let sub = cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, _, cx| {
+            // Back in the tab: another file may have added an implementation.
+            if matches!(ev, InputEvent::Focus) {
+                this.markers.invalidate();
+                this.schedule_markers(cx);
+            }
             if !matches!(ev, InputEvent::Change) || this.loading {
                 return;
             }
@@ -391,6 +404,24 @@ impl Viewer {
                 this.dirty = true;
                 cx.notify();
             }
+        });
+        // A scroll moves the viewport: icons for what came into view.
+        let scrolled = cx.observe(&editor, |this, editor, cx| {
+            let view = editor.read(cx).visible_row_range();
+            if view.is_some() && view != this.markers_view {
+                this.markers_view = view;
+                this.schedule_markers(cx);
+            }
+        });
+        let gutter_setting = cx.observe_global::<crate::settings::LspConfig>(|this, cx| this.schedule_markers(cx));
+        let me = cx.entity().downgrade();
+        editor.update(cx, |ed, _| {
+            ed.set_gutter_marker_handler(Some(Rc::new(move |id, _, window, cx| {
+                let _ = me.update(cx, |this, cx| this.open_marker(id, window, cx));
+            })));
+            ed.set_gutter_marker_tooltip(Some(Rc::new(|text, window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
+            })));
         });
         let preview = cx.new(|cx| TextViewState::markdown("", cx).scrollable(true));
         Self {
@@ -415,6 +446,8 @@ impl Viewer {
             // The decoded image stays in the app's asset cache until removed.
             _subs: vec![
                 sub,
+                scrolled,
+                gutter_setting,
                 cx.on_release(|this: &mut Self, cx| {
                     this.set_image(None, cx);
                     this.lsp_hide();
@@ -422,6 +455,10 @@ impl Viewer {
             ],
             _load: None,
             _nav: None,
+            markers: Default::default(),
+            shown_markers: vec![],
+            markers_view: None,
+            _markers: None,
         }
     }
 
@@ -444,8 +481,10 @@ impl Viewer {
 
     /// Tell the language servers the editor's text: the file it shows is
     /// opened with them first (and the one it showed before closed).
-    fn lsp_sync(&mut self, cx: &App) {
+    fn lsp_sync(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else { return };
+        self.markers.note_edit();
+        self.schedule_markers(cx);
         let text = self.editor.read(cx).value().to_string();
         if self.lsp_doc.as_ref() == Some(&path) {
             self.lsp.change(&path, text);
@@ -578,6 +617,95 @@ impl Viewer {
         } else {
             cx.emit(ViewerEvent::OpenFileAt { path: l.path.clone(), line, col });
         }
+    }
+
+    /// The language servers finished indexing: what they answered before may be incomplete.
+    pub fn lsp_settled(&mut self, cx: &mut Context<Self>) {
+        self.markers.invalidate();
+        self.schedule_markers(cx);
+    }
+
+    /// Ask about the gutter icons once edits and scrolling pause.
+    fn schedule_markers(&mut self, cx: &mut Context<Self>) {
+        let on = cx.try_global::<crate::settings::LspConfig>().is_none_or(|c| c.gutter_icons);
+        let path = self.path.clone().filter(|p| on && self.lsp.supports(p));
+        self.editor.update(cx, |ed, cx| ed.reserve_gutter_markers(path.is_some(), cx));
+        let Some(path) = path else {
+            self._markers = None;
+            if !self.shown_markers.is_empty() {
+                self.show_markers(vec![], cx);
+            }
+            return;
+        };
+        // A new pass replaces the one waiting or under way (its requests are cancelled).
+        self._markers = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::markers::DEBOUNCE).await;
+            let _ = Self::markers_pass(this, path, cx).await;
+        }));
+    }
+
+    async fn markers_pass(this: WeakEntity<Self>, path: PathBuf, cx: &mut AsyncApp) -> Option<()> {
+        let (generation, lsp, text, view, outline) = this
+            .update(cx, |this, cx| {
+                let ed = this.editor.read(cx);
+                let view = ed.visible_row_range().unwrap_or(0..100);
+                let text = ed.value().to_string();
+                (this.markers.begin(), this.lsp.clone(), text, view, this.markers.outline().cloned())
+            })
+            .ok()?;
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        let (outline, candidates) = match outline {
+            Some(known) => known,
+            None => {
+                let outline = lsp.outline(&path).await.ok()?;
+                let line_text = |l: u32| lines.get(l as usize).cloned().unwrap_or_default();
+                let candidates = tern_lsp::nav::candidates(&outline, line_text);
+                this.update(cx, |this, _| this.markers.set_outline(generation, outline.clone(), candidates.clone())).ok()?.then_some(())?;
+                (outline, candidates)
+            },
+        };
+        let visible = crate::markers::visible_candidates(&candidates, view.start as u32, view.end as u32);
+        let (down, up) = this.update(cx, |this, _| this.markers.wanted(&visible)).ok()?;
+        let filled = crate::markers::fill(&lsp, &path, &outline, &lines, down, up).await;
+        this.update(cx, |this, cx| {
+            if this.markers.apply(generation, filled) {
+                let shown = this.markers.shown();
+                this.show_markers(shown, cx);
+            }
+        })
+        .ok()
+    }
+
+    fn show_markers(&mut self, shown: Vec<tern_lsp::nav::LineMarker>, cx: &mut Context<Self>) {
+        use tern_lsp::nav::MarkerKind::*;
+        let look = crate::style::el("viewer.gutter_marker", cx);
+        let markers = shown
+            .iter()
+            .enumerate()
+            .map(|(id, m)| {
+                let (icon, color) = match m.kind {
+                    Implemented => ("icons/circle-arrow-down.svg", "implemented"),
+                    Overridden => ("icons/arrow-down.svg", "overridden"),
+                    Implementing => ("icons/circle-arrow-up.svg", "implementing"),
+                    Overriding => ("icons/arrow-up.svg", "overriding"),
+                };
+                GutterMarker {
+                    id,
+                    line: m.line as usize,
+                    icon: icon.into(),
+                    color: Some(look.color(color)),
+                    tooltip: m.tooltip.clone().into(),
+                }
+            })
+            .collect();
+        self.shown_markers = shown;
+        self.editor.update(cx, |ed, cx| ed.set_gutter_markers(markers, cx));
+    }
+
+    /// A gutter icon was clicked: go to its one target, or choose among them.
+    fn open_marker(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.shown_markers.get(id).cloned() else { return };
+        self.show_targets(m.chooser_title, m.targets, "Nothing found", window, cx);
     }
 
     /// Show `image` (or none), dropping the one shown before from the app's

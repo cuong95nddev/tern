@@ -22,6 +22,7 @@ mod git_log_view;
 mod handoff;
 mod links;
 mod main_window;
+mod markers;
 mod mcp;
 mod menus;
 mod palette;

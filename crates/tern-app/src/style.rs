@@ -1343,6 +1343,16 @@ pub const ELEMENTS: &[Element] = &[
     },
     simple!("file_header.button", "The Preview / Diff / VS Code buttons above a file"),
     Element {
+        name: "viewer.gutter_marker",
+        about: "The inheritance icons in a file's gutter: ↓ is implemented / overridden, ↑ implements / overrides",
+        groups: &[&[
+            ("implemented", Color, "$info.background"),
+            ("overridden", Color, "$info.background"),
+            ("implementing", Color, "$success.background"),
+            ("overriding", Color, "$success.background"),
+        ]],
+    },
+    Element {
         name: "terminal",
         about: "A terminal tab. Its colors are `terminal.colors`; a `background_opacity` below 1 lets what's behind \
                 it (a background image) show through",

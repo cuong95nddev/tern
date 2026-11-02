@@ -2263,7 +2263,13 @@ impl Workspace {
                     window.push_notification(format!("{server} could not start: navigation uses names only.{hint}"), cx);
                 }
             },
-            tern_lsp::LspEvent::Settled => {},
+            tern_lsp::LspEvent::Settled => {
+                for t in &self.tabs {
+                    if let CenterTab::File { view, .. } = t {
+                        view.update(cx, |v, cx| v.lsp_settled(cx));
+                    }
+                }
+            },
         }
     }
 
