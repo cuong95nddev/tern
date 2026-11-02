@@ -252,8 +252,14 @@ pub struct Described {
 pub fn describe(target: &Location, lines: &dyn Fn(&Path) -> Option<Vec<String>>) -> Described {
     let text = lines(&target.path);
     let name = target_name(text.as_ref(), target, false);
+    // A type's own declaration line names it: it is no member of the type above.
+    let declares_type = text
+        .as_ref()
+        .and_then(|l| l.get(target.range.start.line as usize))
+        .and_then(|l| TYPE_DECLARATION.captures(l))
+        .is_some_and(|m| m[1] == name);
     let container = enclosing_type_name(text.as_ref(), target);
-    let container = if container == name || text.is_none() { String::new() } else { container };
+    let container = if declares_type || container == name || text.is_none() { String::new() } else { container };
     Described { name, container }
 }
 
@@ -721,6 +727,10 @@ mod tests {
         assert_eq!((d.name.as_str(), d.container.as_str()), ("Circle", ""), "a type is its own container");
         let d = describe(&loc("/p/Gone.java", 3, 0), &lines);
         assert_eq!((d.name.as_str(), d.container.as_str()), ("Gone", ""));
+        // A type declared under another one is still its own container.
+        let swift = |_: &Path| Some(["class Base: Shape {", "}", "", "class Circle: Base {", "}"].map(String::from).to_vec());
+        let d = describe(&loc("/p/Shape.swift", 3, 6), &swift);
+        assert_eq!((d.name.as_str(), d.container.as_str()), ("Circle", ""));
     }
 
     #[test]

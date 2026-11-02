@@ -27,6 +27,9 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 - **File explorer** and a light editor that saves, diffs against `HEAD` and renders Markdown
 - **Changes panel** listing the git changes of every repo under the folder; click a file to preview its diff
 - **Scratch files** that save as you type
+- **Code navigation** in file tabs through language servers (rust-analyzer, clangd, gopls, jdtls, TypeScript,
+  Python, Swift): go to definition, implementations and super method, and "is implemented by" / "implements"
+  icons in the gutter (see [Language servers](#language-servers))
 - **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
 - **Screenshots for agents**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> (<kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows) anywhere freezes the screen; pick a region, mark it up (boxes, arrows, text, numbered markers, mosaic), collect a few, add a prompt and send them all to an agent tab (or a new Claude Code, Codex or OpenCode tab). On macOS it needs Screen Recording access. Not on Linux yet.
 - **Background sessions**: terminals keep running after you quit, and reattach on the next launch
@@ -92,6 +95,9 @@ Tooltips show each platform's keys.
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>D</kbd> | Diff the open file against `HEAD` |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>V</kbd> | Toggle Markdown preview |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd> | Open the file in VS Code or Cursor |
+| <kbd>F12</kbd> / <kbd>⌘</kbd>-click | Go to definition (in a file tab) |
+| <kbd>⌘</kbd><kbd>⌥</kbd><kbd>B</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd>-click | Go to implementation(s) |
+| <kbd>⌘</kbd><kbd>U</kbd> | Go to super method (or the supertypes of a type) |
 | <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> | Capture a screenshot for an agent (works from any app; <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows, also **File ▸ Capture Screenshot**) |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 | <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> | Pick a theme |
@@ -104,6 +110,37 @@ back / forward, <kbd>⌥</kbd><kbd>⌫</kbd> deletes a word, <kbd>⌘</kbd><kbd>
 reading it takes `terminal.clipboard_read` (**Settings ▸ Terminal**). Programs can show images with the kitty
 graphics protocol's Unicode placeholders (`kitten icat --unicode-placeholder`; macOS and Linux); a click on one
 shows it full size.
+
+## Language servers
+
+File tabs ask a language server for the file's language when one is installed (Tern looks for it on your login
+shell's `PATH`), and fall back to names (tree-sitter) for go to definition when none is. A missing server is
+mentioned once, with how to install it:
+
+| Languages | Server | Install |
+|---|---|---|
+| Rust | `rust-analyzer` | `rustup component add rust-analyzer` |
+| C, C++ | `clangd` | `brew install llvm`, `apt install clangd`, or [clangd.llvm.org](https://clangd.llvm.org/installation) |
+| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
+| Java | `jdtls` | `brew install jdtls`, or [eclipse.jdt.ls](https://github.com/eclipse-jdtls/eclipse.jdt.ls); needs JDK 21+ |
+| TypeScript, JavaScript | `vtsls`, else `typescript-language-server` | `npm i -g @vtsls/language-server` |
+| Python | `basedpyright`, else `pyright`, else `ty` | `pip install basedpyright` (or `uv tool install basedpyright`) |
+| Swift | `sourcekit-lsp` | Comes with the Swift toolchain / Xcode |
+
+- **Go to implementation(s)** (<kbd>⌘</kbd><kbd>⌥</kbd><kbd>B</kbd>, <kbd>⌘</kbd><kbd>⌥</kbd>-click) goes to the one
+  implementation, or lets you choose among several.
+- **Super method** (<kbd>⌘</kbd><kbd>U</kbd>) goes to the method a method implements or overrides, through the
+  server's type hierarchy (Go and Rust servers have none: their own "implementation" / "declaration" answers).
+- **Gutter icons**: ↓ on a type or method that is implemented or overridden, ↑ on a method that implements or
+  overrides another; hover for which, click to go there. `lsp.gutter_icons: false` turns them off.
+- clangd finds implementations in files that aren't open only with a `compile_commands.json` (CMake:
+  `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`); with `compile_flags.txt` it knows the open files only.
+- `lsp.servers` in `settings.json` changes them by name: an entry replaces the built-in server of its name, `null`
+  turns it off, a new name adds one (`{"gopls": null, "zls": {"languages": ["zig"], "command": "zls"}}`).
+  `reference/language-servers.json` has the built-in ones.
+
+Servers run the project's own build logic as they do in any editor (Cargo build scripts and proc macros, Gradle or
+Maven import), so they start only when you open a file of their language.
 
 ## Background sessions
 
