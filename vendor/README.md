@@ -69,3 +69,7 @@ count it as two cells, so their cursor also drifted. It now becomes a wide
 char with its spacer, as in kitty, WezTerm, Ghostty and Warp; only when the
 cursor still sits right after it (not one in the last column). Test:
 `vs16_widens_text_emoji`.
+
+## gpui-base 0.7.3
+
+Left out: `Cargo.lock`.
