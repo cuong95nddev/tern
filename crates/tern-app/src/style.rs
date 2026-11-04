@@ -7,7 +7,8 @@
 //! alike ([`crate::settings`] reads `tokens` and `elements`).
 //!
 //! A value is a number (logical pixels), `"0.875rem"` (scales with the UI
-//! font size), a color (`#rrggbb`, `#rrggbbaa`, `blue-500/50`,
+//! font size), `"auto"` for a size (the content's, also where the element
+//! sets one), a color (`#rrggbb`, `#rrggbbaa`, `blue-500/50`,
 //! `transparent`), plain text, or `$name`: a token, another element's
 //! property (`$explorer.row.height`), or a theme color by its key. A color
 //! `$name` takes `/NN` for NN% of its opacity (`$primary/15`).
@@ -86,7 +87,8 @@ impl Element {
 /// share of its parent's room, grown from nothing (a box's own `grow`, but
 /// one the code can give: `"{used}"`). `text_transform`
 /// (`uppercase`, `lowercase`, `capitalize`, `none`) applies to the labels
-/// Tern writes (titles, tab names).
+/// Tern writes (titles, tab names). `line_clamp` wraps text and cuts it
+/// with an ellipsis after that many lines.
 pub const BOX: &[Prop] = &[
     ("visible", Num, ""),
     ("grow", Num, ""),
@@ -132,6 +134,7 @@ pub const BOX: &[Prop] = &[
     ("opacity", Num, ""),
     ("shadow", Text, ""),
     ("text_transform", Text, ""),
+    ("line_clamp", Num, ""),
 ];
 
 /// A template box's own properties: those of [`BOX`], of [`IMAGE`] (any
@@ -321,6 +324,28 @@ pub const ELEMENTS: &[Element] = &[
             ("hover_background", Color, "$row_hover"),
             ("selected_background", Color, "$row_selected"),
             ("selected_text", Color, ""),
+            ("recent_padding_y", Len, "4"),
+        ]],
+    },
+    Element {
+        name: "agents.recent",
+        about: "Under an agent's name: the last line of its latest reply, so you can follow it without opening its tab. `padding_left` lines it up with the name. The row grows to fit it (`agents.tab`'s `height` is then its least, `recent_padding_y` its padding)",
+        groups: &[&[
+            ("padding_left", Len, "20"),
+            ("font_size", Len, "$text_xs"),
+            ("font_weight", Num, "400"),
+            ("text", Color, "$text_muted"),
+        ]],
+    },
+    Element {
+        name: "agents.recent.tool",
+        about: "Under an agent's latest reply line: the tool it called after it (\"Running cargo test\")",
+        groups: &[&[
+            ("padding_left", Len, "20"),
+            ("font_size", Len, "$text_xs"),
+            ("font_weight", Num, "400"),
+            ("text", Color, "$text_muted"),
+            ("opacity", Num, "0.75"),
         ]],
     },
     Element {
@@ -430,6 +455,22 @@ pub const ELEMENTS: &[Element] = &[
         ]],
     },
     simple!("changes.commit.button", "The commit box's Amend switch"),
+    Element {
+        name: "changes_review",
+        about: "The Review Changes dialog's body: the changes list and commit box beside the selected file's diff",
+        groups: &[&[("border", Color, "$border"), ("border_width", Len, "1"), ("radius", Len, "$radius")]],
+    },
+    Element {
+        name: "changes_review.side",
+        about: "The Review Changes dialog's side: the changes list and the commit box",
+        groups: &[&[
+            ("start_width", Len, "340"),
+            ("background", Color, "$panel_background"),
+            ("border", Color, "$border"),
+            ("border_right_width", Len, "1"),
+        ]],
+    },
+    Element { name: "changes_review.empty", about: "What the Review Changes dialog shows with no file selected", groups: &[EMPTY] },
     Element {
         name: "changes.commit.count",
         about: "How many files the commit box will commit",
@@ -2231,7 +2272,9 @@ impl Resolver<'_> {
     fn literal(&self, raw: &str, kind: Kind) -> Result<Val, String> {
         let raw = raw.trim();
         match kind {
-            Len => parse_len(raw).map(Val::Len).ok_or_else(|| format!("\"{raw}\" is not a size (22, \"22px\", \"1.5rem\")")),
+            // Sized by its content, also where its element sets a size.
+            Len if raw == AUTO => Ok(Val::Text(AUTO.into())),
+            Len => parse_len(raw).map(Val::Len).ok_or_else(|| format!("\"{raw}\" is not a size (22, \"22px\", \"1.5rem\", \"auto\")")),
             Num => raw.parse().map(Val::Num).map_err(|_| format!("\"{raw}\" is not a number")),
             Color => parse_color(raw).map(Val::Color).ok_or_else(|| format!("\"{raw}\" is not a color")),
             Text => Ok(Val::Text(raw.to_owned().into())),
@@ -2247,6 +2290,9 @@ impl Resolver<'_> {
         self.config_dir.join(p)
     }
 }
+
+/// A size that is no size: the box takes its content's.
+const AUTO: &str = "auto";
 
 fn parse_len(raw: &str) -> Option<AbsoluteLength> {
     let n = |s: &str| s.trim().parse::<f32>().ok().filter(|v| v.is_finite());
@@ -2523,6 +2569,10 @@ impl El {
         }
         if let Some(v) = self.len_opt("line_height") {
             s = s.line_height(v);
+        }
+        // Wraps, and cuts with an ellipsis after this many lines.
+        if let Some(n) = self.num_opt("line_clamp").filter(|n| *n >= 1.) {
+            s = s.whitespace_normal().text_ellipsis().line_clamp(n as usize);
         }
         let family = self.text("font_family");
         if !family.is_empty() {

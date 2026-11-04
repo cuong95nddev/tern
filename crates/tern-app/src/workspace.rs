@@ -26,6 +26,7 @@ use tern_term::{SpawnConfig, TermSize};
 use crate::accounts;
 use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
+use crate::changes_review::ChangesReview;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::chat_view::{ChatEvent, ChatView};
 use crate::diff_pane::{DiffPane, InCommit};
@@ -184,6 +185,11 @@ struct TermTab {
     guard: crate::agents::ContextGuard,
     /// The handoff it can go on from.
     handoff: crate::agents::Handoff,
+    /// What its Claude conversation is doing now (its latest sentence and
+    /// tool call), read from its transcript on each hook.
+    recent: tern_chat::Recent,
+    /// That read, a moment after the last hook (a newer hook replaces it).
+    recent_read: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -191,7 +197,7 @@ struct TermTab {
 /// explorer, a file diff opened from the Changes or Git Log preview, a
 /// scratch file, or the Git Log.
 enum CenterTab {
-    Term(TermTab),
+    Term(Box<TermTab>),
     File {
         view: Entity<Viewer>,
         _subs: Vec<Subscription>,
@@ -411,6 +417,8 @@ pub struct Workspace {
     _rename: Option<Subscription>,
     /// The diff shown in the Changes preview popup, while it is open.
     preview: Option<WeakEntity<DiffPane>>,
+    /// The Review Changes dialog, while it is open.
+    review: Option<WeakEntity<ChangesReview>>,
     show_explorer: bool,
     show_changes: bool,
     show_scratches: bool,
@@ -678,6 +686,7 @@ impl Workspace {
                 this.panels_changed(cx);
             },
             ChangesEvent::OpenLog => this.open_git_log(window, cx),
+            ChangesEvent::Review => this.review_changes(window, cx),
         });
         let scratches_sub = cx.subscribe_in(&scratches, window, |this, _, ev: &ScratchesEvent, window, cx| match ev {
             ScratchesEvent::Open(p) => this.open_scratch(p.clone(), window, cx),
@@ -754,6 +763,7 @@ impl Workspace {
             next_group: 0,
             _rename: None,
             preview: None,
+            review: None,
             show_explorer: shown("explorer"),
             show_changes: shown("changes"),
             show_scratches: shown("scratches"),
@@ -1439,9 +1449,11 @@ impl Workspace {
             context: None,
             guard: Default::default(),
             handoff: Default::default(),
+            recent: Default::default(),
+            recent_read: None,
             _subs: vec![sub],
         };
-        let ix = self.push_tab(CenterTab::Term(tab));
+        let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
         self.activate(ix, window, cx);
     }
 
@@ -1517,9 +1529,11 @@ impl Workspace {
             context: None,
             guard: Default::default(),
             handoff: Default::default(),
+            recent: Default::default(),
+            recent_read: None,
             _subs: vec![sub],
         };
-        let ix = self.push_tab(CenterTab::Term(tab));
+        let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
         self.activate(ix, window, cx);
     }
 
@@ -2133,6 +2147,30 @@ impl Workspace {
         self.show_diff_preview(pane, title, window, cx);
     }
 
+    /// The changes list beside the selected file's diff, in a dialog as
+    /// large as the window.
+    fn review_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_all_dialogs(cx);
+        let changes = self.changes.clone();
+        let review = cx.new(|cx| ChangesReview::new(changes, cx));
+        self.review = Some(review.downgrade());
+        let first = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                review.focus_handle(cx).focus(window, cx);
+            }
+            let vp = window.viewport_size();
+            let margin = cx.theme().spacing_tokens().lg;
+            let body = review.clone();
+            dialog
+                .w(vp.width)
+                .h(vp.height - margin * 2.)
+                .margin_top(margin)
+                .title("Review Changes")
+                .content(move |c, _, _| c.min_h_0().child(body.clone()))
+        });
+    }
+
     /// Open the Git Log tab, or switch to it.
     fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|t| matches!(t, CenterTab::Log { .. })) {
@@ -2306,6 +2344,9 @@ impl Workspace {
         for d in diffs.into_iter().chain(preview) {
             d.update(cx, |d, cx| d.files_changed(batch, cx));
         }
+        if let Some(r) = self.review.as_ref().and_then(|r| r.upgrade()) {
+            r.update(cx, |r, cx| r.files_changed(batch, cx));
+        }
     }
 
     /// Point file tabs showing `from` (or something inside it) at `to`.
@@ -2395,7 +2436,7 @@ impl Workspace {
 
     fn term_tab_mut(&mut self, view: &Entity<TerminalView>) -> Option<&mut TermTab> {
         self.tabs.iter_mut().find_map(|t| match t {
-            CenterTab::Term(t) if &t.view == view => Some(t),
+            CenterTab::Term(t) if &t.view == view => Some(t.as_mut()),
             _ => None,
         })
     }
@@ -2693,6 +2734,14 @@ impl Workspace {
         if status_line {
             return;
         }
+        if let Some(path) = ev.raw.get("transcript_path").and_then(|p| p.as_str()).map(PathBuf::from) {
+            let read = Self::read_recent(ev.token.clone(), path, ev.cwd.clone(), cx);
+            if let Some(CenterTab::Term(t)) =
+                self.tabs.iter_mut().find(|t| matches!(t, CenterTab::Term(t) if t.token.as_deref() == Some(ev.token.as_str())))
+            {
+                t.recent_read = Some(read);
+            }
+        }
         let paths: Vec<PathBuf> = ev.paths.into_iter().filter(|p| p.starts_with(&self.root)).collect();
         if paths.is_empty() {
             return;
@@ -2701,6 +2750,37 @@ impl Workspace {
         let batch = ChangeBatch { paths, git_repos: vec![], rescan: false };
         self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
         self.files_changed(&batch, window, cx);
+    }
+
+    /// Read what the conversation of the tab with hook `token` is doing from
+    /// its transcript at `path`, off the UI thread, once its hooks pause:
+    /// a turn sends several at once, and Claude may not have written the
+    /// latest lines yet.
+    fn read_recent(token: String, path: PathBuf, cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Task<()> {
+        const SETTLE: Duration = Duration::from_millis(250);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTLE).await;
+            let read = cx.background_spawn(async move { tern_chat::read_recent(&path, cwd.as_deref()) }).await;
+            let recent = match read {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("agents: read transcript: {e}");
+                    return;
+                },
+            };
+            let _ = this.update(cx, |this, cx| {
+                let tab = this.tabs.iter_mut().find_map(|t| match t {
+                    CenterTab::Term(t) if t.token.as_deref() == Some(token.as_str()) => Some(t),
+                    _ => None,
+                });
+                if let Some(tab) = tab
+                    && tab.recent != recent
+                {
+                    tab.recent = recent;
+                    cx.notify();
+                }
+            });
+        })
     }
 
     /// The terminal tabs, in tab order: where a screenshot can go, and the
@@ -2758,12 +2838,13 @@ impl Workspace {
                     CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => {
                         let v = t.view.read(cx);
                         let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
-                        let scope = row(crate::agents::display_name(&label, agent));
+                        let scope = crate::agents::recent_vars(row(crate::agents::display_name(&label, agent)), &t.recent, cx);
                         Some((id, crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme()), now))
                     },
                     CenterTab::Chat { view, .. } => {
                         let v = view.read(cx);
-                        Some((id, crate::agents::chat_ring_vars(row(label), v, cx.theme()), v.status()))
+                        let scope = crate::agents::recent_vars(row(label), &v.recent(), cx);
+                        Some((id, crate::agents::chat_ring_vars(scope, v, cx.theme()), v.status()))
                     },
                     _ => None,
                 }

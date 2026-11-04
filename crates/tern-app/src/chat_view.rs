@@ -297,6 +297,12 @@ impl ChatView {
         self.status
     }
 
+    /// What the conversation is doing now: Claude's latest sentence and
+    /// tool call, for the agents panel.
+    pub fn recent(&self) -> tern_chat::Recent {
+        tern_chat::recent(&self.t.entries, Some(self.root.as_path()))
+    }
+
     pub fn status_since(&self) -> Instant {
         self.status_since
     }

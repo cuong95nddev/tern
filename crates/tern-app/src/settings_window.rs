@@ -27,6 +27,7 @@ enum Section {
     Appearance,
     Terminal,
     Editor,
+    Agents,
     Connections,
     /// macOS only.
     Permissions,
@@ -38,6 +39,7 @@ const SECTIONS: &[(Section, &str, &str, &str)] = &[
     (Section::Appearance, "Appearance", "palette", "Theme, text size and layout."),
     (Section::Terminal, "Terminal", "square-terminal", "Terminal tabs."),
     (Section::Editor, "Editor", "file-code", "The file editor and code blocks."),
+    (Section::Agents, "Agents", "bot", "What the agents panel shows of each agent."),
     (Section::Connections, "Connections", "globe", "Use Tern from your phone or another computer."),
     (Section::Permissions, "Permissions", "shield-check", "What macOS lets Tern do."),
 ];
@@ -498,6 +500,20 @@ impl SettingsView {
                 vec![
                     Row { control: self.number(&["editor", "font_size"], 13., 1., (6., 40.), cx), ..Row::new("Font size", "") },
                     Row::new("Font", "Set editor.font_family in the settings file.").value(font),
+                ]
+            },
+            Section::Agents => {
+                let (tool, toggle_tool) = self.flag(&["agents", "show_tool"], true, cx);
+                vec![
+                    Row {
+                        control: self.number(&["agents", "reply_lines"], 1., 1., (0., settings::MAX_REPLY_LINES as f64), cx),
+                        ..Row::new(
+                            "Reply lines",
+                            "Lines of each agent's latest reply under its name, to follow it without opening its tab. Longer text wraps, then is cut; 0 hides it.",
+                        )
+                    },
+                    Row::new("Tool call", "The tool the agent called after that reply (\"Running cargo test\").")
+                        .switch(tool, move |v, w, cx| toggle_tool(v, w, cx)),
                 ]
             },
             Section::Connections => self.remote_rows(),

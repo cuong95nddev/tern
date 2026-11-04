@@ -83,7 +83,8 @@ was in code. Scope, in the user's words: the whole UI except the text editor and
    - **Dialogs.** gpui-component's `Dialog` stays the frame (overlay, title, close button, Escape, focus): that
      is behavior. Its body is template `dialog.<name>` and its footer `dialog.<name>.footer`; the title stays a
      string in code. Built-in: `dialog.trash`, `dialog.restart`, `dialog.delete_scratch`, `dialog.diff_preview`, `dialog.image_preview`,
-     `dialog.name`, `dialog.claude_args`, `dialog.theme`. Elements `dialog.note` (the small muted line) and
+     `dialog.name`, `dialog.claude_args`, `dialog.theme` (later `dialog.changes_review`: the Changes list and commit
+     box beside the selected file's diff, in a dialog as large as the window). Elements `dialog.note` (the small muted line) and
      `dialog.footer` (the buttons' row). New node property `wrap`: text wraps at the box's width even where a box
      around it keeps it on one line (a dialog's message).
    - **Menus.** A menu is a template `menu.<name>` whose root's children are its entries; the code passes the

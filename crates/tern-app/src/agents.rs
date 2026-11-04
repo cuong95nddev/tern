@@ -219,6 +219,23 @@ fn hook_detail(mut word: String, h: &tern_term::claude_status::ClaudeStatus) -> 
     word
 }
 
+/// An agent row's lines under its name, as the settings ask: Claude's
+/// latest words (`say`, at most `say_lines` lines) and its tool call after
+/// them (`doing`); `recent` when either is shown.
+pub fn recent_vars(mut scope: crate::template::Scope, recent: &tern_chat::Recent, cx: &App) -> crate::template::Scope {
+    let config = cx.try_global::<crate::settings::AgentsConfig>().copied().unwrap_or_default();
+    let say = recent.text.as_ref().filter(|_| config.reply_lines > 0);
+    let doing = recent.tool.as_ref().filter(|_| config.show_tool);
+    scope = scope.var("recent", say.is_some() || doing.is_some());
+    if let Some(t) = say {
+        scope = scope.var("say", t.clone()).var("say_lines", config.reply_lines as f64);
+    }
+    if let Some(t) = doing {
+        scope = scope.var("doing", t.clone());
+    }
+    scope
+}
+
 /// What a workspace's line says of its agents that wait for you, in place
 /// of its dot: "1 needs you".
 pub fn needs_label(n: usize) -> String {

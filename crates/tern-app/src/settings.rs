@@ -78,6 +78,41 @@ pub struct SettingsFile {
     /// Language servers for file tabs (go to definition, implementations,
     /// super method, gutter icons).
     pub lsp: LspSettings,
+    /// The agents panel.
+    pub agents: AgentsSettings,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsSettings {
+    /// Lines of each agent's latest reply under its name, so you can follow
+    /// it without opening its tab (default 1; 0 hides it). Longer text wraps,
+    /// then is cut.
+    pub reply_lines: Option<u32>,
+    /// The tool call it made after that reply, under it (default true).
+    pub show_tool: Option<bool>,
+}
+
+/// What the agents panel shows under each agent, as the settings make it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AgentsConfig {
+    pub reply_lines: u32,
+    pub show_tool: bool,
+}
+
+impl Global for AgentsConfig {}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        agents_config(&AgentsSettings::default())
+    }
+}
+
+/// The most lines of a reply the panel shows.
+pub const MAX_REPLY_LINES: u32 = 10;
+
+pub fn agents_config(s: &AgentsSettings) -> AgentsConfig {
+    AgentsConfig { reply_lines: s.reply_lines.unwrap_or(1).min(MAX_REPLY_LINES), show_tool: s.show_tool.unwrap_or(true) }
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -141,10 +176,11 @@ pub struct EditorSettings {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalSettings {
-    /// Monospace font family (default: Menlo on macOS, Cascadia Mono or
-    /// Consolas on Windows, JetBrains Mono or DejaVu Sans Mono on Linux).
+    /// Monospace font family (default: the theme's `mono_font.family`, else
+    /// Menlo on macOS, Cascadia Mono or Consolas on Windows, JetBrains Mono
+    /// or DejaVu Sans Mono on Linux).
     pub font_family: Option<String>,
-    /// Font size (default 13).
+    /// Font size (default: the theme's `mono_font.size`, else 13).
     pub font_size: Option<f32>,
     /// Line height as a multiple of the font size (default 1.25).
     pub line_height: Option<f32>,
@@ -560,11 +596,13 @@ fn load(cx: &mut App) {
     if cx.try_global::<LspConfig>() != Some(&lsp) {
         cx.set_global(lsp);
     }
+    cx.set_global(agents_config(&settings.agents));
 
     let t = &settings.terminal;
+    let (font_family, font_size) = terminal_font(&theme.ui, t, mono_font);
     cx.set_global(TerminalLook {
-        font_family: t.font_family.clone().map_or_else(|| mono_font.clone(), Into::into),
-        font_size: px(t.font_size.filter(|v| *v > 0.).unwrap_or(13.)),
+        font_family,
+        font_size,
         line_height: t.line_height.filter(|v| *v > 0.).unwrap_or(1.25),
         palette: Arc::new(palette),
         ctrl_v_paste: t.ctrl_v_paste.unwrap_or(true),
@@ -862,6 +900,19 @@ fn overrides<'a>(theme: &'a TernTheme, s: &'a SettingsFile, problems: &mut Vec<S
     over
 }
 
+/// The terminal's font family and size: the settings', else the theme's
+/// monospace font (`mono_font.family`, `mono_font.size`), else `mono_font`
+/// at 13.
+fn terminal_font(theme: &ThemeConfig, t: &TerminalSettings, mono_font: &str) -> (SharedString, Pixels) {
+    let family = match (&t.font_family, &theme.mono_font_family) {
+        (Some(f), _) => f.clone().into(),
+        (None, Some(f)) => f.clone(),
+        (None, None) => mono_font.to_string().into(),
+    };
+    let size = t.font_size.or(theme.mono_font_size).filter(|v| *v > 0.).unwrap_or(13.);
+    (family, px(size))
+}
+
 /// The theme's UI config with the settings applied over it: colors, fonts,
 /// corner radii. An unknown color key or an unreadable color is an error.
 fn ui_config(theme: &ThemeConfig, s: &SettingsFile, over: &Overrides, problems: &mut Vec<String>) -> Result<ThemeConfig, String> {
@@ -893,6 +944,15 @@ fn ui_config(theme: &ThemeConfig, s: &SettingsFile, over: &Overrides, problems: 
     if let Some(size) = s.editor.font_size.filter(|v| *v > 0.) {
         config.mono_font_size = Some(size);
     }
+    // `apply_config` keeps what a config leaves out, so a theme naming no
+    // font, corners or shadow would show the last theme's: name the defaults.
+    let default = Theme::default();
+    config.font_family.get_or_insert(default.font_family);
+    config.font_size.get_or_insert(f32::from(default.font_size));
+    config.mono_font_size.get_or_insert(f32::from(default.mono_font_size));
+    config.radius.get_or_insert(f32::from(default.radius) as usize);
+    config.radius_lg.get_or_insert(f32::from(default.radius_lg) as usize);
+    config.shadow.get_or_insert(default.shadow);
     let rem = px(config.font_size.unwrap_or(16.));
     if let Some(r) = style::token_px(over, "radius", rem).filter(|v| *v >= px(0.)) {
         config.radius = Some(f32::from(r).round() as usize);
@@ -1179,8 +1239,10 @@ give them: `visible` (0 hides it), `width`, `height`, `min_*` / `max_*`,
 (same), `gap`, `radius` (and `radius_top_left` … by corner), `border_width`
 (and `border_top_width` … by side), `border` (its color), `background`,
 `text`, `font_family`, `font_size`, `font_weight`, `italic`, `line_height`,
-`opacity`, `shadow` (`sm`, `md`, `lg`, `xl`, `none`) and `text_transform`
-(`uppercase`, `lowercase`, `capitalize`, `none`, for the labels Tern writes).
+`opacity`, `shadow` (`sm`, `md`, `lg`, `xl`, `none`), `text_transform`
+(`uppercase`, `lowercase`, `capitalize`, `none`, for the labels Tern writes)
+and `line_clamp` (wraps text, cut with an ellipsis after that many lines).
+A size can be `\"auto\"`: the content's, also where the element sets one.
 Panel headers have `title` to replace their text. `pane` has `focused_border`;
 `pane.title` (`visible: 1`) puts the tab's name on the pane's top edge.
 
@@ -1270,7 +1332,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `agents` | list `items` | `header` |
 | `agents.header.buttons` | `open_key`, `monitor` | |
 | `agents.folder` (also in `agent_monitor`) | `folder`, `name`, `active`, `open`, `dot`, `dot_color`, `buttons`, `close_key` | |
-| `agents.tab` (also in `agent_monitor`) | `label`, `active`, `shown`, `working`, `status`, `status_icon`, `status_color`, `buttons`, `close_key` | `icon` |
+| `agents.tab` (also in `agent_monitor`) | `label`, `active`, `shown`, `working`, `status`, `status_icon`, `status_color`, `buttons`, `close_key`, `recent` (it has `say` or `doing`), `say` (the last paragraph of its latest reply), `say_lines` (how many lines of it to show, `agents.reply_lines`), `doing` (its tool call after it) | `icon` |
 | `welcome` | `recents`, `open_key`, `new_window_key`, `close_key`, `switch_key`; list `recent` | |
 | `welcome.recent` | `name`, `path` | |
 | `settings` | `title`, `subtitle`; lists `sections`, `rows` | `extra` |
@@ -1284,6 +1346,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `dialog.remove_account` | `name` | |
 | `dialog.diff_preview` | `height` | `diff` |
 | `dialog.image_preview` | `height` | `image` |
+| `dialog.changes_review` | `empty`, `selected`; as `changes.commit` | `list`, `input`, `diff` |
 | `dialog.name`, `dialog.claude_args` | | `field` |
 | `dialog.theme` | | `list` |
 | `dialog.pick_account` | `note`; list `accounts` (as `dialog.pick_account.item`: `key`, `name`, `detail`, `usage`) | |
@@ -1486,7 +1549,11 @@ A theme file in `themes/` holds one or more themes:
 ```
 
 Then set `\"theme\": \"Midnight\"` in `{SETTINGS}`. A color a theme leaves out
-takes the default of its `mode`. `reference/` has the built-in themes in full:
+takes the default of its `mode`; a font, size, corner radius or shadow it
+leaves out (`font.family`, `font.size`, `mono_font.family`, `mono_font.size`,
+`radius`, `radius.lg`, `shadow`) takes Tern's default, never the last theme's.
+`mono_font.family` and `mono_font.size` are the editor's and the terminal's
+font unless `{SETTINGS}` names theirs. `reference/` has the built-in themes in full:
 copy one into `themes/`, rename it, and change what you like. The UI part is
 the theme format of gpui-component, so its themes work here too.
 
@@ -1517,14 +1584,17 @@ change looks right.
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::component::{ThemeColor, ThemeConfig, ThemeMode};
+    use std::rc::Rc;
+
+    use gpui_kit::component::{Theme, ThemeColor, ThemeConfig, ThemeMode};
     use tern_term::palette::DARK_ANSI;
     use tern_term::vt::vte::ansi::Rgb;
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
     use super::{
-        BUILTIN_SETS, LspSettings, SettingsFile, TerminalColors, TernTheme, ThemePair, ThemeSetting, elements_doc, is_app_data, lsp_config,
-        parse_theme_set, read_theme_set, see_through, terminal_palette, with_value,
+        BUILTIN_SETS, LspSettings, SettingsFile, TerminalColors, TerminalSettings, TernTheme, ThemePair, ThemeSetting, elements_doc,
+        is_app_data, lsp_config, overrides, parse_theme_set, read_theme_set, see_through, terminal_font, terminal_palette, ui_config,
+        with_value,
     };
 
     /// The session and window places live next to the settings on Windows:
@@ -1565,6 +1635,53 @@ mod tests {
                 assert!(problems.is_empty(), "{name}: {problems:?}");
             }
         }
+    }
+
+    /// A theme with its own fonts, sizes, corners and shadow, then one that
+    /// names none of them.
+    fn pixel_then_plain() -> [TernTheme; 2] {
+        let set = r#"{"name": "T", "themes": [
+            {"name": "Pixel", "mode": "dark", "font.family": "VT323", "font.size": 20, "mono_font.family": "Unifont",
+             "mono_font.size": 16, "radius": 0, "radius.lg": 0, "shadow": false, "colors": {}},
+            {"name": "Plain", "mode": "dark", "colors": {}}]}"#;
+        let mut themes = parse_theme_set(set).unwrap().into_iter().map(|(_, t)| t);
+        [themes.next().unwrap(), themes.next().unwrap()]
+    }
+
+    /// Switching to a theme that names no fonts, corners or shadow goes
+    /// back to the defaults, not to what the theme before it set.
+    #[test]
+    fn a_theme_without_fonts_drops_the_last_themes() {
+        let s = SettingsFile::default();
+        let mut problems = vec![];
+        let mut theme = Theme::default();
+        for t in pixel_then_plain() {
+            let over = overrides(&t, &s, &mut problems);
+            theme.apply_config(&Rc::new(ui_config(&t.ui, &s, &over, &mut problems).unwrap()));
+        }
+        assert!(problems.is_empty(), "{problems:?}");
+        let default = Theme::default();
+        assert_eq!(theme.font_family, default.font_family);
+        assert_eq!(theme.font_size, default.font_size);
+        assert_eq!(theme.mono_font_size, default.mono_font_size);
+        assert_eq!(theme.radius, default.radius);
+        assert_eq!(theme.radius_lg, default.radius_lg);
+        assert_eq!(theme.shadow, default.shadow);
+    }
+
+    /// The terminal takes the theme's monospace font and size unless the
+    /// settings name their own.
+    #[test]
+    fn the_terminal_follows_the_themes_mono_font() {
+        let [pixel, plain] = pixel_then_plain();
+        let none = TerminalSettings::default();
+        let (family, size) = terminal_font(&pixel.ui, &none, "Menlo");
+        assert_eq!((family.as_ref(), size), ("Unifont", gpui::px(16.)));
+        let (family, size) = terminal_font(&plain.ui, &none, "Menlo");
+        assert_eq!((family.as_ref(), size), ("Menlo", gpui::px(13.)));
+        let own = TerminalSettings { font_family: Some("Iosevka".into()), font_size: Some(14.), ..Default::default() };
+        let (family, size) = terminal_font(&pixel.ui, &own, "Menlo");
+        assert_eq!((family.as_ref(), size), ("Iosevka", gpui::px(14.)));
     }
 
     #[test]

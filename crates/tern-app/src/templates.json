@@ -168,6 +168,13 @@
         "tooltip": "Git Log"
       },
       {
+        "button": "review",
+        "element": "changes.header.button",
+        "size": "xsmall",
+        "icon": "maximize-2",
+        "tooltip": "Review Changes"
+      },
+      {
         "button": "refresh",
         "element": "changes.header.button",
         "size": "xsmall",
@@ -920,70 +927,81 @@
     "frame": "tab",
     "group": "stab",
     "element": "agents.tab",
-    "layout": "row",
-    "align": "center",
+    "layout": "column",
+    "justify": "center",
     "shrink": 0,
+    "style": { "gap": 0 },
     "states": {
       "active": { "background": "$agents.tab.selected_background", "text": "$agents.tab.selected_text" },
       "hover && !active": { "background": "$agents.tab.hover_background" },
       "!shown && !active": { "text": "$agents.tab.hidden_text" },
       "working && !active": { "opacity": "$agents.tab.working_opacity" },
-      "done": { "font_weight": "$agents.tab.done_weight" }
+      "done": { "font_weight": "$agents.tab.done_weight" },
+      "recent": { "height": "auto", "min_height": "$agents.tab.height", "padding_y": "$agents.tab.recent_padding_y" }
     },
     "children": [
-      { "slot": "icon" },
-      { "grow": 1, "truncate": true, "text": "{label}" },
       {
-        "frame": "status",
-        "element": "agents.status",
         "layout": "row",
         "align": "center",
-        "shrink": 0,
-        "states": { "hover:stab": { "opacity": 0 } },
+        "style": { "gap": "$agents.tab.gap" },
         "children": [
-          { "text": "{time}" },
+          { "slot": "icon" },
+          { "grow": 1, "truncate": true, "text": "{label}" },
           {
-            "element": "agents.state",
-            "shrink": 0,
+            "frame": "status",
+            "element": "agents.status",
+            "layout": "row",
             "align": "center",
-            "justify": "center",
-            "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
+            "shrink": 0,
+            "states": { "hover:stab": { "opacity": 0 } },
             "children": [
-              { "when": "working", "element": "agents.ring", "ring": "75" },
-              { "when": "monitoring", "icon": "agent-activity", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.monitoring" } },
-              { "when": "needs", "icon": "agent-needs", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.needs" } },
-              { "when": "rang", "icon": "agent-dot", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.bell" } },
-              { "when": "done && !shell_dot", "icon": "agent-done", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
-              { "when": "done && shell_dot", "icon": "agent-done-cut", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
-              { "when": "seen", "icon": "agent-tick", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.seen" } },
-              { "when": "pending", "icon": "agent-ring", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.pending" } },
+              { "text": "{time}" },
               {
-                "when": "shell_dot",
-                "element": "agents.shell_dot",
-                "position": { "top": -1.5, "right": -1.5 },
-                "style": { "width": "$agents.shell_dot.size", "height": "$agents.shell_dot.size", "radius": 9999 }
+                "element": "agents.state",
+                "shrink": 0,
+                "align": "center",
+                "justify": "center",
+                "style": { "width": "$agents.state.size", "height": "$agents.state.size" },
+                "children": [
+                  { "when": "working", "element": "agents.ring", "ring": "75" },
+                  { "when": "monitoring", "icon": "agent-activity", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.monitoring" } },
+                  { "when": "needs", "icon": "agent-needs", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.needs" } },
+                  { "when": "rang", "icon": "agent-dot", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.bell" } },
+                  { "when": "done && !shell_dot", "icon": "agent-done", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+                  { "when": "done && shell_dot", "icon": "agent-done-cut", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.done" } },
+                  { "when": "seen", "icon": "agent-tick", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.seen" } },
+                  { "when": "pending", "icon": "agent-ring", "style": { "width": "$agents.state.glyph", "height": "$agents.state.glyph", "text": "$agents.state.pending" } },
+                  {
+                    "when": "shell_dot",
+                    "element": "agents.shell_dot",
+                    "position": { "top": -1.5, "right": -1.5 },
+                    "style": { "width": "$agents.shell_dot.size", "height": "$agents.shell_dot.size", "radius": 9999 }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "when": "buttons",
+            "position": { "top": 0, "right": 0, "bottom": 0 },
+            "layout": "row",
+            "align": "center",
+            "style": { "padding_right": 4, "opacity": 0 },
+            "states": { "hover:stab": { "opacity": 1 } },
+            "children": [
+              {
+                "button": "close",
+                "element": "agents.button",
+                "size": "xsmall",
+                "icon": "close",
+                "tooltip": "Close ({close_key})"
               }
             ]
           }
         ]
       },
-      {
-        "when": "buttons",
-        "position": { "top": 0, "right": 0, "bottom": 0 },
-        "layout": "row",
-        "align": "center",
-        "style": { "padding_right": 4, "opacity": 0 },
-        "states": { "hover:stab": { "opacity": 1 } },
-        "children": [
-          {
-            "button": "close",
-            "element": "agents.button",
-            "size": "xsmall",
-            "icon": "close",
-            "tooltip": "Close ({close_key})"
-          }
-        ]
-      }
+      { "when": "say", "element": "agents.recent", "style": { "line_clamp": "{say_lines}" }, "text": "{say}" },
+      { "when": "doing", "element": "agents.recent.tool", "truncate": true, "text": "{doing}" }
     ]
   },
   "welcome": {
@@ -2996,6 +3014,50 @@
     "layout": "row",
     "justify": "end",
     "children": [{ "button": "open_in_tab", "variant": "primary", "label": "Open in Tab" }]
+  },
+  "dialog.changes_review": {
+    "frame": "review",
+    "element": "changes_review",
+    "grow": 1,
+    "style": { "min_height": 0 },
+    "children": [
+      {
+        "grow": 1,
+        "split": "row",
+        "style": { "min_height": 0 },
+        "children": [
+          {
+            "element": "changes_review.side",
+            "fixed": true,
+            "fill": true,
+            "size": "$changes_review.side.start_width",
+            "min": 220,
+            "max": 900,
+            "children": [
+              { "when": "empty", "use": "changes.empty" },
+              { "slot": "list" },
+              { "when": "!empty", "use": "changes.commit" }
+            ]
+          },
+          {
+            "fill": true,
+            "style": { "min_width": 0 },
+            "children": [
+              {
+                "when": "!selected",
+                "element": "changes_review.empty",
+                "grow": 1,
+                "layout": "row",
+                "align": "center",
+                "justify": "center",
+                "text": "Select a file to review its changes"
+              },
+              { "slot": "diff" }
+            ]
+          }
+        ]
+      }
+    ]
   },
   "dialog.image_preview": {
     "element": "dialog.body",

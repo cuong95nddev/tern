@@ -15,10 +15,12 @@
 //! way a timeline shows them, for any front end.
 
 mod launch;
+mod recent;
 pub mod summary;
 mod transcript;
 
 pub use launch::{Launch, PermissionMode, new_session_id, transcript_path, wire};
+pub use recent::{Recent, read_recent, recent};
 pub use transcript::{
     Answer, Ask, Elicit, ElicitAnswer, Entry, Field, FieldKind, Model, Tool, Transcript, TurnEnd, UserImage, read_record,
 };

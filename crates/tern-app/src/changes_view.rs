@@ -2,7 +2,8 @@
 //! (the enclosing repo plus nested repos), grouped per repo. Clicking a file
 //! previews its diff in a popup. Under the list, the commit box commits the
 //! checked files (as IntelliJ does: changed files start checked, new ones
-//! not), each repo's in that repo.
+//! not), each repo's in that repo. The expand button opens the same list
+//! and commit box beside the selected file's diff ([`crate::changes_review`]).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -37,6 +38,8 @@ pub enum ChangesEvent {
     Hide,
     /// The header's log button: open the Git Log.
     OpenLog,
+    /// The header's expand button: review the changes in a full-window dialog.
+    Review,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +80,9 @@ pub struct ChangesView {
     committing: bool,
     /// The last commit's summary, or why it failed.
     commit_result: Option<Result<String, String>>,
+    /// The review dialog shows the list and the commit box: the panel leaves
+    /// the message field out, one field is drawn in one place.
+    reviewing: bool,
     _timer: Option<Task<()>>,
     _task: Option<Task<()>>,
     _commit: Option<Task<()>>,
@@ -184,6 +190,7 @@ impl ChangesView {
             amend: false,
             committing: false,
             commit_result: None,
+            reviewing: false,
             _timer: None,
             _task: None,
             _commit: None,
@@ -395,7 +402,7 @@ impl ChangesView {
         }
     }
 
-    fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.amend = !self.amend;
         self.commit_result = None;
         // As IntelliJ does: amending starts from the last commit's message.
@@ -410,7 +417,7 @@ impl ChangesView {
     }
 
     /// Commit the checked files of each repo with the message (or amend).
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.committing {
             return;
         }
@@ -471,7 +478,77 @@ impl ChangesView {
         }));
     }
 
-    fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub fn set_reviewing(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.reviewing = on;
+        cx.notify();
+    }
+
+    pub fn message(&self) -> &Entity<TextareaState> {
+        &self.message
+    }
+
+    pub fn refreshing(&self) -> bool {
+        self.refreshing
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The selected file, while it is still listed.
+    pub fn selected(&self) -> Option<&Path> {
+        self.selected.as_deref().filter(|s| self.repos.iter().any(|r| r.files.iter().any(|(p, _)| p == s)))
+    }
+
+    /// Select the file `delta` file rows from the selected one (the first
+    /// file when none is), and return its row.
+    pub fn step(&mut self, delta: isize, cx: &mut Context<Self>) -> Option<usize> {
+        let files: Vec<usize> = (0..self.rows.len()).filter(|&ix| matches!(self.rows[ix], RowKind::File(..))).collect();
+        let at = self.selected().and_then(|s| files.iter().position(|&ix| self.row_path(ix) == Some(s)));
+        let next = match at {
+            Some(at) => at.saturating_add_signed(delta).min(files.len().checked_sub(1)?),
+            None => 0,
+        };
+        let ix = *files.get(next)?;
+        self.selected = self.row_path(ix).map(Path::to_path_buf);
+        cx.notify();
+        Some(ix)
+    }
+
+    fn row_path(&self, ix: usize) -> Option<&Path> {
+        match self.rows.get(ix)? {
+            RowKind::File(ri, fi) => Some(&self.repos[*ri].files[*fi].0),
+            RowKind::Repo(_) => None,
+        }
+    }
+
+    /// The commit box's values (`changes.commit`), in `scope`.
+    pub fn commit_scope(&self, scope: template::Scope, cx: &App) -> template::Scope {
+        let checked: usize = self.on.iter().sum();
+        let count_text = match (checked, self.amend) {
+            (0, true) => "Message only".to_owned(),
+            (1, _) => "1 file".to_owned(),
+            (n, _) => format!("{n} files"),
+        };
+        let can_commit = !self.committing && (checked > 0 || self.amend) && !self.message.read(cx).value().trim().is_empty();
+        let (done, error) = match &self.commit_result {
+            Some(Ok(s)) => (s.clone(), String::new()),
+            Some(Err(e)) => (String::new(), e.clone()),
+            None => (String::new(), String::new()),
+        };
+        scope
+            .var("amend_icon", if self.amend { "square-check" } else { "square" })
+            .var("count_text", count_text)
+            .var("can_commit", can_commit)
+            .var("committing", self.committing)
+            .var("commit_key", crate::platform::shortcut("⌘↵"))
+            .var("done", done)
+            .var("error", error)
+    }
+
+    /// A row clicked: a repo folds; a file is selected, and outside the
+    /// review its diff previews in a popup.
+    fn click(&mut self, ix: usize, review: bool, cx: &mut Context<Self>) {
         match self.rows.get(ix).copied() {
             Some(RowKind::Repo(ri)) => {
                 let root = self.repos[ri].root.clone();
@@ -483,14 +560,21 @@ impl ChangesView {
             Some(RowKind::File(ri, fi)) => {
                 let (path, status) = self.repos[ri].files[fi].clone();
                 self.selected = Some(path.clone());
-                cx.emit(ChangesEvent::PreviewDiff(path, status));
+                if !review {
+                    cx.emit(ChangesEvent::PreviewDiff(path, status));
+                }
             },
             None => {},
         }
         cx.notify();
     }
 
-    fn render_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_rows(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.rows_for(range, false, window, cx)
+    }
+
+    /// The rows in `range`; in the `review` dialog a file click selects it.
+    pub fn rows_for(&mut self, range: Range<usize>, review: bool, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
         range
             .filter_map(|ix| {
@@ -547,7 +631,7 @@ impl ChangesView {
                     scope,
                     &mut |name, _, f| match (name, f) {
                         ("row", Framed::Box(d)) => {
-                            d.id(ix).on_click(cx.listener(move |this, _, _, cx| this.click(ix, cx))).into_any_element()
+                            d.id(ix).on_click(cx.listener(move |this, _, _, cx| this.click(ix, review, cx))).into_any_element()
                         },
                         ("check", Framed::Button(b)) => {
                             let row = self.rows.get(ix).copied();
@@ -604,6 +688,9 @@ impl Render for ChangesView {
                 ("refresh", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this, _: &ClickEvent, _, cx| this.refresh(true, cx))).into_any_element()
                 },
+                ("review", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(ChangesEvent::Review))).into_any_element()
+                },
                 ("hide", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |_, _: &ClickEvent, _, cx| cx.emit(ChangesEvent::Hide))).into_any_element()
                 },
@@ -611,30 +698,14 @@ impl Render for ChangesView {
             },
             cx,
         );
-        let checked: usize = self.on.iter().sum();
-        let count_text = match (checked, self.amend) {
-            (0, true) => "Message only".to_owned(),
-            (1, _) => "1 file".to_owned(),
-            (n, _) => format!("{n} files"),
-        };
-        let can_commit = !self.committing && (checked > 0 || self.amend) && !self.message.read(cx).value().trim().is_empty();
-        let (done, error) = match &self.commit_result {
-            Some(Ok(s)) => (s.clone(), String::new()),
-            Some(Err(e)) => (String::new(), e.clone()),
-            None => (String::new(), String::new()),
-        };
-        let mut scope = template::Scope::new("changes")
+        let mut scope = self
+            .commit_scope(template::Scope::new("changes"), cx)
             .var("empty", self.repos.is_empty())
             .var("refreshing", self.refreshing)
-            .var("amend_icon", if self.amend { "square-check" } else { "square" })
-            .var("count_text", count_text)
-            .var("can_commit", can_commit)
-            .var("committing", self.committing)
-            .var("commit_key", crate::platform::shortcut("⌘↵"))
-            .var("done", done)
-            .var("error", error)
-            .slot("header", header)
-            .slot("input", Textarea::new(&self.message).small());
+            .slot("header", header);
+        if !self.reviewing {
+            scope = scope.slot("input", Textarea::new(&self.message).small());
+        }
         if !self.repos.is_empty() {
             let list = uniform_list("changes", self.rows.len(), cx.processor(Self::render_rows)).track_scroll(&self.scroll).flex_1();
             scope = scope.slot("list", style::el("changes.list", cx).apply(list));

@@ -7,6 +7,7 @@ mod agent_ui;
 mod agents;
 mod arrange;
 mod caffeine;
+mod changes_review;
 mod changes_view;
 mod chat_view;
 #[cfg(debug_assertions)]
