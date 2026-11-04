@@ -187,8 +187,9 @@
   .also a + a::before { content: "·"; color: var(--faint); margin: 0 8px; }
   .also a[hidden] { display: none; }
 
-  /* window mock, laid out as the app: title bar, agents panel, a pane,
-     the explorer and changes docked on the right */
+  /* window mock, laid out as the app: title bar, agents over the explorer
+     on the left, a Claude tab with the usage and system rows under it,
+     Changes (with commit) and Services on the right */
   .shot { padding: 16px 0 96px; }
   .win {
     border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
@@ -199,73 +200,111 @@
   }
   .ic { display: inline-flex; flex: none; width: 15px; height: 15px; }
   .ic svg { width: 100%; height: 100%; }
-  .titlebar { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 12px; border-bottom: 1px solid var(--line); color: var(--dim); }
+  .titlebar { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 12px; color: var(--dim); }
   .lights { display: flex; gap: 8px; }
   .lights b { width: 12px; height: 12px; border-radius: 50%; background: var(--light-dot); }
-  .titlebar .title { flex: 1; color: var(--ink); }
-  .tb-btns { display: flex; gap: 4px; }
-  .tb-btns .ic { width: 26px; height: 24px; padding: 4px 6px; border-radius: 5px; }
+  .titlebar .title { flex: 1; color: var(--dim); }
+  .tb-btns { display: flex; gap: 2px; }
+  .tb-btns .ic { width: 24px; height: 22px; padding: 4px 5px; border-radius: 5px; }
   .tb-btns .ic.on { background: var(--raise); color: var(--ink); }
-  .body { display: grid; grid-template-columns: 270px minmax(0,1fr) 240px; height: 460px; }
-  .head { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; font-size: 12px; color: var(--dim); letter-spacing: .02em; }
+  .body { display: grid; grid-template-columns: 260px minmax(0,1fr) 290px; height: 540px; }
+  .head { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; font-size: 12.5px; color: var(--dim); }
   .head .t { flex: 1; }
+  .head .t b { color: var(--ink); font-weight: 600; font-size: 15px; }
+  .head .n { color: var(--faint); margin-left: 6px; }
   .head .ic { width: 13px; height: 13px; }
 
-  .agents { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-  .alist { list-style: none; margin: 0; padding: 4px 6px; flex: 1; display: flex; flex-direction: column; gap: 1px; }
-  .alist li { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px 0 6px; border-radius: 6px; white-space: nowrap; }
-  .alist li.folder { font-weight: 600; margin-top: 6px; }
+  .left { display: flex; flex-direction: column; min-height: 0; }
+  .alist { list-style: none; margin: 0; padding: 4px 6px; display: flex; flex-direction: column; gap: 1px; }
+  .alist li { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px 0 6px; border-radius: 6px; white-space: nowrap; }
+  .alist li.folder { margin-top: 6px; color: var(--ink); }
   .alist li.folder:first-child { margin-top: 0; }
+  .alist li.two { flex-wrap: wrap; padding: 4px 8px 5px 6px; row-gap: 0; }
   .alist li.on { background: var(--raise); }
   .alist .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .alist .folder .name { flex: 0 1 auto; }
   .alist .fill { flex: 1; }
+  .alist .sub { flex-basis: 100%; padding-left: 21px; font-size: 12px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; line-height: 1.45; }
   .ic.muted { color: var(--dim); }
   .ic.agent { color: var(--agent); }
   .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-  .status { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; color: var(--dim); }
-  .status .ic { width: 13px; height: 13px; }
+  .status { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; color: var(--faint); }
+  .status .ic { width: 12px; height: 12px; }
   .Working { color: var(--working); } .dot.Working { background: var(--working); }
   .Blocked { color: var(--blocked); } .dot.Blocked { background: var(--blocked); }
   .Done { color: var(--done); }
   .spin { animation: spin 3s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .gear { padding: 8px 12px; color: var(--dim); }
+  .left .explorer { margin-top: auto; border-top: 1px solid var(--line); }
 
-  .main { display: flex; flex-direction: column; min-width: 0; }
-  .tabs { display: flex; align-items: stretch; height: 32px; border-bottom: 1px solid var(--line); font-size: 12.5px; white-space: nowrap; color: var(--dim); }
-  .tabs > span { display: flex; align-items: center; gap: 6px; padding: 0 14px; border-right: 1px solid var(--line); }
-  .tabs > span.on { color: var(--ink); background: var(--bg); box-shadow: inset 0 -2px 0 var(--ink); }
-  .tabs .plus { padding: 0 10px; border: 0; }
-  .tabs .fill { flex: 1; border: 0; padding: 0; }
-  .tabs .tools { gap: 10px; border: 0; }
-  .tabs .ic { width: 13px; height: 13px; }
-  .term { flex: 1; background: var(--bg); padding: 16px 18px; color: var(--term-text); overflow: hidden; font: 400 13px/1.6 var(--mono); }
-  .term p { margin: 0; white-space: pre-wrap; }
-  .term .p, .term .mut { color: var(--faint); }
-  .term .you, .term .tool { color: var(--ink); }
-  .term .ok { color: var(--add); }
-  .term .gap { height: 12px; }
-  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--ink); vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-
-  .right { border-left: 1px solid var(--line); display: flex; flex-direction: column; color: var(--dim); }
-  .right section + section { border-top: 1px solid var(--line); }
   .tree { padding: 0 0 8px; }
   .tree div { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px; white-space: nowrap; color: var(--ink); }
   .tree .ic { width: 14px; height: 14px; color: var(--dim); }
   .tree .chev { width: 10px; height: 10px; }
   .tree .in { padding-left: 28px; }
-  .tree .sel { background: var(--raise); }
-  .repo { display: flex; align-items: baseline; gap: 6px; padding: 2px 12px 4px; }
-  .repo b { color: var(--ink); font-weight: 600; }
-  .repo .br { flex: 1; font-size: 12px; }
-  .file { display: flex; justify-content: space-between; padding: 1px 12px 1px 24px; }
-  .file em { font: normal 12px var(--mono); }
-  .a { color: var(--add); } .r { color: var(--del); }
+  .tree .sel { background: var(--raise); border-radius: 6px; margin: 0 6px; padding-left: 22px; }
+  .tree .mod { color: var(--blocked); }
 
-  /* the floating widgets: the agent monitor and the screenshot tray, each
-     a small window of its own over whatever is on screen */
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .tabs { display: flex; align-items: center; height: 34px; padding: 0 6px; font-size: 13px; white-space: nowrap; color: var(--dim); gap: 2px; }
+  .tabs > span { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; }
+  .tabs > span.on { color: var(--ink); background: var(--raise); }
+  .tabs .x { width: 10px; height: 10px; color: var(--faint); }
+  .tabs .fill { flex: 1; padding: 0; }
+  .tabs .tools { gap: 10px; }
+  .tabs .ic { width: 13px; height: 13px; }
+  .term { flex: 1; background: var(--bg); padding: 14px 18px; color: var(--term-text); overflow: hidden; font: 400 12.5px/1.6 var(--mono); border-radius: 8px 8px 0 0; }
+  .term p { margin: 0; white-space: pre-wrap; }
+  .term .p, .term .mut { color: var(--faint); }
+  .term .you { color: var(--ink); background: var(--raise); margin: 0 -6px; padding: 0 6px; }
+  .term .tool { color: var(--ink); font-weight: 500; }
+  .term .ok { color: var(--add); }
+  .term .lnk { color: var(--working); }
+  .term .gap { height: 12px; }
+  .term .line { border-top: 1px solid var(--line); margin: 10px 0 6px; }
+  .term .model { color: var(--working); }
+  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--ink); vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .bars { background: var(--bg); padding: 4px 18px 10px; font-size: 12.5px; color: var(--faint); display: flex; flex-direction: column; gap: 6px; }
+  .bar { display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
+  .bar b { color: var(--ink); font-weight: 500; }
+  .bar .ic { width: 13px; height: 13px; }
+  .meter { display: inline-block; width: 18px; height: 5px; border-radius: 3px; background: var(--raise); overflow: hidden; vertical-align: 1px; }
+  .meter i { display: block; height: 100%; background: var(--working); border-radius: 3px; }
+  .meter.hot i { background: var(--blocked); }
+  .ring { width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--working) 0 22%, var(--raise) 22% 100%); -webkit-mask: radial-gradient(circle, transparent 3px, #000 3.5px); mask: radial-gradient(circle, transparent 3px, #000 3.5px); }
+
+  .right { display: flex; flex-direction: column; color: var(--dim); min-height: 0; }
+  .right section + section { border-top: 1px solid var(--line); }
+  .changes { flex: 1; display: flex; flex-direction: column; }
+  .cb { display: inline-block; flex: none; width: 11px; height: 11px; border: 1.5px solid var(--dim); border-radius: 3px; position: relative; }
+  .cb.on::after { content: ""; position: absolute; left: 2.5px; top: 0; width: 3px; height: 6px; border: solid var(--ink); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+  .repo, .file { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px; white-space: nowrap; }
+  .repo .chev { width: 10px; height: 10px; }
+  .repo b { color: var(--ink); font-weight: 600; }
+  .repo .br { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--faint); }
+  .repo .k { font-size: 12px; color: var(--faint); }
+  .file { padding-left: 34px; }
+  .file .ic { width: 13px; height: 13px; }
+  .file .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .file .st { font: 500 12px var(--mono); }
+  .file.M .nm, .file.M .st, .file.M .ic { color: var(--blocked); }
+  .file.A .nm, .file.A .st, .file.A .ic { color: var(--add); }
+  .file.sel { background: var(--raise); border-radius: 6px; margin: 0 6px; padding-left: 28px; }
+  .commit { margin: auto 10px 10px; }
+  .msg { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; height: 48px; color: var(--faint); font-size: 12.5px; }
+  .crow { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
+  .crow .fill { flex: 1; }
+  .cbtn { background: var(--ink); color: var(--on-ink); font-weight: 600; border-radius: 6px; padding: 2px 10px; }
+  .svc { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; white-space: nowrap; }
+  .svc .ic { width: 13px; height: 13px; }
+  .svc .up { color: var(--add); }
+  .svc b { color: var(--ink); font-weight: 500; }
+  .svc .cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--faint); }
+  .svc .port { color: var(--working); font-size: 12px; }
+  .svc .k { font-size: 12px; color: var(--faint); }
+
+  /* the screenshot tray, a small window of its own over whatever is on screen */
   .shot { position: relative; }
   .float {
     position: absolute; z-index: 2;
@@ -277,9 +316,7 @@
   .fhead .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .fhead .ic { width: 12px; height: 12px; }
   .fhead .btn-x { width: 22px; height: 22px; padding: 5px; border-radius: 5px; }
-  .monitor { width: 290px; right: -14px; top: 92px; }
-  .monitor .alist { padding: 2px 6px 6px; }
-  .tray { width: 380px; left: 24%; bottom: 56px; padding: 6px 8px 8px; }
+  .tray { width: 380px; right: -18px; top: 214px; padding: 6px 8px 8px; }
   .tray .fhead { padding: 0 0 0 4px; gap: 2px; }
   .tray .fhead .t { color: var(--ink); }
   .tray .fhead .ic { width: 22px; height: 22px; padding: 5px; border-radius: 5px; }
@@ -307,7 +344,7 @@
   footer a:hover { color: var(--ink); }
 
   @media (max-width: 960px) {
-    .body { grid-template-columns: 220px minmax(0,1fr); }
+    .body { grid-template-columns: 230px minmax(0,1fr); }
     .right { display: none; }
     .shot { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
     .win { width: 100%; }
@@ -325,7 +362,7 @@
     .main { display: none; }
     .float { width: 100%; }
     .features { grid-template-columns: 1fr; padding-bottom: 64px; }
-    .agents { border-right: 0; }
+    .left .explorer { display: none; }
     .tb-btns { display: none; }
     footer .wrap { flex-direction: column; justify-content: center; gap: 6px; height: auto; padding: 28px 16px; }
   }
@@ -335,6 +372,33 @@
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-claude" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></symbol>
+    <symbol id="i-term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+    <symbol id="i-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></symbol>
+    <symbol id="i-ask" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M6 6v10"/><circle cx="18" cy="6" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+    <symbol id="i-cup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 8h1a4 4 0 1 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/><path d="M6 2v2M10 2v2M14 2v2"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+    <symbol id="i-split" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-15-6.7L3 8M3 3v5h5M3 12a9 9 0 0 0 15 6.7l3-2.7M21 21v-5h-5"/></symbol>
+  </defs>
+</svg>
 <div class="wrap">
   <nav>
     <a class="brand" href="./">Tern</a>
@@ -350,7 +414,7 @@
 
   <header class="hero">
     <h1>The terminal for coding agents</h1>
-    <p class="lede">Claude Code, Codex, OpenCode or any CLI agent in a native GPU-rendered terminal, with every agent of every folder in one list.</p>
+    <p class="lede">Claude Code, Codex, OpenCode or any CLI agent in a native GPU-rendered terminal, with every agent of every folder in one list, and the changes, servers and limits they touch beside them.</p>
     <div class="ctas">
       <a class="btn btn-primary js-download" href="https://github.com/cuong95nddev/tern/releases/latest">
         <span class="js-icon"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c.02 2.43 2.13 3.24 2.15 3.25-.02.06-.34 1.15-1.11 2.28-.67.98-1.36 1.95-2.45 1.97-1.07.02-1.42-.63-2.64-.63-1.23 0-1.61.61-2.62.65-1.05.04-1.85-1.06-2.52-2.04-1.38-1.99-2.43-5.63-1.02-8.08.7-1.22 1.95-1.99 3.31-2.01 1.03-.02 2.01.7 2.64.7.63 0 1.81-.86 3.06-.73.52.02 1.98.21 2.92 1.59-.08.05-1.74 1.02-1.72 3.05zM14.35 5.04c.56-.68.94-1.62.83-2.56-.81.03-1.79.54-2.37 1.21-.52.6-.98 1.56-.85 2.48.9.07 1.82-.46 2.39-1.13z"/></svg></span>
@@ -367,94 +431,114 @@
         <div class="lights"><b></b><b></b><b></b></div>
         <span class="title">tern</span>
         <div class="tb-btns">
-          <span class="ic on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
-          <span class="ic on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M6 6v10"/><circle cx="6" cy="5" r="0.5"/><circle cx="18" cy="6" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
-          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>
+          <span class="ic on"><svg><use href="#i-bot"/></svg></span>
+          <span class="ic on"><svg><use href="#i-folder"/></svg></span>
+          <span class="ic"><svg><use href="#i-gauge"/></svg></span>
+          <span class="ic"><svg><use href="#i-cpu"/></svg></span>
+          <span class="ic on"><svg><use href="#i-branch"/></svg></span>
+          <span class="ic on"><svg><use href="#i-file"/></svg></span>
+          <span class="ic"><svg><use href="#i-term"/></svg></span>
+          <span class="ic on"><svg><use href="#i-server"/></svg></span>
+          <span class="ic"><svg><use href="#i-cup"/></svg></span>
+          <span class="ic"><svg><use href="#i-gear"/></svg></span>
         </div>
       </div>
       <div class="body">
-        <aside class="agents">
-          <div class="head"><span class="t">AGENTS</span>
-            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></span>
-            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
-          </div>
-          <ul class="alist">
-            <li class="folder"><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 0 2 2v2"/></svg></span><span class="name">tern</span><span class="fill"></span><span class="dot Blocked"></span></li>
-            <li class="on"><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Update button</span><span class="status Working"><span class="ic spin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7M21.82 10.1a9.93 9.93 0 0 1 0 3.8M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69M13.9 21.82a9.94 9.94 0 0 1-3.8 0M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7M2.18 13.9a9.93 9.93 0 0 1 0-3.8M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/></svg></span>Working 42s</span></li>
-            <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Review daemon</span><span class="status Blocked"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg></span>Needs input</span></li>
-            <li><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></span><span class="name">codex</span><span class="status">5m</span></li>
-            <li class="folder"><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 0 2 2v2"/></svg></span><span class="name">api-server</span><span class="fill"></span><span class="dot Working"></span></li>
-            <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Rate limit</span><span class="status Working"><span class="ic spin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7M21.82 10.1a9.93 9.93 0 0 1 0 3.8M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69M13.9 21.82a9.94 9.94 0 0 1-3.8 0M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7M2.18 13.9a9.93 9.93 0 0 1 0-3.8M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/></svg></span>Working 3m</span></li>
-            <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Route tests</span><span class="status Done"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>Done</span></li>
-            <li class="folder"><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 0 2 2v2"/></svg></span><span class="name">dotfiles</span></li>
-          </ul>
-          <div class="gear"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span></div>
+        <aside class="left">
+          <section>
+            <div class="head"><span class="t"><b>Agents</b></span>
+              <span class="ic"><svg><use href="#i-bot"/></svg></span>
+              <span class="ic"><svg><use href="#i-camera"/></svg></span>
+              <span class="ic"><svg><use href="#i-folder-plus"/></svg></span>
+            </div>
+            <ul class="alist">
+              <li class="folder"><span class="ic muted"><svg><use href="#i-folder"/></svg></span><span class="name">tern</span><span class="fill"></span><span class="dot Blocked"></span></li>
+              <li class="two on"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Update button</span><span class="status Working">42s <span class="ic spin"><svg><use href="#i-spin"/></svg></span></span><span class="sub">Moving the button into the title bar…</span></li>
+              <li class="two"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Review daemon</span><span class="status Blocked">1m <span class="ic"><svg><use href="#i-ask"/></svg></span></span><span class="sub">Should I also drop the old socket path?</span></li>
+              <li class="folder"><span class="ic muted"><svg><use href="#i-folder"/></svg></span><span class="name">api-server</span><span class="fill"></span><span class="dot Working"></span></li>
+              <li class="two"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Rate limit</span><span class="status Working">3m <span class="ic spin"><svg><use href="#i-spin"/></svg></span></span><span class="sub">Ran npm test -- routes</span></li>
+              <li class="two"><span class="ic muted"><svg><use href="#i-term"/></svg></span><span class="name">codex</span><span class="status Done">now <span class="ic"><svg><use href="#i-check"/></svg></span></span><span class="sub">The route tests pass now.</span></li>
+            </ul>
+          </section>
+          <section class="explorer">
+            <div class="head"><span class="t">tern</span>
+              <span class="ic"><svg><use href="#i-file"/></svg></span>
+              <span class="ic"><svg><use href="#i-folder-plus"/></svg></span>
+            </div>
+            <div class="tree">
+              <div><span class="ic chev"><svg><use href="#i-down"/></svg></span><span class="ic"><svg><use href="#i-folder"/></svg></span>crates</div>
+              <div class="in"><span class="ic"><svg><use href="#i-file"/></svg></span><span class="mod">main_window.rs</span></div>
+              <div class="in sel"><span class="ic"><svg><use href="#i-file"/></svg></span><span class="mod">update.rs</span></div>
+              <div><span class="ic chev"><svg><use href="#i-right"/></svg></span><span class="ic"><svg><use href="#i-folder"/></svg></span>docs</div>
+              <div><span class="ic chev"><svg><use href="#i-right"/></svg></span><span class="ic"><svg><use href="#i-folder"/></svg></span>site</div>
+              <div class="in"><span class="ic"><svg><use href="#i-file"/></svg></span>Cargo.toml</div>
+              <div class="in"><span class="ic"><svg><use href="#i-file"/></svg></span>README.md</div>
+            </div>
+          </section>
         </aside>
 
         <div class="main">
           <div class="tabs">
-            <span class="on">claude</span>
-            <span>zsh</span>
-            <span>update.rs</span>
-            <span class="plus">+</span>
+            <span class="on"><span class="ic agent"><svg><use href="#i-claude"/></svg></span>Update button<span class="ic x"><svg><use href="#i-x"/></svg></span></span>
+            <span><span class="ic"><svg><use href="#i-term"/></svg></span>zsh</span>
+            <span><span class="ic"><svg><use href="#i-file"/></svg></span>update.rs</span>
+            <span>+</span>
             <span class="fill"></span>
             <span class="tools">
-              <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/></svg></span>
-              <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg></span>
+              <span class="ic"><svg><use href="#i-chat"/></svg></span>
+              <span class="ic"><svg><use href="#i-split"/></svg></span>
+              <span class="ic"><svg><use href="#i-grid"/></svg></span>
             </span>
           </div>
           <div class="term">
-            <p><span class="p">~/ws/tern $</span> <span class="you">claude</span></p>
-            <div class="gap"></div>
             <p class="you">&gt; the update button overlaps the tabs, show it in the title bar instead</p>
             <div class="gap"></div>
-            <p><span class="ok">⏺</span> <span class="tool">Read</span> <span class="mut">crates/tern-app/src/main_window.rs</span></p>
-            <p><span class="ok">⏺</span> <span class="tool">Update</span> <span class="mut">crates/tern-app/src/update.rs</span></p>
-            <p><span class="ok">⏺</span> <span class="tool">Update</span> <span class="mut">main_window.rs  +18 −1</span></p>
-            <p><span class="ok">⏺</span> <span class="tool">Bash</span> <span class="mut">cargo check -p tern-app</span></p>
+            <p class="mut">  Thought for 4s</p>
+            <p><span class="ok">●</span> <span class="tool">Read</span>(<span class="mut">crates/tern-app/src/main_window.rs</span>)</p>
+            <p><span class="ok">●</span> <span class="tool">Update</span>(<span class="mut">crates/tern-app/src/update.rs</span>)</p>
+            <p class="mut">  ⎿ Updated update.rs with 212 additions</p>
+            <p><span class="ok">●</span> <span class="tool">Bash</span>(<span class="mut">cargo check -p tern-app</span>)</p>
             <p class="mut">  ⎿ Finished `dev` profile in 5.01s</p>
             <div class="gap"></div>
-            <p class="you">&gt; <span class="cursor"></span></p>
+            <p>● The button now sits in the title bar, right of the panel</p>
+            <p>  buttons, and only shows when an update is ready. See</p>
+            <p>  <span class="lnk">crates/tern-app/src/main_window.rs:412</span>.</p>
+            <div class="line"></div>
+            <p>&gt; <span class="cursor"></span></p>
+            <div class="line"></div>
+            <p class="mut">~/ws/tern | <span class="model">Opus 5.5</span> | 22% 44k/200k</p>
+          </div>
+          <div class="bars">
+            <div class="bar"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><b>you@example.com</b> 5h <b>12%</b> <span class="meter"><i style="width:12%"></i></span> 4h 8m · W <b>34%</b> <span class="meter"><i style="width:34%"></i></span> 4d 23h · <span class="ring"></span> 22%</div>
+            <div class="bar">CPU <b>20%</b> <span class="meter"><i style="width:20%"></i></span> · MEM <b>63%</b> <span class="meter hot"><i style="width:63%"></i></span></div>
           </div>
         </div>
 
         <aside class="right">
-          <section>
-            <div class="head"><span class="t">TERN</span></div>
-            <div class="tree">
-              <div><span class="ic chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>crates</div>
-              <div class="in"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>main_window.rs</div>
-              <div class="in sel"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>update.rs</div>
-              <div><span class="ic chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>docs</div>
-              <div><span class="ic chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>scripts</div>
-              <div class="in"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>Cargo.toml</div>
-              <div class="in"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>README.md</div>
+          <section class="changes">
+            <div class="head"><span class="t">Changes<span class="n">4</span></span>
+              <span class="ic"><svg><use href="#i-refresh"/></svg></span>
+              <span class="ic"><svg><use href="#i-x"/></svg></span>
+            </div>
+            <div class="repo"><span class="ic chev"><svg><use href="#i-down"/></svg></span><span class="cb on"></span><b>tern</b><span class="br">main</span><span class="k">3</span></div>
+            <div class="file M"><span class="cb on"></span><span class="ic"><svg><use href="#i-file"/></svg></span><span class="nm">update.rs</span><span class="st">M</span></div>
+            <div class="file M sel"><span class="cb on"></span><span class="ic"><svg><use href="#i-file"/></svg></span><span class="nm">main_window.rs</span><span class="st">M</span></div>
+            <div class="file A"><span class="cb"></span><span class="ic"><svg><use href="#i-file"/></svg></span><span class="nm">update_badge.svg</span><span class="st">A</span></div>
+            <div class="repo"><span class="ic chev"><svg><use href="#i-right"/></svg></span><span class="cb on"></span><b>api-server</b><span class="br">fix/rate-limit</span><span class="k">1</span></div>
+            <div class="commit">
+              <div class="msg">Commit message (⌘↩ commits)</div>
+              <div class="crow"><span class="cb"></span>Amend<span class="fill"></span>3 files<span class="cbtn">Commit</span></div>
             </div>
           </section>
           <section>
-            <div class="head"><span class="t">CHANGES</span></div>
-            <div class="repo"><b>tern</b><span class="br">main</span></div>
-            <div class="file"><span>update.rs</span><em class="a">+212</em></div>
-            <div class="file"><span>main_window.rs</span><em><span class="a">+18</span> <span class="r">−1</span></em></div>
-            <div class="file"><span>release.yml</span><em><span class="a">+10</span> <span class="r">−1</span></em></div>
-            <div class="repo" style="margin-top:8px"><b>api-server</b><span class="br">main</span></div>
-            <div class="file"><span>routes.ts</span><em><span class="a">+4</span> <span class="r">−9</span></em></div>
+            <div class="head"><span class="t">Services<span class="n">2</span></span><span class="ic"><svg><use href="#i-x"/></svg></span></div>
+            <div class="svc"><span class="ic up"><svg><use href="#i-server"/></svg></span><b>web</b><span class="cmd">npm run dev</span><span class="port">:5173</span><span class="k">8m</span></div>
+            <div class="svc"><span class="ic up"><svg><use href="#i-server"/></svg></span><b>api</b><span class="cmd">cargo run</span><span class="port">:8080</span><span class="k">3m</span></div>
+            <div style="height:8px"></div>
           </section>
         </aside>
       </div>
     </div>
-    <div class="float monitor" aria-label="Agent monitor">
-      <div class="fhead"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg></span><span class="t">1 need input · 2 working · 1 done</span><span class="ic btn-x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></span></div>
-      <ul class="alist">
-        <li class="folder"><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 0 2 2v2"/></svg></span><span class="name">tern</span><span class="fill"></span><span class="dot Blocked"></span></li>
-        <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Update button</span><span class="status Working"><span class="ic spin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7M21.82 10.1a9.93 9.93 0 0 1 0 3.8M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69M13.9 21.82a9.94 9.94 0 0 1-3.8 0M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7M2.18 13.9a9.93 9.93 0 0 1 0-3.8M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/></svg></span>Working 42s</span></li>
-        <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Review daemon</span><span class="status Blocked"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg></span>Needs input</span></li>
-        <li class="folder"><span class="ic muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 0 2 2v2"/></svg></span><span class="name">api-server</span><span class="fill"></span><span class="dot Working"></span></li>
-        <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Rate limit</span><span class="status Working"><span class="ic spin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7M21.82 10.1a9.93 9.93 0 0 1 0 3.8M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69M13.9 21.82a9.94 9.94 0 0 1-3.8 0M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7M2.18 13.9a9.93 9.93 0 0 1 0-3.8M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/></svg></span>Working 3m</span></li>
-        <li><span class="ic agent"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8z"/></svg></span><span class="name">Route tests</span><span class="status Done"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>Done</span></li>
-      </ul>
-    </div>
-
     <div class="float tray" aria-label="Screenshots">
       <div class="fhead"><span class="t">Screenshots (2)</span>
         <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2M9 3h1M9 21h1M14 3h1M14 21h1M3 9v1M21 9v1M3 14v1M21 14v1"/></svg></span>
@@ -479,11 +563,19 @@
   <section class="features" aria-label="Features">
     <div>
       <h3>Every agent in one list</h3>
-      <p>Claude Code, Codex and OpenCode terminals of every open folder, each with Working, Needs input or Done.</p>
+      <p>Claude Code, Codex and OpenCode tabs of every open folder: Working, Needs input or Done, with each agent's latest sentence and tool.</p>
     </div>
     <div>
-      <h3>Agent monitor</h3>
-      <p>A small window of its own that keeps every agent's state in view while you work elsewhere.</p>
+      <h3>Terminal or chat</h3>
+      <p>Switch a Claude tab between its terminal and a chat view of the same conversation, and back.</p>
+    </div>
+    <div>
+      <h3>Context limits and handoffs</h3>
+      <p>A ring shows how full each Claude tab's context is. Past a limit you set, Claude writes a handoff and goes on in a fresh conversation.</p>
+    </div>
+    <div>
+      <h3>Usage at a glance</h3>
+      <p>Your Claude plan's 5-hour and weekly limits, per account, and the CPU and memory each terminal takes.</p>
     </div>
     <div>
       <h3>Screenshots for agents<span class="tag">macOS, Windows</span></h3>
@@ -494,24 +586,40 @@
       <p>Terminals keep running after you quit, update or crash, and come back attached with their scrollback.</p>
     </div>
     <div>
-      <h3>Every repo's changes</h3>
-      <p>The Changes panel lists what changed in every git repo under the folder. Click a file for its diff.</p>
+      <h3>Changes, commit and log</h3>
+      <p>The git changes of every repo under the folder, a diff on click, a review of them all, commit and the log.</p>
     </div>
     <div>
-      <h3>Explorer and editor</h3>
-      <p>Browse the folder, edit files, diff against HEAD and preview Markdown next to the agents.</p>
+      <h3>Code navigation</h3>
+      <p>File tabs go to definition, implementations and super method through language servers, with gutter icons.</p>
+    </div>
+    <div>
+      <h3>Palette and search</h3>
+      <p>Commands and files in one palette (<code>⌘P</code>), and a search in files over an index, fast on big repos.</p>
+    </div>
+    <div>
+      <h3>Services for agents</h3>
+      <p>Agents start dev servers through <code>tern --mcp</code>; the Services panel shows their ports, logs and a stop button.</p>
+    </div>
+    <div>
+      <h3>A fast terminal</h3>
+      <p>GPU-rendered, drawn at the display's rate, scrolled by pixels, with find, OSC 52 and kitty images.</p>
     </div>
     <div>
       <h3>Panels where you want them</h3>
-      <p>Dock a panel on either side, among the panes, floating, or in a window of its own. Split panes in a grid.</p>
+      <p>Edit the layout: dock panels on either side, in groups, among the panes or in a window of their own. Split panes in a grid.</p>
     </div>
     <div>
       <h3>From your phone</h3>
-      <p><code>tern --web</code> serves your terminals to a browser over Tailscale, to answer an agent away from the desk.</p>
+      <p><code>tern --web</code> serves your terminals over Tailscale. Allow a device to type, and take the session back when you are at the desk.</p>
     </div>
     <div>
-      <h3>Settings in plain files</h3>
-      <p>Themes, fonts and layout are files, applied as you save, easy for an agent to edit.</p>
+      <h3>Themes agents can change</h3>
+      <p>Themes, fonts and layout are plain files applied as you save. Ask an agent to restyle Tern and it sees the result.</p>
+    </div>
+    <div>
+      <h3>macOS, Windows, Linux</h3>
+      <p>Native on all three, written in Rust, with updates that install themselves and keep your session.</p>
     </div>
   </section>
 </div>
