@@ -62,6 +62,15 @@ pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
     out
 }
 
+/// The workspace each window shows, frontmost window first.
+pub fn shown_workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
+    let mut wins = windows(cx);
+    if let Some(stack) = cx.window_stack() {
+        wins.sort_by_key(|(h, _)| stack.iter().position(|s| s == h).unwrap_or(usize::MAX));
+    }
+    wins.into_iter().filter_map(|(h, m)| Some((h, m.read(cx).active_ws()?.clone()))).collect()
+}
+
 /// Every workspace with its window, in a steady order: windows as they
 /// opened, and in each its tabs' order.
 pub fn all_workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
@@ -578,6 +587,8 @@ impl MainWindow {
                 crate::dock_badge::clear(cx);
             }
         });
+        // A theme for each of light and dark follows the system's.
+        let appearance_sub = cx.observe_window_appearance(window, |_: &mut Self, _, cx| crate::settings::appearance_changed(cx));
         // The focused view went away (a panel moved, closed or popped out):
         // keys would only reach the window's root, past the workspace's actions.
         let focus_lost_sub = cx.on_focus_lost(window, |this: &mut Self, window, cx| this.focus_active(window, cx));
@@ -637,7 +648,7 @@ impl MainWindow {
             backdrop: crate::style::Backdrop::default(),
             placement: window_state::placement(window, cx),
             focus: cx.focus_handle(),
-            _subs: vec![bounds_sub, activation_sub, focus_lost_sub],
+            _subs: vec![bounds_sub, activation_sub, appearance_sub, focus_lost_sub],
             _save_placement: Task::ready(()),
             _tick: None,
         }

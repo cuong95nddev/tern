@@ -22,7 +22,7 @@ use crate::UnixStream;
 use crate::paths;
 use crate::proto::{
     self, ASK_HANDOFF_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR,
-    LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, Role, ServerMsg, SessionInfo,
+    LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, PALETTE_MINOR, Role, ServerMsg, SessionInfo,
 };
 
 /// What the client asks who runs in a session's foreground with: the PTY
@@ -34,8 +34,18 @@ type Pty = u32;
 
 /// Gets each hook request: the tab's token and the JSON body.
 pub type HookSink = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
-/// Gets each request to show a session (from the menu bar agent).
-pub type RevealSink = Arc<dyn Fn(u64) + Send + Sync>;
+/// What the daemon asks the UI to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiRequest {
+    /// Show session `id` (asked by the menu bar agent).
+    Reveal(u64),
+    /// An agent's request (a JSON object), to answer with
+    /// [`MuxClient::answer_ui`] and this `ask`.
+    Ask { ask: u64, request: String },
+}
+
+/// Gets each request for the UI.
+pub type UiSink = Arc<dyn Fn(UiRequest) + Send + Sync>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -163,7 +173,7 @@ struct Inner {
     /// connection ends, as it does when one succeeds).
     handoffs: Mutex<HashMap<u64, mpsc::Sender<String>>>,
     hooks: HookSink,
-    reveal: RevealSink,
+    ui: UiSink,
     server_pid: u32,
     server_minor: u32,
     server_version: String,
@@ -318,13 +328,13 @@ impl Drop for Closer {
 impl MuxClient {
     /// Connect to the daemon in `dir`, starting it first when `spawn_daemon`
     /// and none runs.
-    pub fn connect(dir: &Path, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> io::Result<Self> {
+    pub fn connect(dir: &Path, spawn_daemon: bool, hooks: HookSink, ui: UiSink) -> io::Result<Self> {
         // A daemon that was exiting (idle) turns us away: once it has gone,
         // a new one starts.
         let deadline = Instant::now() + 2 * CONNECT_TIMEOUT;
         let mut turned_away = false;
         loop {
-            match Self::connect_once(dir, spawn_daemon, hooks.clone(), reveal.clone()) {
+            match Self::connect_once(dir, spawn_daemon, hooks.clone(), ui.clone()) {
                 Err(e) if spawn_daemon && (turned_away || e.kind() == io::ErrorKind::ConnectionAborted) && Instant::now() < deadline => {
                     log::info!("daemon went away while connecting ({e}); again");
                     turned_away = true;
@@ -335,7 +345,7 @@ impl MuxClient {
         }
     }
 
-    fn connect_once(dir: &Path, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> io::Result<Self> {
+    fn connect_once(dir: &Path, spawn_daemon: bool, hooks: HookSink, ui: UiSink) -> io::Result<Self> {
         let sock = paths::socket_path(dir);
         let stream = match UnixStream::connect(&sock) {
             Ok(s) => s,
@@ -400,7 +410,7 @@ impl MuxClient {
             chat_lists: Mutex::default(),
             handoffs: Mutex::default(),
             hooks,
-            reveal,
+            ui,
             server_pid,
             server_minor,
             server_version,
@@ -592,6 +602,20 @@ impl MuxClient {
         self.inner.server_minor >= ASK_HANDOFF_MINOR
     }
 
+    /// Answer the daemon's [`UiRequest::Ask`] `ask` with `answer` (a JSON
+    /// object).
+    pub fn answer_ui(&self, ask: u64, answer: String) {
+        let _ = self.inner.send(ClientMsg::UiAnswer { ask, answer });
+    }
+
+    /// Tell the daemon the UI wrote a new terminal palette (an older daemon
+    /// looks at it on its own).
+    pub fn palette_changed(&self) {
+        if self.inner.server_minor >= PALETTE_MINOR {
+            let _ = self.inner.send(ClientMsg::PaletteChanged);
+        }
+    }
+
     /// Ask session `id`'s Claude for a handoff, to step away.
     pub fn ask_handoff(&self, id: u64) {
         if self.takes_handoffs() {
@@ -614,15 +638,15 @@ pub struct Connector {
     dir: PathBuf,
     spawn_daemon: bool,
     hooks: HookSink,
-    reveal: RevealSink,
+    ui: UiSink,
     cur: Mutex<Option<MuxClient>>,
 }
 
 impl Connector {
-    pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink, reveal: RevealSink) -> Self {
+    pub fn new(dir: PathBuf, spawn_daemon: bool, hooks: HookSink, ui: UiSink) -> Self {
         // Before an update can replace the executable.
         paths::build_id();
-        Self { dir, spawn_daemon, hooks, reveal, cur: Mutex::new(None) }
+        Self { dir, spawn_daemon, hooks, ui, cur: Mutex::new(None) }
     }
 
     /// The connection, starting a daemon if none runs. A daemon of another
@@ -632,7 +656,7 @@ impl Connector {
         let mut cur = self.cur.lock().unwrap();
         let c = match cur.as_ref().filter(|c| c.alive()) {
             Some(c) => c.clone(),
-            None => MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone(), self.reveal.clone())?,
+            None => MuxClient::connect(&self.dir, self.spawn_daemon, self.hooks.clone(), self.ui.clone())?,
         };
         if self.spawn_daemon && c.server_outdated() && c.list().is_ok_and(|l| l.iter().all(|s| s.exited)) {
             log::info!("replacing idle daemon {} (Tern {})", c.server_pid(), c.server_version());
@@ -640,7 +664,7 @@ impl Connector {
             drop(c);
             *cur = None;
             kill_process(pid)?;
-            let c = MuxClient::connect(&self.dir, true, self.hooks.clone(), self.reveal.clone())?;
+            let c = MuxClient::connect(&self.dir, true, self.hooks.clone(), self.ui.clone())?;
             *cur = Some(c.clone());
             return Ok(c);
         }
@@ -660,7 +684,7 @@ impl Connector {
         if let Some(c) = cur.as_ref().filter(|c| c.alive()) {
             return Some(c.clone());
         }
-        let c = MuxClient::connect(&self.dir, false, self.hooks.clone(), self.reveal.clone()).ok()?;
+        let c = MuxClient::connect(&self.dir, false, self.hooks.clone(), self.ui.clone()).ok()?;
         *cur = Some(c.clone());
         Some(c)
     }
@@ -680,6 +704,23 @@ impl Connector {
     pub fn set_muted(&self, id: u64, muted: bool) {
         if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
             c.set_muted(id, muted);
+        }
+    }
+
+    /// Answer an agent's request (see [`MuxClient::answer_ui`]), over the
+    /// live connection: the request came on it.
+    pub fn answer_ui(&self, ask: u64, answer: String) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.answer_ui(ask, answer);
+        }
+    }
+
+    /// The UI wrote a new terminal palette (see
+    /// [`MuxClient::palette_changed`]). Only over a live connection: a UI
+    /// that connects has the daemon look at the palette anyway.
+    pub fn palette_changed(&self) {
+        if let Some(c) = self.cur.lock().unwrap().as_ref().filter(|c| c.alive()) {
+            c.palette_changed();
         }
     }
 
@@ -1006,11 +1047,12 @@ fn read_loop(inner: &Arc<Inner>, mut reader: FrameReader) {
         };
         match msg {
             ServerMsg::Hello { .. } => {},
-            ServerMsg::Reveal { id } => (inner.reveal)(id),
+            ServerMsg::Reveal { id } => (inner.ui)(UiRequest::Reveal(id)),
+            ServerMsg::UiAsk { ask, request } => (inner.ui)(UiRequest::Ask { ask, request }),
             // For observers.
             ServerMsg::SessionsChanged { .. } | ServerMsg::ChatsChanged { .. } | ServerMsg::Revealed { .. } => {},
             // For `services::Services`.
-            ServerMsg::ServiceStarted { .. } | ServerMsg::Text { .. } => {},
+            ServerMsg::ServiceStarted { .. } | ServerMsg::Text { .. } | ServerMsg::UiAnswer { .. } => {},
             ServerMsg::Attached { req, id, token, pid, fd, snapshot } => {
                 #[cfg(unix)]
                 let tty = if fd { reader.take_fd().map(Pty::from) } else { None };

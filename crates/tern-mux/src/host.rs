@@ -33,7 +33,7 @@ use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tern_term::claude_status::{ClaudeStatus, ClaudeTracker, TurnState};
 use tern_term::mirror::Marker;
 use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report, version_report};
-use tern_term::palette::PaletteFile;
+use tern_term::palette::{Palette, PaletteFile};
 use tern_term::snapshot::{self, Snapshot};
 use tern_term::status::{ActivityStatus, next_status};
 use tern_term::vt::event::{Event, EventListener, OnResize, WindowSize};
@@ -44,7 +44,7 @@ use tern_term::vt::tty::EventedReadWrite;
 use tern_term::vt::tty::{self, ChildEvent, EventedPty, Options, Shell};
 #[cfg(windows)]
 use tern_term::vt::tty::{PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN};
-use tern_term::vt::vte::ansi::{Processor, StdSyncHandler};
+use tern_term::vt::vte::ansi::{Processor, Rgb, StdSyncHandler};
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::proto::{ServerMsg, SessionInfo};
@@ -62,8 +62,6 @@ const MAX_LOCKED_READ: usize = 1 << 20;
 const PROBE_REPLY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the rows+1 size of an attach "jiggle" lasts.
 const JIGGLE: Duration = Duration::from_millis(50);
-/// How often a program that wants color scheme reports has the theme checked.
-const SCHEME_CHECK: Duration = Duration::from_millis(300);
 /// How long a closed program has to exit after SIGHUP (on Windows, after
 /// its pseudoconsole is closed) before it is killed.
 const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -176,6 +174,8 @@ enum Msg {
     Resize(TermSize),
     Jiggle(TermSize),
     Shutdown,
+    /// The UI wrote a new palette.
+    Palette,
     /// Stop and send the driver back (see [`Host::pause`]).
     #[cfg(unix)]
     Pause(Sender<Box<dyn Paused>>),
@@ -253,6 +253,22 @@ type HostParser = Arc<Mutex<Processor<StdSyncHandler>>>;
 fn theme_palette() -> &'static PaletteFile {
     static FILE: OnceLock<PaletteFile> = OnceLock::new();
     FILE.get_or_init(|| PaletteFile::new(crate::paths::palette_path()))
+}
+
+/// What a color scheme report stands for: whether the palette is dark, and
+/// the default colors a program asks for after one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Scheme {
+    dark: bool,
+    foreground: Rgb,
+    background: Rgb,
+    cursor: Rgb,
+}
+
+impl Scheme {
+    fn of(p: &Palette) -> Self {
+        Self { dark: p.is_dark(), foreground: p.foreground, background: p.background, cursor: p.cursor }
+    }
 }
 
 impl EventListener for Listener {
@@ -596,6 +612,12 @@ impl Host {
         self.shared.send(Msg::Jiggle(size));
     }
 
+    /// The UI wrote a new palette: the program hears of it if it asked for
+    /// color scheme reports and the palette's colors changed.
+    pub fn palette_changed(&self) {
+        self.shared.send(Msg::Palette);
+    }
+
     pub fn info(&self) -> SessionInfo {
         SessionInfo { cwd: self.cwd(), program: self.foreground_programs().into_iter().next(), ..self.info_without_processes() }
     }
@@ -814,9 +836,8 @@ struct Driver<P: HostPty> {
     last_probe_reply: Option<Instant>,
     /// The program asked for color scheme reports (`CSI ? 2031 h`).
     scheme_reports: bool,
-    /// The app's theme was dark when last looked at, and when that was.
-    dark: bool,
-    scheme_checked: Instant,
+    /// The app's palette when last looked at.
+    scheme: Scheme,
     /// The size to go back to after an attach's extra row, and when.
     jiggle: Option<(Instant, TermSize)>,
     /// When a polled program was last checked for its end.
@@ -868,8 +889,7 @@ impl<P: HostPty> Driver<P> {
             writes: VecDeque::new(),
             last_probe_reply: None,
             scheme_reports: false,
-            dark: theme_palette().get().is_dark(),
-            scheme_checked: Instant::now(),
+            scheme: Scheme::of(&theme_palette().get()),
             jiggle: None,
             exit_checked: Instant::now(),
             claude_check: None,
@@ -917,10 +937,9 @@ impl<P: HostPty> Driver<P> {
         loop {
             let now = Instant::now();
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
-            let scheme_check = self.scheme_reports.then(|| self.scheme_checked + SCHEME_CHECK);
             let exit_check = P::POLLED.then(|| self.exit_checked + EXIT_POLL);
             let hooks_check = self.claude_hooks_check(now);
-            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), scheme_check, exit_check, self.claude_check, hooks_check];
+            let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), exit_check, self.claude_check, hooks_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
             events.clear();
             if let Err(e) = self.poller.wait(&mut events, timeout) {
@@ -939,9 +958,6 @@ impl<P: HostPty> Driver<P> {
                     parser.stop_sync(&mut *term);
                     self.emit_marker(&Marker::SyncFlush);
                 }
-            }
-            if scheme_check.is_some_and(|t| t <= now) {
-                self.check_scheme(now);
             }
             if self.claude_check.is_some_and(|t| t <= now) {
                 self.check_claude(now);
@@ -973,6 +989,7 @@ impl<P: HostPty> Driver<P> {
                         self.resize(TermSize { rows: size.rows + 1, ..size });
                         self.jiggle = Some((Instant::now() + JIGGLE, size));
                     },
+                    Ok(Msg::Palette) => self.check_scheme(),
                     Ok(Msg::Shutdown) => {
                         // On Windows, `end` closes the pseudoconsole and
                         // makes sure the program ends.
@@ -1113,11 +1130,11 @@ impl<P: HostPty> Driver<P> {
                 OscSignal::Notify { title, body } => self.observer.notify(self.id, title.clone(), body.clone()),
                 OscSignal::ColorSchemeReports(on) => {
                     self.scheme_reports = *on;
-                    self.check_scheme(Instant::now());
+                    self.check_scheme();
                 },
                 OscSignal::ColorSchemeQuery => {
-                    self.dark = theme_palette().get().is_dark();
-                    self.writes.push_back((color_scheme_report(self.dark).into(), 0));
+                    self.scheme = Scheme::of(&theme_palette().get());
+                    self.writes.push_back((color_scheme_report(self.scheme.dark).into(), 0));
                 },
                 OscSignal::VersionQuery => self.writes.push_back((version_report(env!("CARGO_PKG_VERSION")).into(), 0)),
                 // The UI's (it keeps the folder).
@@ -1250,15 +1267,16 @@ impl<P: HostPty> Driver<P> {
         }
     }
 
-    /// Tell a program that asked for it when the app's theme turned from
-    /// dark to light or back.
-    fn check_scheme(&mut self, now: Instant) {
-        self.scheme_checked = now;
-        let dark = theme_palette().get().is_dark();
-        if dark != self.dark {
-            self.dark = dark;
+    /// Tell a program that asked for it when the app's palette changed:
+    /// turned from dark to light or back, or (as herdr and Ghostty do) took
+    /// other default colors, which the program asks for again (OSC 10 / 11
+    /// / 12) on a report.
+    fn check_scheme(&mut self) {
+        let scheme = Scheme::of(&theme_palette().get());
+        if scheme != self.scheme {
+            self.scheme = scheme;
             if self.scheme_reports {
-                self.writes.push_back((color_scheme_report(dark).into(), 0));
+                self.writes.push_back((color_scheme_report(scheme.dark).into(), 0));
             }
         }
     }

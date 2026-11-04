@@ -49,6 +49,11 @@ test-support = [
     "gpui/test-support",
     "gpui_apple/test-support",
 ]
+# Tern: `render_to_image` outside tests.
+window-capture = [
+    "gpui/window-capture",
+    "gpui_apple/window-capture",
+]
 
 [lib]
 name = "gpui_macos"

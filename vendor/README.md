@@ -92,3 +92,16 @@ set one (go to implementations).
 
 The crate's own tests need its dev-dependencies (criterion, gpui-fast), which
 are not built here, so these changes are covered by the app's tests and use.
+
+## gpui-pre, gpui-pre-apple, gpui-pre-macos and gpui-pre-windows 0.3.9: `window-capture`
+
+A new feature, `window-capture`, compiles `Window::render_to_image` (and the
+platform window's and the Metal and DirectX renderers' `render_to_image`
+under it) outside `test-support`: `src/window.rs`, `src/platform.rs`,
+`src/metal_renderer.rs` (and its `read_texture_to_image`), the macOS and
+Windows `src/window.rs`, and `src/directx_renderer.rs` take
+`feature = "window-capture"` in their `cfg`s, and each crate's `Cargo.toml`
+declares it (passing it on to the crates under it). Tern turns it on so an
+agent can see the window as it was last drawn (`tern --mcp`'s
+`window_shot`), without screen recording permission and even when the
+window is covered. The code is unchanged.

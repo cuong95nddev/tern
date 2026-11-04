@@ -316,6 +316,18 @@ struct State {
     exiting: bool,
     /// Handing the sessions to another daemon: no new ones start.
     handing_off: bool,
+    /// Agents' `AskUi`s a UI has yet to answer, by the `ask` it got.
+    ui_asks: HashMap<u64, UiAsk>,
+    next_ui_ask: u64,
+}
+
+/// An `AskUi` waiting for its answer.
+struct UiAsk {
+    /// Who asked, and its `req`.
+    asker: Weak<Conn>,
+    req: u64,
+    /// The UI asked.
+    ui: Weak<Conn>,
 }
 
 /// Why a daemon stops serving.
@@ -498,6 +510,8 @@ impl Server {
                     idle_since: Some(Instant::now()),
                     exiting: false,
                     handing_off: false,
+                    ui_asks: HashMap::new(),
+                    next_ui_ask: 1,
                 }),
                 hooks,
                 sock: paths::socket_path(dir),
@@ -667,6 +681,9 @@ impl Server {
                 Some(Role::Ui) => {
                     st.clients += 1;
                     st.uis.push(Arc::downgrade(&conn));
+                    // It may have written a new palette while it wasn't
+                    // connected.
+                    Self::palette_changed(&st);
                 },
                 Some(_) => st.observers.push(Arc::downgrade(&conn)),
                 None => {},
@@ -698,6 +715,13 @@ impl Server {
         for c in st.chats.values() {
             c.detach(Arc::as_ptr(&conn) as *const ());
         }
+        let gone: Vec<u64> = st.ui_asks.iter().filter(|(_, a)| a.ui.as_ptr() == Arc::as_ptr(&conn)).map(|(&ask, _)| ask).collect();
+        for ask in gone {
+            let a = st.ui_asks.remove(&ask).expect("listed");
+            if let Some(asker) = a.asker.upgrade() {
+                asker.send(ServerMsg::Error { req: a.req, message: "the Tern window went away before answering".into() });
+            }
+        }
         let sub: Arc<dyn Subscriber> = conn.clone();
         for (&id, s) in st.sessions.iter_mut() {
             if s.owner.as_ref().is_some_and(|o| o.as_ptr() == Arc::as_ptr(&conn)) {
@@ -712,6 +736,14 @@ impl Server {
         }
         Self::update_idle(&mut st);
         result
+    }
+
+    /// Every session's program that asked for color scheme reports hears
+    /// whether the UI's palette changed.
+    fn palette_changed(st: &State) {
+        for s in st.sessions.values() {
+            s.host.palette_changed();
+        }
     }
 
     fn on_msg(self: &Arc<Self>, conn: &Arc<Conn>, msg: ClientMsg) {
@@ -802,6 +834,28 @@ impl Server {
             },
             ClientMsg::List { req } => conn.send(ServerMsg::Sessions { req, list: self.list() }),
             ClientMsg::SpawnChat { req, spec } => self.spawn_chat(conn, req, spec),
+            ClientMsg::PaletteChanged => Self::palette_changed(&self.state.lock().unwrap()),
+            ClientMsg::AskUi { req, request } => {
+                let mut st = self.state.lock().unwrap();
+                let Some(ui) = st.uis.iter().rev().filter_map(Weak::upgrade).find(|c| !c.dead.load(Ordering::Acquire)) else {
+                    conn.send(ServerMsg::Error { req, message: "Tern isn't open: no window to ask".into() });
+                    return;
+                };
+                let ask = st.next_ui_ask;
+                st.next_ui_ask += 1;
+                st.ui_asks.insert(ask, UiAsk { asker: Arc::downgrade(conn), req, ui: Arc::downgrade(&ui) });
+                ui.send(ServerMsg::UiAsk { ask, request });
+            },
+            ClientMsg::UiAnswer { ask, answer } => {
+                let mut st = self.state.lock().unwrap();
+                // Only the UI asked answers.
+                if st.ui_asks.get(&ask).is_some_and(|a| a.ui.as_ptr() == Arc::as_ptr(conn))
+                    && let Some(a) = st.ui_asks.remove(&ask)
+                    && let Some(asker) = a.asker.upgrade()
+                {
+                    asker.send(ServerMsg::UiAnswer { req: a.req, answer });
+                }
+            },
             ClientMsg::ListChats { req } => conn.send(ServerMsg::Chats { req, list: self.chat_list() }),
             ClientMsg::AttachChat { req, id } => match self.chat(id) {
                 Some(chat) => Self::attach_chat(conn, req, &chat),

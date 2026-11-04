@@ -11,7 +11,7 @@ use tern_term::SpawnConfig;
 
 use crate::UnixStream;
 use crate::paths;
-use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, Role, SERVICES_MINOR, ServerMsg, ServiceSpec, SessionInfo};
+use crate::proto::{self, ClientMsg, FrameReader, MAJOR, MINOR, PALETTE_MINOR, Role, SERVICES_MINOR, ServerMsg, ServiceSpec, SessionInfo};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a request may wait for its answer.
@@ -22,6 +22,8 @@ pub struct Services {
     writer: UnixStream,
     reader: FrameReader,
     next_req: u64,
+    /// The daemon's MINOR.
+    minor: u32,
 }
 
 impl Services {
@@ -55,16 +57,17 @@ impl Services {
             &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: env!("CARGO_PKG_VERSION").into(), role: Role::Observer },
         )?;
         let mut reader = FrameReader::new(stream, proto::MAX_SERVER_FRAME);
-        match reader.read::<ServerMsg>()? {
+        let minor = match reader.read::<ServerMsg>()? {
             Some(ServerMsg::Hello { major, minor, app_version, .. }) if major == MAJOR => {
                 if minor < SERVICES_MINOR {
                     let message = format!("the Tern daemon running (Tern {app_version}) is too old for services; restart Tern");
                     return Err(io::Error::new(io::ErrorKind::Unsupported, message));
                 }
+                minor
             },
             other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad hello: {other:?}"))),
-        }
-        Ok(Self { writer, reader, next_req: 1 })
+        };
+        Ok(Self { writer, reader, next_req: 1, minor })
     }
 
     fn ask(&mut self, msg: impl FnOnce(u64) -> ClientMsg) -> io::Result<ServerMsg> {
@@ -79,6 +82,7 @@ impl Services {
                 ServerMsg::Sessions { req: r, .. }
                 | ServerMsg::ServiceStarted { req: r, .. }
                 | ServerMsg::Text { req: r, .. }
+                | ServerMsg::UiAnswer { req: r, .. }
                 | ServerMsg::NotFound { req: r, .. }
                 | ServerMsg::Error { req: r, .. }
                     if *r == req =>
@@ -112,6 +116,19 @@ impl Services {
         match self.ask(|req| ClientMsg::ReadText { req, id, lines })? {
             ServerMsg::Text { text, .. } => Ok(Some(text)),
             ServerMsg::NotFound { .. } => Ok(None),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Ask the Tern window `request` (a JSON object, see tern-app's
+    /// `agent_ui`): its answer, a JSON object.
+    pub fn ask_ui(&mut self, request: String) -> io::Result<String> {
+        if self.minor < PALETTE_MINOR {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "the Tern daemon running is too old for this; restart Tern"));
+        }
+        match self.ask(|req| ClientMsg::AskUi { req, request })? {
+            ServerMsg::UiAnswer { answer, .. } => Ok(answer),
+            ServerMsg::Error { message, .. } => Err(io::Error::other(message)),
             other => Err(unexpected(other)),
         }
     }

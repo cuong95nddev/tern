@@ -74,14 +74,49 @@ fn watcher_reveal_reports_delivery() {
         &d.dir,
         false,
         std::sync::Arc::new(|_, _| {}),
-        std::sync::Arc::new(move |id| g.lock().unwrap().push(id)),
+        std::sync::Arc::new(move |r| g.lock().unwrap().push(r)),
     )
     .unwrap();
     // `connect` returns once its Hello is sent; an answer on that connection
     // means the daemon took the Hello, so it knows the UI.
     ui.list().unwrap();
     assert!(w.reveal(5));
-    wait_until("ui got it", || *got.lock().unwrap() == [5]);
+    wait_until("ui got it", || *got.lock().unwrap() == [tern_mux::client::UiRequest::Reveal(5)]);
+}
+
+#[test]
+fn an_agent_asks_the_ui() {
+    let d = daemon(Duration::from_secs(60));
+    let mut agent = tern_mux::services::Services::connect(&d.dir, false).unwrap();
+    // No UI: it says so.
+    let err = agent.ask_ui("{}".into()).unwrap_err();
+    assert!(err.to_string().contains("isn't open"), "{err}");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ui = tern_mux::client::MuxClient::connect(
+        &d.dir,
+        false,
+        std::sync::Arc::new(|_, _| {}),
+        std::sync::Arc::new(move |r| {
+            let _ = tx.send(r);
+        }),
+    )
+    .unwrap();
+    ui.list().unwrap();
+    let answering = ui.clone();
+    let answerer = std::thread::spawn(move || {
+        let tern_mux::client::UiRequest::Ask { ask, request } = rx.recv().unwrap() else { panic!("not an ask") };
+        answering.answer_ui(ask, format!("{{\"got\":{request}}}"));
+        // The next one goes unanswered: the window goes away.
+        let tern_mux::client::UiRequest::Ask { .. } = rx.recv().unwrap() else { panic!("not an ask") };
+        drop(answering);
+    });
+    assert_eq!(agent.ask_ui(r#"{"op":"status"}"#.into()).unwrap(), r#"{"got":{"op":"status"}}"#);
+    let asking = std::thread::spawn(move || agent.ask_ui("{}".into()));
+    answerer.join().unwrap();
+    drop(ui);
+    let err = asking.join().unwrap().unwrap_err();
+    assert!(err.to_string().contains("went away"), "{err}");
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! `tern --mcp`: an MCP server on stdio through which a coding agent runs
 //! its dev servers and other long-running commands as Tern services
 //! (`tern_mux::services`), so the user sees them in the Services panel and
-//! they outlive the agent. JSON-RPC 2.0, one message per line.
+//! they outlive the agent, and changes and checks how Tern looks (asking the
+//! window, see `agent_ui`). JSON-RPC 2.0, one message per line.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,9 @@ use tern_term::{SpawnConfig, TermSize};
 
 /// The protocol versions this server speaks, newest first.
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// The longest side of the picture `window_shot` sends (the file keeps the
+/// window's own size): about what a model looks at.
+const SHOT_SIDE: u32 = 1568;
 /// How long `run_service` waits for a new service to listen (or end).
 const START_WAIT: Duration = Duration::from_secs(8);
 const DEFAULT_LOG_LINES: u32 = 100;
@@ -21,7 +25,9 @@ const MAX_LOG_LINES: u32 = 2000;
 
 const INSTRUCTIONS: &str = "Run dev servers, watchers and other long-running commands with run_service \
 instead of in your own shell (or in the background): Tern runs them in terminals the user can watch and stop, \
-and they keep running after you finish. Check them with list_services and service_logs.";
+and they keep running after you finish. Check them with list_services and service_logs. \
+To change how Tern looks, edit the files in Tern's config folder (its README.md tells how; theme_status names it), \
+then call theme_status to apply and check them, set_theme to switch themes, and window_shot to see the window.";
 
 pub fn run() -> i32 {
     let ctx = Context {
@@ -78,14 +84,18 @@ fn handle(ctx: &Context, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let (text, is_error) = match call(ctx, name, &args) {
-                Ok(text) => (text, false),
-                Err(e) => (e, true),
+            let (content, is_error) = match call(ctx, name, &args) {
+                Ok(content) => (content, false),
+                Err(e) => (vec![text(e)], true),
             };
-            result(id, json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
+            result(id, json!({ "content": content, "isError": is_error }))
         },
         _ => error(id, -32601, &format!("unknown method {method}")),
     })
+}
+
+fn text(text: String) -> Value {
+    json!({ "type": "text", "text": text })
 }
 
 fn result(id: Value, result: Value) -> Value {
@@ -146,10 +156,109 @@ fn tools() -> Value {
             "description": "Stop a service and start its command again.",
             "inputSchema": { "type": "object", "properties": { "name": name }, "required": ["name"] },
         },
+        {
+            "name": "theme_status",
+            "description": "Apply Tern's settings and theme files as saved now, and report: the theme in use, every theme \
+    there is (light or dark), what is wrong in the files (nothing when they are fine), and where settings.json and the \
+    themes folder are. Call it after editing them.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "set_theme",
+            "description": "Switch Tern to a theme (a built-in one or one in its themes folder), saved in settings.json; \
+    reports as theme_status does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The theme's name, as theme_status lists it." } },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "window_shot",
+            "description": "A picture of the Tern window showing your folder, as Tern last drew it (even when the window \
+    is covered), saved as a PNG whose path it gives. Look at it after changing how Tern looks.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
-fn call(ctx: &Context, tool: &str, args: &Value) -> Result<String, String> {
+fn call(ctx: &Context, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
+    match tool {
+        "theme_status" => ask_ui(json!({ "op": "status" })).map(|a| vec![text(describe_status(&a))]),
+        "set_theme" => {
+            let name = args.get("name").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("`name` is required")?;
+            ask_ui(json!({ "op": "set_theme", "name": name })).map(|a| vec![text(describe_status(&a))])
+        },
+        "window_shot" => {
+            let a = ask_ui(json!({ "op": "shot", "folder": ctx.cwd }))?;
+            let path = PathBuf::from(a.get("path").and_then(Value::as_str).ok_or("no picture")?);
+            let (w, h) = (a.get("width").and_then(Value::as_u64).unwrap_or(0), a.get("height").and_then(Value::as_u64).unwrap_or(0));
+            let mut content = vec![text(format!("{} ({w}×{h} pixels)", path.display()))];
+            match inline_png(&path) {
+                Ok(data) => content.push(json!({ "type": "image", "data": data, "mimeType": "image/png" })),
+                Err(e) => content.push(text(format!("(can't attach it: {e})"))),
+            }
+            Ok(content)
+        },
+        _ => services_call(ctx, tool, args).map(|t| vec![text(t)]),
+    }
+}
+
+/// Ask the Tern window `request` (see `agent_ui`): its answer, or why not.
+fn ask_ui(request: Value) -> Result<Value, String> {
+    let mut s = Services::connect(&tern_mux::paths::mux_dir(), false).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => "Tern isn't running.".to_owned(),
+        _ => format!("can't reach Tern: {e}"),
+    })?;
+    let answer = s.ask_ui(request.to_string()).map_err(|e| e.to_string())?;
+    let answer: Value = serde_json::from_str(&answer).map_err(|e| format!("bad answer from Tern: {e}"))?;
+    match answer.get("error").and_then(Value::as_str) {
+        Some(e) => Err(e.to_owned()),
+        None => Ok(answer),
+    }
+}
+
+/// `agent_ui`'s status, for reading.
+fn describe_status(a: &Value) -> String {
+    let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or_default();
+    let themes: Vec<String> = a
+        .get("themes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            let name = t.get("name").and_then(Value::as_str).unwrap_or_default();
+            format!("{name} ({})", if t.get("dark").and_then(Value::as_bool).unwrap_or(false) { "dark" } else { "light" })
+        })
+        .collect();
+    let problems = match a.get("problems").and_then(Value::as_str) {
+        Some(p) => format!("Problems (the rest applies): {p}"),
+        None => "No problems.".into(),
+    };
+    format!(
+        "Theme: {}\nThemes: {}\n{problems}\nSettings: {}\nThemes folder: {}",
+        s("theme"),
+        themes.join(", "),
+        s("settings"),
+        s("themes_dir")
+    )
+}
+
+/// The PNG at `path`, made no bigger than `SHOT_SIDE`, in base64.
+fn inline_png(path: &Path) -> Result<String, String> {
+    use base64::Engine as _;
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let img = if img.width().max(img.height()) > SHOT_SIDE {
+        img.resize(SHOT_SIDE, SHOT_SIDE, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut png = Vec::new();
+    img.write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
+}
+
+fn services_call(ctx: &Context, tool: &str, args: &Value) -> Result<String, String> {
     let str_arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
     let connect = |start| {
         Services::connect(&tern_mux::paths::mux_dir(), start).map_err(|e| match e.kind() {
@@ -363,12 +472,32 @@ mod tests {
     fn tools_are_listed_and_bad_calls_are_tool_errors() {
         let a = handle(&ctx(), &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" })).unwrap();
         let names: Vec<&str> = a["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["run_service", "list_services", "service_logs", "stop_service", "restart_service"]);
+        assert_eq!(
+            names,
+            ["run_service", "list_services", "service_logs", "stop_service", "restart_service", "theme_status", "set_theme", "window_shot"]
+        );
         let call = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "run_service", "arguments": {} } });
         let a = handle(&ctx(), &call).unwrap();
         assert_eq!(a["result"]["isError"], true);
         let a = handle(&ctx(), &json!({ "jsonrpc": "2.0", "id": 5, "method": "nope" })).unwrap();
         assert_eq!(a["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn describes_the_window_status() {
+        let a = json!({
+            "theme": "Tern Dark",
+            "themes": [{ "name": "Tern Dark", "dark": true }, { "name": "Tern Light", "dark": false }],
+            "problems": null,
+            "settings": "/c/settings.json",
+            "themes_dir": "/c/themes",
+        });
+        assert_eq!(
+            describe_status(&a),
+            "Theme: Tern Dark\nThemes: Tern Dark (dark), Tern Light (light)\nNo problems.\nSettings: /c/settings.json\nThemes folder: /c/themes"
+        );
+        let a = json!({ "theme": "Mine", "themes": [], "problems": "themes/mine.json: expected `,`" });
+        assert!(describe_status(&a).contains("Problems (the rest applies): themes/mine.json: expected `,`"));
     }
 
     #[test]

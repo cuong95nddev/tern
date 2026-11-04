@@ -6,7 +6,7 @@ use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support", feature = "window-capture"))]
 use image::RgbaImage;
 use objc2::runtime::AnyObject;
 
@@ -584,7 +584,7 @@ impl MetalRenderer {
     ///
     /// Note: This requires a layer-backed renderer. For headless rendering,
     /// use `render_scene_to_image()` instead.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "window-capture"))]
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
         let layer = self
             .layer
@@ -1308,7 +1308,7 @@ fn new_command_encoder_for_texture<'a>(
     command_encoder
 }
 
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support", feature = "window-capture"))]
 fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;

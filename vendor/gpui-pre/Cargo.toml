@@ -61,6 +61,8 @@ default = [
     "windows-manifest",
 ]
 font-kit = []
+# Tern: `Window::render_to_image` outside tests (an agent checks the window).
+window-capture = []
 inspector = ["gpui_macros/inspector"]
 leak-detection = []
 profiler = ["dep:hdrhistogram"]

@@ -7,11 +7,16 @@ edition.workspace = true
 embed-resource = "3.0"
 
 [dependencies]
+# `tern --mcp`'s `window_shot` sends its picture inline.
+base64 = "0.22"
 # Markdown preview: `data:` images, which an image resolver decodes itself.
 data-url = "0.3"
 dunce = "1"
 env_logger = "0.11.11"
 flume = "0.12.0"
+# Only for its `window-capture` feature (vendor/README.md): an agent asks for
+# a picture of the window (`tern --mcp`'s `window_shot`).
+gpui-pre = { version = "=0.3.9", default-features = false, features = ["window-capture"] }
 gpui-kit = { version = "=0.7.3", features = ["tree-sitter-rust", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-python", "tree-sitter-go", "tree-sitter-bash", "tree-sitter-yaml", "tree-sitter-css", "tree-sitter-html", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-swift", "tree-sitter-diff"] }
 futures = "0.3"
 global-hotkey = "0.8"
@@ -51,6 +56,7 @@ tern-term = { version = "0.1.0", path = "../tern-term" }
 tern-web = { path = "../tern-web" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-macos = { version = "=0.3.9", default-features = false, features = ["window-capture"] }
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSBundle", "NSError", "NSString"] }
@@ -58,5 +64,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
+gpui-pre-windows = { version = "=0.3.9", default-features = false, features = ["window-capture"] }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Networking_WinHttp", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

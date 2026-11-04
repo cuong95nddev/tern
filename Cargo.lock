@@ -6656,6 +6656,7 @@ name = "tern-app"
 version = "0.9.0"
 dependencies = [
  "ab_glyph",
+ "base64 0.22.1",
  "block2 0.6.2",
  "data-url",
  "dunce",
@@ -6665,6 +6666,9 @@ dependencies = [
  "futures",
  "global-hotkey",
  "gpui-kit",
+ "gpui-pre",
+ "gpui-pre-macos",
+ "gpui-pre-windows",
  "image",
  "keepawake",
  "libc",

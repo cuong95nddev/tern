@@ -370,8 +370,8 @@ pub struct Services {
     /// The background daemon the terminals run in.
     pub mux: Arc<Connector>,
     pub hook_events: flume::Receiver<HookEvent>,
-    /// Sessions the menu bar agent asked to show.
-    pub reveal_events: flume::Receiver<u64>,
+    /// Sessions the menu bar agent asked to show, and agents' requests.
+    pub ui_requests: flume::Receiver<tern_mux::client::UiRequest>,
     pub terminal: TerminalConfig,
 }
 
@@ -5504,12 +5504,12 @@ pub fn services(terminal: TerminalConfig) -> Services {
             let _ = tx.send(ev);
         }
     });
-    let (reveal_tx, reveal_rx) = flume::unbounded();
-    let reveal: tern_mux::client::RevealSink = Arc::new(move |id| {
-        let _ = reveal_tx.send(id);
+    let (ui_tx, ui_rx) = flume::unbounded();
+    let ui: tern_mux::client::UiSink = Arc::new(move |r| {
+        let _ = ui_tx.send(r);
     });
-    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, reveal));
-    Services { mux, hook_events: rx, reveal_events: reveal_rx, terminal }
+    let mux = Arc::new(Connector::new(tern_mux::paths::mux_dir(), true, hooks, ui));
+    Services { mux, hook_events: rx, ui_requests: ui_rx, terminal }
 }
 
 #[cfg(test)]

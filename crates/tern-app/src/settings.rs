@@ -42,8 +42,9 @@ pub struct SettingsFile {
     #[serde(rename = "$schema")]
     pub schema: Option<String>,
     /// The theme: "Tern Dark", "Tern Light", or the `name` of a theme in a
-    /// `themes/*.json` file.
-    pub theme: Option<String>,
+    /// `themes/*.json` file; or `{"light": …, "dark": …}`, one for each of
+    /// the system's light and dark appearance, following it as it changes.
+    pub theme: Option<ThemeSetting>,
     /// The window's own text: panels, tabs, menus, dialogs.
     pub ui: UiSettings,
     /// The file editor and code blocks.
@@ -186,6 +187,24 @@ pub struct TerminalColors {
     pub bright_white: Option<String>,
 }
 
+/// `settings.json`'s `theme`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ThemeSetting {
+    /// One theme, by name.
+    One(String),
+    /// A theme for each of the system's appearances.
+    Pair(ThemePair),
+}
+
+/// A theme for each of the system's appearances, by name.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThemePair {
+    pub light: String,
+    pub dark: String,
+}
+
 /// What the last load found wrong, shown in the status bar until fixed.
 #[derive(Default)]
 pub struct SettingsStatus {
@@ -209,8 +228,12 @@ struct Loader {
     preview: Option<SharedString>,
     /// The themes there are, as of the last load.
     themes: Vec<ThemeChoice>,
-    /// The theme `settings.json` names (or the default).
+    /// The theme `settings.json` names (or the default); of a light and dark
+    /// pair, the one for the system's appearance.
     current: SharedString,
+    /// `settings.json` names a light and dark pair: the window follows the
+    /// system's appearance, which was dark (or not) at the last load.
+    follows_system: Option<bool>,
     /// The `elements` of the theme applied, under the settings' ones.
     theme_elements: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
@@ -252,6 +275,7 @@ pub fn init(mono_font: SharedString, cx: &mut App) {
         preview: None,
         themes: vec![],
         current: DEFAULT_THEME.into(),
+        follows_system: None,
         theme_elements: BTreeMap::new(),
     });
     load(cx);
@@ -299,6 +323,20 @@ pub fn theme_element(element: &str, prop: &str, cx: &App) -> Option<serde_json::
     cx.global::<Loader>().theme_elements.get(element)?.get(prop).cloned()
 }
 
+/// The system turned light or dark (or the window's appearance changed):
+/// a light and dark pair shows its other theme.
+pub fn appearance_changed(cx: &mut App) {
+    if let Some(dark) = cx.global::<Loader>().follows_system
+        && dark != is_dark(cx.window_appearance())
+    {
+        load(cx);
+    }
+}
+
+fn is_dark(a: WindowAppearance) -> bool {
+    matches!(a, WindowAppearance::Dark | WindowAppearance::VibrantDark)
+}
+
 /// Shows theme `name` without saving it, or with `None` goes back to the
 /// settings' theme.
 pub fn preview_theme(name: Option<SharedString>, cx: &mut App) {
@@ -343,6 +381,22 @@ pub fn file_value(cx: &App) -> serde_json::Value {
 /// `settings.json`, the file to edit.
 pub fn settings_path(cx: &App) -> PathBuf {
     cx.global::<Loader>().dir.join(SETTINGS)
+}
+
+/// The folder of the user's theme files.
+pub fn themes_dir(cx: &App) -> PathBuf {
+    cx.global::<Loader>().dir.join(THEMES)
+}
+
+/// Reads the settings and themes and applies them now, rather than when the
+/// folder watcher next sees a change: what was saved just before shows.
+pub fn reload(cx: &mut App) {
+    load(cx);
+}
+
+/// What the last load found wrong (`None` when nothing).
+pub fn problems(cx: &App) -> Option<SharedString> {
+    cx.global::<SettingsStatus>().error.clone()
 }
 
 /// `text` (a settings file, `None` when there is none) with the key at
@@ -416,10 +470,20 @@ fn load(cx: &mut App) {
         themes.retain(|(n, _)| *n != name);
         themes.push((name, theme));
     }
-    let current: SharedString = settings.theme.clone().map_or(DEFAULT_THEME.into(), Into::into);
+    let (current, follows_system): (SharedString, _) = match &settings.theme {
+        None => (DEFAULT_THEME.into(), None),
+        Some(ThemeSetting::One(name)) => (name.clone().into(), None),
+        Some(ThemeSetting::Pair(ThemePair { light, dark })) => {
+            // The system's appearance, not the one last forced on the app.
+            cx.set_window_appearance(None);
+            let system_dark = is_dark(cx.window_appearance());
+            (if system_dark { dark } else { light }.clone().into(), Some(system_dark))
+        },
+    };
     let l = cx.global_mut::<Loader>();
     l.themes = themes.iter().map(|(name, t)| ThemeChoice { name: name.clone(), dark: t.ui.mode.is_dark() }).collect();
     l.current = current.clone();
+    l.follows_system = follows_system;
     let wanted = preview.as_deref().unwrap_or(&current);
     let theme = match themes.iter().find(|(n, _)| n.as_ref() == wanted) {
         Some((_, t)) => t.clone(),
@@ -467,8 +531,11 @@ fn load(cx: &mut App) {
             t.mono_font_size = px(size);
         }
     });
-    // The native title bar and menus follow the theme, not the system.
-    cx.set_window_appearance(Some(if ui.mode.is_dark() { WindowAppearance::Dark } else { WindowAppearance::Light }));
+    // The native title bar and menus follow the theme, not the system (but
+    // for a pair's own theme, which the system's appearance chose).
+    if follows_system.is_none() || preview.is_some() {
+        cx.set_window_appearance(Some(if ui.mode.is_dark() { WindowAppearance::Dark } else { WindowAppearance::Light }));
+    }
 
     let (colors, rem) = (cx.theme().colors, cx.theme().font_size);
     style::check_names(&over, &colors, &mut problems);
@@ -685,6 +752,92 @@ fn derive_from_ui(ui: &ThemeConfig) -> TerminalColors {
     TerminalColors { background: hex(&ui.colors.background), foreground: hex(&ui.colors.foreground), ..Default::default() }
 }
 
+/// UI colors made from a terminal palette, for a theme that gives only
+/// that (as herdr's themes do): the window takes the terminal's background
+/// and text, a border and dimmed text between them, and its blue for what is
+/// selected. With whether the background is dark; `None` without both a
+/// background and a text color.
+fn ui_from_terminal(t: &TerminalColors) -> Option<(serde_json::Map<String, serde_json::Value>, bool)> {
+    let get = |c: &Option<String>| c.as_deref().and_then(parse_hex);
+    let (bg, fg) = (get(&t.background)?, get(&t.foreground)?);
+    let defaults = |dark: bool| if dark { colors_of(&Palette::default()) } else { light_terminal() };
+    let dark = Palette { background: bg, ..Palette::default() }.is_dark();
+    let d = defaults(dark);
+    let or = |c: &Option<String>, def: &Option<String>| get(c).or_else(|| get(def)).unwrap_or(fg);
+    let (blue, red, green, yellow, cyan) =
+        (or(&t.blue, &d.blue), or(&t.red, &d.red), or(&t.green, &d.green), or(&t.yellow, &d.yellow), or(&t.cyan, &d.cyan));
+    let selection = get(&t.selection).unwrap_or_else(|| mix(bg, blue, 0.3));
+    let cursor = get(&t.cursor).unwrap_or(fg);
+    // `amount` of the way from `a` to `b`.
+    fn mix(a: Rgb, b: Rgb, amount: f32) -> Rgb {
+        let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * amount).round() as u8;
+        Rgb { r: m(a.r, b.r), g: m(a.g, b.g), b: m(a.b, b.b) }
+    }
+    let hex = |c: Rgb| serde_json::Value::String(format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b));
+    let (raised, bar, hover, line, muted) = (mix(bg, fg, 0.06), mix(bg, fg, 0.04), mix(bg, fg, 0.1), mix(bg, fg, 0.16), mix(bg, fg, 0.6));
+    let on_blue = if dark { bg } else { Rgb { r: 0xff, g: 0xff, b: 0xff } };
+    let colors = [
+        ("background", bg),
+        ("foreground", fg),
+        ("border", line),
+        ("input.border", mix(bg, fg, 0.22)),
+        ("ring", blue),
+        ("caret", cursor),
+        ("selection.background", selection),
+        ("muted.background", raised),
+        ("muted.foreground", muted),
+        ("accent.background", hover),
+        ("accent.foreground", fg),
+        ("primary.background", blue),
+        ("primary.hover.background", mix(blue, fg, 0.12)),
+        ("primary.active.background", mix(blue, bg, 0.12)),
+        ("primary.foreground", on_blue),
+        ("secondary.background", raised),
+        ("secondary.hover.background", hover),
+        ("secondary.active.background", line),
+        ("secondary.foreground", fg),
+        ("popover.background", raised),
+        ("popover.foreground", fg),
+        ("title_bar.background", bar),
+        ("title_bar.border", line),
+        ("status_bar.background", bar),
+        ("status_bar.border", line),
+        ("window.border", line),
+        ("sidebar.background", bar),
+        ("sidebar.foreground", fg),
+        ("sidebar.border", line),
+        ("sidebar.accent.background", hover),
+        ("sidebar.accent.foreground", fg),
+        ("tab_bar.background", bar),
+        ("tab.background", bar),
+        ("tab.foreground", muted),
+        ("tab.active.background", bg),
+        ("tab.active.foreground", fg),
+        ("list.background", bg),
+        ("list.even.background", bg),
+        ("list.hover.background", raised),
+        ("list.active.background", mix(bg, blue, 0.2)),
+        ("list.active.border", blue),
+        ("scrollbar.thumb.background", mix(bg, fg, 0.25)),
+        ("scrollbar.thumb.hover.background", mix(bg, fg, 0.35)),
+        ("link", blue),
+        ("danger.background", red),
+        ("danger.foreground", on_blue),
+        ("success.background", green),
+        ("success.foreground", on_blue),
+        ("warning.background", yellow),
+        ("warning.foreground", on_blue),
+        ("info.background", cyan),
+        ("info.foreground", on_blue),
+        ("base.blue", blue),
+        ("base.red", red),
+        ("base.green", green),
+        ("base.yellow", yellow),
+        ("base.cyan", cyan),
+    ];
+    Some((colors.into_iter().map(|(k, c)| (k.to_owned(), hex(c))).collect(), dark))
+}
+
 /// `tokens` and `elements` as the style resolver takes them. A value that is
 /// neither a number nor a string is reported and left out.
 fn overrides<'a>(theme: &'a TernTheme, s: &'a SettingsFile, problems: &mut Vec<String>) -> Overrides<'a> {
@@ -793,6 +946,13 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             Some(t) => serde_json::from_value(t).map_err(|e| format!("templates: {e}"))?,
             None => BTreeMap::new(),
         };
+        if let Some(t) = theme.as_object_mut()
+            && !t.contains_key("colors")
+            && let Some((colors, dark)) = ui_from_terminal(&terminal)
+        {
+            t.insert("colors".into(), colors.into());
+            t.entry("mode").or_insert_with(|| if dark { "dark" } else { "light" }.into());
+        }
         let ui: ThemeConfig = serde_json::from_value(theme.take()).map_err(|e| e.to_string())?;
         out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates }));
     }
@@ -1301,7 +1461,9 @@ see-through than the window under it.
 
 Terminal programs learn the theme's background the ways terminals tell them:
 `COLORFGBG` when they start, OSC 10 / 11 / 4 color queries, `CSI ? 996 n`, and
-`CSI ? 2031 h` reports when the theme turns light or dark. So programs with an
+`CSI ? 2031 h` reports when the theme turns light or dark or its terminal
+background, text or cursor color changes (the program then asks for the new
+colors). So programs with an
 automatic theme follow Tern's: Claude Code with `/theme` set to auto, OpenCode
 with its `system` theme. A program set to a fixed dark theme stays dark.
 
@@ -1327,6 +1489,27 @@ Then set `\"theme\": \"Midnight\"` in `{SETTINGS}`. A color a theme leaves out
 takes the default of its `mode`. `reference/` has the built-in themes in full:
 copy one into `themes/`, rename it, and change what you like. The UI part is
 the theme format of gpui-component, so its themes work here too.
+
+A theme with only `terminal` colors (no `colors`) is enough: the window's
+colors are made from them (its background and text, borders and dimmed text
+between the two, its blue for what is selected), and its `mode` from how dark
+the background is. A terminal theme from elsewhere becomes a whole theme so:
+
+```json
+{{ \"name\": \"Ink\", \"terminal\": {{ \"background\": \"#101018\", \"foreground\": \"#e0e0f0\", \"blue\": \"#5080ff\" }} }}
+```
+
+`\"theme\": {{ \"light\": \"Tern Light\", \"dark\": \"Ink\" }}` in `{SETTINGS}` shows the one
+for the system's light or dark appearance, and switches when the system does.
+Choosing a theme in the theme picker sets one theme in its place.
+
+### For agents
+
+`tern --mcp` (Tern's MCP server) has tools to check what you change here:
+`theme_status` applies the files as saved and says which theme shows and what
+is wrong in them, `set_theme` switches themes, and `window_shot` gives a
+picture of the window as Tern drew it. Look at the picture before saying a
+change looks right.
 ",
         dir = dir.display()
     )
@@ -1340,8 +1523,8 @@ mod tests {
 
     // Not `super::*`: GPUI's glob brings its own `test` macro.
     use super::{
-        BUILTIN_SETS, LspSettings, SettingsFile, TerminalColors, TernTheme, elements_doc, is_app_data, lsp_config, parse_theme_set,
-        read_theme_set, see_through, terminal_palette, with_value,
+        BUILTIN_SETS, LspSettings, SettingsFile, TerminalColors, TernTheme, ThemePair, ThemeSetting, elements_doc, is_app_data, lsp_config,
+        parse_theme_set, read_theme_set, see_through, terminal_palette, with_value,
     };
 
     /// The session and window places live next to the settings on Windows:
@@ -1498,5 +1681,36 @@ mod tests {
         assert_eq!(themes[0].1.terminal.red.as_deref(), Some("#ff0000"));
         assert_eq!(themes[0].1.tokens["row_height"], 26);
         assert_eq!(themes[0].1.elements["pane"]["border_width"], 1);
+    }
+
+    #[test]
+    fn a_terminal_only_theme_gets_ui_colors_from_it() {
+        let set = r##"{"name": "S", "themes": [
+            {"name": "Ink", "terminal": {"background": "#101018", "foreground": "#e0e0f0", "blue": "#5080ff"}},
+            {"name": "Paper", "terminal": {"background": "#fafaf8", "foreground": "#202020"}},
+            {"name": "Own", "colors": {"background": "#000000"}, "terminal": {"background": "#ffffff", "foreground": "#000000"}}
+        ]}"##;
+        let themes = parse_theme_set(set).unwrap();
+        let (ink, paper, own) = (&themes[0].1.ui, &themes[1].1.ui, &themes[2].1.ui);
+        assert_eq!(ink.mode, ThemeMode::Dark);
+        assert_eq!(ink.colors.background.as_deref(), Some("#101018"));
+        assert_eq!(ink.colors.foreground.as_deref(), Some("#e0e0f0"));
+        assert_eq!(ink.colors.primary.as_deref(), Some("#5080ff"));
+        assert_eq!(ink.colors.list_active_border.as_deref(), Some("#5080ff"));
+        assert_eq!(paper.mode, ThemeMode::Light);
+        assert_eq!(paper.colors.background.as_deref(), Some("#fafaf8"));
+        // A theme with colors of its own keeps them as they are.
+        assert_eq!(own.colors.background.as_deref(), Some("#000000"));
+        assert_eq!(own.colors.foreground, None);
+    }
+
+    #[test]
+    fn a_theme_is_one_name_or_a_light_and_dark_pair() {
+        let s: SettingsFile = serde_json::from_str(r#"{"theme": "Tern Dark"}"#).unwrap();
+        assert!(matches!(s.theme, Some(ThemeSetting::One(n)) if n == "Tern Dark"));
+        let s: SettingsFile = serde_json::from_str(r#"{"theme": {"light": "Tern Light", "dark": "Ink"}}"#).unwrap();
+        assert!(matches!(s.theme, Some(ThemeSetting::Pair(ThemePair { light, dark })) if light == "Tern Light" && dark == "Ink"));
+        assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": {"light": "Tern Light"}}"#).is_err());
+        assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": {"light": "a", "dark": "b", "dim": "c"}}"#).is_err());
     }
 }

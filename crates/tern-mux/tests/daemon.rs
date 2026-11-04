@@ -498,7 +498,17 @@ fn reveal_goes_to_the_live_ui() {
     drop(old);
     let got = Arc::new(Mutex::new(vec![]));
     let g = got.clone();
-    let new = MuxClient::connect(&d.dir, false, Arc::new(|_, _| {}), Arc::new(move |id| g.lock().unwrap().push(id))).unwrap();
+    let new = MuxClient::connect(
+        &d.dir,
+        false,
+        Arc::new(|_, _| {}),
+        Arc::new(move |r| {
+            if let tern_mux::client::UiRequest::Reveal(id) = r {
+                g.lock().unwrap().push(id);
+            }
+        }),
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_millis(100)); // the daemon saw the old one go
     proto::write_frame(&mut raw, &ClientMsg::Reveal { req: 1, id: 42 }).unwrap();
     assert!(revealed(&mut r));

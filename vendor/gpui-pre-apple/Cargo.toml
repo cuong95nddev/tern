@@ -42,6 +42,8 @@ font-kit = [
 ]
 runtime_shaders = []
 test-support = ["gpui/test-support"]
+# Tern: `MetalRenderer::render_to_image` outside tests.
+window-capture = ["gpui/window-capture"]
 
 [lib]
 name = "gpui_apple"

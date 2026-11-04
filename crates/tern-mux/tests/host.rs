@@ -121,6 +121,20 @@ fn jiggle_resizes_twice() {
 }
 
 #[test]
+fn an_unchanged_palette_sends_no_scheme_report() {
+    // The program asks for color scheme reports, then echoes its next line:
+    // a report would come before it.
+    let host = Host::spawn(5, &sh("printf 'on\\033[?2031h'; read x; printf '[%s]' \"$x\"; read y"), None, Arc::new(NoObserver)).unwrap();
+    let rec = Arc::new(Recorder::default());
+    host.attach(rec.clone());
+    wait_until("reports on", || text(&rec).contains("on"));
+    host.palette_changed();
+    host.input(b"ok\n".to_vec());
+    wait_until("the line", || text(&rec).contains("[ok]"));
+    host.kill();
+}
+
+#[test]
 fn kill_ends_a_program_that_ignores_sighup() {
     let host = Host::spawn(4, &sh("trap '' HUP; while :; do sleep 1; done"), None, Arc::new(NoObserver)).unwrap();
     std::thread::sleep(Duration::from_millis(100));

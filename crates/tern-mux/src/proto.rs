@@ -31,7 +31,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 13;
+pub const MINOR: u32 = 14;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -49,6 +49,9 @@ pub const SERVICES_MINOR: u32 = 10;
 pub const CHAT_MINOR: u32 = 12;
 /// The first MINOR whose daemon takes `ListChats`.
 pub const LIST_CHATS_MINOR: u32 = 13;
+/// The first MINOR whose daemon takes `PaletteChanged` and `AskUi` (and
+/// sends `UiAsk`, which older UIs skip).
+pub const PALETTE_MINOR: u32 = 14;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 5;
@@ -214,6 +217,21 @@ pub enum ClientMsg {
     ListChats {
         req: u64,
     },
+    /// The UI wrote a new terminal palette: programs that asked for color
+    /// scheme reports get one when its colors changed (MINOR 14).
+    PaletteChanged,
+    /// An agent (`tern --mcp`) asks the newest UI something: `request` is a
+    /// JSON object (see tern-app's `agent_ui`). Answered by `UiAnswer`, or
+    /// `Error` when no UI runs or it goes before answering (MINOR 14).
+    AskUi {
+        req: u64,
+        request: String,
+    },
+    /// The UI's answer (a JSON object) to `UiAsk` `ask` (MINOR 14).
+    UiAnswer {
+        ask: u64,
+        answer: String,
+    },
 }
 
 /// A chat's program: run directly (a shell that runs Claude), its stdio piped.
@@ -360,6 +378,17 @@ pub enum ServerMsg {
     Revealed {
         req: u64,
         delivered: bool,
+    },
+    /// To a UI: an agent's `AskUi`; answer with `ClientMsg::UiAnswer` and
+    /// this `ask`.
+    UiAsk {
+        ask: u64,
+        request: String,
+    },
+    /// To who sent `AskUi` `req`: the UI's answer.
+    UiAnswer {
+        req: u64,
+        answer: String,
     },
     /// Who has session `id` now: sent to its owner and viewers when that
     /// changes, and after `Attached` (MINOR 7).

@@ -3,6 +3,7 @@
 
 mod accounts;
 mod agent_monitor;
+mod agent_ui;
 mod agents;
 mod arrange;
 mod caffeine;
@@ -69,6 +70,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use main_window::Content;
 use terminal_view::TerminalConfig;
+use tern_mux::client::UiRequest;
 
 actions!(tern, [Quit, OpenFolder, ToggleMenuBarIcon]);
 
@@ -208,15 +210,21 @@ fn main() {
             }
         })
         .detach();
-        // Sessions the menu bar agent asks to show.
-        let reveal_events = services.reveal_events.clone();
+        // Sessions the menu bar agent asks to show, and agents' requests.
+        let ui_requests = services.ui_requests.clone();
         cx.spawn(async move |cx| {
-            while let Ok(id) = reveal_events.recv_async().await {
-                cx.update(|cx| main_window::reveal_session(id, cx));
+            while let Ok(r) = ui_requests.recv_async().await {
+                cx.update(|cx| match r {
+                    UiRequest::Reveal(id) => main_window::reveal_session(id, cx),
+                    UiRequest::Ask { ask, request } => agent_ui::answer(ask, &request, cx),
+                });
             }
         })
         .detach();
         cx.set_global(AppServices(services));
+        // Each settings load wrote the daemon's palette: programs that asked
+        // hear of new colors at once.
+        cx.observe_global::<terminal_view::TerminalLook>(|cx| cx.global::<AppServices>().0.mux.palette_changed()).detach();
 
         // Scripted debug runs leave the real session alone (unless
         // `TERN_SESSION` is set, e.g. with a scratch `HOME`).

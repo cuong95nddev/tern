@@ -41,6 +41,8 @@ screen-capture = [
     "scap",
 ]
 test-support = ["gpui/test-support"]
+# Tern: `render_to_image` outside tests.
+window-capture = ["gpui/window-capture"]
 
 [lib]
 name = "gpui_windows"
