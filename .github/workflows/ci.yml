@@ -1,10 +1,11 @@
-# Lint, test and build on every platform Tern ships for.
+# Lint, test and build on every platform Tern ships for. Runs only for a
+# release tag (beside release.yml) or by hand: pushes to branches cost
+# Actions minutes, so the same checks run locally before pushing.
 name: CI
 
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
