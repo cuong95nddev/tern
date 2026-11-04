@@ -63,7 +63,7 @@ pub struct Launch {
     pub resume: bool,
     pub model: Option<String>,
     pub mode: Option<PermissionMode>,
-    /// `--mcp-config` (JSON).
+    /// `--mcp-config` (a file's path).
     pub mcp_config: Option<String>,
 }
 

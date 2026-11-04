@@ -573,10 +573,34 @@ pub(crate) fn claude_env<'a>(account: &'a str, cx: &mut App) -> (&'a str, std::c
 }
 
 /// `--mcp-config` for Tern's MCP server, which runs an agent's dev servers
-/// as services (JSON).
+/// as services: a file's path. Never the JSON itself, which goes through the
+/// shell: Windows PowerShell strips its double quotes, and the `\"` that
+/// would keep them there breaks it in PowerShell 7.3+.
 pub(crate) fn tern_mcp_config() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    Some(serde_json::json!({ "mcpServers": { "tern": { "command": exe, "args": ["--mcp"] } } }).to_string())
+    let path = write_mcp_config(&crate::dirs::data(), &exe).inspect_err(|e| log::warn!("can't write the MCP config: {e}")).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Write the MCP config for Tern at `exe` in `dir`, unless it is there: one
+/// file per `exe`, as a dev build and an installed Tern share `dir`.
+fn write_mcp_config(dir: &Path, exe: &Path) -> std::io::Result<PathBuf> {
+    use std::hash::{Hash as _, Hasher as _};
+    let text = serde_json::json!({ "mcpServers": { "tern": { "command": exe, "args": ["--mcp"] } } }).to_string();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    exe.hash(&mut hasher);
+    let path = dir.join(format!("mcp-config-{:016x}.json", hasher.finish()));
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(dir)?;
+    // Whole or not at all: a Claude may be reading it.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    Ok(path)
 }
 
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -5595,7 +5619,28 @@ pub fn services(terminal: TerminalConfig) -> Services {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, claude_bg_job, switch_blocker};
+    use super::{ActivityStatus, claude_bg_job, switch_blocker, write_mcp_config};
+
+    #[test]
+    fn the_mcp_config_is_a_file_per_exe() {
+        let dir = std::env::temp_dir().join(format!("tern-mcp-config-{}", std::process::id()));
+        let exe = std::path::Path::new(r"C:\Program Files\Tern's\tern.exe");
+        let path = write_mcp_config(&dir, exe).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["tern"]["command"], exe.to_str().unwrap());
+        assert_eq!(config["mcpServers"]["tern"]["args"], serde_json::json!(["--mcp"]));
+        // What the shell is given has no double quote for it to strip.
+        assert!(!path.to_str().unwrap().contains('"'));
+
+        // Another install keeps its own; a damaged file is written again.
+        assert_ne!(write_mcp_config(&dir, std::path::Path::new("/opt/tern")).unwrap(), path);
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(write_mcp_config(&dir, exe).unwrap(), path);
+        assert!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap()).is_ok());
+        // No temporary file is left behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_claude_tab_switches_only_while_it_waits() {
