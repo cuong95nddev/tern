@@ -171,6 +171,7 @@ pub fn listening_ports(_roots: &[u32]) -> HashMap<u32, Vec<u16>> {
     HashMap::new()
 }
 
+#[cfg(any(unix, test))]
 /// `ps -o pid=,ppid=` lines: each pid's parent.
 fn parse_ps(text: &str) -> HashMap<u32, u32> {
     text.lines()
@@ -181,6 +182,7 @@ fn parse_ps(text: &str) -> HashMap<u32, u32> {
         .collect()
 }
 
+#[cfg(any(unix, test))]
 /// `lsof -F pn` output: (pid, port) of each listening socket.
 fn parse_lsof(text: &str) -> Vec<(u32, u16)> {
     let mut pid = None;
@@ -197,6 +199,7 @@ fn parse_lsof(text: &str) -> Vec<(u32, u16)> {
     out
 }
 
+#[cfg(any(unix, test))]
 /// `pid` is `root` or runs under it.
 fn descends(mut pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
     for _ in 0..64 {

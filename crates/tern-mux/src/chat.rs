@@ -17,6 +17,7 @@ use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+#[cfg(unix)]
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -120,6 +121,9 @@ pub(crate) struct ChatHost {
     state: Mutex<State>,
     /// The program, when this daemon started it (to learn its exit status).
     child: Mutex<Option<Child>>,
+    /// The reader, to park for a handoff (Unix: Windows has no handoff,
+    /// its reader threads end with the program's pipes).
+    #[cfg(unix)]
     reader: Mutex<Option<Reader>>,
     notify: Notify,
     /// Its tab muted its notifications (not handed off: the tab says it
@@ -128,9 +132,9 @@ pub(crate) struct ChatHost {
 }
 
 /// The thread reading the program's stdout and stderr.
+#[cfg(unix)]
 struct Reader {
-    /// Written to park it (Unix).
-    #[cfg(unix)]
+    /// Written to park it.
     wake: File,
     thread: JoinHandle<Option<Parked>>,
 }
@@ -184,6 +188,7 @@ impl ChatHost {
             stdin: Mutex::new(stdin),
             state: Mutex::new(State::default()),
             child: Mutex::new(Some(child)),
+            #[cfg(unix)]
             reader: Mutex::new(None),
             notify,
             muted: AtomicBool::new(false),
@@ -218,6 +223,7 @@ impl ChatHost {
             stdin: Mutex::new(stdin),
             state: Mutex::new(state),
             child: Mutex::new(None),
+            #[cfg(unix)]
             reader: Mutex::new(None),
             notify,
             muted: AtomicBool::new(false),
@@ -226,6 +232,7 @@ impl ChatHost {
     }
 
     /// Read the program's output again from `parked`.
+    #[cfg(unix)]
     pub fn resume(self: &Arc<Self>, parked: Parked) {
         if let Err(e) = self.read(parked) {
             log::warn!("chat {}: can't read: {e}", self.id);
@@ -371,7 +378,7 @@ impl ChatHost {
                     errs.on_stderr(&buf[..n]);
                 }
             })?;
-            let thread = std::thread::Builder::new().name("chat reader".into()).spawn(move || {
+            std::thread::Builder::new().name("chat reader".into()).spawn(move || {
                 let mut partial = partial;
                 let mut stdout = stdout;
                 let mut buf = vec![0u8; 64 << 10];
@@ -382,9 +389,7 @@ impl ChatHost {
                     host.on_bytes(&mut partial, &buf[..n]);
                 }
                 host.on_exit();
-                None
             })?;
-            *self.reader.lock().unwrap() = Some(Reader { thread });
         }
         Ok(())
     }
