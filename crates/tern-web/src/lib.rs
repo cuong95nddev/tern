@@ -424,6 +424,11 @@ fn tailscale_self() -> Option<Tailnet> {
 
 fn parse_tailscale_status(json: &[u8]) -> Option<Tailnet> {
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    // Stopped, logged out or starting: the addresses are listed but not on any
+    // interface yet, so they can't be served on.
+    if v.get("BackendState")?.as_str()? != "Running" {
+        return None;
+    }
     let me = v.get("Self")?;
     let ips: Vec<IpAddr> = me.get("TailscaleIPs")?.as_array()?.iter().filter_map(|i| i.as_str()?.parse().ok()).collect();
     let ip = ips.iter().find(|i| i.is_ipv4()).or(ips.first()).copied()?;
@@ -473,11 +478,16 @@ mod tests {
 
     #[test]
     fn reads_tailscale_status() {
-        let json = br#"{"Self":{"DNSName":"box.tail1234.ts.net.","TailscaleIPs":["fd7a:115c::1","100.101.102.103"]}}"#;
+        let json =
+            br#"{"BackendState":"Running","Self":{"DNSName":"box.tail1234.ts.net.","TailscaleIPs":["fd7a:115c::1","100.101.102.103"]}}"#;
         let t = parse_tailscale_status(json).unwrap();
         assert_eq!(t.ip, "100.101.102.103".parse::<IpAddr>().unwrap());
         assert_eq!(t.name.as_deref(), Some("box.tail1234.ts.net"));
         assert!(parse_tailscale_status(b"{}").is_none());
+        // Tailscale turned off still names its addresses, but they are not on
+        // any interface: binding one fails with "Can't assign requested address".
+        let stopped = br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":["100.101.102.103"]}}"#;
+        assert!(parse_tailscale_status(stopped).is_none());
     }
 
     #[test]
