@@ -221,7 +221,7 @@
   .tree .ic { width: 14px; height: 14px; color: var(--dim); }
   .tree .chev { width: 10px; height: 10px; }
   .tree .in { padding-left: 28px; }
-  .tree .sel { background: var(--raise); border-radius: 6px; margin: 0 6px; padding-left: 22px; }
+  .tree .sel { border-radius: 6px; margin: 0 6px; padding-left: 22px; }
   .tree .mod { color: var(--blocked); }
 
   .main { display: flex; flex-direction: column; min-width: 0; }
@@ -253,6 +253,53 @@
   .meter.hot i { background: var(--blocked); }
   .ring { width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--working) 0 22%, var(--raise) 22% 100%); -webkit-mask: radial-gradient(circle, transparent 3px, #000 3.5px); mask: radial-gradient(circle, transparent 3px, #000 3.5px); }
 
+  /* the demo: an agent restyles Tern from its config files; the mock
+     takes the theme it sets */
+  .term { display: flex; flex-direction: column; min-height: 0; }
+  .main, .left, .right { min-height: 0; overflow: hidden; }
+  .term .log { flex: 1; min-height: 0; overflow: hidden; }
+  .term.playing .s:not(.shown) { display: none; }
+  .tree .sel { background: var(--raise); }
+  .win[data-look][data-fix] { --dim: #d8c4a4; --faint: #b29c7e; }
+  .win { position: relative; }
+  .hit { background: var(--raise); color: var(--ink); border-radius: 4px; }
+  /* the capture: the window dims around a growing selection, a box marks
+     the row, then the tray takes it with a prompt */
+  .capture { position: absolute; inset: 0; z-index: 3; pointer-events: none; opacity: 0; transition: opacity .15s; }
+  .capture.on { opacity: 1; }
+  .sel-rect { position: absolute; border: 1px solid #fff; box-shadow: 0 0 0 3000px rgba(0,0,0,.5); transition: width .45s ease-out, height .45s ease-out; }
+  .sel-rect span { position: absolute; left: -1px; top: -22px; font: 500 11px var(--mono); color: #fff; background: rgba(0,0,0,.7); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+  .mark-box { position: absolute; border: 2px solid #ff5a4f; border-radius: 3px; opacity: 0; transform: scale(.7); transition: opacity .15s, transform .25s ease-out; }
+  .mark-box.on { opacity: 1; transform: none; }
+  .tray { position: absolute; z-index: 4; left: 50%; bottom: 78px; width: 360px; padding: 6px 8px 8px; transform: translate(-50%, 10px); opacity: 0; pointer-events: none;
+    background: var(--win); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 60px -16px rgba(0,0,0,.7);
+    transition: opacity .2s, transform .2s; }
+  .tray.on { opacity: 1; transform: translate(-50%, 0); }
+  .fhead { display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 0 0 4px; color: var(--dim); font-size: 12px; }
+  .fhead .t { flex: 1; color: var(--ink); }
+  .fhead .ic { width: 22px; height: 22px; padding: 5px; }
+  .fhead .sep { width: 1px; height: 14px; background: var(--line); margin: 0 3px; }
+  .thumbs { display: flex; gap: 4px; margin: 4px 0 6px; }
+  .thumb { position: relative; width: 84px; height: 54px; border-radius: 6px; border: 1px solid var(--line); overflow: hidden;
+    background: repeating-linear-gradient(180deg, transparent 0 8px, var(--raise) 8px 9px), var(--bg); }
+  .thumb i { position: absolute; left: 12%; top: 44%; width: 62%; height: 20%; border: 1.5px solid #ff5a4f; border-radius: 2px; }
+  .thumb b { position: absolute; top: 2px; right: 2px; width: 14px; height: 14px; border-radius: 4px; background: var(--raise); color: var(--dim); font: 600 9px/14px var(--sans); text-align: center; }
+  .send-row { display: flex; align-items: center; gap: 6px; }
+  .prompt { flex: 1; min-width: 0; height: 28px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; color: var(--ink); white-space: nowrap; overflow: hidden; font-size: 12.5px; }
+  .prompt .cursor { width: 1.5px; height: 14px; vertical-align: -3px; }
+  .send { display: inline-flex; align-items: center; gap: 6px; flex: none; background: var(--ink); color: var(--on-ink); font-weight: 600; border-radius: 6px; padding: 4px 10px; transition: transform .1s; }
+  .send.press { transform: scale(.92); }
+  .send .ic { width: 13px; height: 13px; }
+  .term .s { transition: opacity .15s; }
+  .status .st-work, .status.Working .st-done { display: none; }
+  .status.Working .st-work { display: inline-flex; }
+  .win, .win * { transition: background-color .5s, color .5s, border-color .5s; }
+  .win[data-look="sepia"] {
+    --win: #231b13; --bg: #1b150f; --raise: #352a1e; --line: #3e3226;
+    --ink: #f3e5cf; --dim: #bba486; --faint: #8c785f; --term-text: #e4d3b6;
+    --working: #f0a050; --blocked: #f2c35b; --done: #b6cf7a; --add: #b6cf7a;
+    --agent: #ee7d45; --on-ink: #1b150f;
+  }
   .right { display: flex; flex-direction: column; color: var(--dim); min-height: 0; }
   .right section + section { border-top: 1px solid var(--line); }
   .changes { flex: 1; display: flex; flex-direction: column; }
@@ -315,6 +362,7 @@
     footer .wrap { flex-direction: column; justify-content: center; gap: 6px; height: auto; padding: 28px 16px; }
   }
   @media (prefers-reduced-motion: reduce) {
+    .win, .win * { transition: none; }
     .cursor, .spin { animation: none; }
   }
 </style>
@@ -345,6 +393,12 @@
     <symbol id="i-split" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-15-6.7L3 8M3 3v5h5M3 12a9 9 0 0 0 15 6.7l3-2.7M21 21v-5h-5"/></symbol>
+    <symbol id="i-region" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2M9 3h1M9 21h1M14 3h1M14 21h1M3 9v1M21 9v1M3 14v1M21 14v1"/></symbol>
+    <symbol id="i-window" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M2 9h20"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.38 3.62a1 1 0 0 1 3 3L7.37 18.64a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.54 21.69a.5.5 0 0 0 .93-.02l6.5-19a.5.5 0 0 0-.63-.63l-19 6.5a.5.5 0 0 0-.03.93l7.93 3.18a2 2 0 0 1 1.11 1.11z"/><path d="m21.85 2.15-10.94 10.93"/></symbol>
   </defs>
 </svg>
 <div class="wrap">
@@ -396,12 +450,12 @@
           <section>
             <div class="head"><span class="t"><b>Agents</b></span>
               <span class="ic"><svg><use href="#i-bot"/></svg></span>
-              <span class="ic"><svg><use href="#i-camera"/></svg></span>
+              <span class="ic" id="demo-cam"><svg><use href="#i-camera"/></svg></span>
               <span class="ic"><svg><use href="#i-folder-plus"/></svg></span>
             </div>
             <ul class="alist">
               <li class="folder"><span class="ic muted"><svg><use href="#i-folder"/></svg></span><span class="name">tern</span><span class="fill"></span><span class="dot Blocked"></span></li>
-              <li class="two on"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Update button</span><span class="status Working">42s <span class="ic spin"><svg><use href="#i-spin"/></svg></span></span><span class="sub">Moving the button into the title bar…</span></li>
+              <li class="two on" id="demo-agent"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Warmer theme</span><span class="status Done"><span class="t">now</span> <span class="ic st-done"><svg><use href="#i-check"/></svg></span><span class="ic spin st-work"><svg><use href="#i-spin"/></svg></span></span><span class="sub">Tern is on Sepia now.</span></li>
               <li class="two"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Review daemon</span><span class="status Blocked">1m <span class="ic"><svg><use href="#i-ask"/></svg></span></span><span class="sub">Should I also drop the old socket path?</span></li>
               <li class="folder"><span class="ic muted"><svg><use href="#i-folder"/></svg></span><span class="name">api-server</span><span class="fill"></span><span class="dot Working"></span></li>
               <li class="two"><span class="ic agent"><svg><use href="#i-claude"/></svg></span><span class="name">Rate limit</span><span class="status Working">3m <span class="ic spin"><svg><use href="#i-spin"/></svg></span></span><span class="sub">Ran npm test -- routes</span></li>
@@ -427,7 +481,7 @@
 
         <div class="main">
           <div class="tabs">
-            <span class="on"><span class="ic agent"><svg><use href="#i-claude"/></svg></span>Update button<span class="ic x"><svg><use href="#i-x"/></svg></span></span>
+            <span class="on"><span class="ic agent"><svg><use href="#i-claude"/></svg></span>Warmer theme<span class="ic x"><svg><use href="#i-x"/></svg></span></span>
             <span><span class="ic"><svg><use href="#i-term"/></svg></span>zsh</span>
             <span><span class="ic"><svg><use href="#i-file"/></svg></span>update.rs</span>
             <span>+</span>
@@ -438,21 +492,33 @@
               <span class="ic"><svg><use href="#i-grid"/></svg></span>
             </span>
           </div>
-          <div class="term">
-            <p class="you">&gt; the update button overlaps the tabs, show it in the title bar instead</p>
-            <div class="gap"></div>
-            <p class="mut">  Thought for 4s</p>
-            <p><span class="ok">●</span> <span class="tool">Read</span>(<span class="mut">crates/tern-app/src/main_window.rs</span>)</p>
-            <p><span class="ok">●</span> <span class="tool">Update</span>(<span class="mut">crates/tern-app/src/update.rs</span>)</p>
-            <p class="mut">  ⎿ Updated update.rs with 212 additions</p>
-            <p><span class="ok">●</span> <span class="tool">Bash</span>(<span class="mut">cargo check -p tern-app</span>)</p>
-            <p class="mut">  ⎿ Finished `dev` profile in 5.01s</p>
-            <div class="gap"></div>
-            <p>● The button now sits in the title bar, right of the panel</p>
-            <p>  buttons, and only shows when an update is ready. See</p>
-            <p>  <span class="lnk">crates/tern-app/src/main_window.rs:412</span>.</p>
+          <div class="term" id="demo">
+            <div class="log">
+              <p class="you s">&gt; make Tern warmer: a sepia theme with orange accents</p>
+              <div class="gap"></div>
+              <p class="mut s" data-sub="Reading Tern's config README…">  Thought for 3s</p>
+              <p class="s" data-sub="Ran Read ~/.config/tern/README.md"><span class="ok">●</span> <span class="tool">Read</span>(<span class="mut">~/.config/tern/README.md</span>)</p>
+              <p class="s" data-sub="Ran Write themes/sepia.json"><span class="ok">●</span> <span class="tool">Write</span>(<span class="mut">~/.config/tern/themes/sepia.json</span>)</p>
+              <p class="mut s">  ⎿ Wrote 48 lines</p>
+              <p class="s" data-sub="Ran tern set_theme" data-apply><span class="ok">●</span> <span class="tool">tern - set_theme</span> <span class="mut">(MCP)(name: "Sepia")</span></p>
+              <p class="mut s">  ⎿ Sepia (dark), no problems in the files</p>
+              <p class="s" data-sub="Ran tern window_shot"><span class="ok">●</span> <span class="tool">tern - window_shot</span> <span class="mut">(MCP)</span></p>
+              <p class="mut s">  ⎿ Saved the window as shot.png</p>
+              <div class="gap"></div>
+              <p class="s" data-sub="Tern is on Sepia now." data-done>● Tern is on Sepia now: a warm background and orange</p>
+              <p class="s" data-end>  accents, and the screenshot looks right.</p>
+              <div class="gap s"></div>
+              <p class="you s">&gt; [Image #1] the dim text in here is hard to read</p>
+              <div class="gap s"></div>
+              <p class="s" data-sub="Ran Read image #1"><span class="ok">●</span> <span class="tool">Read</span>(<span class="mut">image #1</span>)</p>
+              <p class="s" data-sub="Ran Update themes/sepia.json" data-fix><span class="ok">●</span> <span class="tool">Update</span>(<span class="mut">~/.config/tern/themes/sepia.json</span>)</p>
+              <p class="mut s">  ⎿ muted_foreground: two steps lighter</p>
+              <p class="s" data-sub="Ran tern window_shot"><span class="ok">●</span> <span class="tool">tern - window_shot</span> <span class="mut">(MCP)</span></p>
+              <div class="gap s"></div>
+              <p class="s" data-sub="Muted text is lighter now." data-done>● Muted text is lighter now, everywhere it is used.</p>
+            </div>
             <div class="line"></div>
-            <p>&gt; <span class="cursor"></span></p>
+            <p>&gt; <span class="typed"></span><span class="cursor"></span></p>
             <div class="line"></div>
             <p class="mut">~/ws/tern | <span class="model">Opus 5.5</span> | 22% 44k/200k</p>
           </div>
@@ -485,6 +551,23 @@
             <div style="height:8px"></div>
           </section>
         </aside>
+      </div>
+      <div class="capture" aria-hidden="true"><i class="sel-rect"><span></span></i><i class="mark-box"></i></div>
+      <div class="tray" aria-hidden="true">
+        <div class="fhead"><span class="t">Screenshots (1)</span>
+          <span class="ic"><svg><use href="#i-region"/></svg></span>
+          <span class="ic"><svg><use href="#i-window"/></svg></span>
+          <span class="ic"><svg><use href="#i-monitor"/></svg></span>
+          <span class="sep"></span>
+          <span class="ic"><svg><use href="#i-pen"/></svg></span>
+          <span class="ic"><svg><use href="#i-trash"/></svg></span>
+          <span class="ic"><svg><use href="#i-x"/></svg></span>
+        </div>
+        <div class="thumbs"><div class="thumb"><i></i><b>✕</b></div></div>
+        <div class="send-row">
+          <div class="prompt"><span class="ptext"></span><span class="cursor"></span></div>
+          <div class="send"><span class="ic"><svg><use href="#i-send"/></svg></span>Send</div>
+        </div>
       </div>
     </div>
   </section>
@@ -597,6 +680,130 @@
     try { localStorage.setItem("theme", root.dataset.theme); } catch {}
     sync();
   });
+
+  // The demo in the window, on a loop: an agent restyles Tern from its
+  // config files (the mock takes the theme it sets); as the theme lands, a
+  // screenshot of a spot in it goes to the agent with a prompt, and the
+  // agent fixes that spot next. Without JS, or with reduced motion, the
+  // finished conversation stays as it is.
+  (() => {
+    const term = document.getElementById("demo");
+    if (!term || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const win = term.closest(".win");
+    const log = term.querySelector(".log");
+    const steps = [...log.querySelectorAll(".s")];
+    const cut = steps.findIndex(p => "end" in p.dataset) + 1;
+    const typed = term.querySelector(".typed");
+    const row = document.getElementById("demo-agent");
+    const status = row.querySelector(".status");
+    const sub = row.querySelector(".sub");
+    const age = status.querySelector(".t");
+    const cam = document.getElementById("demo-cam");
+    const cap = win.querySelector(".capture");
+    const rect = cap.querySelector(".sel-rect");
+    const size = rect.querySelector("span");
+    const mark = cap.querySelector(".mark-box");
+    const tray = win.querySelector(".tray");
+    const ptext = tray.querySelector(".ptext");
+    const send = tray.querySelector(".send");
+    const thumbMark = tray.querySelector(".thumb i");
+    const rand = (a, b) => a + Math.random() * (b - a);
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    let visible = false;
+    const seen = () => new Promise(r => { const t = () => visible ? r() : setTimeout(t, 400); t(); });
+    new IntersectionObserver(e => { visible = e[0].isIntersecting; }).observe(win);
+    const type = async (el, text) => { for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await wait(14); } };
+    const place = (el, b) => Object.assign(el.style, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px" });
+    const idle = (t, s) => { status.className = "status Done"; age.textContent = t; sub.textContent = s; };
+
+    // An asked turn: its prompt line, then the agent's lines one by one.
+    async function turn(lines, onApply) {
+      let side = null;
+      lines[0].classList.add("shown");
+      status.className = "status Working"; age.textContent = "0s"; sub.textContent = "Thinking…";
+      let secs = 0, done = false;
+      for (const p of lines.slice(1)) {
+        if (!p.matches(".gap")) await wait(p.classList.contains("mut") ? 200 : 420);
+        p.classList.add("shown");
+        log.scrollTop = log.scrollHeight;
+        if (!done) { secs += 2; age.textContent = secs + "s"; }
+        if (p.dataset.sub) sub.textContent = p.dataset.sub;
+        if ("apply" in p.dataset) { win.dataset.look = "sepia"; if (onApply) side = onApply(); }
+        if ("fix" in p.dataset) win.dataset.fix = "";
+        if ("done" in p.dataset) { done = true; status.className = "status Done"; age.textContent = "now"; }
+      }
+      return side;
+    }
+
+    async function theme() {
+      const ask = steps[0];
+      await wait(400);
+      await type(typed, ask.textContent.replace(/^>\s*/, ""));
+      await wait(250);
+      typed.textContent = "";
+      // The capture starts as the theme lands, while the agent still works;
+      // its prompt waits in the queue until the turn ends.
+      // (A promise returned from turn is awaited with it.)
+      if (await turn(steps.slice(0, cut), capture)) {
+        steps[cut].classList.add("shown");
+        await turn(steps.slice(cut + 1));
+      }
+    }
+
+    async function capture() {
+      await wait(150);
+      cam.classList.add("hit"); await wait(250); cam.classList.remove("hit");
+      // A region somewhere in the middle of the window, a new one each time,
+      // and a mark inside it.
+      const W = win.clientWidth, H = win.clientHeight;
+      const b = { w: W * rand(.24, .36), h: H * rand(.26, .38) };
+      b.x = W * rand(.18, .82) - b.w / 2; b.y = H * rand(.32, .68) - b.h / 2;
+      const m = { w: b.w * rand(.35, .55), h: b.h * rand(.18, .3) };
+      m.x = b.x + rand(.08, .92 - m.w / b.w) * b.w; m.y = b.y + rand(.15, .85 - m.h / b.h) * b.h;
+      Object.assign(thumbMark.style, { left: (m.x - b.x) / b.w * 100 + "%", top: (m.y - b.y) / b.h * 100 + "%", width: m.w / b.w * 100 + "%", height: m.h / b.h * 100 + "%" });
+      rect.style.transition = "none";
+      place(rect, { x: b.x, y: b.y, w: 0, h: 0 });
+      size.textContent = "";
+      mark.classList.remove("on");
+      cap.classList.add("on");
+      await wait(300);
+      rect.offsetWidth;
+      rect.style.transition = "";
+      place(rect, b);
+      size.textContent = Math.round(b.w * 2) + " × " + Math.round(b.h * 2);
+      await wait(650);
+      place(mark, m);
+      mark.classList.add("on");
+      await wait(700);
+      cap.classList.remove("on");
+      ptext.textContent = "";
+      tray.classList.add("on");
+      await wait(350);
+      const ask = steps[cut + 1];
+      await type(ptext, ask.textContent.replace(/^>\s*\[Image #1\]\s*/, ""));
+      await wait(300);
+      send.classList.add("press"); await wait(150); send.classList.remove("press");
+      tray.classList.remove("on");
+      await wait(200);
+      return true;
+    }
+
+    async function play() {
+      for (;;) {
+        await seen();
+        term.classList.add("playing");
+        steps.forEach(p => p.classList.remove("shown"));
+        log.scrollTop = 0;
+        idle("1m", "Waiting for you");
+        await theme();
+        await wait(4000);
+        delete win.dataset.look;
+        delete win.dataset.fix;
+        await wait(800);
+      }
+    }
+    play();
+  })();
 
   // Point the download links straight at the latest release's files; the
   // release page stays as the fallback.
