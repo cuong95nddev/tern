@@ -25,7 +25,9 @@ fn starts_on_first_use_and_opens_document() {
     let open = &got[2]["params"]["textDocument"];
     assert_eq!(open["text"], "fn main() { x }\n");
     assert_eq!(open["languageId"], "rust");
-    assert_eq!(got[0]["params"]["rootUri"].as_str().unwrap(), format!("file://{}", f.ws.display()));
+    // The root as a URI (`file:///C:/...` on Windows: compared as a path).
+    let root: lsp_types::Uri = got[0]["params"]["rootUri"].as_str().unwrap().parse().unwrap();
+    assert_eq!(tern_lsp::uri::uri_to_path(&root).unwrap(), f.ws);
     // The request names the document.
     let req = got.iter().find(|m| m["method"] == "textDocument/hover").unwrap();
     assert!(req["params"]["textDocument"]["uri"].as_str().unwrap().ends_with("/src/main.rs"));
