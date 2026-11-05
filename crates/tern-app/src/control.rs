@@ -40,13 +40,15 @@
 //!   term-paste-path P1|P2   paste paths as a file drop does
 //!   chat-new         open a Claude chat tab (default account)
 //!   chat-open ID     open conversation ID in a chat tab (as a restored one)
-//!   claude-switch    show the active Claude tab the other way (terminal ⇄ chat)
+//!   agent-new ID     open a tab running agent ID (`tern --agents` lists them)
+//!   agent-switch     show the active agent tab the other way (terminal ⇄ chat;
+//!                    `claude-switch` is its older name)
 //!   chat-send TEXT   send TEXT in the active chat tab
 //!   chat-state       the active chat's rows, busy, mode
 //!   chat-trust       trust its folder, as the question over the message box does
 //!   chat-answer allow|session|deny   answer its open permission request
 //!   chat-mode MODE   set its permission mode (`default`, `acceptEdits`, `plan`, `auto`)
-//!   context-state    the shown Claude tab's context window, limit and handoff
+//!   context-state    the shown agent tab's context window, limit and handoff
 //!   context-guard LIMIT [manual]   turn its limit on (`manual`: no auto switch)
 //!   context-hand-off, context-resume   the context card's buttons
 //!   @N CMD           send CMD to window N instead of the active one

@@ -267,7 +267,7 @@
       { "slot": "icon" },
       { "when": "editing", "slot": "field" },
       { "when": "!editing", "grow": 1, "nowrap": true, "text": "{name}", "style": { "text": "{name_color}" } },
-      { "when": "!editing && claude", "text": "✦", "style": { "font_size": "$explorer.row.detail_font_size", "text": "$accent.foreground" } },
+      { "when": "!editing && agent_edited", "text": "✦", "style": { "font_size": "$explorer.row.detail_font_size", "text": "$accent.foreground" } },
       { "when": "!editing && git && !folder", "text": "{git}", "style": { "font_size": "$explorer.row.detail_font_size", "text": "{name_color}" } }
     ]
   },
@@ -2155,7 +2155,7 @@
           {
             "element": "usage.card.detail",
             "wrap": true,
-            "text": "Past the limit, this tab's Claude is told so, and when it next stops it writes a handoff in the repository first."
+            "text": "Past the limit, this tab's {agent} is told so, and when it next stops it writes a handoff in the repository first."
           },
           {
             "when": "guarded",

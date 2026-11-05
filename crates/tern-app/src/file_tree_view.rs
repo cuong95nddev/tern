@@ -132,7 +132,7 @@ type Then = Box<dyn FnOnce(&mut FileTreeView, &mut Context<FileTreeView>)>;
 pub struct FileTreeView {
     tree: FileTree,
     git: HashMap<PathBuf, GitStatus>,
-    claude_touched: HashSet<PathBuf>,
+    agent_touched: HashSet<PathBuf>,
     /// Every selected entry (⌘-click and ⇧-click add to it).
     selected: Vec<PathBuf>,
     /// The entry the keyboard acts on, and where a ⇧-click range starts.
@@ -184,7 +184,7 @@ impl FileTreeView {
         let mut this = Self {
             tree: FileTree::unloaded(root.clone()),
             git: HashMap::new(),
-            claude_touched: HashSet::new(),
+            agent_touched: HashSet::new(),
             selected: vec![],
             cursor: None,
             edit: None,
@@ -266,9 +266,9 @@ impl FileTreeView {
         }
     }
 
-    /// Mark files Claude edited (from hooks).
-    pub fn mark_claude_edit(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.claude_touched.extend(paths.iter().cloned());
+    /// Mark files an agent edited (from its hooks).
+    pub fn mark_agent_edit(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        self.agent_touched.extend(paths.iter().cloned());
         let applied = self.tree.apply_changes(paths.iter().map(PathBuf::as_path));
         self.applied(applied, cx);
         cx.notify();
@@ -548,7 +548,7 @@ impl FileTreeView {
         let follow = |p: &PathBuf| p.strip_prefix(from).map(|r| to.join(r)).unwrap_or_else(|_| p.clone());
         self.selected = self.selected.iter().map(follow).collect();
         self.cursor = self.cursor.as_ref().map(follow);
-        self.claude_touched = self.claude_touched.iter().map(follow).collect();
+        self.agent_touched = self.agent_touched.iter().map(follow).collect();
         self.show(to.to_path_buf(), cx);
         cx.emit(FileTreeEvent::Moved { from: from.to_path_buf(), to: to.to_path_buf() });
     }
@@ -937,7 +937,7 @@ impl FileTreeView {
             .var("cut", self.clip.as_ref().is_some_and(|c| c.cut && c.paths.iter().any(|p| path.starts_with(p))))
             .var("editing", renaming.is_some())
             .var("name", name)
-            .var("claude", self.claude_touched.contains(path))
+            .var("agent_edited", self.agent_touched.contains(path))
             .var("git", git.map(|g| g.letter().to_string()).unwrap_or_default())
             .slot("icon", style::row_icon(ROW, icon, icon_color, cx))
             .slot_opt("field", renaming.map(|e| Self::name_field(&e.input)));

@@ -50,10 +50,12 @@ pub enum UsageEvent {
     ResumeHandoff,
 }
 
-/// The shown Claude tab's context window: how full it is (once its status
-/// line said), the limit it keeps and its handoff.
+/// The shown agent tab's context window: how full it is (once its agent
+/// said), the limit it keeps and its handoff.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextShown {
+    /// What the copy calls its agent (`Claude`).
+    pub agent: String,
     pub usage: Option<ContextUse>,
     pub guard: ContextGuard,
     pub handoff: Handoff,
@@ -67,9 +69,11 @@ impl ContextShown {
         let (g, percent) = (self.guard, self.usage.map(|u| u.percent));
         let used = match self.usage {
             Some(u) => format!("{}% of {} used", u.percent.round(), crate::agents::tokens_label(u.size)),
-            None => "Not known until Claude answers".into(),
+            None => format!("Not known until {} answers", self.agent),
         };
+        let agent = &self.agent;
         scope
+            .var("agent", agent.clone())
             .var("context", true)
             .var("context_ring", percent.map(|p| p.to_string()).unwrap_or_default())
             .var("context_text", percent.map(|p| format!("{}%", p.round())).unwrap_or_default())
@@ -85,9 +89,9 @@ impl ContextShown {
                 "handoff_text",
                 match &self.handoff {
                     Handoff::None => {
-                        "Claude writes a handoff in the repository, then stops. Go on from it later, also after a restart.".into()
+                        format!("{agent} writes a handoff in the repository, then stops. Go on from it later, also after a restart.")
                     },
-                    Handoff::Asked => "Claude is writing a handoff…".into(),
+                    Handoff::Asked => format!("{agent} is writing a handoff…"),
                     Handoff::Written(path) => {
                         format!("Handoff at {path}. Going on clears this conversation and a fresh one starts from it.")
                     },
@@ -598,5 +602,27 @@ impl Render for ContextCard {
             cx,
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContextShown;
+    use crate::agents::{ContextGuard, Handoff};
+    use crate::template::Scope;
+
+    #[test]
+    fn the_context_card_names_the_tabs_agent() {
+        let shown = ContextShown {
+            agent: "Claude".into(),
+            usage: None,
+            guard: ContextGuard::default(),
+            handoff: Handoff::Asked,
+            takes_handoffs: true,
+        };
+        let scope = shown.scope(Scope::new("t"));
+        assert_eq!(scope.text_var("agent").as_deref(), Some("Claude"));
+        assert_eq!(scope.text_var("handoff_text").as_deref(), Some("Claude is writing a handoff…"));
+        assert_eq!(scope.text_var("context_used").as_deref(), Some("Not known until Claude answers"));
     }
 }

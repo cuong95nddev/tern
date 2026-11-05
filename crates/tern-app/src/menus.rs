@@ -34,10 +34,21 @@ pub fn install(cx: &mut App) {
 }
 
 fn menus() -> Vec<Menu> {
-    let mut file = vec![
-        MenuItem::action("New Claude Tab", workspace::NewClaudeTab),
-        MenuItem::action("New Claude Chat", workspace::NewClaudeChat),
-        MenuItem::action("New Shell Tab", workspace::NewShellTab),
+    let registry = tern_agent::registry();
+    let claude = registry.get(tern_agent::CLAUDE).map_or("Claude", |d| d.short_name.as_str());
+    let mut file = vec![MenuItem::action(format!("New {claude} Tab"), workspace::NewClaudeTab)];
+    if registry.has(tern_agent::CLAUDE, tern_agent::Capability::Chat) {
+        file.push(MenuItem::action(format!("New {claude} Chat"), workspace::NewClaudeChat));
+    }
+    file.push(MenuItem::action("New Shell Tab", workspace::NewShellTab));
+    // The other agents: a shell that starts each (with Tern wired in once it can).
+    let others = registry.all().filter(|d| !d.id.is(tern_agent::CLAUDE));
+    let others: Vec<MenuItem> =
+        others.map(|d| MenuItem::action(format!("New {} Tab", d.short_name), workspace::NewAgentTab(d.id.to_string().into()))).collect();
+    if !others.is_empty() {
+        file.push(MenuItem::submenu(Menu::new("New Agent Tab").items(others)));
+    }
+    file.extend([
         MenuItem::action("New Scratch File", workspace::NewScratch),
         MenuItem::separator(),
         MenuItem::action("New Window", main_window::NewWindow),
@@ -46,7 +57,7 @@ fn menus() -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Close Tab", workspace::CloseTab),
         MenuItem::action("Close Workspace", main_window::CloseWorkspace),
-    ];
+    ]);
     let edit = Menu::new("Edit").items([
         MenuItem::action("Copy", terminal_view::Copy),
         MenuItem::action("Paste", terminal_view::Paste),

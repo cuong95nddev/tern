@@ -62,7 +62,7 @@ actions!(
     [
         NewClaudeTab,
         NewClaudeChat,
-        SwitchClaudeView,
+        SwitchAgentView,
         NewShellTab,
         NewScratch,
         OpenScratchesFolder,
@@ -109,6 +109,12 @@ actions!(
     ]
 );
 
+/// A new tab running agent `.0` (an id of `tern_agent`): with Tern wired in
+/// when it can (`Capability::Launch`), else a shell that starts it.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewAgentTab(pub SharedString);
+
 /// The template the panes are drawn with: it holds the pane dock.
 const PANES: &str = "panes";
 
@@ -154,7 +160,8 @@ pub fn bind_keys(cx: &mut App) {
 
 #[derive(Clone, PartialEq, Eq)]
 enum TabKind {
-    /// Runs an agent with Tern's integration (`Capability::Launch`).
+    /// Runs an agent: with Tern wired in where Tern can
+    /// (`Capability::Launch`, ...), else its command alone.
     Agent(AgentId),
     Shell,
 }
@@ -843,8 +850,8 @@ impl Workspace {
             match tab {
                 SavedTab::Agent { agent, name, session, mux, account, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
-                    let kind =
-                        if tern_agent::registry().has(agent.as_str(), Capability::Launch) { TabKind::Agent(agent) } else { TabKind::Shell };
+                    // An agent no longer known runs as a shell.
+                    let kind = if tern_agent::registry().get(agent.as_str()).is_some() { TabKind::Agent(agent) } else { TabKind::Shell };
                     this.add_term(kind, name, session, mux, &account, window, cx);
                     if let Some(CenterTab::Term(t)) = this.tabs.get_mut(before) {
                         t.guard = crate::agents::ContextGuard::from_saved(guard);
@@ -1124,19 +1131,27 @@ impl Workspace {
     /// How to start a terminal of `kind` running as Claude account
     /// `account`: a Claude tab, or a shell one that runs `claude` as it.
     /// One removed since runs as the default account.
-    fn spawn_config(&self, kind: &TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, &'static str) {
+    fn spawn_config(&self, kind: &TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, SharedString) {
         let shell = crate::platform::shell();
         let (account, mut env) = claude_env(account, cx);
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
         let (args, title) = match kind {
-            // Only Claude launches with Tern's integration so far.
-            TabKind::Shell | TabKind::Agent(_) if !kind.is_claude() => {
+            TabKind::Shell => {
                 // Only Claude's hooks need the proxy bypass.
                 env.remove("NO_PROXY");
                 env.remove("no_proxy");
-                (crate::platform::shell_args(), "shell")
+                (crate::platform::shell_args(), "shell".into())
             },
-            TabKind::Agent(_) | TabKind::Shell => {
+            // An agent Tern has no integration for yet: its command, run
+            // as Claude's is (the tab goes on as a shell when it ends).
+            TabKind::Agent(agent) if !agent.is(tern_agent::CLAUDE) => {
+                env.remove("NO_PROXY");
+                env.remove("no_proxy");
+                let registry = tern_agent::registry();
+                let line = registry.get(agent.as_str()).map_or_else(|| agent.to_string(), crate::agents::launch_line);
+                (crate::platform::shell_command_args(&line), crate::agents::agent_short_name(agent).into())
+            },
+            TabKind::Agent(_) => {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
                 // the placeholder (or drops the flag without hooks).
@@ -1154,7 +1169,7 @@ impl Workspace {
                     (None, Some(id)) => format!("{claude} --resume {}", shell_quote(id)),
                     (None, None) => claude,
                 };
-                (crate::platform::shell_command_args(&claude), "claude")
+                (crate::platform::shell_command_args(&claude), "claude".into())
             },
         };
         (
@@ -1743,7 +1758,7 @@ impl Workspace {
 
     /// Whether tab `ix` is a Claude terminal or chat, which can show its
     /// conversation the other way: `Some(to_chat)`.
-    fn claude_view_switch(&self, ix: usize) -> Option<bool> {
+    fn agent_view_switch(&self, ix: usize) -> Option<bool> {
         match self.tabs.get(ix)? {
             CenterTab::Term(t) if t.kind.has(Capability::Chat) => Some(true),
             CenterTab::Chat { .. } => Some(false),
@@ -1754,8 +1769,8 @@ impl Workspace {
     /// Show tab `ix`'s Claude conversation the other way, in its place: a
     /// terminal's as a chat, a chat's in a terminal (resumed there). Its
     /// program ends first, so two never write the conversation.
-    fn switch_claude_view(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(to_chat) = self.claude_view_switch(ix) else { return };
+    fn switch_agent_view(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(to_chat) = self.agent_view_switch(ix) else { return };
         let (status, session, account) = match &self.tabs[ix] {
             CenterTab::Term(t) => (t.view.read(cx).status(), t.session.clone(), t.account.clone()),
             CenterTab::Chat { view, .. } => {
@@ -2858,7 +2873,7 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        self.tree.update(cx, |t, cx| t.mark_claude_edit(&paths, cx));
+        self.tree.update(cx, |t, cx| t.mark_agent_edit(&paths, cx));
         let batch = ChangeBatch { paths, git_repos: vec![], rescan: false };
         self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
         self.files_changed(&batch, window, cx);
@@ -3011,23 +3026,12 @@ impl Workspace {
         }
     }
 
-    /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
+    /// Open a tab running `agent`: `None` when the workspace shows none
+    /// after (Claude asks which account first when several are on).
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
-        let kind =
-            if tern_agent::registry().has(agent.as_str(), Capability::Launch) { TabKind::Agent(agent.clone()) } else { TabKind::Shell };
-        let shell = kind == TabKind::Shell;
-        self.add_tab(kind, window, cx);
-        let view = self.tabs.get(self.active)?.term()?.view.clone();
-        if shell {
-            let registry = tern_agent::registry();
-            let line = registry.get(agent.as_str()).map_or_else(
-                || agent.to_string(),
-                |d| [d.command.clone()].into_iter().chain(d.args.iter().cloned()).collect::<Vec<_>>().join(" "),
-            );
-            view.update(cx, |v, cx| v.write_input(format!("{line}\r").into_bytes(), cx));
-        }
-        Some(view)
+        self.add_tab(TabKind::Agent(agent), window, cx);
+        Some(self.tabs.get(self.active)?.term()?.view.clone())
     }
 
     /// What tab `i` shows: its label, its name for drags, and a terminal's
@@ -3295,7 +3299,7 @@ impl Workspace {
     fn pane_vars(&self, pane: PaneId, scope: template::Scope) -> template::Scope {
         let shortcut = |k| crate::platform::shortcut(k).to_string();
         // The Claude tab it shows can switch terminal ⇄ chat.
-        let switch = self.pane_active_ix(pane).and_then(|ix| self.claude_view_switch(ix));
+        let switch = self.pane_active_ix(pane).and_then(|ix| self.agent_view_switch(ix));
         scope
             .var("panes", self.layout.panes().len())
             .var("to_chat", switch == Some(true))
@@ -3330,7 +3334,7 @@ impl Workspace {
             "switch_view" => b.on_click(on(|this, pane, window, cx| {
                 this.focus_pane_state(pane);
                 if let Some(ix) = this.pane_active_ix(pane) {
-                    this.switch_claude_view(ix, window, cx);
+                    this.switch_agent_view(ix, window, cx);
                 }
             })),
             "new_claude" => b.on_click(on(|this, pane, window, cx| {
@@ -3718,8 +3722,8 @@ impl Workspace {
             .var("renamable", matches!(tab, CenterTab::Term(_) | CenterTab::Scratch { .. }))
             .var("terminal", tab.term().is_some())
             .var("mutable", matches!(tab, CenterTab::Term(_) | CenterTab::Chat { .. }))
-            .var("to_chat", this.claude_view_switch(ix) == Some(true))
-            .var("to_terminal", this.claude_view_switch(ix) == Some(false))
+            .var("to_chat", this.agent_view_switch(ix) == Some(true))
+            .var("to_terminal", this.agent_view_switch(ix) == Some(false))
             .var("muted", tab.muted())
             .var("diff_file", matches!(tab, CenterTab::Diff(_)) && path.as_ref().is_some_and(|p| p.is_file()))
             .var("has_path", path.is_some())
@@ -3742,7 +3746,7 @@ impl Workspace {
                 "remove_from_group" => Self::remove_from_group,
                 "rename" => Self::rename_tab,
                 "mute" => Self::toggle_mute,
-                "switch_view" => Self::switch_claude_view,
+                "switch_view" => Self::switch_agent_view,
                 "open_file" => Self::open_tab_file,
                 "copy_path" => Self::copy_tab_path,
                 "reveal" => Self::reveal_tab_file,
@@ -5415,9 +5419,20 @@ impl Workspace {
                 self.add_chat(accounts::DEFAULT, None, None, window, cx);
                 "ok".into()
             },
-            "claude-switch" => {
-                self.switch_claude_view(self.active, window, cx);
+            // `claude-switch`: its name before other agents.
+            "agent-switch" | "claude-switch" => {
+                self.switch_agent_view(self.active, window, cx);
                 "ok".into()
+            },
+            cmd if cmd.starts_with("agent-new ") => {
+                let id = cmd["agent-new ".len()..].trim();
+                if tern_agent::registry().get(id).is_none() {
+                    return format!("error: no agent {id} (tern --agents lists them)");
+                }
+                match self.new_agent_tab(AgentId::new(id), window, cx) {
+                    Some(_) => "ok".into(),
+                    None => "error: no tab".into(),
+                }
             },
             cmd if cmd.starts_with("chat-open ") => {
                 self.add_chat(accounts::DEFAULT, Some(cmd["chat-open ".len()..].trim().to_owned()), None, window, cx);
@@ -5633,6 +5648,7 @@ impl Render for Workspace {
         // And how full its context window is, with the limit it keeps.
         let context = match self.tabs.get(self.active) {
             Some(CenterTab::Term(t)) if t.kind.has(Capability::Context) => Some(crate::usage_view::ContextShown {
+                agent: t.kind.agent().map(crate::agents::agent_short_name).unwrap_or_default(),
                 usage: t.context,
                 guard: t.guard,
                 handoff: t.handoff.clone(),
@@ -5641,6 +5657,7 @@ impl Render for Workspace {
             Some(CenterTab::Chat { view, .. }) => {
                 let v = view.read(cx);
                 Some(crate::usage_view::ContextShown {
+                    agent: crate::agents::agent_short_name(&AgentId::new(tern_agent::CLAUDE)),
                     usage: v.context(),
                     guard: v.guard(),
                     handoff: v.handoff().clone(),
@@ -5694,7 +5711,10 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::claude(), w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
-            .on_action(cx.listener(|this, _: &SwitchClaudeView, w, cx| this.switch_claude_view(this.active, w, cx)))
+            .on_action(cx.listener(|this, _: &SwitchAgentView, w, cx| this.switch_agent_view(this.active, w, cx)))
+            .on_action(cx.listener(|this, a: &NewAgentTab, w, cx| {
+                this.new_agent_tab(AgentId::new(&a.0), w, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))
             .on_action(cx.listener(|this, _: &NewScratch, w, cx| this.new_scratch("txt", w, cx)))
             .on_action(cx.listener(|_, _: &OpenScratchesFolder, _, cx| {

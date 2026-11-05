@@ -363,6 +363,19 @@ pub fn agent_name(id: &AgentId) -> String {
     tern_agent::registry().get(id.as_str()).map_or_else(|| id.to_string(), |d| d.name.clone())
 }
 
+/// The shell line that starts agent `d` in a tab: its command, then its
+/// args, each quoted when the shell would split or expand it.
+pub fn launch_line(d: &tern_agent::Descriptor) -> String {
+    let plain = |a: &str| !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:@%+,".contains(c));
+    let args = d.args.iter().map(|a| if plain(a) { a.clone() } else { crate::workspace::shell_quote(a) });
+    std::iter::once(d.command.clone()).chain(args).collect::<Vec<_>>().join(" ")
+}
+
+/// What menus and copy call agent `id` (`Claude`).
+pub fn agent_short_name(id: &AgentId) -> String {
+    tern_agent::registry().get(id.as_str()).map_or_else(|| id.to_string(), |d| d.short_name.clone())
+}
+
 /// What agent `id` is doing, read off its terminal title and the bottom
 /// lines of its screen (lowercased): for when it doesn't report it itself.
 /// `None` when its screen can't tell.
@@ -412,6 +425,15 @@ mod tests {
         assert_eq!(ContextUse::read(&fresh), Some(ContextUse { percent: 0., size: 200_000 }));
         assert_eq!(ContextUse::read(&serde_json::json!({"model": {}})), Option::None);
         assert_eq!((super::tokens_label(200_000), super::tokens_label(1_000_000)), ("200k".to_owned(), "1M".to_owned()));
+    }
+
+    #[test]
+    fn an_agent_starts_with_its_args() {
+        let registry = tern_agent::Registry::builtin();
+        let mut codex = registry.get("codex").unwrap().clone();
+        assert_eq!(super::launch_line(&codex), "codex");
+        codex.args = vec!["--model".into(), "o9 mini".into()];
+        assert_eq!(super::launch_line(&codex), "codex --model 'o9 mini'");
     }
 
     #[test]

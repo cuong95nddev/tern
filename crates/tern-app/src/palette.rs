@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -74,28 +75,25 @@ pub enum PaletteEvent {
 
 enum Do {
     Show(Mode),
-    Action(fn() -> Box<dyn Action>),
+    Action(Rc<dyn Fn() -> Box<dyn Action>>),
 }
 
 struct Command {
-    title: &'static str,
+    title: SharedString,
     key: &'static str,
     run: Do,
 }
 
 macro_rules! cmd {
     ($title:literal, $key:literal, $action:expr) => {
-        Command { title: $title, key: $key, run: Do::Action(|| Box::new($action)) }
+        ($title, $key, (|| Box::new($action)) as fn() -> Box<dyn Action>)
     };
 }
 
-/// The commands, in the order shown before anything is typed.
-const COMMANDS: &[Command] = &[
-    Command { title: "Go to File…", key: "⌘P", run: Do::Show(Mode::Files) },
-    Command { title: "Search in Files", key: "⌘⇧F", run: Do::Show(Mode::Search) },
-    cmd!("New Claude Tab", "⌘T", workspace::NewClaudeTab),
-    cmd!("New Claude Chat", "", workspace::NewClaudeChat),
-    cmd!("Switch Claude Tab: Terminal ⇄ Chat", "", workspace::SwitchClaudeView),
+/// The commands but the agents' and the palette's own, in the order shown
+/// before anything is typed: a title, a key, what it runs.
+#[allow(clippy::type_complexity)]
+const COMMANDS: &[(&str, &str, fn() -> Box<dyn Action>)] = &[
     cmd!("New Shell Tab", "⌘⇧T", workspace::NewShellTab),
     cmd!("New Scratch File", "⌘N", workspace::NewScratch),
     cmd!("Toggle Explorer", "⌘B", workspace::ToggleExplorer),
@@ -133,12 +131,57 @@ const COMMANDS: &[Command] = &[
     cmd!("Restart Background Terminals…", "", restart::RestartBackground),
 ];
 
+/// Every command, in the order shown before anything is typed: Go to
+/// File and Search in Files, a new tab of each agent (Claude's first, then
+/// its chat; the others' after the shell's), then [`COMMANDS`].
+fn commands(registry: &tern_agent::Registry) -> Vec<Command> {
+    use tern_agent::Capability;
+    let mut out = vec![
+        Command { title: "Go to File…".into(), key: "⌘P", run: Do::Show(Mode::Files) },
+        Command { title: "Search in Files".into(), key: "⌘⇧F", run: Do::Show(Mode::Search) },
+    ];
+    let action = |f: Rc<dyn Fn() -> Box<dyn Action>>| Do::Action(f);
+    let mut others = Vec::new();
+    for d in registry.all() {
+        let (id, name) = (d.id.to_string(), d.short_name.clone());
+        if d.id.is(tern_agent::CLAUDE) {
+            // ⌘T, and the actions the menus and templates name.
+            out.push(Command {
+                title: format!("New {name} Tab").into(),
+                key: "⌘T",
+                run: action(Rc::new(|| Box::new(workspace::NewClaudeTab))),
+            });
+        } else {
+            let tab = Rc::new(move || Box::new(workspace::NewAgentTab(id.clone().into())) as Box<dyn Action>);
+            others.push(Command { title: format!("New {name} Tab").into(), key: "", run: action(tab) });
+        }
+        if registry.has(d.id.as_str(), Capability::Chat) {
+            out.push(Command {
+                title: format!("New {name} Chat").into(),
+                key: "",
+                run: action(Rc::new(|| Box::new(workspace::NewClaudeChat))),
+            });
+            out.push(Command {
+                title: format!("Switch {name} Tab: Terminal ⇄ Chat").into(),
+                key: "",
+                run: action(Rc::new(|| Box::new(workspace::SwitchAgentView))),
+            });
+        }
+    }
+    let mut statics = COMMANDS.iter().map(|&(title, key, make)| Command { title: title.into(), key, run: action(Rc::new(make)) });
+    // New Shell Tab, then the other agents' tabs.
+    out.extend(statics.next());
+    out.extend(others);
+    out.extend(statics);
+    out
+}
+
 /// The indices of the commands `query` matches, best first: every word of
 /// it is in the title; titles starting with it come first.
-fn filter_commands(query: &str) -> Vec<usize> {
+fn filter_commands(query: &str, commands: &[Command]) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     let words: Vec<&str> = q.split_whitespace().collect();
-    let mut found: Vec<(bool, usize)> = COMMANDS
+    let mut found: Vec<(bool, usize)> = commands
         .iter()
         .enumerate()
         .filter_map(|(i, c)| {
@@ -193,7 +236,9 @@ pub struct Palette {
     targets: Vec<Target>,
     targets_title: String,
     target_hits: Vec<usize>,
-    /// Indices into [`COMMANDS`], as filtered.
+    /// Every command (see [`commands`]), made when the palette opens.
+    all: Vec<Command>,
+    /// Indices into `all`, as filtered.
     commands: Vec<usize>,
     /// The workspace's files (relative, `/` between folders), read again
     /// each time Go to File shows.
@@ -238,7 +283,7 @@ impl Palette {
         let subs = vec![
             cx.subscribe_in(&commands_input, window, |this, input, ev: &InputEvent, window, cx| match ev {
                 InputEvent::Change => {
-                    this.commands = filter_commands(&input.read(cx).value());
+                    this.commands = filter_commands(&input.read(cx).value(), &this.all);
                     this.select(0, cx);
                 },
                 InputEvent::PressEnter { .. } => this.confirm(window, cx),
@@ -263,6 +308,7 @@ impl Palette {
                 _ => {},
             }),
         ];
+        let all = commands(&tern_agent::registry());
         Self {
             index: Arc::new(SearchIndex::new(root.clone())),
             root,
@@ -274,7 +320,8 @@ impl Palette {
             targets: vec![],
             targets_title: String::new(),
             target_hits: vec![],
-            commands: filter_commands(""),
+            commands: filter_commands("", &all),
+            all,
             files: Arc::default(),
             listing: false,
             hits: vec![],
@@ -303,7 +350,7 @@ impl Palette {
             i.select_all(window, cx);
         });
         match mode {
-            Mode::Commands => self.commands = filter_commands(&input.read(cx).value()),
+            Mode::Commands => self.commands = filter_commands(&input.read(cx).value(), &self.all),
             // The list so far shows until the new one is read.
             Mode::Files => self.list_files(cx),
             Mode::Search => self.index.warm(),
@@ -367,10 +414,13 @@ impl Palette {
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             Mode::Commands => {
-                let Some(c) = self.commands.get(self.selected).map(|&i| &COMMANDS[i]) else { return };
-                match c.run {
-                    Do::Show(mode) => self.show(mode, window, cx),
-                    Do::Action(make) => cx.emit(PaletteEvent::Run(make())),
+                let Some(c) = self.commands.get(self.selected).map(|&i| &self.all[i]) else { return };
+                match &c.run {
+                    Do::Show(mode) => self.show(*mode, window, cx),
+                    Do::Action(make) => {
+                        let action = make();
+                        cx.emit(PaletteEvent::Run(action));
+                    },
                 }
             },
             Mode::Files => {
@@ -506,10 +556,10 @@ impl Palette {
             .filter_map(|ix| {
                 let (name, scope, entry) = match self.mode {
                     Mode::Commands => {
-                        let c = &COMMANDS[*self.commands.get(ix)?];
+                        let c = &self.all[*self.commands.get(ix)?];
                         let scope = template::Scope::new("palette.command")
                             .var("selected", ix == self.selected)
-                            .var("title", c.title)
+                            .var("title", c.title.clone())
                             .var("key", if c.key.is_empty() { String::new() } else { shortcut(c.key) });
                         ("palette.command", scope, Some(ix))
                     },
@@ -745,7 +795,7 @@ mod tests {
 
     use tern_fs::search::Match;
 
-    use super::{COMMANDS, KEEP, Target, filter_commands, filter_files, filter_targets, hit_runs, segments};
+    use super::{KEEP, Target, commands, filter_commands, filter_files, filter_targets, hit_runs, segments};
 
     #[test]
     fn targets_filter_by_name_container_and_path() {
@@ -765,13 +815,23 @@ mod tests {
         assert!(filter_targets("zzz", &all).is_empty());
     }
 
-    fn titles(q: &str) -> Vec<&'static str> {
-        filter_commands(q).into_iter().map(|i| COMMANDS[i].title).collect()
+    fn titles(q: &str) -> Vec<String> {
+        let all = commands(&tern_agent::Registry::builtin());
+        filter_commands(q, &all).into_iter().map(|i| all[i].title.to_string()).collect()
+    }
+
+    #[test]
+    fn palette_offers_every_agent_and_a_chat_only_for_agents_with_chat() {
+        let all = titles("");
+        for t in ["New Claude Tab", "New Claude Chat", "Switch Claude Tab: Terminal ⇄ Chat", "New Codex Tab", "New OpenCode Tab"] {
+            assert!(all.iter().any(|a| a == t), "{t}");
+        }
+        assert!(!all.iter().any(|a| a == "New Codex Chat"));
     }
 
     #[test]
     fn commands_filter_by_words_prefix_first() {
-        assert_eq!(titles("").len(), COMMANDS.len());
+        assert_eq!(titles("").len(), commands(&tern_agent::Registry::builtin()).len());
         assert_eq!(titles("split"), ["Split Right", "Split Down"]);
         assert_eq!(titles("tab new")[..2], ["New Claude Tab", "New Shell Tab"]);
         // A title starting with the query comes before one only containing it.
