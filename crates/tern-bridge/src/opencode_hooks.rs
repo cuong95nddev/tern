@@ -146,4 +146,20 @@ mod tests {
         remove_opencode_hook_file(&run, "tok");
         assert!(!path.exists() && !preview.exists());
     }
+
+    /// The plugin's own behaviour, under node when there is one: CI's runners
+    /// have it, and OpenCode's runtime isn't needed for what is tested.
+    #[test]
+    fn the_plugin_behaves_under_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plugin, harness) = (dir.path().join("plugin.mjs"), dir.path().join("harness.mjs"));
+        std::fs::write(&plugin, PLUGIN_SOURCE).unwrap();
+        std::fs::write(&harness, include_str!("opencode_plugin_test.mjs")).unwrap();
+        let run = std::process::Command::new("node").arg(&harness).arg(&plugin).arg(dir.path().join("hook.json")).output();
+        let Ok(run) = run else {
+            eprintln!("no node here: the plugin's scenarios didn't run");
+            return;
+        };
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    }
 }

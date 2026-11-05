@@ -20,9 +20,38 @@ pub const EVENT: &str = "OpenCode";
 /// A permission or a form the agent waited on was settled: OpenCode tells, as
 /// Claude's hooks don't.
 pub const ANSWERED: &str = "PermissionAnswered";
+/// The kinds of event this file reads, each of which the plugin must forward.
+#[cfg(test)]
+const FOLDED: [&str; 20] = [
+    "session.created",
+    "session.viewed",
+    "session.inbox.enqueued",
+    "session.execution.started",
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+    "session.step.started",
+    "session.tool.input.started",
+    "session.tool.called",
+    "session.tool.success",
+    "session.tool.failed",
+    "session.text.ended",
+    "session.step.ended",
+    "session.compaction.ended",
+    "permission.asked",
+    "permission.replied",
+    "form.created",
+    "form.replied",
+    "form.cancelled",
+];
 
 fn text_at<'a>(v: &'a Value, pointer: &str) -> &'a str {
     v.pointer(pointer).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// A session's turn ended, by event `kind`.
+fn turn_ends(kind: &str) -> bool {
+    matches!(kind, "session.execution.succeeded" | "session.execution.failed" | "session.execution.interrupted")
 }
 
 /// The name Tern's hook events know a tool by.
@@ -132,11 +161,12 @@ impl OpenCodeFold {
     pub fn on_event(&mut self, raw: &Value) -> Vec<Value> {
         let kind = text_at(raw, "/type");
         let data = &raw["data"];
-        let session = text_at(data, "/sessionID");
-        if session.is_empty() {
-            return Vec::new();
-        }
-        if raw.get("parent").is_some_and(|p| !p.is_null()) {
+        // A form's creation has it only in the form.
+        let session = [text_at(data, "/sessionID"), text_at(data, "/form/sessionID")].into_iter().find(|s| !s.is_empty());
+        let Some(session) = session else { return Vec::new() };
+        // The tab's conversation is a root, whatever a failed lookup says.
+        let parent = raw.get("parent").is_some_and(|p| !p.is_null()) || !text_at(data, "/parentID").is_empty();
+        if parent && self.root.as_deref() != Some(session) {
             return self.child(kind, session);
         }
         let mut out = Vec::new();
@@ -158,8 +188,18 @@ impl OpenCodeFold {
             },
             None => out.push(self.switch(session, "resume")),
         }
+        if turn_ends(kind) {
+            out.extend(self.children_end());
+        }
         out.extend(self.root_event(kind, raw));
         out
+    }
+
+    /// The tab's turn is over: so are the children it left at work.
+    fn children_end(&mut self) -> Vec<Value> {
+        let mut left: Vec<String> = self.children.drain().collect();
+        left.sort();
+        left.iter().map(|c| self.payload("SubagentStop", json!({ "agent_id": c, "agent_type": "subagent" }))).collect()
     }
 
     /// What event `kind` of the tab's conversation stands for.
@@ -222,12 +262,13 @@ impl OpenCodeFold {
         }
         let fields = json!({ "agent_id": session, "agent_type": "subagent" });
         let mut out = Vec::new();
-        let ended = matches!(kind, "session.execution.succeeded" | "session.execution.failed" | "session.execution.interrupted");
-        if !ended && self.children.insert(session.to_owned()) {
+        // Only work: a finished child is still looked at, renamed, viewed.
+        let working = matches!(kind, "session.execution.started" | "session.step.started" | "session.tool.called");
+        if working && self.children.insert(session.to_owned()) {
             out.push(self.payload("SubagentStart", fields.clone()));
         }
         match kind {
-            _ if ended => {
+            _ if turn_ends(kind) => {
                 if self.children.remove(session) {
                     out.push(self.payload("SubagentStop", fields));
                 }
@@ -502,5 +543,90 @@ mod tests {
         let mut f = OpenCodeFold::default();
         let reply = json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "read the handoff"}});
         assert_eq!(f.answer("s", &reply).unwrap(), json!({"steer": {"sessionID": "s", "text": "read the handoff", "resume": true}}));
+    }
+
+    #[test]
+    fn a_forms_session_is_in_the_form() {
+        // `form.created` has no `sessionID` of its own; its ends do.
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        let asked = f.on_event(&ev("form.created", json!({"form": {"id": "q", "sessionID": "r"}})));
+        assert_eq!(names(&asked), ["PermissionRequest"]);
+        assert_eq!(names(&f.on_event(&ev("form.replied", json!({"id": "q", "sessionID": "r", "answer": {}})))), [ANSWERED]);
+    }
+
+    #[test]
+    fn a_childs_form_waits_on_the_tab() {
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        let asked = f.on_event(&child("form.created", json!({"form": {"id": "q", "sessionID": "c"}}), "r"));
+        assert_eq!(names(&asked), ["PermissionRequest"]);
+    }
+
+    #[test]
+    fn a_finished_child_doesnt_come_back() {
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        f.on_event(&child("session.execution.started", json!({"sessionID": "c"}), "r"));
+        f.on_event(&child("session.execution.succeeded", json!({"sessionID": "c"}), "r"));
+        assert!(f.on_event(&child("session.viewed", json!({"sessionID": "c"}), "r")).is_empty());
+    }
+
+    #[test]
+    fn a_child_at_work_starts_by_any_sign_of_work() {
+        for kind in ["session.execution.started", "session.step.started", "session.tool.called"] {
+            let mut f = OpenCodeFold::default();
+            started(&mut f, "r");
+            assert_eq!(names(&f.on_event(&child(kind, json!({"sessionID": "c"}), "r"))), ["SubagentStart"], "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_turns_end_ends_the_children_left() {
+        for (kind, end) in [
+            ("session.execution.succeeded", "Stop"),
+            ("session.execution.failed", "StopFailure"),
+            ("session.execution.interrupted", "Interrupt"),
+        ] {
+            let mut f = OpenCodeFold::default();
+            started(&mut f, "r");
+            f.on_event(&child("session.execution.started", json!({"sessionID": "c"}), "r"));
+            let got = f.on_event(&ev(kind, json!({"sessionID": "r"})));
+            assert_eq!(names(&got), ["SubagentStop", end], "{kind}");
+            assert_eq!(got[0]["agent_id"], "c");
+        }
+    }
+
+    #[test]
+    fn a_created_session_with_a_parent_is_a_child() {
+        // Whatever the plugin's lookup found.
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        assert!(f.on_event(&ev("session.created", json!({"sessionID": "c", "parentID": "r"}))).is_empty());
+        assert!(f.on_event(&ev("session.execution.succeeded", json!({"sessionID": "r"}))).iter().any(|e| e["session_id"] == "r"));
+    }
+
+    #[test]
+    fn a_session_of_unknown_parent_never_takes_the_tab() {
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        assert!(f.on_event(&child("session.created", json!({"sessionID": "c"}), "unknown")).is_empty());
+        assert!(f.on_event(&child("session.execution.succeeded", json!({"sessionID": "c"}), "unknown")).is_empty());
+    }
+
+    #[test]
+    fn the_tabs_conversation_stays_itself_when_a_lookup_fails() {
+        let mut f = OpenCodeFold::default();
+        started(&mut f, "r");
+        let stop = f.on_event(&child("session.execution.succeeded", json!({"sessionID": "r"}), "unknown"));
+        assert_eq!(names(&stop), ["Stop"]);
+    }
+
+    #[test]
+    fn the_plugin_forwards_every_kind_the_fold_reads() {
+        let source = include_str!("opencode_plugin.js");
+        for kind in FOLDED {
+            assert!(source.contains(&format!("\"{kind}\"")), "{kind} isn't forwarded");
+        }
     }
 }
