@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::claude::ClaudeDriver;
+use crate::claude::{ClaudeDriver, ClaudeFollow};
 use crate::model::{Answer, Ask, Elicit, ElicitAnswer, PermissionMode, Transcript};
 
 /// What a driver's agent can do in a chat; the chat shows a control only
@@ -77,6 +77,40 @@ pub trait ChatDriver: Send {
 
     /// The agent's process ended: nothing streams or waits any more.
     fn ended(&mut self, t: &mut Transcript, why: Option<String>);
+}
+
+/// What a chat line, read from the agent or written to it, says.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Said {
+    TurnStarted,
+    TurnEnded,
+    /// The conversation is now this one.
+    Session(String),
+    /// A request waits for the user, by id.
+    Ask(String),
+    /// The request with this id doesn't wait any more.
+    Settled(String),
+    /// An MCP form came, by id: its lines are recorded.
+    Form(String),
+    /// A line that settles the form with this id, if there is one.
+    FormSettled(String),
+    /// How full the context window is.
+    Reading(tern_bridge::context::Reading),
+}
+
+/// How the daemon follows a chat without reading the conversation: one per
+/// agent's protocol, as [`ChatDriver`] is for the UI.
+pub trait ChatFollow: Send {
+    /// What `line`, one read from the agent or written to it, says.
+    fn follow(&mut self, line: &Value, out: &mut Vec<Said>);
+}
+
+/// The chat follower of agent `agent`, if it has a chat.
+pub fn chat_follower(agent: &str) -> Option<Box<dyn ChatFollow>> {
+    match agent {
+        tern_agent::CLAUDE => Some(Box::<ClaudeFollow>::default()),
+        _ => None,
+    }
 }
 
 /// The chat driver of agent `agent`, if it has one.

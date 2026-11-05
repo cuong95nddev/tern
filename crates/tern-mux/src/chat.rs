@@ -28,7 +28,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tern_bridge::HookEvent;
-use tern_bridge::context::{Action, Guard, Meter, Policy};
+use tern_bridge::context::{Action, Guard, Policy};
+use tern_chat::{ChatFollow, Said};
 use tern_term::status::ActivityStatus;
 
 use crate::proto::{ChatExit, ChatSpec};
@@ -71,58 +72,65 @@ struct State {
     forms: std::collections::HashSet<String>,
     /// The conversation now, once Claude said (`/clear` starts another).
     session: Option<String>,
-    meter: Meter,
+    follower: Follower,
     guard: Guard,
     policy: Policy,
 }
 
+/// What reads a chat's lines for [`State`]: its agent's, if it has one.
+struct Follower(Option<Box<dyn ChatFollow>>);
+
+impl Follower {
+    fn of(agent: &str) -> Self {
+        Self(tern_chat::chat_follower(agent))
+    }
+}
+
+impl Default for Follower {
+    /// Claude's, as a [`ChatMeta`] is Claude's unless it says otherwise.
+    fn default() -> Self {
+        Self::of(tern_agent::CLAUDE)
+    }
+}
+
 impl State {
-    /// `v` is a line of an MCP form: the request, the UI's answer to it,
-    /// or Claude taking it back.
-    fn form_line(&mut self, v: &Value) -> bool {
-        let id = |p: &str| v.pointer(p).and_then(Value::as_str).map(str::to_owned);
-        match v.get("type").and_then(Value::as_str) {
-            Some("control_request") if v.pointer("/request/subtype").and_then(Value::as_str) == Some("elicitation") => {
-                id("/request_id").map(|i| self.forms.insert(i)).is_some()
-            },
-            Some("control_response") => id("/response/request_id").is_some_and(|i| self.forms.remove(&i)),
-            Some("control_cancel_request") => id("/request_id").is_some_and(|i| self.forms.remove(&i)),
-            _ => false,
-        }
+    fn new(agent: &tern_agent::AgentId) -> Self {
+        Self { follower: Follower::of(agent.as_str()), ..Default::default() }
     }
 
-    /// What `v`, a line read from the program or written to it, says of
-    /// the turn and the requests waiting.
-    fn follow(&mut self, v: &Value) {
-        let s = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or_default().to_owned();
-        self.meter.read(v);
-        let kind = v.get("type").and_then(Value::as_str).unwrap_or_default();
-        // Only these read anew: another line may come after a fresh
-        // conversation's `SessionStart` with the old one's reading.
-        if matches!(kind, "assistant" | "result")
-            && let Some(r) = self.meter.reading()
-        {
-            self.guard.reading(r.percent, self.policy);
+    /// Take in what `v`, a line read from the program or written to it,
+    /// says of the turn and the requests waiting. Whether it is a line of
+    /// an MCP form: the request, the UI's answer to it, or the agent taking
+    /// it back.
+    fn follow(&mut self, v: &Value) -> bool {
+        let mut said = Vec::new();
+        if let Some(follower) = &mut self.follower.0 {
+            follower.follow(v, &mut said);
         }
-        match kind {
-            "user" => self.busy = true,
-            "result" => {
-                self.busy = false;
-                self.asks.clear();
-            },
-            "system" if s("/subtype") == "init" => self.session = Some(s("/session_id")),
-            // A permission, a question, or an MCP server's form: the user's turn.
-            "control_request" if matches!(s("/request/subtype").as_str(), "can_use_tool" | "elicitation") => {
-                self.asks.insert(s("/request_id"));
-            },
-            "control_cancel_request" => {
-                self.asks.remove(&s("/request_id"));
-            },
-            "control_response" => {
-                self.asks.remove(&s("/response/request_id"));
-            },
-            _ => {},
+        let mut form = false;
+        for s in said {
+            match s {
+                Said::TurnStarted => self.busy = true,
+                Said::TurnEnded => {
+                    self.busy = false;
+                    self.asks.clear();
+                },
+                Said::Session(id) => self.session = Some(id),
+                Said::Ask(id) => {
+                    self.asks.insert(id);
+                },
+                Said::Settled(id) => {
+                    self.asks.remove(&id);
+                },
+                Said::Form(id) => {
+                    self.forms.insert(id);
+                    form = true;
+                },
+                Said::FormSettled(id) => form |= self.forms.remove(&id),
+                Said::Reading(r) => self.guard.reading(r.percent, self.policy),
+            }
         }
+        form
     }
 
     /// Hook `ev` came: the answer for Claude Code, and what to tell it after.
@@ -245,7 +253,7 @@ impl ChatHost {
             },
             token,
             stdin: Mutex::new(stdin),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State::new(&spec.agent_id())),
             child: Mutex::new(Some(child)),
             #[cfg(unix)]
             reader: Mutex::new(None),
@@ -265,12 +273,11 @@ impl ChatHost {
             None => (None, None),
         };
         let lines: Vec<Kept> = handed.lines.into_iter().map(|text| Kept { text, stream: false }).collect();
-        let mut state = State { owner: None, exited: handed.exited, title: handed.title, stderr: handed.stderr, ..Default::default() };
+        let mut state = State { exited: handed.exited, title: handed.title, stderr: handed.stderr, ..State::new(&handed.meta.agent) };
         for k in &lines {
             if let Ok(v) = serde_json::from_str::<Value>(&k.text) {
+                // Its forms were recorded by the daemon before.
                 state.follow(&v);
-                // Recorded by the daemon before.
-                state.form_line(&v);
             }
         }
         state.lines = lines;
@@ -399,11 +406,11 @@ impl ChatHost {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             let form = {
                 let mut st = self.state.lock().unwrap();
-                st.follow(&v);
+                let form = st.follow(&v);
                 if v.get("type").and_then(Value::as_str) == Some("control_response") {
                     st.lines.push(Kept { text: line.to_owned(), stream: false });
                 }
-                st.form_line(&v)
+                form
             };
             if form {
                 self.record(&v);
@@ -590,7 +597,7 @@ impl ChatHost {
     fn on_line(&self, line: String) {
         let v: Option<Value> = serde_json::from_str(&line).ok();
         if let Some(v) = &v {
-            let form = self.state.lock().unwrap().form_line(v);
+            let form = self.state.lock().unwrap().follow(v);
             if form {
                 self.record(v);
             }
@@ -600,9 +607,6 @@ impl ChatHost {
             let mut st = self.state.lock().unwrap();
             if kind == "result" {
                 st.lines.retain(|k| !k.stream);
-            }
-            if let Some(v) = &v {
-                st.follow(v);
             }
             if st.title.is_none()
                 && kind == "user"

@@ -2,6 +2,7 @@
 //! stdin and stdout.
 
 pub(crate) mod fold;
+mod follow;
 pub mod launch;
 
 use std::io;
@@ -10,6 +11,7 @@ use std::path::Path;
 use serde_json::Value;
 
 pub use fold::{ClaudeFold, read_record};
+pub use follow::ClaudeFollow;
 pub use launch::{Launch, claude_line, new_session_id, transcript_path, wire};
 
 use crate::driver::{ChatCaps, ChatDriver};
