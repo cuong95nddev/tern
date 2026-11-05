@@ -49,6 +49,9 @@ const STDERR_TAIL: usize = 4096;
 /// by then.
 const AFTER_HOOK: Duration = Duration::from_millis(500);
 
+/// How long a message waits for a fresh conversation to open.
+const FRESH_CONVERSATION_WAIT: Duration = Duration::from_secs(15);
+
 /// A line kept for replay.
 struct Kept {
     text: String,
@@ -77,6 +80,22 @@ struct State {
     policy: Policy,
 }
 
+/// What the daemon does with a line, besides keeping it.
+#[derive(Default)]
+struct Followed {
+    /// It is a line of an MCP form: the request, the UI's answer to it, or
+    /// the agent taking it back. Recorded.
+    form: bool,
+    /// It ends a turn: the turn's streamed lines go.
+    ended: bool,
+    /// It settles a request: written, it is kept for replay.
+    settles: bool,
+    /// A piece of a message: it goes when its turn ends.
+    streamed: bool,
+    /// What a notification is titled, as the first message says.
+    title: Option<String>,
+}
+
 /// What reads a chat's lines for [`State`]: its agent's, if it has one.
 struct Follower(Option<Box<dyn ChatFollow>>);
 
@@ -95,25 +114,37 @@ impl Default for Follower {
 
 impl State {
     fn new(agent: &tern_agent::AgentId) -> Self {
-        Self { follower: Follower::of(agent.as_str()), ..Default::default() }
+        Self { follower: Follower::of(agent.as_str()), guard: crate::server::guard_for(Some(agent)), ..Default::default() }
     }
 
-    /// Take in what `v`, a line read from the program or written to it,
-    /// says of the turn and the requests waiting. Whether it is a line of
-    /// an MCP form: the request, the UI's answer to it, or the agent taking
-    /// it back.
-    fn follow(&mut self, v: &Value) -> bool {
+    /// Take in `v`, a line read from the program.
+    fn follow(&mut self, v: &Value) -> Followed {
         let mut said = Vec::new();
         if let Some(follower) = &mut self.follower.0 {
             follower.follow(v, &mut said);
         }
-        let mut form = false;
+        self.take_in(said)
+    }
+
+    /// Take in `v`, a line written to the program.
+    fn wrote(&mut self, v: &Value) -> Followed {
+        let mut said = Vec::new();
+        if let Some(follower) = &mut self.follower.0 {
+            follower.wrote(v, &mut said);
+        }
+        self.take_in(said)
+    }
+
+    /// What a line said of the turn and the requests waiting.
+    fn take_in(&mut self, said: Vec<Said>) -> Followed {
+        let mut line = Followed::default();
         for s in said {
             match s {
                 Said::TurnStarted => self.busy = true,
                 Said::TurnEnded => {
                     self.busy = false;
                     self.asks.clear();
+                    line.ended = true;
                 },
                 Said::Session(id) => self.session = Some(id),
                 Said::Ask(id) => {
@@ -121,16 +152,19 @@ impl State {
                 },
                 Said::Settled(id) => {
                     self.asks.remove(&id);
+                    line.settles = true;
                 },
                 Said::Form(id) => {
                     self.forms.insert(id);
-                    form = true;
+                    line.form = true;
                 },
-                Said::FormSettled(id) => form |= self.forms.remove(&id),
+                Said::FormSettled(id) => line.form |= self.forms.remove(&id),
                 Said::Reading(r) => self.guard.reading(r.percent, self.policy),
+                Said::Streamed => line.streamed = true,
+                Said::Title(title) => line.title = Some(title),
             }
         }
-        form
+        line
     }
 
     /// Hook `ev` came: the answer for Claude Code, and what to tell it after.
@@ -374,23 +408,46 @@ impl ChatHost {
         self.tell(action);
     }
 
-    /// Say what the guard wants to Claude, as a user message: Claude takes
-    /// it when its turn is over.
+    /// Say what the guard wants to the agent, as a user message: it takes
+    /// it when its turn is over. A clear comes first: a message that goes
+    /// on after it waits for the fresh conversation to open.
     fn tell(self: &Arc<Self>, action: Action) {
-        let text = match action {
+        let (clear, text) = match action {
             Action::None => return,
-            Action::Clear => "/clear".to_owned(),
-            // Only a terminal's guard says it (see `server`).
-            Action::Prompt(p) | Action::ClearPrompt(p) => p,
+            Action::Clear => (true, None),
+            Action::Prompt(p) => (false, Some(p)),
+            Action::ClearPrompt(p) => (true, Some(p)),
         };
         let host = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(AFTER_HOOK);
-            // Its agent's own user message (only agents with a chat driver run as chats).
+            // Its agent's own lines (only agents with a chat driver run as chats).
             let Some(mut driver) = tern_chat::chat_driver(host.meta.agent.as_str()) else { return };
-            let (_, line) = driver.user_line(&host.session(), &text, &[]);
-            host.write(&line);
+            if clear {
+                let old = host.session();
+                host.write(&driver.clear_line(&old));
+                if text.is_some() && !host.wait_for_another_session(&old) {
+                    log::warn!("chat {}: no fresh conversation came", host.id);
+                    return;
+                }
+            }
+            if let Some(text) = text {
+                let (_, line) = driver.user_line(&host.session(), &text, &[]);
+                host.write(&line);
+            }
         });
+    }
+
+    /// Wait for the conversation to be another than `old`.
+    fn wait_for_another_session(&self, old: &str) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < FRESH_CONVERSATION_WAIT {
+            if self.session() != old {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 
     pub fn detach(&self, owner: *const ()) {
@@ -406,11 +463,11 @@ impl ChatHost {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             let form = {
                 let mut st = self.state.lock().unwrap();
-                let form = st.follow(&v);
-                if v.get("type").and_then(Value::as_str) == Some("control_response") {
+                let followed = st.wrote(&v);
+                if followed.settles {
                     st.lines.push(Kept { text: line.to_owned(), stream: false });
                 }
-                form
+                followed.form
             };
             if form {
                 self.record(&v);
@@ -596,25 +653,19 @@ impl ChatHost {
 
     fn on_line(&self, line: String) {
         let v: Option<Value> = serde_json::from_str(&line).ok();
-        if let Some(v) = &v {
-            let form = self.state.lock().unwrap().follow(v);
-            if form {
-                self.record(v);
-            }
+        let followed = v.as_ref().map_or_else(Followed::default, |v| self.state.lock().unwrap().follow(v));
+        if let Some(v) = v.as_ref().filter(|_| followed.form) {
+            self.record(v);
         }
-        let kind = v.as_ref().and_then(|v| v.get("type")).and_then(Value::as_str).unwrap_or_default().to_owned();
         let notice = {
             let mut st = self.state.lock().unwrap();
-            if kind == "result" {
+            if followed.ended {
                 st.lines.retain(|k| !k.stream);
             }
-            if st.title.is_none()
-                && kind == "user"
-                && let Some(text) = v.as_ref().and_then(user_text)
-            {
-                st.title = Some(text);
+            if st.title.is_none() {
+                st.title = followed.title;
             }
-            st.lines.push(Kept { stream: kind == "stream_event", text: line.clone() });
+            st.lines.push(Kept { stream: followed.streamed, text: line.clone() });
             match st.owner.as_ref().and_then(Weak::upgrade) {
                 Some(owner) => {
                     owner.chat_line(self.id, &line);
@@ -622,7 +673,8 @@ impl ChatHost {
                 },
                 None => {
                     let name = self.meta.agent_name();
-                    v.as_ref().and_then(|v| notice(v, &name)).map(|body| (st.title.clone().unwrap_or(name), body))
+                    let body = v.as_ref().zip(st.follower.0.as_ref()).and_then(|(v, f)| f.notice(v, &name));
+                    body.map(|body| (st.title.clone().unwrap_or(name), body))
                 },
             }
         };
@@ -644,58 +696,6 @@ impl ChatHost {
         if let Some(owner) = st.owner.as_ref().and_then(Weak::upgrade) {
             owner.chat_exited(self.id, &exit);
         }
-    }
-}
-
-/// The text of a user message the program echoed, cut to a title.
-fn user_text(v: &Value) -> Option<String> {
-    let content = v.pointer("/message/content")?;
-    let text = match content {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => {
-            parts.iter().find_map(|p| (p.get("type")?.as_str()? == "text").then(|| p.get("text")?.as_str().map(str::to_owned))?)?
-        },
-        _ => return None,
-    };
-    let line = text.lines().next()?.trim();
-    (!line.is_empty()).then(|| line.chars().take(60).collect())
-}
-
-/// What a line tells the user while no UI is connected; `agent` names the
-/// agent that wrote it.
-fn notice(v: &Value, agent: &str) -> Option<String> {
-    match v.get("type")?.as_str()? {
-        "control_request" if v.pointer("/request/subtype")?.as_str()? == "can_use_tool" => {
-            Some(match v.pointer("/request/tool_name").and_then(Value::as_str) {
-                Some("AskUserQuestion") => format!("{agent} has a question"),
-                Some("ExitPlanMode") => format!("{agent} has a plan to approve"),
-                Some(tool) => format!("{agent} asks to use {tool}"),
-                None => format!("{agent} asks for permission"),
-            })
-        },
-        "control_request" if v.pointer("/request/subtype")?.as_str()? == "elicitation" => {
-            Some(match v.pointer("/request/mcp_server_name").and_then(Value::as_str) {
-                Some(server) => format!("{server} asks for your input"),
-                None => "An MCP server asks for your input".into(),
-            })
-        },
-        "result" => {
-            // Stopped by the user: no news (older CLIs say so only by an
-            // error during execution without errors).
-            let stopped = match v.get("terminal_reason").and_then(Value::as_str) {
-                Some(r) => r.starts_with("aborted"),
-                None => {
-                    v.get("subtype").and_then(Value::as_str) == Some("error_during_execution")
-                        && v.get("errors").and_then(Value::as_array).is_none_or(|e| e.is_empty())
-                },
-            };
-            Some(match v.get("subtype").and_then(Value::as_str) {
-                _ if stopped => return None,
-                Some("success") => format!("{agent} finished"),
-                _ => format!("{agent} stopped with an error"),
-            })
-        },
-        _ => None,
     }
 }
 
@@ -853,23 +853,49 @@ read a; echo '{"type":"result","subtype":"success"}'; read b"#;
         host.kill();
     }
 
-    #[test]
-    fn tells_forms_and_failures_but_not_a_stop() {
-        use serde_json::json;
-        let form = json!({"type":"control_request","request_id":"e","request":{"subtype":"elicitation","mcp_server_name":"deploy"}});
-        assert_eq!(notice(&form, "Claude").as_deref(), Some("deploy asks for your input"));
-        let mut st = State::default();
-        st.follow(&form);
-        assert_eq!(st.asks.len(), 1);
-        let stopped = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"});
-        assert_eq!(notice(&stopped, "Claude"), None);
-        let failed = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"model_error","errors":["500"]});
-        assert_eq!(notice(&failed, "Claude").as_deref(), Some("Claude stopped with an error"));
-        assert_eq!(notice(&failed, "Codex").as_deref(), Some("Codex stopped with an error"));
-    }
-
     fn sh(script: &str) -> ChatSpec {
         ChatSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: "/".into(), ..Default::default() }
+    }
+
+    /// A Codex server that opens thread `one`, then answers a `thread/start`
+    /// with thread `two`, echoing what it is told.
+    fn codex_server() -> ChatSpec {
+        let script = r#"echo '{"id":1,"result":{"thread":{"id":"one"}}}'
+while read -r line; do
+  echo "{\"got\":$line}"
+  case "$line" in *thread/start*) echo '{"id":"x","result":{"thread":{"id":"two"}}}';; esac
+done"#;
+        ChatSpec { agent: Some("codex".into()), ..sh(script) }
+    }
+
+    fn turn_starts(host: &ChatHost) -> Vec<Value> {
+        let st = host.state.lock().unwrap();
+        let lines = st.lines.iter().filter_map(|k| serde_json::from_str::<Value>(&k.text).ok());
+        lines.filter_map(|v| v.get("got").cloned()).filter(|v| v["method"] == "turn/start").collect()
+    }
+
+    #[test]
+    fn codex_chat_runs_against_a_scripted_server() {
+        let host = ChatHost::spawn(9, &codex_server(), None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        wait("the thread", || host.session() == "one");
+        host.ask_handoff();
+        wait("the guard's message", || !turn_starts(&host).is_empty());
+        let turn = &turn_starts(&host)[0];
+        assert_eq!(turn["params"]["threadId"], "one");
+        assert!(turn["params"]["input"][0]["text"].as_str().unwrap().contains("handoff"), "{turn}");
+        host.kill();
+    }
+
+    #[test]
+    fn a_codex_chat_goes_on_in_a_fresh_thread() {
+        let host = ChatHost::spawn(10, &codex_server(), None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        wait("the thread", || host.session() == "one");
+        host.resume_handoff(None);
+        wait("the prompt", || !turn_starts(&host).is_empty());
+        let turn = &turn_starts(&host)[0];
+        assert_eq!(turn["params"]["threadId"], "two");
+        assert_eq!(turn["params"]["input"][0]["text"], tern_bridge::context::CONTINUE_PROMPT);
+        host.kill();
     }
 
     #[test]

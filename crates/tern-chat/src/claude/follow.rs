@@ -25,7 +25,11 @@ impl ChatFollow for ClaudeFollow {
             out.push(Said::Reading(r));
         }
         match kind {
-            "user" => out.push(Said::TurnStarted),
+            "user" => {
+                out.push(Said::TurnStarted);
+                out.extend(user_text(v).map(Said::Title));
+            },
+            "stream_event" => out.push(Said::Streamed),
             "result" => out.push(Said::TurnEnded),
             "system" if s("/subtype") == "init" => out.push(Said::Session(s("/session_id"))),
             // A permission, a question, or an MCP server's form: the user's turn.
@@ -48,6 +52,62 @@ impl ChatFollow for ClaudeFollow {
             },
             _ => {},
         }
+    }
+
+    fn notice(&self, line: &Value, agent: &str) -> Option<String> {
+        notice_of(line, agent)
+    }
+}
+
+/// The text of a user message the program echoed, cut to a title.
+fn user_text(v: &Value) -> Option<String> {
+    let content = v.pointer("/message/content")?;
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => {
+            parts.iter().find_map(|p| (p.get("type")?.as_str()? == "text").then(|| p.get("text")?.as_str().map(str::to_owned))?)?
+        },
+        _ => return None,
+    };
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.chars().take(60).collect())
+}
+
+/// What a line tells the user while no UI is connected; `agent` names the
+/// agent that wrote it.
+fn notice_of(v: &Value, agent: &str) -> Option<String> {
+    match v.get("type")?.as_str()? {
+        "control_request" if v.pointer("/request/subtype")?.as_str()? == "can_use_tool" => {
+            Some(match v.pointer("/request/tool_name").and_then(Value::as_str) {
+                Some("AskUserQuestion") => format!("{agent} has a question"),
+                Some("ExitPlanMode") => format!("{agent} has a plan to approve"),
+                Some(tool) => format!("{agent} asks to use {tool}"),
+                None => format!("{agent} asks for permission"),
+            })
+        },
+        "control_request" if v.pointer("/request/subtype")?.as_str()? == "elicitation" => {
+            Some(match v.pointer("/request/mcp_server_name").and_then(Value::as_str) {
+                Some(server) => format!("{server} asks for your input"),
+                None => "An MCP server asks for your input".into(),
+            })
+        },
+        "result" => {
+            // Stopped by the user: no news (older CLIs say so only by an
+            // error during execution without errors).
+            let stopped = match v.get("terminal_reason").and_then(Value::as_str) {
+                Some(r) => r.starts_with("aborted"),
+                None => {
+                    v.get("subtype").and_then(Value::as_str) == Some("error_during_execution")
+                        && v.get("errors").and_then(Value::as_array).is_none_or(|e| e.is_empty())
+                },
+            };
+            Some(match v.get("subtype").and_then(Value::as_str) {
+                _ if stopped => return None,
+                Some("success") => format!("{agent} finished"),
+                _ => format!("{agent} stopped with an error"),
+            })
+        },
+        _ => None,
     }
 }
 
@@ -88,6 +148,17 @@ mod tests {
                 Said::TurnEnded,
             ]
         );
+    }
+
+    #[test]
+    fn tells_forms_and_failures_but_not_a_stop() {
+        let form = json!({"type":"control_request","request_id":"e","request":{"subtype":"elicitation","mcp_server_name":"deploy"}});
+        assert_eq!(notice_of(&form, "Claude").as_deref(), Some("deploy asks for your input"));
+        let stopped = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"});
+        assert_eq!(notice_of(&stopped, "Claude"), None);
+        let failed = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"model_error","errors":["500"]});
+        assert_eq!(notice_of(&failed, "Claude").as_deref(), Some("Claude stopped with an error"));
+        assert_eq!(notice_of(&failed, "Codex").as_deref(), Some("Codex stopped with an error"));
     }
 
     #[test]

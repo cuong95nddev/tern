@@ -49,7 +49,7 @@ impl ChatDriver for ClaudeDriver {
         claude_line(&start, user_args, &launch.args(), quote)
     }
 
-    fn start_lines(&self) -> Vec<String> {
+    fn start_lines(&mut self, _: &str, _: bool) -> Vec<String> {
         vec![wire::initialize()]
     }
 
@@ -62,6 +62,10 @@ impl ChatDriver for ClaudeDriver {
         // Its replay is the message already shown.
         self.fold.sent.insert(uuid.clone());
         (uuid, line)
+    }
+
+    fn clear_line(&mut self, session: &str) -> String {
+        self.user_line(session, "/clear", &[]).1
     }
 
     fn answer_line(&self, ask: &Ask, answer: &Answer) -> Option<String> {

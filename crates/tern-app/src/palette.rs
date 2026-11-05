@@ -159,7 +159,12 @@ fn commands(registry: &tern_agent::Registry) -> Vec<Command> {
             out.push(Command {
                 title: format!("New {name} Chat").into(),
                 key: "",
-                run: action(Rc::new(|| Box::new(workspace::NewClaudeChat))),
+                run: if d.id.is(tern_agent::CLAUDE) {
+                    action(Rc::new(|| Box::new(workspace::NewClaudeChat)))
+                } else {
+                    let id = d.id.to_string();
+                    action(Rc::new(move || Box::new(workspace::NewAgentChat(id.clone().into()))))
+                },
             });
             out.push(Command {
                 title: format!("Switch {name} Tab: Terminal ⇄ Chat").into(),
@@ -823,10 +828,10 @@ mod tests {
     #[test]
     fn palette_offers_every_agent_and_a_chat_only_for_agents_with_chat() {
         let all = titles("");
-        for t in ["New Claude Tab", "New Claude Chat", "Switch Claude Tab: Terminal ⇄ Chat", "New Codex Tab", "New OpenCode Tab"] {
+        for t in ["New Claude Tab", "New Claude Chat", "Switch Claude Tab: Terminal ⇄ Chat", "New Codex Tab", "New Codex Chat", "New OpenCode Tab"] {
             assert!(all.iter().any(|a| a == t), "{t}");
         }
-        assert!(!all.iter().any(|a| a == "New Codex Chat"));
+        assert!(!all.iter().any(|a| a == "New OpenCode Chat"));
     }
 
     #[test]

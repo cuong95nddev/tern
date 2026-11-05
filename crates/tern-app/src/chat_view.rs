@@ -463,8 +463,10 @@ impl ChatView {
     /// Start Claude in the daemon: resuming the conversation when Claude saved it.
     fn start(&mut self, cx: &mut Context<Self>) {
         let resume = saved_path(self.driver.agent(), &self.account, &self.root, &self.session).is_some();
+        // The flags the user picked are Claude's.
+        let user_args = if self.agent().is(tern_agent::CLAUDE) { crate::window_state::claude_args() } else { String::new() };
         let line = self.driver.command(
-            &crate::window_state::claude_args(),
+            &user_args,
             &self.session,
             resume,
             self.model_picked.as_deref(),
@@ -483,7 +485,7 @@ impl ChatView {
             agent: Some(self.driver.agent().to_owned()),
         };
         // Before anything the user sends.
-        self.outbox.splice(0..0, self.driver.start_lines());
+        self.outbox.splice(0..0, self.driver.start_lines(&self.session, resume));
         self.connect(OpenChat::Spawn(Box::new(spec)), cx);
     }
 
@@ -729,7 +731,9 @@ impl ChatView {
         let attachments = std::mem::take(&mut self.attachments);
         let images: Vec<(&str, &[u8])> = attachments.iter().map(|a| (a.image.format().mime_type(), a.image.bytes())).collect();
         let (_, line) = self.driver.user_line(&self.session, &text, &images);
-        self.write(line);
+        if !line.is_empty() {
+            self.write(line);
+        }
         if self.t.entries.iter().all(|e| !matches!(e, Entry::User { .. })) {
             let title = if text.is_empty() { attachments.first().map_or("", |a| a.name.as_str()) } else { text.as_str() };
             self.title = summary::first_line(title, 40);
@@ -1801,7 +1805,7 @@ fn record_path(session: &str) -> Option<PathBuf> {
 }
 
 fn saved_path(agent: &str, account: &str, root: &std::path::Path, id: &str) -> Option<PathBuf> {
-    let config = accounts::claude_dir(account)?;
+    let config = if agent == tern_agent::CODEX { tern_chat::codex::rollout::codex_home() } else { accounts::claude_dir(account)? };
     tern_chat::sessions::transcript_path(agent, &config, root, id)
 }
 

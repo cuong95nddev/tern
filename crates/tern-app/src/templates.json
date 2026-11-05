@@ -3194,6 +3194,7 @@
       { "separator": true },
       { "action": "workspace::NewClaudeTab", "label": "New Claude Tab" },
       { "action": "workspace::NewClaudeChat", "label": "New Claude Chat" },
+      { "each": "chats", "item": { "button": "new_chat", "label": "New {agent} Chat" } },
       { "action": "workspace::NewShellTab", "label": "New Shell Tab" },
       {
         "label": "Claude Options",

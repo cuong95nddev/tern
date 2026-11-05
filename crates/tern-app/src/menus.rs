@@ -40,6 +40,9 @@ fn menus() -> Vec<Menu> {
     if registry.has(tern_agent::CLAUDE, tern_agent::Capability::Chat) {
         file.push(MenuItem::action(format!("New {claude} Chat"), workspace::NewClaudeChat));
     }
+    for d in registry.all().filter(|d| !d.id.is(tern_agent::CLAUDE) && registry.has(d.id.as_str(), tern_agent::Capability::Chat)) {
+        file.push(MenuItem::action(format!("New {} Chat", d.short_name), workspace::NewAgentChat(d.id.to_string().into())));
+    }
     file.push(MenuItem::action("New Shell Tab", workspace::NewShellTab));
     // The other agents: a shell that starts each (with Tern wired in once it can).
     let others = registry.all().filter(|d| !d.id.is(tern_agent::CLAUDE));

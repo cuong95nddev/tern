@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tern_bridge::context::Reading;
 
-use crate::model::{Entry, Tool};
+use crate::claude::fold::timestamp_ms;
+use crate::model::{Entry, Tool, TurnEnd};
 use crate::recent::{Recent, TAIL, recent};
 
 /// Tokens Codex counts as always there, out of what it shows as used.
@@ -135,6 +136,32 @@ pub(crate) fn entries(text: &str) -> Vec<Entry> {
     let mut items: Vec<_> = events_back(text, "item_completed").collect();
     items.reverse();
     items.iter().filter_map(|p| p.get("item")).flat_map(item_entries).collect()
+}
+
+/// What the rollout lines `text` show as in a chat, with the ends of their
+/// turns: those saved before `before` (ms since the Unix epoch).
+pub(crate) fn history(text: &str, before: Option<u64>) -> Vec<Entry> {
+    let mut shown = Vec::new();
+    let wanted = ["item_completed", "task_complete", "turn_aborted"];
+    for line in text.lines().filter(|l| wanted.iter().any(|w| l.contains(w))) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let at = v.get("timestamp").and_then(Value::as_str).and_then(timestamp_ms);
+        if before.is_some_and(|b| at.is_none_or(|at| at >= b)) {
+            break;
+        }
+        if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let p = &v["payload"];
+        let ms = p.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+        match p.get("type").and_then(Value::as_str) {
+            Some("item_completed") => shown.extend(p.get("item").into_iter().flat_map(item_entries)),
+            Some("task_complete") => shown.push(Entry::TurnEnd(TurnEnd { ms, interrupted: false, error: None })),
+            Some("turn_aborted") => shown.push(Entry::TurnEnd(TurnEnd { ms, interrupted: true, error: None })),
+            _ => {},
+        }
+    }
+    shown
 }
 
 /// [`Recent`] of the conversation saved at `path`.

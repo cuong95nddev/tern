@@ -8,6 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::claude::{ClaudeDriver, ClaudeFollow};
+use crate::codex::app_server::{CodexDriver, CodexFollow};
 use crate::model::{Answer, Ask, Elicit, ElicitAnswer, PermissionMode, Transcript};
 
 /// What a driver's agent can do in a chat; the chat shows a control only
@@ -46,16 +47,21 @@ pub trait ChatDriver: Send {
         quote: fn(&str) -> String,
     ) -> String;
 
-    /// The lines written before anything the user sends.
-    fn start_lines(&self) -> Vec<String>;
+    /// The lines written before anything the user sends, in conversation
+    /// `session`: resumed with `resume`, else it may get another id.
+    fn start_lines(&mut self, session: &str, resume: bool) -> Vec<String>;
 
     /// Fold one line the agent wrote into `t`; a reply line the chat must
     /// write back, if any.
     fn fold_line(&mut self, t: &mut Transcript, line: &str) -> Option<String>;
 
     /// A user message in conversation `session`: `images` (media type,
-    /// bytes) then `text`. Gives its id and the line.
+    /// bytes) then `text`. Gives its id and the line; an empty line has
+    /// nothing to write yet, it goes in by [`Self::fold_line`]'s reply.
     fn user_line(&mut self, session: &str, text: &str, images: &[(&str, &[u8])]) -> (String, String);
+
+    /// The line that goes on in a fresh conversation in place of `session`.
+    fn clear_line(&mut self, session: &str) -> String;
 
     fn answer_line(&self, ask: &Ask, answer: &Answer) -> Option<String>;
 
@@ -96,19 +102,34 @@ pub enum Said {
     FormSettled(String),
     /// How full the context window is.
     Reading(tern_bridge::context::Reading),
+    /// The line is a piece of a message that comes whole once its turn ends.
+    Streamed,
+    /// What a notification about the conversation is titled.
+    Title(String),
 }
 
 /// How the daemon follows a chat without reading the conversation: one per
 /// agent's protocol, as [`ChatDriver`] is for the UI.
 pub trait ChatFollow: Send {
-    /// What `line`, one read from the agent or written to it, says.
+    /// What `line`, one the agent wrote, says.
     fn follow(&mut self, line: &Value, out: &mut Vec<Said>);
+
+    /// What `line`, one written to the agent, says: an agent whose answers
+    /// look like the ones written to it tells them apart here.
+    fn wrote(&mut self, line: &Value, out: &mut Vec<Said>) {
+        self.follow(line, out);
+    }
+
+    /// What `line`, one the agent wrote, tells the user while no UI is
+    /// connected; `agent` names it.
+    fn notice(&self, line: &Value, agent: &str) -> Option<String>;
 }
 
 /// The chat follower of agent `agent`, if it has a chat.
 pub fn chat_follower(agent: &str) -> Option<Box<dyn ChatFollow>> {
     match agent {
         tern_agent::CLAUDE => Some(Box::<ClaudeFollow>::default()),
+        tern_agent::CODEX => Some(Box::<CodexFollow>::default()),
         _ => None,
     }
 }
@@ -117,6 +138,7 @@ pub fn chat_follower(agent: &str) -> Option<Box<dyn ChatFollow>> {
 pub fn chat_driver(agent: &str) -> Option<Box<dyn ChatDriver>> {
     match agent {
         tern_agent::CLAUDE => Some(Box::new(ClaudeDriver::default())),
+        tern_agent::CODEX => Some(Box::new(CodexDriver::default())),
         _ => None,
     }
 }
@@ -126,8 +148,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_has_no_chat_driver_yet() {
-        assert!(chat_driver("codex").is_none());
+    fn codex_has_a_chat_driver() {
+        let d = chat_driver("codex").unwrap();
+        assert_eq!(d.agent(), "codex");
+        assert_eq!(d.caps(), ChatCaps { permission_modes: false, models: false, elicitation: true, images: false, interrupt: true });
+    }
+
+    #[test]
+    fn an_agent_without_a_chat_has_no_driver() {
+        assert!(chat_driver("gemini").is_none());
+        assert!(chat_follower("gemini").is_none());
     }
 
     #[test]

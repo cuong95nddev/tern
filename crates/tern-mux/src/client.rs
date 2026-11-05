@@ -76,6 +76,19 @@ fn for_daemon(minor: u32, mut cfg: SpawnConfig, hook: bool, agent: Option<&str>)
     (cfg, false)
 }
 
+/// `spec` for a daemon that can't give it hooks: one that doesn't take chat
+/// handoffs, or (`minor`) knows only Claude's. It would take the placeholder
+/// for an argument.
+fn strip_chat_hooks(minor: u32, takes_handoffs: bool, spec: &mut ChatSpec) {
+    let claude = spec.agent.as_deref().is_none_or(|a| a == tern_agent::CLAUDE);
+    if takes_handoffs && (claude || minor >= AGENT_SPAWN_MINOR) {
+        return;
+    }
+    for a in &mut spec.args {
+        *a = a.replace(" --settings {tern-settings}", "").replace(" {tern-settings}", "");
+    }
+}
+
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
     /// what agent `agent` (none: Claude) needs for its hooks. With `seed` (a
@@ -551,12 +564,7 @@ impl MuxClient {
         self.inner.chat_pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
             OpenChat::Spawn(mut spec) => {
-                if !self.takes_chat_handoffs() {
-                    // It would take the placeholder for an argument.
-                    for a in &mut spec.args {
-                        *a = a.replace(" --settings {tern-settings}", "");
-                    }
-                }
+                strip_chat_hooks(self.inner.server_minor, self.takes_chat_handoffs(), &mut spec);
                 ClientMsg::SpawnChat { req, spec: *spec }
             },
             OpenChat::Attach { id } => ClientMsg::AttachChat { req, id },
@@ -1471,6 +1479,21 @@ impl Drop for RemoteSession {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_chat_loses_its_hooks_on_a_daemon_that_cant_give_them() {
+        let spec = |agent: &str, line: &str| ChatSpec { agent: Some(agent.into()), args: vec![line.into()], ..Default::default() };
+        let stripped = |minor, handoffs, mut s: ChatSpec| {
+            strip_chat_hooks(minor, handoffs, &mut s);
+            s.args[0].clone()
+        };
+        let codex = "codex {tern-settings} app-server";
+        assert_eq!(stripped(AGENT_SPAWN_MINOR, true, spec("codex", codex)), codex);
+        assert_eq!(stripped(AGENT_SPAWN_MINOR - 1, true, spec("codex", codex)), "codex app-server");
+        let claude = "claude --settings {tern-settings} -p";
+        assert_eq!(stripped(AGENT_SPAWN_MINOR - 1, true, spec("claude", claude)), claude);
+        assert_eq!(stripped(AGENT_SPAWN_MINOR - 1, false, spec("claude", claude)), "claude -p");
+    }
+
     #[test]
     fn a_daemon_before_agents_runs_other_agents_without_hooks() {
         let cfg = || SpawnConfig {

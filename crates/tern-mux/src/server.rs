@@ -488,7 +488,7 @@ fn type_after_turn(host: &Arc<Host>, action: Action) {
 }
 
 /// The guard of a tab of `agent`.
-fn guard_for(agent: Option<&AgentId>) -> Guard {
+pub(crate) fn guard_for(agent: Option<&AgentId>) -> Guard {
     match agent {
         Some(a) if a.is(tern_agent::CODEX) => Guard::starting_at_first_turn(),
         _ => Guard::default(),

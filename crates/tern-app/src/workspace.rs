@@ -117,6 +117,11 @@ actions!(
 #[action(namespace = workspace, no_json)]
 pub struct NewAgentTab(pub SharedString);
 
+/// A chat with the agent of this id.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewAgentChat(pub SharedString);
+
 /// The template the panes are drawn with: it holds the pane dock.
 const PANES: &str = "panes";
 
@@ -634,6 +639,13 @@ fn tab_agent(detected: Option<AgentId>, kind: &TabKind) -> AgentId {
     detected.or_else(|| kind.agent().cloned()).unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE))
 }
 
+/// The agents a chat can be opened with.
+fn chat_agents() -> Vec<AgentId> {
+    let registry = tern_agent::registry();
+    let chats = registry.all().filter(|d| registry.has(d.id.as_str(), Capability::Chat) && tern_chat::chat_driver(d.id.as_str()).is_some());
+    chats.map(|d| d.id.clone()).collect()
+}
+
 /// A tab of `kind` can show its conversation as a chat: its agent has one
 /// and a chat driver for it.
 fn chats(kind: &TabKind) -> bool {
@@ -650,16 +662,16 @@ fn goes_on_as_shell(integrated: bool, live: bool, code: Option<i32>) -> bool {
     live && (!integrated || code == Some(0))
 }
 
-/// Why a Claude tab can't show its conversation the other way now (a
+/// Why an agent's tab can't show its conversation the other way now (a
 /// terminal as a chat with `to_chat`, a chat in a terminal), or `None` when
 /// it can. `status` is the tab's, `session` its conversation, `bg` whether
 /// that conversation runs in the background (`/bg`).
 fn switch_blocker(status: ActivityStatus, session: Option<&str>, bg: bool, to_chat: bool) -> Option<&'static str> {
     if matches!(status, ActivityStatus::Working | ActivityStatus::Blocked) {
-        return Some("Claude is in the middle of a turn: switch once it waits for you.");
+        return Some("The agent is in the middle of a turn: switch once it waits for you.");
     }
     if to_chat && session.is_none() {
-        return Some("Claude hasn't started a conversation in this tab yet.");
+        return Some("The agent hasn't started a conversation in this tab yet.");
     }
     if to_chat && bg {
         return Some("This conversation runs in the background (/bg): only a terminal can attach to it.");
@@ -1260,6 +1272,15 @@ impl Workspace {
                 self.pick_account("New Claude Chat As".into(), note.into(), None, then, window, cx)
             },
         }
+    }
+
+    /// A chat with `agent`: Claude's asks which account.
+    fn new_agent_chat(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) {
+        if agent.is(tern_agent::CLAUDE) {
+            return self.new_chat(window, cx);
+        }
+        let account = accounts::store(cx).read(cx).active().first().map(|a| a.id.clone()).unwrap_or_default();
+        self.add_chat(&agent, &account, None, None, window, cx);
     }
 
     /// A chat tab with `agent` running as `account`: conversation
@@ -3439,6 +3460,10 @@ impl Workspace {
                     template::Scope::default().var("label", *label).var("flag", *flag).var("on", window_state::has_flag(&args, flag))
                 })
                 .collect();
+            // Claude's has its own entry, which user templates may name.
+            let chats: Vec<AgentId> = chat_agents().into_iter().filter(|a| !a.is(tern_agent::CLAUDE)).collect();
+            let chat_scopes: Vec<_> =
+                chats.iter().map(|a| template::Scope::default().var("agent", crate::agents::agent_short_name(a))).collect();
             let files: Vec<PathBuf> = scratch::list(&scratch::dir()).into_iter().take(30).collect();
             let names = files
                 .iter()
@@ -3450,6 +3475,7 @@ impl Workspace {
                 .read(cx)
                 .layout_menus(template::Scope::new("new-tab"))
                 .list("flags", flags)
+                .list("chats", chat_scopes)
                 .list("kinds", scratch::kind_entries())
                 .var("scratch_count", files.len())
                 .list("scratch_files", names);
@@ -3467,6 +3493,10 @@ impl Workspace {
                     }))
                 },
                 "edit_args" => on_ws(&ws, |this, window, cx| this.edit_claude_args(window, cx)),
+                "new_chat" => {
+                    let agent = chats.get(entry?)?.clone();
+                    on_ws_shown(&ws, move |this, window, cx| this.new_agent_chat(agent.clone(), window, cx))
+                },
                 "new" => {
                     let (_, ext) = *scratch::KINDS.get(entry?)?;
                     on_ws(&ws, move |this, window, cx| this.new_scratch(ext, window, cx))
@@ -5481,8 +5511,9 @@ impl Workspace {
                 cx.defer(move |cx| crate::main_window::reveal_session(id, cx));
                 "ok".into()
             },
-            "chat-new" => {
-                self.add_chat(&AgentId::new(tern_agent::CLAUDE), accounts::DEFAULT, None, None, window, cx);
+            cmd if cmd == "chat-new" || cmd.starts_with("chat-new ") => {
+                let agent = AgentId::new(cmd.split_whitespace().nth(1).unwrap_or(tern_agent::CLAUDE));
+                self.add_chat(&agent, accounts::DEFAULT, None, None, window, cx);
                 "ok".into()
             },
             // `claude-switch`: its name before other agents.
@@ -5719,7 +5750,11 @@ impl Render for Workspace {
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
         }
         // Whose quota the bar shows.
-        let tab_agent = self.tabs.get(self.active).and_then(CenterTab::term).and_then(|t| t.kind.agent().cloned());
+        let tab_agent = match self.tabs.get(self.active) {
+            Some(CenterTab::Term(t)) => t.kind.agent().cloned(),
+            Some(CenterTab::Chat { view, .. }) => Some(view.read(cx).agent()),
+            _ => None,
+        };
         if self.usage.read(cx).own() != tab_agent.as_ref().filter(|a| !a.is(tern_agent::CLAUDE)) {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_tab_agent(tab_agent, cx)));
@@ -5793,6 +5828,7 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::claude(), w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
+            .on_action(cx.listener(|this, a: &NewAgentChat, w, cx| this.new_agent_chat(AgentId::new(&a.0), w, cx)))
             .on_action(cx.listener(|this, _: &SwitchAgentView, w, cx| this.switch_agent_view(this.active, w, cx)))
             .on_action(cx.listener(|this, a: &NewAgentTab, w, cx| {
                 this.new_agent_tab(AgentId::new(&a.0), w, cx);
@@ -5927,8 +5963,15 @@ mod tests {
     fn only_an_agent_with_a_chat_driver_switches_to_a_chat() {
         use super::{TabKind, chats};
         assert!(chats(&TabKind::claude()));
-        assert!(!chats(&TabKind::Agent(tern_agent::AgentId::new("codex"))));
+        assert!(chats(&TabKind::Agent(tern_agent::AgentId::new("codex"))));
+        assert!(!chats(&TabKind::Agent(tern_agent::AgentId::new("gemini"))));
         assert!(!chats(&TabKind::Shell));
+    }
+
+    #[test]
+    fn new_agent_chat_lists_agents_with_chat() {
+        let ids: Vec<String> = super::chat_agents().iter().map(ToString::to_string).collect();
+        assert_eq!(ids, ["claude", "codex"]);
     }
 
     #[test]

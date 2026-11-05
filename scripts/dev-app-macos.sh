@@ -8,7 +8,7 @@
 # (dev.tern.debug), signed with the same certificate as an installed Tern,
 # so its permissions are its own and survive rebuilds, and the installed
 # Tern's are never touched. Launched with `open`, so it answers for itself.
-# Env: TERN_CONTROL (default target/dev.sock), XDG_CONFIG_HOME,
+# Env: TERN_CONTROL (default target/dev.sock), XDG_CONFIG_HOME, CODEX_HOME,
 # TERN_SESSION and TERN_FRAME_TRACE are passed on; TERN_DEV_SIGN_ID picks the identity.
 # Prints the app's pid. Build first (`cargo build -p tern-app`).
 set -eu
@@ -64,6 +64,7 @@ rm -f "$CONTROL"
 set -- --env "TERN_CONTROL=$CONTROL"
 [ -n "${XDG_CONFIG_HOME:-}" ] && set -- "$@" --env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
 [ -n "${TERN_SESSION:-}" ] && set -- "$@" --env "TERN_SESSION=$TERN_SESSION"
+[ -n "${CODEX_HOME:-}" ] && set -- "$@" --env "CODEX_HOME=$CODEX_HOME"
 [ -n "${TERN_FRAME_TRACE:-}" ] && set -- "$@" --env "TERN_FRAME_TRACE=$TERN_FRAME_TRACE"
 open -n "$@" -a "$APP" --args "$FOLDER"
 

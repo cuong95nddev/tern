@@ -23,7 +23,7 @@ fn builtin_capabilities(id: &str) -> &'static [Capability] {
     use Capability::*;
     match id {
         CLAUDE => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Chat, Skills],
-        CODEX => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Skills],
+        CODEX => &[Launch, Status, Session, Transcript, Chat, Context, Steer, Usage, Skills],
         _ => &[],
     }
 }

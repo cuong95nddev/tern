@@ -758,7 +758,7 @@ fn result_text(content: Option<&Value>) -> String {
 }
 
 /// Milliseconds since 1970 of an RFC 3339 UTC time (`2026-10-30T07:49:25.177Z`).
-fn timestamp_ms(s: &str) -> Option<u64> {
+pub(crate) fn timestamp_ms(s: &str) -> Option<u64> {
     let (date, time) = s.strip_suffix('Z')?.split_once('T')?;
     let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);
