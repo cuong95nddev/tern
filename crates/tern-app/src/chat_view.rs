@@ -202,7 +202,8 @@ pub struct ChatView {
     /// The handoff it can go on from.
     handoff: Handoff,
     waiting_for_start: Option<Waiting>,
-    /// The agent may start in its folder (see [`crate::folder_trust`]).
+    /// The folder is trusted (see [`crate::folder_trust`]): the agent may
+    /// start unasked. Elsewhere see [`may_start_asked`].
     trusted: bool,
 }
 
@@ -237,7 +238,7 @@ impl ChatView {
             InputEvent::PressEnter { secondary: false, shift: false } => this.send(window, cx),
             InputEvent::Change => {
                 this.slash = 0;
-                // Claude starts while the user types, so its commands and models are there.
+                // It starts while the user types, so its commands and models are there.
                 this.warm(cx);
                 cx.notify();
             },
@@ -250,8 +251,7 @@ impl ChatView {
         });
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let session = session.unwrap_or_else(tern_chat::new_session_id);
-        // Folder trust is Claude Code's own record; other agents aren't asked here.
-        let trusted = driver.agent() != tern_agent::CLAUDE || crate::folder_trust::trusted(&account, &root);
+        let trusted = crate::folder_trust::trusted(&account, &root);
         let mut this = Self {
             root,
             account,
@@ -353,7 +353,7 @@ impl ChatView {
     /// Start Claude, to do `what` once it runs (see [`Self::take_waiting`]).
     pub fn start_for(&mut self, what: Waiting, cx: &mut Context<Self>) {
         self.waiting_for_start = Some(what);
-        self.warm(cx);
+        self.start_asked(cx);
     }
 
     pub fn take_waiting(&mut self) -> Option<Waiting> {
@@ -505,11 +505,18 @@ impl ChatView {
         self.connect(OpenChat::Spawn(Box::new(spec)), cx);
     }
 
-    /// Start Claude unless it runs: it then says which commands and models
-    /// it has. Not in a folder the user hasn't trusted: it would run the
-    /// folder's hooks.
+    /// Start the agent unasked unless it runs: it then says which commands
+    /// and models it has. Not in a folder the user hasn't trusted: it would
+    /// read the folder's config and run its hooks.
     fn warm(&mut self, cx: &mut Context<Self>) {
         if !self.live && self.trusted {
+            self.start(cx);
+        }
+    }
+
+    /// Start the agent unless it runs, the user having asked for something of it.
+    fn start_asked(&mut self, cx: &mut Context<Self>) {
+        if !self.live && may_start_asked(self.driver.agent(), self.trusted) {
             self.start(cx);
         }
     }
@@ -522,7 +529,7 @@ impl ChatView {
         }
     }
 
-    /// The user trusts the folder: Claude starts.
+    /// The user trusts the folder: the agent starts.
     fn trust_folder(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = crate::folder_trust::trust(&self.root) {
             // It holds for this tab all the same.
@@ -739,11 +746,11 @@ impl ChatView {
             return;
         }
         self.check_trust(cx);
-        if !self.trusted {
+        if !may_start_asked(self.driver.agent(), self.trusted) {
             // What was typed stays, for once it is.
             return;
         }
-        self.warm(cx);
+        self.start_asked(cx);
         let attachments = std::mem::take(&mut self.attachments);
         let images: Vec<(&str, &[u8])> = attachments.iter().map(|a| (a.image.format().mime_type(), a.image.bytes())).collect();
         let (_, line) = self.driver.user_line(&self.session, &text, &images);
@@ -1894,7 +1901,7 @@ impl Render for ChatView {
             .var("attached", !self.attachments.is_empty())
             .list("attachments", attachments)
             .slot_opt("list", list)
-            .var("untrusted", !self.trusted && self.chat_id.is_none())
+            .var("untrusted", !may_start_asked(self.driver.agent(), self.trusted) && self.chat_id.is_none())
             .var("folder", crate::dirs::tilde(&self.root))
             .slot("input", input);
         template::render(
@@ -2025,9 +2032,25 @@ fn thumb_key(image: &UserImage) -> usize {
     image.bytes.as_ptr() as usize
 }
 
+/// Whether `agent` may start once the user asks something of it, in a folder
+/// that is `trusted` or not. Claude Code headless runs the folder's hooks
+/// with no question of its own, so a chat asks first (template `chat.trust`).
+/// For the others, sending to them is the user's word.
+fn may_start_asked(agent: &str, trusted: bool) -> bool {
+    trusted || agent != tern_agent::CLAUDE
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{command_matches, web_url};
+    use super::{command_matches, may_start_asked, web_url};
+
+    #[test]
+    fn only_claude_waits_for_the_folder_to_be_trusted() {
+        assert!(!may_start_asked(tern_agent::CLAUDE, false));
+        assert!(may_start_asked(tern_agent::CLAUDE, true));
+        assert!(may_start_asked(tern_agent::OPENCODE, false));
+        assert!(may_start_asked(tern_agent::CODEX, false));
+    }
 
     #[test]
     fn a_form_opens_only_web_pages() {
