@@ -228,6 +228,44 @@ fn a_codex_tabs_agent_and_lane_carry_over() {
 }
 
 #[test]
+fn an_opencode_tabs_agent_and_lane_carry_over() {
+    use tern_term::agent_status::TurnState;
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = sink();
+    let (_dir, path) = fake_opencode("2.0.30");
+    let post = |kind: &str, data: &str| {
+        format!(
+            r#"curl -s -X POST -H 'content-type: application/json' -d '{{"hook_event_name":"OpenCode","type":"{kind}","data":{data}}}' "$url" >/dev/null; "#
+        )
+    };
+    let mut script = r#"url=$(sed -n 's/.*"hook_url":"\([^"]*\)".*/\1/p' "$TERN_OPENCODE_HOOK_FILE"); "#.to_owned();
+    script += &post("session.created", r#"{"sessionID":"s"}"#);
+    script += &post("session.inbox.enqueued", r#"{"sessionID":"s","item":{"type":"user","payload":{"text":"hi"}}}"#);
+    // Posted until it reaches the new daemon: here the old one, in the same
+    // process, still takes some (a real one has exited).
+    script += "read x; while :; do ";
+    script += &post("session.execution.interrupted", r#"{"sessionID":"s"}"#);
+    script += "sleep 0.1; done";
+    let s = c.open(opencode_tab(&path, &script), SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    wait_until("working", || statuses(&ev1).last().is_some_and(|s| s.state == TurnState::Working));
+    let id = s.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let c = client(&p.dir);
+    assert!(c.list().unwrap().iter().any(|i| i.id == id && i.agent.as_deref() == Some("opencode") && !i.claude));
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("status after the handoff", || statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Working));
+    s.write(b"\n".to_vec());
+    wait_until("interrupted", || statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Done));
+    s.close();
+}
+
+#[test]
 fn a_codex_tab_without_a_hook_yet_keeps_its_lane() {
     use tern_term::agent_status::TurnState;
     let p = daemon_pair();

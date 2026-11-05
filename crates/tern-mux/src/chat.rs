@@ -898,6 +898,63 @@ done"#;
         host.kill();
     }
 
+    /// An `opencode acp` that opens session `one`, then answers a further
+    /// `session/new` with `two`, echoing what it is told.
+    fn opencode_server() -> ChatSpec {
+        let script = r#"echo '{"id":"open","result":{"sessionId":"one"}}'
+while read -r line; do
+  echo "{\"got\":$line}"
+  case "$line" in *session/new*) echo '{"id":"x","result":{"sessionId":"two"}}';; esac
+done"#;
+        ChatSpec { agent: Some("opencode".into()), ..sh(script) }
+    }
+
+    fn prompts(host: &ChatHost) -> Vec<Value> {
+        let st = host.state.lock().unwrap();
+        let lines = st.lines.iter().filter_map(|k| serde_json::from_str::<Value>(&k.text).ok());
+        lines.filter_map(|v| v.get("got").cloned()).filter(|v| v["method"] == "session/prompt").collect()
+    }
+
+    #[test]
+    fn opencode_chat_runs_against_a_scripted_server() {
+        let host = ChatHost::spawn(11, &opencode_server(), None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        wait("the session", || host.session() == "one");
+        host.ask_handoff();
+        wait("the guard's message", || !prompts(&host).is_empty());
+        let prompt = &prompts(&host)[0];
+        assert_eq!(prompt["params"]["sessionId"], "one");
+        assert!(prompt["params"]["prompt"][0]["text"].as_str().unwrap().contains("handoff"), "{prompt}");
+        host.kill();
+    }
+
+    #[test]
+    fn an_opencode_chat_goes_on_in_a_fresh_session() {
+        let host = ChatHost::spawn(12, &opencode_server(), None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        wait("the session", || host.session() == "one");
+        host.resume_handoff(None);
+        wait("the prompt", || !prompts(&host).is_empty());
+        let prompt = &prompts(&host)[0];
+        assert_eq!(prompt["params"]["sessionId"], "two");
+        assert_eq!(prompt["params"]["prompt"][0]["text"], tern_bridge::context::CONTINUE_PROMPT);
+        host.kill();
+    }
+
+    #[test]
+    fn an_opencode_ask_notifies_while_no_one_is_there_and_replays() {
+        let notified = Arc::new(Mutex::new(Vec::new()));
+        let n = notified.clone();
+        let notify: Notify = Arc::new(move |t: &str, b: &str| n.lock().unwrap().push(format!("{t}: {b}")));
+        let script = r#"echo '{"id":"open","result":{"sessionId":"one"}}'
+echo '{"id":0,"method":"session/request_permission","params":{"sessionId":"one","toolCall":{"toolCallId":"c","kind":"execute","title":"ls","rawInput":{"command":"ls"}}}}'
+sleep 5"#;
+        let host = ChatHost::spawn(13, &ChatSpec { agent: Some("opencode".into()), ..sh(script) }, None, notify).unwrap();
+        wait("the notice", || notified.lock().unwrap().iter().any(|m| m.contains("asks to run a command")));
+        let st = host.state.lock().unwrap();
+        assert!(st.lines.iter().any(|k| k.text.contains("session/request_permission")), "a waiting ask is replayed");
+        drop(st);
+        host.kill();
+    }
+
     #[test]
     fn replays_then_streams_and_drops_finished_deltas() {
         let notified = Arc::new(Mutex::new(Vec::new()));

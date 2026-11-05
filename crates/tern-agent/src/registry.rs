@@ -24,7 +24,7 @@ fn builtin_capabilities(id: &str) -> &'static [Capability] {
     match id {
         CLAUDE => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Chat, Skills],
         CODEX => &[Launch, Status, Session, Transcript, Chat, Context, Steer, Usage, Skills],
-        OPENCODE => &[Launch, Status, Session, Transcript, Context, Steer, Skills],
+        OPENCODE => &[Launch, Status, Session, Transcript, Chat, Context, Steer, Skills],
         _ => &[],
     }
 }
@@ -228,6 +228,7 @@ mod tests {
             assert!(r.has("opencode", c), "{c:?}");
         }
         assert!(!r.has("opencode", Capability::Usage));
+        assert!(r.has("opencode", Capability::Chat));
     }
 
     #[test]
