@@ -40,12 +40,18 @@ impl Launch {
     }
 }
 
-/// The shell line that starts Claude: `user`'s own arguments, as typed
-/// (shell syntax), and `args`, each quoted with `quote` for the shell that
-/// runs the line. The daemon puts the hook settings file's path in place of
-/// the placeholder (or drops the flag without hooks).
-pub fn claude_line(user: &str, args: &[String], quote: fn(&str) -> String) -> String {
-    let mut line = String::from("claude");
+/// How descriptor `d` starts its agent: its command, then its args, each
+/// quoted with `quote` for the shell that runs the line.
+pub fn start(d: &tern_agent::Descriptor, quote: fn(&str) -> String) -> String {
+    std::iter::once(d.command.clone()).chain(d.args.iter().map(|a| quote(a))).collect::<Vec<_>>().join(" ")
+}
+
+/// The shell line that starts Claude: `start` (see [`start`]), `user`'s own
+/// arguments, as typed (shell syntax), and `args`, each quoted with `quote`
+/// for the shell that runs the line. The daemon puts the hook settings
+/// file's path in place of the placeholder (or drops the flag without hooks).
+pub fn claude_line(start: &str, user: &str, args: &[String], quote: fn(&str) -> String) -> String {
+    let mut line = start.to_owned();
     if !user.is_empty() {
         line.push(' ');
         line.push_str(user);
@@ -229,8 +235,14 @@ mod tests {
     fn claude_gets_the_hook_settings_placeholder_as_it_is() {
         let args = ["--verbose".to_owned()];
         let q = |s: &str| format!("<{s}>");
-        assert_eq!(claude_line("", &args, q), "claude --settings {tern-settings} <--verbose>");
-        assert_eq!(claude_line("--foo", &args, q), "claude --foo --settings {tern-settings} <--verbose>");
+        assert_eq!(claude_line("claude", "", &args, q), "claude --settings {tern-settings} <--verbose>");
+        assert_eq!(claude_line("claude", "--foo", &args, q), "claude --foo --settings {tern-settings} <--verbose>");
+        // A user file may change its command and args.
+        let mut d = tern_agent::registry().get(tern_agent::CLAUDE).unwrap().clone();
+        assert_eq!(start(&d, q), "claude");
+        d.command = "claude-beta".into();
+        d.args = vec!["--x".into()];
+        assert_eq!(claude_line(&start(&d, q), "--foo", &args, q), "claude-beta <--x> --foo --settings {tern-settings} <--verbose>");
     }
 
     #[test]

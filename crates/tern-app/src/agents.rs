@@ -378,6 +378,20 @@ pub fn launch_line(d: &tern_agent::Descriptor) -> String {
     std::iter::once(d.command.clone()).chain(d.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ")
 }
 
+/// The shell line that starts Claude-integrated agent `d` in a tab: its
+/// command and args, the user's own arguments `user` as typed (shell
+/// syntax), then the hook settings placeholder, which the daemon fills (or
+/// drops without hooks).
+pub fn start_line(d: &tern_agent::Descriptor, user: &str) -> String {
+    let mut line = launch_line(d);
+    if !user.is_empty() {
+        line.push(' ');
+        line.push_str(user);
+    }
+    line.push_str(" --settings {tern-settings}");
+    line
+}
+
 /// `a` as one shell word: as it is when the shell would neither split nor
 /// expand it, else quoted.
 fn shell_word(a: &str) -> String {
@@ -437,6 +451,16 @@ pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_starts_with_the_descriptors_command_and_args() {
+        let mut d = tern_agent::registry().get(tern_agent::CLAUDE).unwrap().clone();
+        assert_eq!(super::start_line(&d, ""), "claude --settings {tern-settings}");
+        assert_eq!(super::start_line(&d, "--foo"), "claude --foo --settings {tern-settings}");
+        d.command = "claude-beta".into();
+        d.args = vec!["--x".into()];
+        assert_eq!(super::start_line(&d, "--foo"), "claude-beta --x --foo --settings {tern-settings}");
+    }
+
     #[test]
     fn claude_resumes_with_its_descriptors_argv_after_the_start_line() {
         let claude = tern_agent::AgentId::new(tern_agent::CLAUDE);

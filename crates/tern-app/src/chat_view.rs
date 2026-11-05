@@ -434,6 +434,8 @@ impl ChatView {
     /// [`ChatDriver::load`]).
     fn load_history(&mut self, before: Option<u64>) {
         let record = record_path(&self.session).map(|p| tern_chat::read_record(&p)).unwrap_or_default();
+        // Whatever was folded before goes with the transcript it was folded into.
+        self.driver.reset();
         let mut t = Transcript::default();
         if let Some(path) = saved_path(self.driver.agent(), &self.account, &self.root, &self.session)
             && let Err(e) = self.driver.load(&mut t, &path, before, record)

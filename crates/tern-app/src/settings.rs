@@ -1333,7 +1333,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `panel_header` | `part`, `title`, `count` | `buttons` |
 | `explorer.header`, `changes.header`, `scratches.header`, `shells.header` | as `panel_header` | as `panel_header` |
 | `explorer.header.buttons`, `changes.header.buttons`, `scratches.header.buttons` | `hide_key`; `refreshing` (changes) | |
-| `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `claude`, `git` | `icon`, `field` |
+| `explorer.row` | `indent`, `folder`, `open`, `selected`, `cursor`, `cut`, `editing`, `name`, `name_color`, `agent_edited` (an agent changed it; `claude` is its old name), `git` | `icon`, `field` |
 | `changes.repo` | `indent`, `folder`, `open`, `name`, `branch`, `detail`, `error`, `files`, `check_icon`, `check_tooltip` | |
 | `changes.file` | `indent`, `selected`, `name`, `name_color`, `dir`, `status`, `check_icon` | `icon` |
 | `scratches.row` | `indent`, `selected`, `name`, `age` | `icon` |
@@ -1411,7 +1411,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.caffeine` | `status`; list `modes` (`label`, `detail`, `on`) | |
 | `menu.tabs` | list `tabs` (`label`, `on`) | |
 | `menu.git_log_filter` | list `options` (`label`, `on`) | |
-| `menu.chat_model` | `loaded`; list `models` (`label`, `detail`, `on`) | |
+| `menu.chat_model` | `loaded`, `agent_short` (the chat's agent); list `models` (`label`, `detail`, `on`) | |
 | `menu.part` | `part`, `floating`, `popped`, `can_float`, `can_window` | |
 | `part_window` | | `part` |
 | `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |
@@ -1688,8 +1688,8 @@ Choosing a theme in the theme picker sets one theme in its place.
 
 Tern knows the coding agents it shows (Claude Code, Codex, OpenCode, Gemini,
 Cursor, Grok, Pi) from descriptors. A file `agents/<id>.json` here changes
-one or adds another; `tern --agents` lists every agent Tern knows, where each
-comes from, and what is wrong in the files.
+one or adds another; `tern --agents` lists every agent Tern knows, what Tern
+does with each, and what is wrong in the files.
 
 A descriptor's fields:
 
@@ -1698,13 +1698,15 @@ A descriptor's fields:
 - `command`, `args`: what a new tab of it runs.
 - `processes`: the program names that tell Tern a terminal runs it.
 - `resume`: the command that resumes a conversation, `{{session}}` standing
-  for its id (`[\"codex\", \"resume\", \"{{session}}\"]`).
+  for its id (`[\"codex\", \"resume\", \"{{session}}\"]`), for the agents
+  whose conversations Tern follows (today Claude Code).
 - `skills_dir`: where its skill files go, under the home folder.
 - `screen`: how its screen says what it does, for agents that don't report
-  it: `blocked` and `working`, each a list of rules. A rule matches when the
+  it: `blocked` and `working`, each a list of rules; any rule of a list
+  matching is enough. A rule matches when everything it gives holds: the
   terminal's title holds `title_contains`, the bottom lines (lowercased) hold
   `bottom_contains` (a text, or a list that must all be there), the title holds
-  one of the characters of `title_any_char`, or starts with a character in one
+  one of the characters of `title_any_char`, it starts with a character in one
   of the `title_lead` ranges (code points, inclusive) then a space. Without
   `working` rules, its screen can't tell working from waiting.
 
@@ -1717,8 +1719,8 @@ a flag of your own:
 
 A file with a new id adds an agent: it needs `name` and `command`. Tern then
 detects it in terminals, offers \"New <name> Tab\" (File > New Agent Tab and the
-command palette), reads its status from its screen and resumes it when it has
-`resume`:
+command palette), runs it as that tab's program (the tab goes on as a shell
+when it ends) and reads its status from its screen:
 
 ```json
 {{ \"id\": \"amp\", \"name\": \"Amp\", \"command\": \"amp\", \"processes\": [\"amp\"] }}

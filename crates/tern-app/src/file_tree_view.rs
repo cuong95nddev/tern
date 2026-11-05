@@ -928,7 +928,7 @@ impl FileTreeView {
         };
         let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(self.root()).to_path_buf() };
 
-        let mut scope = template::Scope::new(ROW)
+        let mut scope = agent_edited(template::Scope::new(ROW), self.agent_touched.contains(path))
             .var("indent", style::row_indent(ROW, row.depth, cx))
             .var("folder", is_dir)
             .var("open", row.expanded)
@@ -937,7 +937,6 @@ impl FileTreeView {
             .var("cut", self.clip.as_ref().is_some_and(|c| c.cut && c.paths.iter().any(|p| path.starts_with(p))))
             .var("editing", renaming.is_some())
             .var("name", name)
-            .var("agent_edited", self.agent_touched.contains(path))
             .var("git", git.map(|g| g.letter().to_string()).unwrap_or_default())
             .slot("icon", style::row_icon(ROW, icon, icon_color, cx))
             .slot_opt("field", renaming.map(|e| Self::name_field(&e.input)));
@@ -1068,5 +1067,21 @@ impl Render for FileTreeView {
             },
             cx,
         )
+    }
+}
+
+/// `scope` saying whether an agent edited the row's file: `agent_edited`,
+/// and `claude`, its name before other agents (user templates may test it).
+fn agent_edited(scope: template::Scope, edited: bool) -> template::Scope {
+    scope.var("agent_edited", edited).var("claude", edited)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_agent_edit_is_told_under_its_old_name_too() {
+        let scope = super::agent_edited(crate::template::Scope::new("t"), true);
+        assert_eq!(scope.text_var("agent_edited").as_deref(), Some("true"));
+        assert_eq!(scope.text_var("claude").as_deref(), Some("true"));
     }
 }

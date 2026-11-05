@@ -67,6 +67,9 @@ pub trait ChatDriver: Send {
 
     fn model_line(&self, model: &str) -> Option<String>;
 
+    /// Forget what was folded so far: the transcript it folded into starts over.
+    fn reset(&mut self);
+
     /// Replace `t` with the conversation saved at `path`, up to the lines
     /// saved at or after `before` (ms since the Unix epoch), with `extra`
     /// lines (ms, frame) the agent doesn't save, each where its time puts it.
@@ -109,5 +112,16 @@ mod tests {
         let replay = serde_json::json!({"type":"user","uuid":uuid,"message":{"role":"user","content":[{"type":"text","text":"hi"}]}});
         d.fold_line(&mut t, &replay.to_string());
         assert_eq!(t.entries.len(), 1, "{:?}", t.entries);
+    }
+
+    #[test]
+    fn a_reset_driver_forgets_what_it_sent() {
+        let mut d = chat_driver("claude").unwrap();
+        let (uuid, _) = d.user_line("s", "hi", &[]);
+        d.reset();
+        let mut t = Transcript::default();
+        let replay = serde_json::json!({"type":"user","uuid":uuid,"message":{"role":"user","content":[{"type":"text","text":"hi"}]}});
+        d.fold_line(&mut t, &replay.to_string());
+        assert!(matches!(&t.entries[..], [crate::Entry::User { text, .. }] if text == "hi"), "{:?}", t.entries);
     }
 }

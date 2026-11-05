@@ -41,7 +41,10 @@ impl ChatDriver for ClaudeDriver {
         quote: fn(&str) -> String,
     ) -> String {
         let launch = Launch { session: session.to_owned(), resume, model: model.map(str::to_owned), mode };
-        claude_line(user_args, &launch.args(), quote)
+        // Its descriptor's command and args: a user file may change them.
+        let registry = tern_agent::registry();
+        let start = registry.get(tern_agent::CLAUDE).map_or_else(|| tern_agent::CLAUDE.to_owned(), |d| launch::start(d, quote));
+        claude_line(&start, user_args, &launch.args(), quote)
     }
 
     fn start_lines(&self) -> Vec<String> {
@@ -77,6 +80,10 @@ impl ChatDriver for ClaudeDriver {
 
     fn model_line(&self, model: &str) -> Option<String> {
         Some(wire::set_model(model))
+    }
+
+    fn reset(&mut self) {
+        self.fold = ClaudeFold::default();
     }
 
     fn load(&mut self, t: &mut Transcript, path: &Path, before: Option<u64>, extra: Vec<(u64, Value)>) -> io::Result<()> {

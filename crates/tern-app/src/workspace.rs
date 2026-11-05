@@ -62,6 +62,8 @@ actions!(
     [
         NewClaudeTab,
         NewClaudeChat,
+        // Its name before other agents, kept for user templates.
+        #[action(deprecated_aliases = ["workspace::SwitchClaudeView"])]
         SwitchAgentView,
         NewShellTab,
         NewScratch,
@@ -626,6 +628,16 @@ pub(crate) fn shell_quote(s: &str) -> String {
     }
 }
 
+/// An agent tab whose program ended (`live`: while Tern watched, with exit
+/// `code`) goes on as a shell. An agent Tern launches with its integration
+/// (`integrated`) does when it ended on purpose (`/exit`, code 0); otherwise
+/// it is restarted or resumed. Any other agent runs as the tab's program in
+/// place of a shell, so it does however it ended: a command that isn't
+/// installed or a crash leaves a shell to fix it from, not a dead tab.
+fn goes_on_as_shell(integrated: bool, live: bool, code: Option<i32>) -> bool {
+    live && (!integrated || code == Some(0))
+}
+
 /// Why a Claude tab can't show its conversation the other way now (a
 /// terminal as a chat with `to_chat`, a chat in a terminal), or `None` when
 /// it can. `status` is the tab's, `session` its conversation, `bg` whether
@@ -1152,20 +1164,19 @@ impl Workspace {
                 (crate::platform::shell_command_args(&line), crate::agents::agent_short_name(agent).into())
             },
             TabKind::Agent(agent) => {
-                // Run through an interactive login shell so PATH from rc files applies.
-                // The daemon puts the hook settings file's path in place of
-                // the placeholder (or drops the flag without hooks).
-                let settings = " --settings {tern-settings}";
-                // The user's own arguments, as typed (shell syntax).
-                let args = window_state::claude_args();
-                let claude = if args.is_empty() { format!("claude{settings}") } else { format!("claude {args}{settings}") };
+                // Run through an interactive login shell so PATH from rc files
+                // applies: its descriptor's command and args (a user file may
+                // change them), the user's own arguments, the hook settings.
+                let registry = tern_agent::registry();
+                let Some(d) = registry.get(agent.as_str()) else { unreachable!("Claude is built in") };
+                let claude = crate::agents::start_line(d, &window_state::claude_args());
                 // A conversation that can't be resumed (deleted, ...) ends
                 // Claude at once: the tab then starts a new one (see
                 // `on_terminal_event`), not on every failed exit.
                 // One moved to the background (`/bg`) is attached to instead.
                 let bg = resume.and_then(|id| claude_bg_job(&accounts::claude_dir(account)?.join("sessions"), id));
                 let claude = match (bg, resume) {
-                    (Some(job), _) => format!("claude attach {}", shell_quote(&job)),
+                    (Some(job), _) => format!("{} attach {}", d.command, shell_quote(&job)),
                     (None, Some(id)) => crate::agents::resume_line(&claude, agent, id).unwrap_or(claude),
                     (None, None) => claude,
                 };
@@ -2706,12 +2717,11 @@ impl Workspace {
                 }
             },
             TerminalEvent::Exited { code, quick, live } => {
-                // Claude ended on purpose (/exit): the tab goes on as a
-                // shell, as if Claude had been started from one.
-                if *live
-                    && *code == Some(0)
-                    && let Some(t) = self.term_tab_mut(view)
+                // The agent ended (see `goes_on_as_shell`): the tab goes on
+                // as a shell, as if the agent had been started from one.
+                if let Some(t) = self.term_tab_mut(view)
                     && t.kind.agent().is_some()
+                    && goes_on_as_shell(t.kind.has(Capability::Launch), *live, *code)
                 {
                     t.kind = TabKind::Shell;
                     t.token = None;
@@ -5843,6 +5853,25 @@ pub fn services(terminal: TerminalConfig) -> Services {
 #[cfg(test)]
 mod tests {
     use super::{ActivityStatus, claude_bg_job, switch_blocker};
+
+    #[test]
+    fn an_agent_tab_goes_on_as_a_shell_when_its_agent_ends() {
+        use super::goes_on_as_shell;
+        // An integrated agent (Claude): only when it ended on purpose.
+        assert!(goes_on_as_shell(true, true, Some(0)));
+        assert!(!goes_on_as_shell(true, true, Some(1)));
+        // Any other agent, however it ended: a missing command (127), a crash.
+        assert!(goes_on_as_shell(false, true, Some(127)));
+        assert!(goes_on_as_shell(false, true, None));
+        // Found ended after a restart: left as it is.
+        assert!(!goes_on_as_shell(false, false, Some(127)));
+    }
+
+    #[test]
+    fn the_old_switch_action_name_still_names_it() {
+        use gpui_kit::Action as _;
+        assert!(super::SwitchAgentView::deprecated_aliases().contains(&"workspace::SwitchClaudeView"));
+    }
 
     #[test]
     fn a_claude_tab_switches_only_while_it_waits() {
