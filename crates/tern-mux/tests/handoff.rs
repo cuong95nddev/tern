@@ -142,8 +142,8 @@ fn ended_sessions_and_claude_tabs_carry_over() {
 
 #[test]
 fn a_claude_tabs_hook_state_carries_over() {
-    use tern_term::claude_status::TurnState;
-    let statuses = |ev: &Mutex<Vec<TermEvent>>| -> Vec<tern_term::claude_status::ClaudeStatus> {
+    use tern_term::agent_status::TurnState;
+    let statuses = |ev: &Mutex<Vec<TermEvent>>| -> Vec<tern_term::agent_status::AgentStatus> {
         ev.lock()
             .unwrap()
             .iter()

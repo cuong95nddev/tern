@@ -536,7 +536,7 @@ fn claude_session_comes_from_hooks() {
 }
 
 /// The Claude statuses `ev` got from the daemon, in order.
-fn agent_statuses(ev: &Mutex<Vec<TermEvent>>) -> Vec<tern_term::claude_status::ClaudeStatus> {
+fn agent_statuses(ev: &Mutex<Vec<TermEvent>>) -> Vec<tern_term::agent_status::AgentStatus> {
     ev.lock()
         .unwrap()
         .iter()
@@ -549,7 +549,7 @@ fn agent_statuses(ev: &Mutex<Vec<TermEvent>>) -> Vec<tern_term::claude_status::C
 
 #[test]
 fn a_claude_tabs_status_comes_from_its_hooks() {
-    use tern_term::claude_status::{TurnState, Wakeup};
+    use tern_term::agent_status::{TurnState, Wakeup};
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (tab, ev) = sink();

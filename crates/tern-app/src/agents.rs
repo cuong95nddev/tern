@@ -205,8 +205,8 @@ pub fn chat_ring_vars(scope: crate::template::Scope, view: &crate::chat_view::Ch
 }
 
 /// `word` with what keeps a Claude tab working besides its own turn.
-fn hook_detail(mut word: String, h: &tern_term::claude_status::ClaudeStatus) -> String {
-    use tern_term::claude_status::{TurnState, Wakeup};
+fn hook_detail(mut word: String, h: &tern_term::agent_status::AgentStatus) -> String {
+    use tern_term::agent_status::{TurnState, Wakeup};
     let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
     if h.main_agent.is_some_and(|m| m.state == TurnState::Done) {
         word += " · turn ended";

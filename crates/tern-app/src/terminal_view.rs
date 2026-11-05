@@ -329,7 +329,7 @@ pub struct TerminalView {
     status_from_file: bool,
     /// A Claude tab's status from its hooks (the daemon tracks them): over
     /// its reports and its session file.
-    hook_status: Option<tern_term::claude_status::ClaudeStatus>,
+    hook_status: Option<tern_term::agent_status::AgentStatus>,
     /// The turn end last told as finished (see [`TerminalEvent::TurnFinished`]).
     announced_turn: Option<u64>,
     /// `Done` came as that told turn's work drained: not news.
@@ -762,7 +762,7 @@ impl TerminalView {
     }
 
     /// A Claude tab's status from its hooks, once one came.
-    pub fn hook_status(&self) -> Option<&tern_term::claude_status::ClaudeStatus> {
+    pub fn hook_status(&self) -> Option<&tern_term::agent_status::AgentStatus> {
         self.hook_status.as_ref()
     }
 
@@ -1088,8 +1088,8 @@ impl TerminalView {
     /// A Claude tab's status from its hooks: its status from here on. A
     /// turn that ended while child work goes on is told finished once, and
     /// its later drain to done is not news.
-    fn set_hook_status(&mut self, st: tern_term::claude_status::ClaudeStatus, cx: &mut Context<Self>) {
-        use tern_term::claude_status::TurnState;
+    fn set_hook_status(&mut self, st: tern_term::agent_status::AgentStatus, cx: &mut Context<Self>) {
+        use tern_term::agent_status::TurnState;
         self.reports_status = true;
         // The first after attaching tells what is, not what happened.
         if self.hook_status.is_none() {

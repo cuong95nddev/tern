@@ -42,7 +42,7 @@ impl Tab {
         tab
     }
 
-    fn post(&mut self, mut payload: Value) -> Option<ClaudeStatus> {
+    fn post(&mut self, mut payload: Value) -> Option<AgentStatus> {
         if payload.get("session_id").is_none() {
             payload["session_id"] = SESSION.into();
         }
@@ -317,7 +317,7 @@ fn a_stopped_shell_owes_nothing() {
 
 /// The main agent launched shell b1, ended its turn, and b1 then vanished
 /// unannounced.
-fn shell_gone_unannounced() -> (Tab, ClaudeStatus) {
+fn shell_gone_unannounced() -> (Tab, AgentStatus) {
     let mut tab = Tab::started();
     tab.launch_shell("b1");
     tab.post(json!({"hook_event_name": "Stop", "background_tasks": [shell("b1")]}));

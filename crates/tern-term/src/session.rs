@@ -55,7 +55,7 @@ pub enum TermEvent {
     /// typing here is dropped until taken back (`true`); or this has it.
     RemoteControl(bool),
     /// What a Claude tab does, from its hooks (the daemon tracks them).
-    AgentStatus(Box<crate::claude_status::ClaudeStatus>),
+    AgentStatus(Box<crate::agent_status::AgentStatus>),
 }
 
 const MAX_CLIPBOARD_STORE: usize = 16 << 20;

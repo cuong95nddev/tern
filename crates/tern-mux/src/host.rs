@@ -30,7 +30,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
-use tern_term::claude_status::{ClaudeStatus, ClaudeTracker, TurnState};
+use tern_term::agent_lane::AgentLane;
+use tern_term::agent_status::{AgentStatus, TurnState};
 use tern_term::mirror::Marker;
 use tern_term::osc::{OscScanner, OscSignal, PROGRAM_STATUS_PROBE_REPLY, color_scheme_report, version_report};
 use tern_term::palette::{Palette, PaletteFile};
@@ -89,14 +90,14 @@ pub trait Observer: Send + Sync {
     fn notify(&self, id: u64, title: Option<String>, body: String);
     fn exited(&self, id: u64, code: Option<i32>);
     /// A Claude tab's status from its hooks changed.
-    fn agent_status(&self, _id: u64, _status: &ClaudeStatus) {}
+    fn agent_status(&self, _id: u64, _status: &AgentStatus) {}
     /// A Claude tab's main agent ended its turn while child work keeps the
     /// tab working: the turn is finished, once (its later drain to done is
     /// not news).
     fn turn_finished(&self, _id: u64) {}
 }
 
-/// Milliseconds since the Unix epoch: a Claude tracker's clock.
+/// Milliseconds since the Unix epoch: a hook lane's clock.
 fn epoch_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -106,12 +107,13 @@ fn instant_at(ms: u64) -> Instant {
     Instant::now() + Duration::from_millis(ms.saturating_sub(epoch_ms()))
 }
 
-/// A Claude tab's hooks and what they told (see
-/// [`tern_term::claude_status`]).
+/// An agent tab's hooks and what they told (see
+/// [`tern_term::agent_lane`]).
 #[derive(Default)]
-struct ClaudeHooks {
-    tracker: ClaudeTracker,
-    status: Option<ClaudeStatus>,
+struct AgentHooks {
+    /// None until its first hook came (or a daemon handed it over).
+    lane: Option<AgentLane>,
+    status: Option<AgentStatus>,
     /// The turn end last told as finished.
     announced: Option<u64>,
     /// A hook came since its session file was last read.
@@ -123,11 +125,30 @@ struct ClaudeHooks {
     next_read: Option<Instant>,
 }
 
-impl ClaudeHooks {
+impl AgentHooks {
+    /// A hook came.
+    fn knows(&self) -> bool {
+        self.lane.as_ref().is_some_and(AgentLane::knows)
+    }
+
+    fn main_agent_busy(&self) -> bool {
+        self.lane.as_ref().is_some_and(AgentLane::main_agent_busy)
+    }
+
+    fn asking(&self) -> bool {
+        self.lane.as_ref().is_some_and(AgentLane::asking)
+    }
+
+    /// Claude Code also tells its state in a file per process, which a
+    /// Claude lane reads to notice what no hook says.
+    fn reads_session_file(&self) -> bool {
+        matches!(self.lane, Some(AgentLane::Claude(_)))
+    }
+
     /// Take `st` as the tab's status: `status` is set and `observer` told,
     /// announcing a turn that ended while child work goes on once, and not
     /// again when that work drains.
-    fn apply(&mut self, id: u64, st: ClaudeStatus, status: &Mutex<ActivityStatus>, observer: &dyn Observer) {
+    fn apply(&mut self, id: u64, st: AgentStatus, status: &Mutex<ActivityStatus>, observer: &dyn Observer) {
         if st.held_open()
             && let Some(at) = st.turn_completed_at
             && self.announced != Some(at)
@@ -187,8 +208,8 @@ struct Shared {
     size: Mutex<TermSize>,
     title: Mutex<Option<String>>,
     status: Mutex<ActivityStatus>,
-    /// Its Claude's hooks, for a Claude tab (once one came).
-    claude: Mutex<ClaudeHooks>,
+    /// Its agent's hooks, for an agent tab (once one came).
+    hooks: Mutex<AgentHooks>,
     exited: Mutex<Option<Option<i32>>>,
     subscriber: Mutex<Option<Arc<dyn Subscriber>>>,
     /// Watch alongside the subscriber, without owning the session.
@@ -206,7 +227,7 @@ impl Shared {
             size: Mutex::new(size),
             title: Mutex::new(None),
             status: Mutex::new(ActivityStatus::None),
-            claude: Mutex::default(),
+            hooks: Mutex::default(),
             exited: Mutex::new(None),
             subscriber: Mutex::new(None),
             viewers: Mutex::new(Vec::new()),
@@ -469,13 +490,15 @@ impl Host {
         *self.shared.exited.lock().unwrap()
     }
 
-    /// Claude hook `raw` came for it; `stop_blocked`: Tern's own Stop hook
-    /// blocked it, so the turn goes on.
-    pub fn claude_hook(&self, raw: &serde_json::Value, stop_blocked: bool) {
-        let mut hooks = self.shared.claude.lock().unwrap();
+    /// Hook `raw` came for it from its agent; `stop_blocked`: Tern's own
+    /// Stop hook blocked it, so the turn goes on.
+    pub fn agent_hook(&self, raw: &serde_json::Value, stop_blocked: bool) {
+        let mut hooks = self.shared.hooks.lock().unwrap();
         hooks.hooked = true;
         hooks.idle_reads = 0;
-        if let Some(st) = hooks.tracker.on_event(raw, epoch_ms(), stop_blocked) {
+        // Only Claude tabs get hooks so far.
+        let lane = hooks.lane.get_or_insert_with(|| AgentLane::for_agent(tern_agent::CLAUDE).expect("Claude has a lane"));
+        if let Some(st) = lane.on_event(raw, epoch_ms(), stop_blocked) {
             hooks.apply(self.id, st, &self.shared.status, &*self.observer);
         }
         drop(hooks);
@@ -483,24 +506,23 @@ impl Host {
         let _ = self.shared.poller.notify();
     }
 
-    /// Its Claude's status from its hooks, once one came.
-    pub fn claude_status(&self) -> Option<ClaudeStatus> {
-        self.shared.claude.lock().unwrap().status.clone()
+    /// Its agent's status from its hooks, once one came.
+    pub fn agent_status(&self) -> Option<AgentStatus> {
+        self.shared.hooks.lock().unwrap().status.clone()
     }
 
-    /// Its Claude hook state, for a daemon taking it over (none before a
-    /// hook came).
-    pub fn claude_tracker(&self) -> Option<ClaudeTracker> {
-        let hooks = self.shared.claude.lock().unwrap();
-        hooks.tracker.knows().then(|| hooks.tracker.clone())
+    /// Its hook lane, for a daemon taking it over (none before a hook came).
+    pub fn lane(&self) -> Option<AgentLane> {
+        let hooks = self.shared.hooks.lock().unwrap();
+        hooks.lane.clone().filter(AgentLane::knows)
     }
 
-    /// Go on from the hook state another daemon had (before its driver runs).
-    pub fn adopt_claude(&self, tracker: ClaudeTracker) {
-        let mut hooks = self.shared.claude.lock().unwrap();
-        hooks.status = tracker.clone().current(epoch_ms());
+    /// Go on from the hook lane another daemon had (before its driver runs).
+    pub fn adopt_lane(&self, mut lane: AgentLane) {
+        let mut hooks = self.shared.hooks.lock().unwrap();
+        hooks.status = lane.current(epoch_ms());
         hooks.announced = hooks.status.as_ref().and_then(|s| s.turn_completed_at);
-        hooks.tracker = tracker;
+        hooks.lane = Some(lane);
     }
 
     /// Start sending to `sub`; returns the state it starts from. Replaces a
@@ -1142,15 +1164,15 @@ impl<P: HostPty> Driver<P> {
                 // Its hooks tell a Claude tab's status; its reports only say
                 // sooner that a question was answered or a turn may have
                 // been cancelled (no hook says either).
-                OscSignal::ProgramStatus(st) if self.shared.claude.lock().unwrap().tracker.knows() => {
-                    let mut hooks = self.shared.claude.lock().unwrap();
+                OscSignal::ProgramStatus(st) if self.shared.hooks.lock().unwrap().knows() => {
+                    let mut hooks = self.shared.hooks.lock().unwrap();
                     if st.state == "working" {
-                        if hooks.tracker.asking()
-                            && let Some(status) = hooks.tracker.question_answered(epoch_ms())
+                        if hooks.asking()
+                            && let Some(status) = hooks.lane.as_mut().and_then(|l| l.question_answered(epoch_ms()))
                         {
                             hooks.apply(self.id, status, &self.shared.status, &*self.observer);
                         }
-                    } else if hooks.tracker.main_agent_busy() {
+                    } else if hooks.main_agent_busy() {
                         hooks.next_read = Some(Instant::now());
                     }
                 },
@@ -1211,12 +1233,12 @@ impl<P: HostPty> Driver<P> {
     /// idle main agent is owed runs out, or its session file is to be read
     /// again while the main agent is in a turn.
     fn claude_hooks_check(&mut self, now: Instant) -> Option<Instant> {
-        let mut hooks = self.shared.claude.lock().unwrap();
-        if !hooks.tracker.knows() {
+        let mut hooks = self.shared.hooks.lock().unwrap();
+        if !hooks.knows() {
             return None;
         }
-        let lease = hooks.tracker.deadline().map(instant_at);
-        if hooks.tracker.main_agent_busy() {
+        let lease = hooks.lane.as_ref().and_then(AgentLane::deadline).map(instant_at);
+        if hooks.main_agent_busy() && hooks.reads_session_file() {
             hooks.next_read.get_or_insert(now + CLAUDE_CHECK);
         } else {
             hooks.next_read = None;
@@ -1229,17 +1251,20 @@ impl<P: HostPty> Driver<P> {
     /// file, notice a cancelled turn (at its prompt twice in a row with no
     /// hook between: Esc and Ctrl+C send none) and an answered question.
     fn check_claude_hooks(&mut self, now: Instant) {
-        let busy = self.shared.claude.lock().unwrap().tracker.main_agent_busy();
+        let busy = {
+            let hooks = self.shared.hooks.lock().unwrap();
+            hooks.main_agent_busy() && hooks.reads_session_file()
+        };
         // Read before locking: it reads the disk.
         let file = if busy { self.claude_status() } else { None };
-        let mut hooks = self.shared.claude.lock().unwrap();
+        let mut hooks = self.shared.hooks.lock().unwrap();
         let ms = epoch_ms();
-        if hooks.tracker.deadline().is_some_and(|d| d <= ms)
-            && let Some(st) = hooks.tracker.current(ms)
+        if hooks.lane.as_ref().and_then(AgentLane::deadline).is_some_and(|d| d <= ms)
+            && let Some(st) = hooks.lane.as_mut().and_then(|l| l.current(ms))
         {
             hooks.apply(self.id, st, &self.shared.status, &*self.observer);
         }
-        if !hooks.next_read.is_some_and(|t| t <= now) || !hooks.tracker.main_agent_busy() {
+        if !hooks.next_read.is_some_and(|t| t <= now) || !hooks.main_agent_busy() {
             return;
         }
         hooks.next_read = Some(now + CLAUDE_CHECK);
@@ -1254,9 +1279,9 @@ impl<P: HostPty> Driver<P> {
                     return;
                 }
                 hooks.idle_reads = 0;
-                hooks.tracker.interrupted(ms)
+                hooks.lane.as_mut().and_then(|l| l.interrupted(ms))
             },
-            Some(ActivityStatus::Working) if hooks.tracker.asking() => hooks.tracker.question_answered(ms),
+            Some(ActivityStatus::Working) if hooks.asking() => hooks.lane.as_mut().and_then(|l| l.question_answered(ms)),
             _ => {
                 hooks.idle_reads = 0;
                 None

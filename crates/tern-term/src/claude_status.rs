@@ -18,6 +18,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent_status::{AgentStatus, Held, MainAgent, Outcome, Subagent, TurnState, Wakeup};
+
 /// How long an idle main agent is still expected to be woken by a
 /// notification it is owed. Deliveries land 40–130 ms after the main agent
 /// goes idle, but hooks are separate posts that can be lost or come out of
@@ -61,92 +63,6 @@ const TERMINAL_STATUSES: &[&str] = &[
     "canceled",
     "timed_out",
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnState {
-    Working,
-    /// Waits for you: a permission, an AskUserQuestion.
-    Waiting,
-    Done,
-}
-
-/// How the main agent's last turn ended, when not plainly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Outcome {
-    Cancellation,
-    Failure,
-}
-
-/// Why a tab whose main agent is between turns is about to work again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Wakeup {
-    /// A task ended and its notification has not reached the main agent.
-    Notification,
-    /// The main agent is in the turn a notification opened.
-    FinishingTurn,
-}
-
-/// The main agent's own state, apart from its children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MainAgent {
-    pub state: TurnState,
-    /// Only while `state` is done.
-    pub outcome: Option<Outcome>,
-    /// When `state` began.
-    pub since: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Subagent {
-    pub id: String,
-    pub agent_type: Option<String>,
-    pub description: Option<String>,
-    pub started: u64,
-    /// Else a teammate between its turns.
-    pub working: bool,
-}
-
-/// What keeps a tab whose main agent's turn is over from being done.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Held {
-    /// Sub-agents at work.
-    pub agents: usize,
-    /// A background shell or Monitor runs.
-    pub shells: bool,
-    /// A session cron is scheduled.
-    pub cron: bool,
-    /// A task ended and the main agent is still to be told.
-    pub owed: bool,
-}
-
-/// A Claude tab's status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeStatus {
-    /// Its main agent and children together: working while either works,
-    /// waiting while either waits for you.
-    pub state: TurnState,
-    /// Working only because watch loops (shells, Monitors, crons) run.
-    pub monitoring: bool,
-    pub wakeup: Option<Wakeup>,
-    /// `None` until a main-agent event was seen.
-    pub main_agent: Option<MainAgent>,
-    /// When the main agent's turn ended while running child work kept the
-    /// tab working: that turn's end, to announce once (and not again when
-    /// the work drains).
-    pub turn_completed_at: Option<u64>,
-    pub subagents: Vec<Subagent>,
-    /// A session boundary (start, resume, clear, manual compact): not a
-    /// turn that completed.
-    pub session_boundary: bool,
-    pub held: Held,
-}
-
-impl ClaudeStatus {
-    /// The main agent is done and child work alone keeps the tab open.
-    pub fn held_open(&self) -> bool {
-        self.main_agent.is_some_and(|m| m.state == TurnState::Done) && self.state != TurnState::Done
-    }
-}
 
 /// The main agent's turn as Claude's hooks told it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,7 +332,7 @@ impl ClaudeTracker {
     /// Take hook payload `raw` at `now`; the tab's status when the event
     /// tells one. `stop_blocked`: Tern's own Stop hook answered it with a
     /// block, so the turn goes on.
-    pub fn on_event(&mut self, raw: &Value, now: u64, stop_blocked: bool) -> Option<ClaudeStatus> {
+    pub fn on_event(&mut self, raw: &Value, now: u64, stop_blocked: bool) -> Option<AgentStatus> {
         let event = read_string(raw, "hook_event_name").unwrap_or("");
         let agent_id = read_string(raw, "agent_id").map(str::to_owned);
         if matches!(event, "SubagentStart" | "TeammateIdle" | "SubagentStop") || (event == "StopFailure" && agent_id.is_some()) {
@@ -595,7 +511,7 @@ impl ClaudeTracker {
     /// Claude's turn was cancelled (Esc, Ctrl+C: it sends no hook): the main
     /// agent's turn is done, as a cancellation. The work it left running
     /// stays until it reports its own end.
-    pub fn interrupted(&mut self, now: u64) -> Option<ClaudeStatus> {
+    pub fn interrupted(&mut self, now: u64) -> Option<AgentStatus> {
         self.lead.as_ref()?;
         self.set_lead(Lead { outcome: Some(Outcome::Cancellation), ..Lead::new(TurnState::Done) }, None, now);
         self.last_tool = None;
@@ -606,7 +522,7 @@ impl ClaudeTracker {
 
     /// An AskUserQuestion was answered or dismissed (no hook says so):
     /// back to what the wait displaced.
-    pub fn question_answered(&mut self, now: u64) -> Option<ClaudeStatus> {
+    pub fn question_answered(&mut self, now: u64) -> Option<AgentStatus> {
         let lead = self.lead.clone()?;
         let (restored, since) = match lead.state {
             TurnState::Waiting => {
@@ -633,7 +549,7 @@ impl ClaudeTracker {
     }
 
     /// The status now, when there is one: what a lease expiring changes.
-    pub fn current(&mut self, now: u64) -> Option<ClaudeStatus> {
+    pub fn current(&mut self, now: u64) -> Option<AgentStatus> {
         self.cached(Evidence::default(), now)
     }
 
@@ -789,7 +705,7 @@ impl ClaudeTracker {
 
     /// The main agent's last state again with the current child list:
     /// what child churn and lease expiry tell.
-    fn cached(&mut self, evidence: Evidence, now: u64) -> Option<ClaudeStatus> {
+    fn cached(&mut self, evidence: Evidence, now: u64) -> Option<AgentStatus> {
         let lead = match self.lead.clone() {
             Some(l) => l,
             // A child at work or ending wakes its parent; only a main-agent
@@ -801,7 +717,7 @@ impl ClaudeTracker {
         Some(self.build(resolution, false))
     }
 
-    fn build(&self, r: Resolution, session_boundary: bool) -> ClaudeStatus {
+    fn build(&self, r: Resolution, session_boundary: bool) -> AgentStatus {
         let lead = self.lead.as_ref();
         let main_agent = lead.and_then(Lead::own).map(|o| MainAgent {
             state: o.state,
@@ -820,7 +736,7 @@ impl ClaudeTracker {
             })
             .collect();
         subagents.sort_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)));
-        ClaudeStatus {
+        AgentStatus {
             state: r.state,
             monitoring: r.monitoring,
             wakeup: if r.state == TurnState::Done { None } else { r.wakeup },
@@ -837,7 +753,7 @@ impl ClaudeTracker {
     /// SubagentStart, SubagentStop, TeammateIdle, and a child's StopFailure
     /// (an API error skips its SubagentStop): the roster changes, and the
     /// main agent's last state goes out again with it.
-    fn lifecycle(&mut self, event: &str, raw: &Value, now: u64) -> Option<ClaudeStatus> {
+    fn lifecycle(&mut self, event: &str, raw: &Value, now: u64) -> Option<AgentStatus> {
         let id = read_string(raw, if event == "TeammateIdle" { "teammate_name" } else { "agent_id" })?.to_owned();
         let owner = self.session.clone();
         let current = owner.is_some() && owner.as_deref() == read_string(raw, "session_id");

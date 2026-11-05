@@ -20,7 +20,8 @@ use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tern_term::claude_status::{ClaudeStatus, ClaudeTracker};
+use tern_term::agent_status::AgentStatus;
+use tern_term::claude_status::ClaudeTracker;
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
@@ -416,11 +417,11 @@ pub enum ServerMsg {
         id: u64,
         text: String,
     },
-    /// What Claude tab `id` does, from its hooks: sent to its owner when
+    /// What agent tab `id` does, from its hooks: sent to its owner when
     /// that changes, and after `Attached` (MINOR 11).
     AgentStatus {
         id: u64,
-        status: Box<ClaudeStatus>,
+        status: Box<AgentStatus>,
     },
     /// Reply to `SpawnChat` and `AttachChat`: when the program started (ms
     /// since the Unix epoch), what it wrote so far (stream deltas of

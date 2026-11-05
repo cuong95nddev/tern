@@ -6826,6 +6826,7 @@ dependencies = [
  "polling",
  "serde",
  "serde_json",
+ "tern-agent",
  "windows-sys 0.61.2",
 ]
 

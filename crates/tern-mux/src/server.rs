@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 use tern_bridge::context::{Action, Guard, Policy};
 use tern_bridge::{HookEvent, HookServer};
-use tern_term::claude_status::ClaudeStatus;
+use tern_term::agent_lane::AgentLane;
+use tern_term::agent_status::AgentStatus;
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
@@ -1263,7 +1264,7 @@ impl Server {
         self.tell_control(conn, id);
         // After `Attached`; changes from here on reach it too.
         host.send_images(&**conn);
-        if let Some(status) = host.claude_status() {
+        if let Some(status) = host.agent_status() {
             conn.send(ServerMsg::AgentStatus { id, status: Box::new(status) });
         }
         for body in hooks {
@@ -1382,7 +1383,7 @@ impl Server {
         // Unlocked: what it tells reaches the observer, which locks.
         if ev.event != tern_bridge::statusline::EVENT {
             let blocked = reply.as_ref().is_some_and(|r| r.get("decision").and_then(|d| d.as_str()) == Some("block"));
-            host.claude_hook(&ev.raw, ev.event == "Stop" && blocked);
+            host.agent_hook(&ev.raw, ev.event == "Stop" && blocked);
         }
         reply
     }
@@ -1521,7 +1522,10 @@ impl Server {
                 snapshot: proto::pack_snapshot(&host.capture())?,
                 images: host.handed_images(),
                 service,
-                claude: host.claude_tracker(),
+                // On the wire as a Claude tracker: what older daemons take.
+                claude: host.lane().map(|lane| match lane {
+                    AgentLane::Claude(t) => t,
+                }),
             };
             handoff.paused.extend(paused);
             let msg = HandoffMsg::Session(Box::new(session));
@@ -1710,7 +1714,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             let (host, driver) =
                 Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, s.images, observer)?;
             if let Some(tracker) = s.claude {
-                host.adopt_claude(tracker);
+                host.adopt_lane(AgentLane::Claude(tracker));
             }
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
@@ -1790,7 +1794,7 @@ impl Observer for Server {
         Self::update_idle(&mut self.state.lock().unwrap());
     }
 
-    fn agent_status(&self, id: u64, status: &ClaudeStatus) {
+    fn agent_status(&self, id: u64, status: &AgentStatus) {
         let owner = self.state.lock().unwrap().sessions.get(&id).and_then(|s| s.owner.as_ref().and_then(Weak::upgrade));
         if let Some(conn) = owner {
             conn.send(ServerMsg::AgentStatus { id, status: Box::new(status.clone()) });
