@@ -6663,7 +6663,7 @@ dependencies = [
 
 [[package]]
 name = "tern-app"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "ab_glyph",
  "block2 0.6.2",
@@ -6776,7 +6776,7 @@ dependencies = [
 
 [[package]]
 name = "tern-menubar"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "dispatch2",
  "env_logger",
@@ -6794,7 +6794,7 @@ dependencies = [
 
 [[package]]
 name = "tern-mux"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "block2 0.6.2",
  "getrandom 0.4.3",
