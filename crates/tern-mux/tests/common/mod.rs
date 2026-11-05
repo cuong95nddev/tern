@@ -124,5 +124,27 @@ pub fn codex_tab(path: &str, script: &str) -> tern_mux::client::Open {
 }
 
 #[cfg(unix)]
+/// A folder with an `opencode` that answers `--version` with `version`, for
+/// the PATH of a tab's env.
+pub fn fake_opencode(version: &str) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let opencode = dir.path().join("opencode");
+    std::fs::write(&opencode, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    (dir, path)
+}
+
+#[cfg(unix)]
+/// An OpenCode tab running `script`, in which `$@` is what the daemon put
+/// in for Tern's plugin.
+pub fn opencode_tab(path: &str, script: &str) -> tern_mux::client::Open {
+    let mut cfg = sh(&format!("set -- {{tern-settings}}; {script}"));
+    cfg.env.insert("PATH".into(), path.to_owned());
+    tern_mux::client::Open::Spawn { cfg, hook: true, seed: None, agent: Some("opencode".into()) }
+}
+
+#[cfg(unix)]
 /// Sets `$url` to the hook endpoint of a Codex tab (see [`codex_tab`]).
 pub const CODEX_URL: &str = r#"file=$(printf %s "$3" | sed -n "s/.*--hook '\([^']*\)'.*/\1/p" | head -1); url=$(sed -n 's/.*"hook_url":"\([^"]*\)".*/\1/p' "$file"); "#;

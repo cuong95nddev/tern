@@ -163,6 +163,84 @@ fn a_codex_that_cant_be_found_runs_without_hooks() {
 }
 
 #[test]
+fn an_opencode_tab_runs_standalone_with_the_plugin() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("2.0.30");
+    let script = r#"echo "[$*]"; echo "file:${TERN_OPENCODE_HOOK_FILE:+set}"; [ -f "$(printf %s "$OPENCODE_CONFIG_CONTENT" | sed -n 's/.*"plugins":\["\([^"]*\)".*/\1/p')/package.json" ] && echo plugin-there; read x"#;
+    let s = c.open(opencode_tab(&path, script), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("launch", || {
+        screen(&s).contains("[--standalone]") && screen(&s).contains("file:set") && screen(&s).contains("plugin-there")
+    });
+    let id = s.id().unwrap();
+    assert!(c.list().unwrap().iter().any(|i| i.id == id && i.agent.as_deref() == Some("opencode")));
+    s.close();
+}
+
+#[test]
+fn an_old_opencode_runs_plain() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("1.14.0");
+    let s = c.open(
+        opencode_tab(&path, r#"echo "args:$# content:${OPENCODE_CONFIG_CONTENT:-none} file:${TERN_OPENCODE_HOOK_FILE:-none}"; read x"#),
+        SIZE,
+        1000,
+        sink,
+    );
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("plain", || screen(&s).contains("args:0 content:none file:none"));
+    s.close();
+}
+
+#[test]
+fn an_opencode_that_says_nothing_runs_plain() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("");
+    let s = c.open(opencode_tab(&path, r#"echo "args:$#"; read x"#), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("plain", || screen(&s).contains("args:0"));
+    s.close();
+}
+
+#[test]
+fn a_users_broken_config_content_runs_plain() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("2.0.30");
+    let mut open = opencode_tab(&path, r#"echo "args:$# content:$OPENCODE_CONFIG_CONTENT"; read x"#);
+    if let tern_mux::client::Open::Spawn { cfg, .. } = &mut open {
+        cfg.env.insert("OPENCODE_CONFIG_CONTENT".into(), "{oops".into());
+    }
+    let s = c.open(open, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("plain", || screen(&s).contains("args:0 content:{oops"));
+    s.close();
+}
+
+#[test]
+fn a_users_config_content_is_added_to() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("2.0.30");
+    let mut open = opencode_tab(&path, r#"printf 'c:%s\n' "$OPENCODE_CONFIG_CONTENT" | cut -c1-30; read x"#);
+    if let tern_mux::client::Open::Spawn { cfg, .. } = &mut open {
+        cfg.env.insert("OPENCODE_CONFIG_CONTENT".into(), r#"{"model":"a/b"}"#.into());
+    }
+    let s = c.open(open, SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("kept", || screen(&s).contains(r#"c:{"model":"a/b","plugins":["#));
+    s.close();
+}
+
+#[test]
 fn a_codex_hook_reaches_its_own_tab() {
     use tern_term::agent_status::TurnState;
     let d = daemon(Duration::from_secs(60));

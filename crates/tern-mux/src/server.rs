@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use tern_agent::AgentId;
 use tern_bridge::context::{Action, Guard, Policy};
-use tern_bridge::{HookEvent, HookServer, codex_hooks};
+use tern_bridge::{HookEvent, HookServer, codex_hooks, opencode_hooks};
 #[cfg(unix)]
 use tern_term::agent_lane::AgentLane;
 use tern_term::agent_status::AgentStatus;
@@ -61,6 +61,22 @@ const ENDED_GRACE: Duration = Duration::from_secs(600);
 /// Hook requests kept for a session while no client is attached.
 const MAX_QUEUED_HOOKS: usize = 64;
 const SETTINGS_PLACEHOLDER: &str = "{tern-settings}";
+/// What OpenCode adds to its config from.
+const CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
+
+/// What an agent's launch gets for its hooks to reach Tern.
+struct HookLaunch {
+    /// In place of the placeholder.
+    args: String,
+    /// In its environment.
+    env: Vec<(String, String)>,
+}
+
+impl HookLaunch {
+    fn args(args: String) -> Self {
+        Self { args, env: Vec::new() }
+    }
+}
 /// The PTY a client gets with `Attached`, for its foreground-process
 /// queries. Windows passes none: the client asks by the shell's pid.
 #[cfg(unix)]
@@ -1068,7 +1084,7 @@ impl Server {
             scrollback: 0,
         };
         let hook = spec.args.iter().any(|a| a.contains(SETTINGS_PLACEHOLDER));
-        let token = self.hook_settings(&spec.agent_id(), &probe, &mut spec.args, hook);
+        let token = self.hook_settings(&spec.agent_id(), &probe, &mut spec.args, &mut spec.env, hook);
         match ChatHost::spawn(id, &spec, token.clone(), self.chat_notify()) {
             Ok(chat) => {
                 log::info!("chat {id}: started pid {}", chat.pid);
@@ -1143,17 +1159,26 @@ impl Server {
 
     /// With `hook`, a token for agent `agent` started as `probe`, and what
     /// its hooks reach this daemon by: `args` get that in place of the
-    /// placeholder, or lose the placeholder without one (an agent that
-    /// can't take Tern's hooks runs without).
-    fn hook_settings(&self, agent: &AgentId, probe: &SpawnConfig, args: &mut [String], hook: bool) -> Option<String> {
+    /// placeholder and `env` what it needs there, or `args` lose the
+    /// placeholder without one (an agent that can't take Tern's hooks runs
+    /// without).
+    fn hook_settings(
+        &self,
+        agent: &AgentId,
+        probe: &SpawnConfig,
+        args: &mut [String],
+        env: &mut HashMap<String, String>,
+        hook: bool,
+    ) -> Option<String> {
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
                 match self.hook_args(agent, probe, hooks, &token) {
-                    Ok(Some(text)) => {
+                    Ok(Some(launch)) => {
                         for a in args.iter_mut() {
-                            *a = a.replace(SETTINGS_PLACEHOLDER, &text);
+                            *a = a.replace(SETTINGS_PLACEHOLDER, &launch.args);
                         }
+                        env.extend(launch.env);
                         Some(token)
                     },
                     Ok(None) => {
@@ -1182,7 +1207,7 @@ impl Server {
 
     /// What goes in `agent`'s command line for its hooks to reach `token`'s
     /// endpoint, its files written; `None` when it can't take them.
-    fn hook_args(&self, agent: &AgentId, probe: &SpawnConfig, hooks: &HookServer, token: &str) -> io::Result<Option<String>> {
+    fn hook_args(&self, agent: &AgentId, probe: &SpawnConfig, hooks: &HookServer, token: &str) -> io::Result<Option<HookLaunch>> {
         let registry = tern_agent::registry();
         let command = registry.get(agent.as_str()).map_or(agent.as_str(), |d| d.command.as_str());
         let version = crate::agent_probe::version(command, probe, SETTINGS_PLACEHOLDER);
@@ -1190,12 +1215,26 @@ impl Server {
         match agent.as_str() {
             tern_agent::CLAUDE => {
                 let path = tern_bridge::write_claude_settings(&self.run_dir, token, &hooks.hook_url(token), exe.as_deref(), version)?;
-                Ok(Some(shell_quote(&path.to_string_lossy())))
+                Ok(Some(HookLaunch::args(shell_quote(&path.to_string_lossy()))))
             },
             tern_agent::CODEX => {
                 let Some(exe) = exe.filter(|_| codex_hooks::codex_wired(version)) else { return Ok(None) };
                 let path = codex_hooks::write_codex_hook_file(&self.run_dir, token, &hooks.hook_url(token))?;
-                Ok(Some(codex_hooks::codex_launch_args(&exe, &path, shell_quote)))
+                Ok(Some(HookLaunch::args(codex_hooks::codex_launch_args(&exe, &path, shell_quote))))
+            },
+            tern_agent::OPENCODE => {
+                if !opencode_hooks::opencode_wired(version) {
+                    return Ok(None);
+                }
+                let plugin = opencode_hooks::write_opencode_plugin(&self.run_dir)?;
+                let existing = probe.env.get(CONFIG_CONTENT).cloned().or_else(|| std::env::var(CONFIG_CONTENT).ok());
+                let Some(content) = opencode_hooks::opencode_config_content(&plugin, existing.as_deref()) else { return Ok(None) };
+                let file = opencode_hooks::write_opencode_hook_file(&self.run_dir, token, &hooks.hook_url(token))?;
+                let env = vec![
+                    (CONFIG_CONTENT.to_owned(), content),
+                    (opencode_hooks::OPENCODE_HOOK_FILE_ENV.to_owned(), file.to_string_lossy().into_owned()),
+                ];
+                Ok(Some(HookLaunch { args: "--standalone".to_owned(), env }))
             },
             _ => Ok(None),
         }
@@ -1216,7 +1255,7 @@ impl Server {
         cfg.env.insert("TERN_SESSION_ID".into(), id.to_string());
         let probe = cfg.clone();
         let agent = hook.clone().unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE));
-        let token = self.hook_settings(&agent, &probe, &mut cfg.args, hook.is_some());
+        let token = self.hook_settings(&agent, &probe, &mut cfg.args, &mut cfg.env, hook.is_some());
         let agent = token.is_some().then_some(agent);
         let observer: Arc<dyn Observer> = self.clone();
         let host = match Host::spawn(id, &cfg, seed, observer) {
@@ -1393,6 +1432,7 @@ impl Server {
         }
         tern_bridge::remove_claude_settings(&self.run_dir, token);
         codex_hooks::remove_codex_hook_file(&self.run_dir, token);
+        opencode_hooks::remove_opencode_hook_file(&self.run_dir, token);
     }
 
     /// Hook `ev` came; the answer for Claude Code, if any.

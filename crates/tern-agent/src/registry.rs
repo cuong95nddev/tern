@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::descriptor::Partial;
-use crate::{CLAUDE, CODEX, Capability, Descriptor};
+use crate::{CLAUDE, CODEX, Capability, Descriptor, OPENCODE};
 
 /// The built-in agents, in the order menus list them.
 const BUILTIN: &[(&str, &str)] = &[
@@ -24,6 +24,7 @@ fn builtin_capabilities(id: &str) -> &'static [Capability] {
     match id {
         CLAUDE => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Chat, Skills],
         CODEX => &[Launch, Status, Session, Transcript, Chat, Context, Steer, Usage, Skills],
+        OPENCODE => &[Launch],
         _ => &[],
     }
 }
@@ -208,11 +209,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_launch_with_tern_wired_in() {
+    fn first_class_agents_launch_with_tern_wired_in() {
         let r = Registry::builtin();
         assert!(r.has("claude", Capability::Launch));
         assert!(r.has("codex", Capability::Launch));
-        for id in ["opencode", "gemini", "cursor", "grok", "pi"] {
+        assert!(r.has("opencode", Capability::Launch));
+        for id in ["gemini", "cursor", "grok", "pi"] {
             assert!(!r.has(id, Capability::Launch), "{id}");
         }
     }

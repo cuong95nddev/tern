@@ -475,6 +475,13 @@ mod tests {
     #[test]
     fn claude_starts_with_the_descriptors_command_and_args() {
         let mut d = tern_agent::registry().get(tern_agent::CLAUDE).unwrap().clone();
+        let opencode = tern_agent::registry().get("opencode").unwrap().clone();
+        assert_eq!(super::start_line(&opencode, ""), "opencode {tern-settings}");
+        let id = tern_agent::AgentId::new("opencode");
+        assert_eq!(
+            super::resume_line("opencode {tern-settings}", &id, "ses_1").as_deref(),
+            Some("opencode {tern-settings} --session ses_1")
+        );
         let codex = tern_agent::registry().get("codex").unwrap().clone();
         assert_eq!(super::start_line(&codex, ""), "codex {tern-settings}");
         assert_eq!(super::start_line(&codex, "--foo"), "codex --foo {tern-settings}");
