@@ -17,6 +17,7 @@
 //! way a timeline shows them, for any front end.
 
 pub mod claude;
+pub mod codex;
 mod driver;
 mod model;
 mod recent;

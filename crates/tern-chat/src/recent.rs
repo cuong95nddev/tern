@@ -12,7 +12,7 @@ use crate::summary;
 
 /// How much of a saved conversation's end is read: enough for the latest
 /// message and tool calls, not the whole history.
-const TAIL: u64 = 256 * 1024;
+pub(crate) const TAIL: u64 = 256 * 1024;
 /// The longest line kept; the panel cuts it shorter.
 const MAX: usize = 600;
 
