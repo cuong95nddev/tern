@@ -1,87 +1,64 @@
-# Handoff: agent adapters, phase 2 (Codex) — written 2026-11-05
+# Handoff: agent adapters, phase 2 (Codex), tasks 7-10 — written 2026-11-05
 
-## Where things stand
+## Task
 
-Phase 1 is done and merged into `main` locally (fast-forward, HEAD `846cfed`), **not pushed**. The branch `agent-adapters` can be deleted.
-
-Each Tern agent feature now goes through a registry of agents plus per-capability tables, with Claude filling every table:
-- Tern-wide checks pass: tests 754/754, clippy on macOS and on Windows (`cargo xwin`), and fmt.
-- Phase 1 had a fresh whole-branch review. Its 4 Important and 4 Minor findings are fixed.
-
-Reply to the user in Vietnamese; write code and comments in English. The user wants this done properly ("làm chuẩn chỉ") and wants native, inline execution: `superpowers:writing-plans`, then `superpowers:executing-plans`.
+Make Codex a first-class Tern agent. Reply to the user in Vietnamese; code and comments in English. The user wants it done properly ("làm chuẩn chỉ") and chose native, inline execution: carry on with `superpowers:executing-plans`, one fresh whole-branch review at the end, then `superpowers:finishing-a-development-branch`.
 
 Read first:
-- The spec, `docs/superpowers/specs/2026-11-05-agent-adapters-design.md`, is the binding authority. Read §2 Capabilities, §4 Chat model, §6 Rollout order (phase 2 = Codex), "Calls made in this design" and "Open items for the builder to verify".
-- The phase-1 plan, `docs/superpowers/plans/2026-11-05-agent-adapters-phase1.md`, shows the plan format the user accepted.
+- Plan: `docs/superpowers/plans/2026-11-05-agent-adapters-phase2.md`. Its "Facts" section is what the spike verified on Codex 0.166.0; the user approved the plan, including dropping the overlay `CODEX_HOME`.
+- Spec: `docs/superpowers/specs/2026-11-05-agent-adapters-design.md` (not yet updated, that is Task 10).
+- Ledger: `.superpowers/sdd/2026-11-05-agent-adapters-phase2/progress.md` (untracked, do not commit). It has every `Ruling:` line and `Task N: complete`; the final message must list them all. Briefs are made by `scripts/task-start`.
 
-## Where phase 2 plugs in (all phase-1 code)
+## State
 
-| Concern | Where | Today |
-|---|---|---|
-| Descriptor and capabilities | `crates/tern-agent/agents/*.json`, `tern-agent/src/registry.rs::builtin_capabilities` | Only Claude has capabilities. Codex: detect + screen |
-| Hook lane | `tern_term::agent_lane::AgentLane::{Claude}`; host `AgentHooks` in tern-mux | A lane is created as Claude on the first hook. The agent should instead be chosen at spawn: add an `agent` field to `Spawn` (protocol MINOR bump) |
-| Status | `tern_term::agent_status::AgentStatus` | Neutral |
-| Chat driver | `tern-chat/src/driver.rs` (`ChatDriver`, `ChatCaps`, `chat_driver()` table); Claude's in `tern-chat/src/claude/` | Codex → `None` |
-| Daemon chat follower | `tern-mux/src/chat.rs` `State::follow` (busy/asks/forms/meter/guard) | **Still Claude stream-json.** It must be generalised before a second driver; its guard message already goes through `chat_driver(agent).user_line` |
-| Sessions / transcript | `tern-chat/src/sessions.rs` (`transcript_path`, `read_recent`, `last_text`) | Codex → none |
-| Usage | `tern-app/src/usage.rs` (`UsageSource`, `usage_source()`, `ACCOUNT_AGENT`) | Cards are per Claude account |
-| Resume | `agents::resume_line` (descriptor `resume`) + `spawn_config` | Only for agents with `Session` |
-| Ring / guard gating | `agents::guard_shown` (Context + Steer + Transcript); `ContextShown.guards`; template var `can_guard` | — |
-| Launch | `workspace::spawn_config`: Claude via `agents::start_line`; others run as the tab's program (the tab goes back to a shell on any exit, see `goes_on_as_shell`) | Codex with `Launch` needs its overlay home + hooks |
-| Actions | `NewAgentTab(id)`, `SwitchAgentView` (alias `SwitchClaudeView`), `NewClaudeTab` = ⌘T | No `NewAgentChat` yet: add it with the Codex driver |
+Branch `agent-adapters-codex`, off `main` 4be3336. Not merged, not pushed. HEAD is this handoff's commit. `main` itself is still not pushed since phase 1.
 
-## Phase 2 scope (spec §6 item 2)
+Tasks 1-6 are complete (run order 1, 3, 2, 4, 5, 6). Package tests pass and macOS clippy is clean at 18e15f3. Not run yet: the whole-workspace test command and Windows clippy (`cargo xwin`).
 
-The work, in this order:
-1. **Codex launch overlay + hooks.** Use a Tern-owned overlay `CODEX_HOME` per agent; never edit the user's `~/.codex`. Trust its hooks there (Orca `src/main/codex/trust/`).
-2. Codex's **hook lane**.
-3. **Sessions and rollouts:** `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`.
-4. **Context meter:** `event_msg/token_count` → `last_token_usage`, `model_context_window`.
-5. **Usage** from the rollout's `rate_limits`. No network call.
-6. **Steer:** a hook answer if Codex hooks can inject or block, else an idle bracketed paste.
-7. **Resume** and the **recent preview**.
-8. **Chat driver** (`codex app-server`, JSON-RPC) + `NewAgentChat`.
+Done:
+- `tern-bridge/src/codex_hooks.rs`: hooks + trust through `--no-daemon -c hooks={…}`, hook file `codex-hooks-<hash of token>.json`, `codex_wired` (≥ 0.166.0). `relay.rs` answers per event. `version.rs`. `HookEvent::parse` takes `apply_patch` paths.
+- `tern-mux`: `Spawn.agent` (MINOR 18, `AGENT_SPAWN_MINOR`), `agent_probe.rs` (was `claude_probe`), `Server::hook_settings`/`hook_args`, `Session.agent`, `Host::set_agent`, `client::for_daemon` (old daemon: no hooks), `Server::read_context` (rollout reading comes in as a synthesized `StatusLine`), `guard_for`, handoff carries `codex` and `agent`.
+- `tern-term/src/codex_status.rs`: `CodexTracker` wraps `ClaudeTracker`, `Interrupt` → `interrupted`. `AgentLane::Codex`.
+- `tern-chat/src/codex/rollout.rs`: `codex_home`, `rollout_path`, `read_recent`, `last_text`, `context_reading`, `context_percent`, `rate_limits`, `latest_rate_limits`, `entries` (pub(crate), for Task 9's `load`). `sessions.rs` table, incl. `context_reading`.
+- `tern-bridge/src/context.rs`: `Guard::starting_at_first_turn`, `Action::ClearPrompt`.
+- `tern-app`: `start_line` per agent, `spawn_config` for agents with `Launch`, `TerminalView::set_hook_agent`, `CodexUsage`, `codex_report`, `UsageStore::agent_usage`, `UsageView::set_tab_agent`, `own_usage`, `UsageCard::render_own`, `has_accounts` in `templates.json`.
+- Registry: codex has `Launch, Status, Session, Transcript, Context, Steer, Usage, Skills`. `Chat` comes with Task 9.
 
-Generalise the daemon chat follower before step 8.
+Checked live on Codex 0.166 (debug build, scratch `CODEX_HOME`): hook status, Esc ends the turn, ring, sidebar preview, resume after `restart-background`, full auto handoff (HANDOFF.md → `/clear` → continue prompt → reads it).
 
-Verify these open items before planning; they decide the design:
-- Can Codex hook outputs inject context or block `Stop`?
-- Can `codex app-server` resume a session the TUI started?
-- How does Codex hook trust work?
+Not checked:
+- Task 6 in the debug build: the bar and card with a Codex tab shown. Do this first.
+- Window restore after a clean quit (`pkill` doesn't save the window).
+- Windows at runtime: hook command is double-quoted for `cmd`, trust key `/<session-flags>/…` unverified there.
 
-Codex 0.166.0 is installed at `~/.local/bin/codex`. Prior art: Orca (`codex-hook-definition.ts`, `providers/codex-state.ts`), herdr.
+## Left
 
-## Deferred / known gaps from phase 1
+- **Task 7.** The preview already works through `sessions::read_recent`. Left: `file_tree_view.rs` badge says "Claude"; name the tab's agent. Read the brief.
+- **Task 8.** `ChatFollow`/`Said` in `tern-chat`, Claude's moved from `tern-mux/src/chat.rs` `State::follow`/`form_line`. No behaviour change.
+- **Task 9.** `codex app-server` driver + follower, `NewAgentChat`, switch. Extra decisions not in the plan:
+  - The guard in a Codex chat: there is no `/clear` there, and `ChatHost::tell` maps `ClearPrompt` to the prompt only, as a user message. Chat state must use `Guard::starting_at_first_turn` for Codex, and going on in a fresh conversation needs a new `thread/start`, or auto switch off for Codex chats. Rule on it and ledger it.
+  - `--no-daemon` and `-c` both work before `app-server`; `{tern-settings}` fills them.
+  - The fixture needs recording: JSON-RPC over stdio, `initialize`, `initialized`, `thread/start`, `turn/start`; approvals with `approvalPolicy: "on-request"`.
+- **Task 10.** Spec (`-c`, not overlay; open items settled; SessionStart comes at the first turn), config README, rewrite this handoff for phase 3 (OpenCode), CI checks + `cargo xwin clippy`.
+- Then the whole-branch review (most capable model, plan's Review Focus verbatim, ledger rulings), one fix pass, finishing skill. Merging or pushing needs the user's word.
 
-- Usage cards stay per Claude account; per-agent cards come with Codex's usage source.
-- `new_agent_tab` returns the previously shown tab while Claude's account picker is open, so `agent-new claude` answers "ok" then.
-- Never checked by hand:
-  - restoring a window saved by the pre-branch `main` (unit tests only);
-  - a guard auto-handoff on crossing the limit;
-  - a subagent keeping a Claude tab working.
+## Decisions to keep
 
-  On the guard: a conversation whose first reading is already over the limit is `born_over`, and the status line after `/clear` still reports the old reading. That is existing behaviour.
-- Pre-existing: a Claude chat's "Trust This Folder" doesn't stop a terminal Claude in the same folder from asking again.
+- No overlay home: Codex sessions stay in `~/.codex/sessions`.
+- Codex hooks never touch `~/.codex`. **Never answer Codex's "Trust this folder" in the real home while testing**: that writes `~/.codex/config.toml`.
+- `ClaudeTracker` isn't renamed yet; note it for later.
+- Claude's card has no Codex row; Codex's numbers show when a Codex tab is shown. The user was told.
+- Born-over: a conversation whose first reading is past the limit never hands off (by design). Test the guard on a resumed conversation.
 
-## Manual testing (debug build)
+## Manual testing
 
-Build and launch:
-- `cargo build -p tern-app`.
-- Launch with `XDG_CONFIG_HOME=<scratch>/xdg scripts/dev-app-macos.sh <scratch>/work`. The daemon starts lazily, so the title says "Background: unavailable" until a tab opens.
+Handoff of phase 1 applies: `cargo build -p tern-app`, then `XDG_CONFIG_HOME=<scratch>/xdg scripts/dev-app-macos.sh <scratch>/work`, drive with `printf 'cmd\n' | nc -U -w 3 target/dev.sock`: `state`, `agent-new codex`, `context-state`, `context-guard N`, `key <k>` (one key at a time, `space`, `enter`, `escape`), `chat-new`, `chat-send …`, `chat-answer allow`, `restart-background`.
 
-Drive it with `printf 'cmd\n' | nc -U -w 3 target/dev.sock`. Useful commands:
-- `state`, `chat-new`, `chat-trust`, `chat-send …`, `chat-state`, `chat-mode`, `chat-answer allow`;
-- `agent-new <id>`, `agent-switch`;
-- `context-state`, `context-guard N [manual]`, `context-hand-off`, `context-resume`;
-- `key <keystroke>` (one key at a time: use `/`, `.`, `space`), `click X Y` (window points).
+For a scratch Codex:
+- `<scratch>/xdg/tern/agents/codex.json` = `{"id":"codex","command":"env CODEX_HOME=<home> codex"}`;
+- `<home>/auth.json` a symlink to `~/.codex/auth.json`;
+- `<home>/config.toml` with `[projects."<folder>"] trust_level = "trusted"`, for both the `/tmp` and `/private/tmp` spellings.
 
-`agent-new claude` opens the account picker when several accounts are on; answer it with `key 1`.
+Screenshots: a CGWindowList Swift helper finds the "Tern Dev" window, `screencapture -x -o -l <id>`. Never capture the whole screen. Shut down with `restart-background`, then `pkill -f "Tern Dev.app/Contents/MacOS/tern"`.
 
-Screenshots:
-- Find the 1920-wide "Tern Dev" window with a CGWindowList Swift helper (`winid`).
-- Capture with `screencapture -x -o -l <id>`.
-- Never capture the whole screen.
-
-Don't set `TERN_SESSION`: the debug build shares `~/Library/Application Support/dev.tern` with the installed Tern.
-
-Shut down: `restart-background`, then `pkill -f "Tern Dev.app/Contents/MacOS/tern"`, then `kill -9` any leftover. Kill the `opencode serve --service` and Codex processes your own tests started.
+Codex's source at `rust-v0.166.0` answers protocol questions: shallow-clone `openai/codex` into a scratch folder (`codex-rs/app-server-protocol/src/protocol/v2/`, `codex-rs/hooks/`). Orca: `../refs/orca/src/main/codex/`. Use `/usr/bin/grep`: the shell's `grep` is ugrep and `\|` patterns silently find nothing.
