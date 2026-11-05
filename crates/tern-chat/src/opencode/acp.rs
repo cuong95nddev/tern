@@ -876,7 +876,9 @@ mod tests {
     #[test]
     fn what_the_daemon_keeps_replays_as_the_chat_went() {
         let opened_line = json!({"id": "open", "result": {"sessionId": "s"}}).to_string();
-        let tool = update(json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}));
+        let tool = update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}),
+        );
         let (mut live, mut t) = (OpenCodeDriver::default(), Transcript::default());
         live.start_lines("new", false, Path::new("/w"));
         let mut kept = vec![opened_line.clone()];
@@ -992,7 +994,9 @@ mod tests {
         t.push_user("typed", Vec::new());
         assert_eq!(d.user_line("s", "typed", &[]).1, "");
         let old = update(json!({"sessionUpdate": "user_message_chunk", "messageId": "u", "content": {"type": "text", "text": "old"}}));
-        let tool = update(json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}));
+        let tool = update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}),
+        );
         for line in [old, tool, chunk("m", "answer")] {
             d.fold_line(&mut t, &line);
         }

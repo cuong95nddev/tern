@@ -22,14 +22,28 @@ What a new agent plugs into:
 
 ## Left from phase 3
 
-- Window restore after a clean quit with an OpenCode tab came back with no tabs when the app was reopened with a folder argument; not looked into, and Codex's was never exercised either. `restart-background` does resume with `--session`.
-- A chat's Stop button wasn't pressed live (the dev `key escape` isn't handled by the chat): `session/cancel` was measured with `acp.py`, and `interrupt_line` is unit tested.
 - `synthetic` with `resume: false` during a turn wasn't measured, only between turns.
-- Sub-agents (`parent`) and forms (`form.*`) come from Orca's code and unit tests: no live run had a child session or a form.
+- Forms (`form.*`) never ran live: their shapes come from the OpenCode binary and Orca's code, and `form.created`'s session is in `data.form`. A real child session did run (the mock's `SUB:`).
 - An OpenCode chat has no model switch, images or MCP forms.
 - A fresh OpenCode tab reads Working for its first seconds, then Done, from output activity alone.
 - A rejected permission ends the turn in a chat as OpenCode does; the row shows `Ended`.
 - A tool that was mid-turn when a chat ended keeps no result.
+- A chat with no hooks is asked for a handoff at its turn's end only: no warning mid-turn. Its guard goes by `ChatFollow::hookless`, and a fresh conversation gets the context and the go-on prompt as one message.
+- A restored OpenCode chat tab starts `opencode acp` at once: its history comes from nowhere else.
+- A daemon handoff with a chat (`MuxChatEvent::Lost`) is covered by `parks_and_resumes_without_losing_a_line` and `kept_lines_of_a_handed_over_chat_ask_nothing_again`, not run live with OpenCode.
+- Open minors from the final review (`opencode_fold.rs`, `opencode_plugin.js`, `acp.rs`, `chat.rs`):
+  - The lane is wiped by the first event after a daemon handoff: seed the fold's `root`.
+  - An adopted chat loses what only written lines told (`busy`, an answered ask).
+  - Compaction leaves a stale warning and ring.
+  - `OPENCODE_CONFIG_CONTENT` set in a shell rc file overrides Tern's, and an empty one counts as invalid.
+  - A nested `opencode` reports into the tab.
+  - A lost steer leaves the tab Working.
+  - `write_if_changed`'s temp name is per process, not per call.
+  - Preview file I/O runs under the state lock.
+  - A refused open has no way out: offer a fresh conversation after "not found".
+  - Any error ends a turn, whoever it answers.
+  - `reset` keeps `session`, so a replay can raise a false `t.handoff`.
+  - With two asks open, the first answer reads Working.
 
 ## Left from phase 2
 
@@ -56,9 +70,11 @@ What a new agent plugs into:
 
 `cargo build -p tern-app`, then `XDG_CONFIG_HOME=<scratch>/xdg XDG_DATA_HOME=… XDG_STATE_HOME=… XDG_CACHE_HOME=… scripts/dev-app-macos.sh <scratch>/work` (`CODEX_HOME=<home>` for Codex), drive with `printf 'cmd\n' | nc -U -w 3 target/dev.sock`: `state`, `agent-new <id>`, `agent-switch`, `context-state`, `context-guard N`, `term-type text\n`, `term-screen`, `term-info`, `key <k>`, `chat-new [agent]`, `chat-send …`, `chat-state`, `chat-answer allow`, `click X Y`, `move X Y`, `restart-background`.
 
-For OpenCode: `mock.py` from the spike folder as a Tern service, and `<scratch>/xdg/opencode/opencode.json` naming it as the provider. Run the mock's service commands with your real `HOME`: a long one breaks Tern's socket path.
+For OpenCode: `mock.py` from the spike folder as a Tern service, and `<scratch>/xdg/opencode/opencode.json` naming it as the provider. Run the mock's service commands with your real `HOME`: a long one breaks Tern's socket path. The mock takes `TOOL: <command>` (a shell call), `SUB:` (a real child session, slow), `SLOW` (6 s), and `FULL` (60% of a 100k window); it answers a handoff request with a `Handoff:` line.
 
 The app window says "Background: an older build" when the daemon predates the build: `restart-background` first, or the daemon's side of a change isn't what runs.
+
+`TERN_CONTROL` without `TERN_SESSION` is scripted: it neither saves, restores nor adopts, so a reopen shows no tabs. Set `TERN_SESSION=1` to test those. A dev app's `--server` outlives `pkill` of the app: `pkill -f 'MacOS/tern <folder>'` quits just the app.
 
 For a scratch Codex: `<home>/auth.json` a symlink to `~/.codex/auth.json`; `<home>/config.toml` with `[projects."<folder>"] trust_level = "trusted"`, for both the `/tmp` and `/private/tmp` spellings. Add `approval_policy = "on-request"` and `sandbox_mode = "read-only"` to see approvals.
 

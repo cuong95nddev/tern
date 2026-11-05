@@ -21,8 +21,18 @@ class H(BaseHTTPRequestHandler):
             o={'id':'c1','object':'chat.completion.chunk','created':int(time.time()),'model':'m','choices':[{'index':0,'delta':delta,'finish_reason':finish}]}
             if usage: o['usage']=usage
             self.wfile.write(('data: '+json.dumps(o)+'\n\n').encode()); self.wfile.flush()
-        t=text_of(last); usage={'prompt_tokens':600,'completion_tokens':20,'total_tokens':620}
-        if last.get('role')=='user' and 'TOOL:' in t:
+        t=text_of(last); usage={'prompt_tokens':(60000 if 'FULL' in t or 'FULL' in json.dumps(msgs) else 600),'completion_tokens':20,'total_tokens':620}
+        if last.get('role')=='user' and 'SUB:' in t:
+            names=[x['function']['name'] for x in body.get('tools',[])]
+            schema=[x['function'] for x in body.get('tools',[]) if x['function']['name'] in('subagent','task')]
+            open(LOG+'.schema','w').write(json.dumps(schema))
+            name='subagent' if 'subagent' in names else 'task'
+            ev({'role':'assistant','tool_calls':[{'index':0,'id':'call_s','type':'function','function':{'name':name,'arguments':json.dumps({'description':'child','prompt':'say hi SLOW from the child','subagent_type':'general','agent':'general'})}}]})
+            ev({},'tool_calls',usage)
+        elif last.get('role')=='user' and 'write a handoff' in t:
+            ev({'role':'assistant','content':'Written.\nHandoff: docs/h.md'})
+            ev({},'stop',usage)
+        elif last.get('role')=='user' and 'TOOL:' in t:
             cmd=t.split('TOOL:',1)[1].strip()
             ev({'role':'assistant','tool_calls':[{'index':0,'id':'call_1','type':'function','function':{'name':'shell','arguments':json.dumps({'command':cmd,'description':'spike'})}}]})
             ev({},'tool_calls',usage)

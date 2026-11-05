@@ -830,7 +830,8 @@ mod guard_tests {
     }
 
     fn opencode_state() -> State {
-        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..State::new(&tern_agent::AgentId::new(tern_agent::OPENCODE)) };
+        let mut st =
+            State { policy: Policy { limit: 50, auto_switch: true }, ..State::new(&tern_agent::AgentId::new(tern_agent::OPENCODE)) };
         st.follow(&json!({"id": "open", "result": {"sessionId": "one"}}));
         st
     }
@@ -846,7 +847,9 @@ mod guard_tests {
 
     /// Run such a turn: what the guard then tells.
     fn run_opencode_turn(st: &mut State, percent: u64, text: &str) -> Option<Action> {
-        st.wrote(&json!({"id": "p", "method": "session/prompt", "params": {"sessionId": "one", "prompt": [{"type": "text", "text": "go"}]}}));
+        st.wrote(
+            &json!({"id": "p", "method": "session/prompt", "params": {"sessionId": "one", "prompt": [{"type": "text", "text": "go"}]}}),
+        );
         opencode_turn(percent, text).iter().map(|l| st.follow(l).tell).last().flatten()
     }
 
@@ -1076,7 +1079,8 @@ done"#
         ChatSpec { agent: Some("opencode".into()), ..sh(&script) }
     }
 
-    const OPENCODE_PROMPT: &str = r#"{"id":"p","method":"session/prompt","params":{"sessionId":"one","prompt":[{"type":"text","text":"hi"}]}}"#;
+    const OPENCODE_PROMPT: &str =
+        r#"{"id":"p","method":"session/prompt","params":{"sessionId":"one","prompt":[{"type":"text","text":"hi"}]}}"#;
     const OPENCODE_CHUNK: &str = r#"{"method":"session/update","params":{"sessionId":"one","update":{"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":"hello"}}}}"#;
     const OPENCODE_END: &str = r#"{"id":"p","result":{"stopReason":"end_turn"}}"#;
 
@@ -1104,7 +1108,8 @@ done"#
 
     #[test]
     fn an_opencode_chat_past_its_limit_is_written_the_request() {
-        let usage = r#"{"method":"session/update","params":{"sessionId":"one","update":{"sessionUpdate":"usage_update","used":60,"size":100}}}"#;
+        let usage =
+            r#"{"method":"session/update","params":{"sessionId":"one","update":{"sessionUpdate":"usage_update","used":60,"size":100}}}"#;
         let spec = opencode_turn_server(&[usage, OPENCODE_CHUNK, OPENCODE_END]);
         let host = ChatHost::spawn(15, &spec, None, Arc::new(|_: &str, _: &str| {})).unwrap();
         host.set_policy(Policy { limit: 50, auto_switch: false });
