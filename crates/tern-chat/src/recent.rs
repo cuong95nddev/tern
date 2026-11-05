@@ -7,8 +7,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::model::{Entry, Transcript};
 use crate::summary;
-use crate::transcript::{Entry, Transcript};
 
 /// How much of a saved conversation's end is read: enough for the latest
 /// message and tool calls, not the whole history.
@@ -65,11 +65,12 @@ pub fn read_recent(path: &Path, cwd: Option<&Path>) -> std::io::Result<Recent> {
         lines.next();
     }
     let mut t = Transcript::default();
+    let mut fold = crate::claude::ClaudeFold::default();
     for line in lines {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        // As `Transcript::load_with`: the rest are Claude's own records.
+        // As `ClaudeFold::load`: the rest are Claude's own records.
         if matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant" | "system")) {
-            t.apply(&v);
+            fold.apply(&mut t, &v);
         }
     }
     Ok(recent(&t.entries, cwd))
@@ -110,7 +111,7 @@ fn plain(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::Tool;
+    use crate::model::Tool;
 
     fn text(s: &str) -> Entry {
         Entry::Text { text: s.into(), streaming: false }

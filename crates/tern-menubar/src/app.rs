@@ -204,16 +204,17 @@ fn end_session(id: u64) {
     let row = UI.with(|u| {
         let u = u.borrow();
         let (list, chats) = u.as_ref().map(|ui| (ui.list.clone(), ui.chats.clone())).unwrap_or_default();
-        model::rows(&list, &chats, None).into_iter().find(|r| r.id == id)
+        let agent = chats.iter().find(|c| c.id == id).map(model::agent_name);
+        model::rows(&list, &chats, None).into_iter().find(|r| r.id == id).map(|r| (r, agent))
     });
-    let Some(row) = row else { return }; // ended meanwhile
+    let Some((row, agent)) = row else { return }; // ended meanwhile
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&format!("End \"{}\"?", row.label)));
-    alert.setInformativeText(if row.chat {
-        ns_string!("Claude stops; the conversation stays, to resume in a chat tab.")
+    alert.setInformativeText(&NSString::from_str(&if row.chat {
+        format!("{} stops; the conversation stays, to resume in a chat tab.", agent.unwrap_or_else(|| "The agent".into()))
     } else {
-        ns_string!("The program running in this terminal stops.")
-    });
+        "The program running in this terminal stops.".to_owned()
+    }));
     alert.addButtonWithTitle(ns_string!("End"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
     // An accessory app's alert would open behind other apps. (`activate`

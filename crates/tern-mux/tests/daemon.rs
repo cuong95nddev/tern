@@ -658,9 +658,10 @@ fn chats_run_on_without_a_tab() {
         session: "conv-1".into(),
         account: "acct".into(),
         record: None,
+        agent: None,
     };
     let (sink, ev) = events();
-    let chat = c.open_chat(OpenChat::Spawn(spec), sink);
+    let chat = c.open_chat(OpenChat::Spawn(Box::new(spec)), sink);
     // Sent before the daemon answered: kept, then sent.
     chat.send("a".into());
     wait_until("echo", || ev.lock().unwrap().iter().any(|e| *e == ChatEvent::Line(r#"{"echo":"a"}"#.into())));

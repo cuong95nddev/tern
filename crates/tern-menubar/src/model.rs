@@ -15,7 +15,7 @@ pub struct Row {
     /// Some Tern tab shows it.
     pub open: bool,
     pub exited: bool,
-    /// A chat tab's Claude, not a terminal.
+    /// A chat tab's agent, not a terminal.
     pub chat: bool,
 }
 
@@ -66,9 +66,15 @@ fn short(cwd: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// The short name of chat `c`'s agent.
+pub fn agent_name(c: &ChatInfo) -> String {
+    let id = c.agent_id();
+    tern_agent::registry().get(id.as_str()).map_or_else(|| id.to_string(), |d| d.short_name.clone())
+}
+
 /// Chat `c` as the session list has it, to rank and word alike.
 fn as_session(c: &ChatInfo) -> SessionInfo {
-    let title = c.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "Claude chat".into());
+    let title = c.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("{} chat", agent_name(c)));
     SessionInfo {
         id: c.id,
         status: c.status,
@@ -178,6 +184,8 @@ mod tests {
         assert_eq!(r[0].menu_title(), "●  Fix it — /w  (not open)");
         let untitled = ChatInfo { id: 3, attached: true, ..Default::default() };
         assert_eq!(rows(&[], &[untitled], None)[0].label, "Claude chat");
+        let codex = ChatInfo { id: 4, agent: Some("codex".into()), ..Default::default() };
+        assert_eq!(rows(&[], &[codex], None)[0].label, "Codex chat");
         assert_eq!(icon(&[], &[chat]), IconState { count: 1, attention: true });
     }
 

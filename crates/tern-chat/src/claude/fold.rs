@@ -1,298 +1,18 @@
-//! Folding Claude Code's stream-json frames into chat entries.
+//! Folding Claude Code's stream-json frames (and its saved `.jsonl`) into
+//! a chat's [`Transcript`].
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
-
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 
 use serde_json::{Value, json};
 
-/// An image sent with a user message.
-#[derive(Clone, PartialEq)]
-pub struct UserImage {
-    /// Its media type, e.g. `image/png`.
-    pub media_type: String,
-    pub bytes: Arc<[u8]>,
-}
+use crate::model::*;
 
-impl UserImage {
-    /// The image of a message's `image` block (base64 source), if it has one.
-    fn from_block(b: &Value) -> Option<Self> {
-        let src = b.get("source")?;
-        let media_type = src.get("media_type").and_then(Value::as_str)?.to_owned();
-        let bytes = STANDARD.decode(src.get("data").and_then(Value::as_str)?).ok()?;
-        Some(Self { media_type, bytes: bytes.into() })
-    }
-}
-
-// Rows are compared by their debug text: not the bytes.
-impl fmt::Debug for UserImage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UserImage({}, {} bytes, {:p})", self.media_type, self.bytes.len(), self.bytes.as_ptr())
-    }
-}
-
-/// One thing the chat shows, in order.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Entry {
-    /// A message the user sent: its text, and the images that came with it.
-    User {
-        text: String,
-        images: Vec<UserImage>,
-    },
-    /// Claude's reply text (Markdown); `streaming` while it still grows.
-    Text {
-        text: String,
-        streaming: bool,
-    },
-    /// Claude's thinking, as the CLI shows it.
-    Thinking {
-        text: String,
-        streaming: bool,
-    },
-    Tool(Tool),
-    /// Claude asks before a tool runs (or asks the user questions).
-    Ask(Ask),
-    /// An MCP server asks the user for input (a form, or a page to visit).
-    Elicit(Elicit),
-    /// A line from the session itself: an error, an interruption, a compaction.
-    Notice {
-        text: String,
-        error: bool,
-    },
-    /// The end of a turn.
-    TurnEnd(TurnEnd),
-    /// Something Claude sent that the chat has no look for, shown as it
-    /// came so nothing is lost: what it is, and its text (JSON
-    /// pretty-printed).
-    Raw {
-        title: String,
-        body: String,
-    },
-}
-
-/// A tool call and, once it ran, its result.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tool {
-    pub id: String,
-    pub name: String,
-    /// Its input: `{}` until it has streamed in whole.
-    pub input: Value,
-    /// The input's JSON as it streams.
-    partial: String,
-    /// The result's text, once it ran.
-    pub result: Option<String>,
-    /// The result is an error (it failed, or the user denied it).
-    pub error: bool,
-    /// The change it made to a file, as a unified patch with the file's own
-    /// line numbers (from the result's `structuredPatch`).
-    pub patch: Option<String>,
-    /// The images in its result (a screenshot, an image it read).
-    pub images: Vec<UserImage>,
-}
-
-impl Tool {
-    /// A call of `name` with `input` that hasn't run.
-    pub fn new(name: String, input: Value) -> Self {
-        Self { id: String::new(), name, input, partial: String::new(), result: None, error: false, patch: None, images: Vec::new() }
-    }
-
-    /// It ran (or the turn ended without it running).
-    pub fn done(&self) -> bool {
-        self.result.is_some()
-    }
-}
-
-/// A permission request (`can_use_tool`): answered with
-/// [`crate::Claude::answer`] under its `request_id`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Ask {
-    pub request_id: String,
-    pub tool_name: String,
-    pub tool_use_id: Option<String>,
-    pub input: Value,
-    /// What "allow for this session" would add (the CLI's own suggestions),
-    /// sent back as they came.
-    pub suggestions: Value,
-    pub answer: Option<Answer>,
-}
-
-impl Ask {
-    /// The questions of an `AskUserQuestion` call: each one's text, header,
-    /// option labels and whether several can be picked.
-    pub fn questions(&self) -> Vec<(String, String, Vec<String>, bool)> {
-        if self.tool_name != "AskUserQuestion" {
-            return Vec::new();
-        }
-        let Some(qs) = self.input.get("questions").and_then(Value::as_array) else { return Vec::new() };
-        qs.iter()
-            .map(|q| {
-                let text = q.get("question").and_then(Value::as_str).unwrap_or_default().to_owned();
-                let header = q.get("header").and_then(Value::as_str).unwrap_or_default().to_owned();
-                let options = q
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|o| o.iter().filter_map(|o| o.get("label").and_then(Value::as_str)).map(str::to_owned).collect())
-                    .unwrap_or_default();
-                let multi = q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
-                (text, header, options, multi)
-            })
-            .collect()
-    }
-}
-
-/// An MCP server's request for input (`elicitation`), answered with
-/// [`crate::wire::elicit`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct Elicit {
-    pub request_id: String,
-    pub server: String,
-    pub message: String,
-    /// A page to open instead of a form (`mode: "url"`).
-    pub url: Option<String>,
-    pub fields: Vec<Field>,
-    pub answer: Option<ElicitAnswer>,
-}
-
-/// A field of an elicitation's form (a property of its `requested_schema`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Field {
-    /// The property's name: the key of its value in the answer.
-    pub name: String,
-    /// What the form shows: its `title`, else its name.
-    pub title: String,
-    pub description: String,
-    pub kind: FieldKind,
-    pub required: bool,
-    pub default: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FieldKind {
-    Text,
-    Number {
-        integer: bool,
-    },
-    Bool,
-    /// One of these values (value, label); `many` takes any number of them.
-    Choice {
-        options: Vec<(Value, String)>,
-        many: bool,
-    },
-}
-
-impl Field {
-    fn parse(name: &str, p: &Value, required: bool) -> Self {
-        let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-        let options = |p: &Value| -> Option<Vec<(Value, String)>> {
-            if let Some(Value::Array(values)) = p.get("enum") {
-                let names = p.get("enumNames").and_then(Value::as_array);
-                return Some(
-                    values
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let label = names.and_then(|n| n.get(i)).and_then(Value::as_str).map(str::to_owned);
-                            (v.clone(), label.unwrap_or_else(|| v.as_str().map_or_else(|| v.to_string(), str::to_owned)))
-                        })
-                        .collect(),
-                );
-            }
-            let one_of = p.get("oneOf").or_else(|| p.get("anyOf"))?.as_array()?;
-            Some(
-                one_of
-                    .iter()
-                    .filter_map(|o| {
-                        let v = o.get("const")?.clone();
-                        let label = o
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map_or_else(|| v.as_str().map_or_else(|| v.to_string(), str::to_owned), str::to_owned);
-                        Some((v, label))
-                    })
-                    .collect(),
-            )
-        };
-        let kind = match (p.get("type").and_then(Value::as_str), options(p)) {
-            (Some("array"), _) => match p.get("items").and_then(options) {
-                Some(options) => FieldKind::Choice { options, many: true },
-                None => FieldKind::Text,
-            },
-            (_, Some(options)) => FieldKind::Choice { options, many: false },
-            (Some("boolean"), _) => FieldKind::Bool,
-            (Some("number"), _) => FieldKind::Number { integer: false },
-            (Some("integer"), _) => FieldKind::Number { integer: true },
-            _ => FieldKind::Text,
-        };
-        let title = Some(s("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| name.to_owned());
-        Field { name: name.to_owned(), title, description: s("description"), kind, required, default: p.get("default").cloned() }
-    }
-}
-
-/// How an elicitation was settled.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ElicitAnswer {
-    /// Sent with the form's values.
-    Accept(Value),
-    Decline,
-    /// Claude took the request back.
-    Withdrawn,
-}
-
-/// How a permission request was settled.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Answer {
-    Allow,
-    /// Allowed, with the CLI's suggested rules for the rest of the session.
-    AllowSession,
-    Deny,
-    /// The user's answers to `AskUserQuestion`, by question text.
-    Answered(Value),
-    /// Claude took the request back (the turn was interrupted).
-    Withdrawn,
-}
-
-/// The end of a turn, from its `result` frame.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TurnEnd {
-    pub ms: u64,
-    /// The user stopped it.
-    pub interrupted: bool,
-    /// What went wrong, when it failed otherwise.
-    pub error: Option<String>,
-}
-
-/// A model Claude offers (from its `initialize` answer).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Model {
-    /// What `set_model` takes (`default`, `opus`, ...).
-    pub value: String,
-    pub name: String,
-    pub description: String,
-}
-
-/// The conversation so far, and the session's state.
+/// What folding Claude's frames keeps beside the transcript.
 #[derive(Debug, Default)]
-pub struct Transcript {
-    pub entries: Vec<Entry>,
-    pub session_id: Option<String>,
-    pub model: Option<String>,
-    pub permission_mode: Option<String>,
-    /// The slash commands Claude takes: name, description.
-    pub commands: Vec<(String, String)>,
-    pub models: Vec<Model>,
-    /// A turn runs: from a sent message to its `result`.
-    pub busy: bool,
-    /// Bumped on every change.
-    pub version: u64,
-    /// How full the conversation's context window is.
-    pub meter: tern_bridge::context::Meter,
-    /// News of its handoff, for the chat to take: one was written (at this
-    /// path), or the conversation was cleared (`None`).
-    pub handoff: Option<Option<String>>,
+pub struct ClaudeFold {
+    /// How full the context window is, from the frames' usage.
+    pub(crate) meter: tern_bridge::context::Meter,
     /// The streamed message's blocks: block index to entry.
     blocks: HashMap<u64, usize>,
     /// The entries streamed for each message, and how many of them its
@@ -305,30 +25,39 @@ pub struct Transcript {
     /// Permission requests by request id.
     asks: HashMap<String, usize>,
     /// The ids of the messages sent from here, so their replays aren't shown twice.
-    sent: HashSet<String>,
+    pub(crate) sent: HashSet<String>,
     /// The rate limit's last status (`allowed`, `allowed_warning`,
     /// `rejected`), to tell only a change.
     rate_limit: Option<String>,
 }
 
-impl Transcript {
-    /// A saved conversation, read from its `.jsonl` (see [`crate::transcript_path`]).
-    pub fn load(path: &Path) -> std::io::Result<Self> {
-        Self::load_before(path, None)
+impl ClaudeFold {
+    /// Fold `v` into `t`; the reply a control request needs when the chat
+    /// doesn't answer it itself.
+    pub fn apply(&mut self, t: &mut Transcript, v: &Value) -> Option<Value> {
+        Folder { t, f: self }.apply(v)
     }
 
-    /// [`Self::load`], up to the lines saved at or after `before` (ms since
-    /// the Unix epoch): those of a program still running, which it replays.
-    pub fn load_before(path: &Path, before: Option<u64>) -> std::io::Result<Self> {
-        Self::load_with(path, before, Vec::new())
+    /// [`Self::apply`] for one line Claude wrote.
+    pub fn apply_line(&mut self, t: &mut Transcript, line: &str) -> Option<Value> {
+        Folder { t, f: self }.apply_line(line)
     }
 
-    /// [`Self::load_before`], with `extra` lines (ms since the Unix epoch,
+    /// Nothing streams any more.
+    pub fn settle(&mut self, t: &mut Transcript) {
+        Folder { t, f: self }.settle();
+    }
+
+    /// A saved conversation, read from its `.jsonl` (see
+    /// [`crate::transcript_path`]), up to the lines saved at or after
+    /// `before` (ms since the Unix epoch: those of a program still running,
+    /// which it replays), with `extra` lines (ms since the Unix epoch,
     /// frame) Claude doesn't save, e.g. MCP forms (see [`read_record`]),
     /// each where its time puts it.
-    pub fn load_with(path: &Path, before: Option<u64>, mut extra: Vec<(u64, Value)>) -> std::io::Result<Self> {
+    pub fn load(&mut self, path: &Path, before: Option<u64>, mut extra: Vec<(u64, Value)>) -> std::io::Result<Transcript> {
         let text = std::fs::read_to_string(path)?;
-        let mut t = Self::default();
+        let mut t = Transcript::default();
+        let mut f = Folder { t: &mut t, f: self };
         extra.retain(|(ms, _)| before.is_none_or(|b| *ms < b));
         extra.sort_by_key(|(ms, _)| *ms);
         let mut extra = extra.into_iter().peekable();
@@ -345,7 +74,7 @@ impl Transcript {
             }
             if let Some(at) = at {
                 while let Some((_, v)) = extra.next_if(|(ms, _)| *ms <= at) {
-                    t.apply(&v);
+                    f.apply(&v);
                 }
             }
             // The rest are Claude's own records (titles, file snapshots,
@@ -353,14 +82,14 @@ impl Transcript {
             if !matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant" | "system")) {
                 continue;
             }
-            let users = t.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
-            let len = t.entries.len();
-            t.apply(&v);
-            let started = t.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count() > users;
+            let users = f.t.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
+            let len = f.t.entries.len();
+            f.apply(&v);
+            let started = f.t.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count() > users;
             if started {
                 if let Some((from, to)) = turn.take() {
-                    t.entries.insert(len, Entry::TurnEnd(TurnEnd { ms: to.saturating_sub(from), interrupted: false, error: None }));
-                    t.reindex();
+                    f.t.entries.insert(len, Entry::TurnEnd(TurnEnd { ms: to.saturating_sub(from), interrupted: false, error: None }));
+                    f.reindex();
                 }
                 turn = at.map(|a| (a, a));
             } else if let (Some((_, to)), Some(a)) = (turn.as_mut(), at) {
@@ -368,103 +97,53 @@ impl Transcript {
             }
         }
         for (_, v) in extra {
-            t.apply(&v);
+            f.apply(&v);
         }
         if let Some((from, to)) = turn {
-            t.entries.push(Entry::TurnEnd(TurnEnd { ms: to.saturating_sub(from), interrupted: false, error: None }));
+            f.t.entries.push(Entry::TurnEnd(TurnEnd { ms: to.saturating_sub(from), interrupted: false, error: None }));
         }
-        t.settle();
+        f.settle();
         Ok(t)
     }
+}
 
+/// A transcript and the fold's state, while a frame folds in.
+struct Folder<'a> {
+    t: &'a mut Transcript,
+    f: &'a mut ClaudeFold,
+}
+
+impl Folder<'_> {
     /// Find tools and requests again after entries moved.
     fn reindex(&mut self) {
-        self.tools.clear();
-        self.asks.clear();
-        for (i, e) in self.entries.iter().enumerate() {
+        self.f.tools.clear();
+        self.f.asks.clear();
+        for (i, e) in self.t.entries.iter().enumerate() {
             match e {
                 Entry::Tool(t) => {
-                    self.tools.insert(t.id.clone(), i);
+                    self.f.tools.insert(t.id.clone(), i);
                 },
                 Entry::Ask(a) => {
-                    self.asks.insert(a.request_id.clone(), i);
+                    self.f.asks.insert(a.request_id.clone(), i);
                 },
                 Entry::Elicit(e) => {
-                    self.asks.insert(e.request_id.clone(), i);
+                    self.f.asks.insert(e.request_id.clone(), i);
                 },
                 _ => {},
             }
         }
     }
 
-    /// Show a message the user sends (with id `uuid`), and start a turn.
-    pub fn push_user(&mut self, text: &str, images: Vec<UserImage>, uuid: &str) {
-        self.sent.insert(uuid.to_owned());
-        self.entries.push(Entry::User { text: text.to_owned(), images });
-        self.busy = true;
-        self.version += 1;
-    }
-
-    /// Record the answer given to request `request_id`.
-    pub fn set_answer(&mut self, request_id: &str, answer: Answer) {
-        match self.asks.get(request_id).and_then(|&i| self.entries.get_mut(i)) {
-            Some(Entry::Ask(a)) => a.answer = Some(answer),
-            // Claude took it back.
-            Some(Entry::Elicit(e)) if answer == Answer::Withdrawn => e.answer = Some(ElicitAnswer::Withdrawn),
-            _ => return,
-        }
-        self.version += 1;
-    }
-
-    /// Record the answer given to elicitation `request_id`.
-    pub fn set_elicit_answer(&mut self, request_id: &str, answer: ElicitAnswer) {
-        if let Some(Entry::Elicit(e)) = self.asks.get(request_id).and_then(|&i| self.entries.get_mut(i)) {
-            e.answer = Some(answer);
-            self.version += 1;
-        }
-    }
-
-    /// A request waits for the user: a permission, a question, a form.
-    pub fn waiting(&self) -> bool {
-        self.entries.iter().any(|e| matches!(e, Entry::Ask(Ask { answer: None, .. }) | Entry::Elicit(Elicit { answer: None, .. })))
-    }
-
-    /// The permission requests still waiting for the user.
-    pub fn open_asks(&self) -> impl Iterator<Item = &Ask> {
-        self.entries.iter().filter_map(|e| match e {
-            Entry::Ask(a) if a.answer.is_none() => Some(a),
-            _ => None,
-        })
-    }
-
-    /// After a replay: a turn runs when the program does and its last user
-    /// message has no end yet.
-    pub fn resume_busy(&mut self, running: bool) {
-        let user = self.entries.iter().rposition(|e| matches!(e, Entry::User { .. }));
-        let end = self.entries.iter().rposition(|e| matches!(e, Entry::TurnEnd(_)));
-        self.busy = running && user.is_some() && user > end;
-        self.version += 1;
-    }
-
-    /// The process ended: nothing streams or waits any more.
-    pub fn ended(&mut self, why: Option<String>) {
-        if let Some(text) = why {
-            self.entries.push(Entry::Notice { text, error: true });
-        }
-        self.settle();
-        self.busy = false;
-        self.version += 1;
-    }
-
     /// Fold in one frame. Returns the reply a control request needs when
     /// the chat doesn't answer it itself (one it doesn't handle).
-    pub fn apply(&mut self, v: &Value) -> Option<Value> {
+    pub(crate) fn apply(&mut self, v: &Value) -> Option<Value> {
         // A subagent's own messages: its Task call shows its result.
         if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             return None;
         }
-        self.version += 1;
-        self.meter.read(v);
+        self.t.version += 1;
+        self.f.meter.read(v);
+        self.t.context = self.f.meter.reading();
         let Some(kind) = v.get("type").and_then(Value::as_str) else {
             self.raw("A message without a type".into(), v);
             return None;
@@ -479,7 +158,7 @@ impl Transcript {
             "control_response" => self.control_response(v.get("response")?),
             "control_cancel_request" => {
                 let id = v.get("request_id").and_then(Value::as_str)?;
-                self.set_answer(id, Answer::Withdrawn);
+                self.t.set_answer(id, Answer::Withdrawn);
             },
             "rate_limit_event" => self.rate_limit(v),
             "auth_status" => {
@@ -487,14 +166,14 @@ impl Transcript {
                 let error = v.get("error").and_then(Value::as_str).filter(|e| !e.is_empty());
                 let text = error.map(str::to_owned).unwrap_or_else(|| lines.join("\n"));
                 if !text.trim().is_empty() {
-                    self.entries.push(Entry::Notice { text, error: error.is_some() });
+                    self.t.entries.push(Entry::Notice { text, error: error.is_some() });
                 }
             },
             // How queued messages stand, and a running tool's heartbeat: the
             // chat shows the turn working its own way.
             "command_lifecycle" | "keep_alive" | "tool_progress" => {},
             // `/clear`: its echo shows, and a fresh `init` follows.
-            "conversation_reset" => self.handoff = Some(None),
+            "conversation_reset" => self.t.handoff = Some(None),
             other => self.raw(format!("A message of type “{other}”"), v),
         }
         None
@@ -502,20 +181,20 @@ impl Transcript {
 
     /// [`Self::apply`] for one line Claude wrote: a line that isn't JSON is
     /// shown as it is (lines in a row go together).
-    pub fn apply_line(&mut self, line: &str) -> Option<Value> {
+    pub(crate) fn apply_line(&mut self, line: &str) -> Option<Value> {
         if line.trim().is_empty() {
             return None;
         }
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             return self.apply(&v);
         }
-        self.version += 1;
-        match self.entries.last_mut() {
+        self.t.version += 1;
+        match self.t.entries.last_mut() {
             Some(Entry::Raw { title, body }) if title == NOT_JSON => {
                 body.push('\n');
                 body.push_str(line);
             },
-            _ => self.entries.push(Entry::Raw { title: NOT_JSON.into(), body: line.to_owned() }),
+            _ => self.t.entries.push(Entry::Raw { title: NOT_JSON.into(), body: line.to_owned() }),
         }
         None
     }
@@ -524,10 +203,10 @@ impl Transcript {
     fn rate_limit(&mut self, v: &Value) {
         let info = v.get("rate_limit_info");
         let status = info.and_then(|i| i.get("status")).and_then(Value::as_str).unwrap_or("allowed").to_owned();
-        if self.rate_limit.as_deref() == Some(status.as_str()) {
+        if self.f.rate_limit.as_deref() == Some(status.as_str()) {
             return;
         }
-        let first = self.rate_limit.replace(status.clone()).is_none();
+        let first = self.f.rate_limit.replace(status.clone()).is_none();
         let kind = info.and_then(|i| i.get("rateLimitType")).and_then(Value::as_str).unwrap_or("usage").replace('_', " ");
         let text = match status.as_str() {
             "allowed" if first => return,
@@ -539,21 +218,21 @@ impl Transcript {
             "rejected" => format!("The {kind} limit is reached"),
             other => format!("Rate limit: {other} ({kind})"),
         };
-        self.entries.push(Entry::Notice { error: status == "rejected", text });
+        self.t.entries.push(Entry::Notice { error: status == "rejected", text });
     }
 
     /// Show `v` as it came, called `title`.
     fn raw(&mut self, title: String, v: &Value) {
-        self.entries.push(raw_entry(title, v));
+        self.t.entries.push(raw_entry(title, v));
     }
 
     fn system(&mut self, v: &Value) {
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
         match v.get("subtype").and_then(Value::as_str) {
             Some("init") => {
-                self.session_id = s("session_id").or(self.session_id.take());
-                self.model = s("model");
-                self.permission_mode = s("permissionMode");
+                self.t.session_id = s("session_id").or(self.t.session_id.take());
+                self.t.model = s("model");
+                self.t.permission_mode = s("permissionMode");
             },
             Some("compact_boundary") => {
                 let how = v.pointer("/compact_metadata/trigger").and_then(Value::as_str);
@@ -563,11 +242,11 @@ impl Transcript {
                     (Some(how), None) => format!("Context compacted ({how})"),
                     _ => "Context compacted".to_owned(),
                 };
-                self.entries.push(Entry::Notice { text, error: false });
+                self.t.entries.push(Entry::Notice { text, error: false });
             },
             Some("commands_changed") => {
                 if let Some(Value::Array(commands)) = v.get("commands") {
-                    self.commands = command_list(commands);
+                    self.t.commands = command_list(commands);
                 }
             },
             Some("hook_response") => {
@@ -581,23 +260,23 @@ impl Transcript {
                         Some(out) => format!("{name} failed: {}", out.trim()),
                         None => format!("{name} failed"),
                     };
-                    self.entries.push(Entry::Notice { text, error: true });
+                    self.t.entries.push(Entry::Notice { text, error: true });
                 }
             },
             Some("stop_hook_summary") => {
                 for e in v.get("hookErrors").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                    self.entries.push(Entry::Notice { text: format!("Stop hook: {e}"), error: false });
+                    self.t.entries.push(Entry::Notice { text: format!("Stop hook: {e}"), error: false });
                 }
             },
             Some("api_retry") => {
                 let n = |k: &str| v.get(k).and_then(Value::as_u64).map_or("?".to_owned(), |n| n.to_string());
                 let why = v.get("error").map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_owned)).unwrap_or_default();
                 let text = format!("Retrying after an API error (attempt {} of {}) {why}", n("attempt"), n("max_retries"));
-                self.entries.push(Entry::Notice { text: text.trim().to_owned(), error: false });
+                self.t.entries.push(Entry::Notice { text: text.trim().to_owned(), error: false });
             },
             Some("api_error") => {
                 let why = v.get("error").map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_owned)).unwrap_or_default();
-                self.entries.push(Entry::Notice { text: format!("API error: {why}"), error: true });
+                self.t.entries.push(Entry::Notice { text: format!("API error: {why}"), error: true });
             },
             Some("permission_denied") => {
                 let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("A tool");
@@ -605,12 +284,12 @@ impl Transcript {
                     .get("message")
                     .and_then(Value::as_str)
                     .map_or_else(|| format!("{tool} was denied"), |m| format!("{tool} was denied: {m}"));
-                self.entries.push(Entry::Notice { text, error: true });
+                self.t.entries.push(Entry::Notice { text, error: true });
             },
             Some("memory_saved") => {
                 let paths: Vec<&str> =
                     v.get("writtenPaths").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
-                self.entries.push(Entry::Notice { text: format!("Saved to memory: {}", paths.join(", ")), error: false });
+                self.t.entries.push(Entry::Notice { text: format!("Saved to memory: {}", paths.join(", ")), error: false });
             },
             // Progress the chat shows its own way (working, hooks and tasks
             // running, thinking), and the saved files' bookkeeping.
@@ -636,7 +315,7 @@ impl Transcript {
                 Some(text) if text.is_empty() && subtype == Some("local_command") => {},
                 Some(text) if !text.is_empty() => {
                     let error = v.get("level").and_then(Value::as_str) == Some("error");
-                    self.entries.push(Entry::Notice { text, error });
+                    self.t.entries.push(Entry::Notice { text, error });
                 },
                 _ => self.raw(format!("A system message “{}”", subtype.unwrap_or("?")), v),
             },
@@ -647,21 +326,21 @@ impl Transcript {
         let index = ev.get("index").and_then(Value::as_u64);
         match ev.get("type").and_then(Value::as_str) {
             Some("message_start") => {
-                self.stream_msg = ev.pointer("/message/id").and_then(Value::as_str).map(str::to_owned);
-                self.blocks.clear();
+                self.f.stream_msg = ev.pointer("/message/id").and_then(Value::as_str).map(str::to_owned);
+                self.f.blocks.clear();
             },
             Some("content_block_start") => {
                 let (Some(index), Some(block)) = (index, ev.get("content_block")) else { return };
                 let ix = self.push(new_entry(block, true));
-                self.blocks.insert(index, ix);
-                if let Some(msg) = &self.stream_msg {
-                    self.streamed.entry(msg.clone()).or_default().0.push(ix);
+                self.f.blocks.insert(index, ix);
+                if let Some(msg) = &self.f.stream_msg {
+                    self.f.streamed.entry(msg.clone()).or_default().0.push(ix);
                 }
             },
             Some("content_block_delta") => {
-                let (Some(&ix), Some(delta)) = (index.and_then(|i| self.blocks.get(&i)), ev.get("delta")) else { return };
+                let (Some(&ix), Some(delta)) = (index.and_then(|i| self.f.blocks.get(&i)), ev.get("delta")) else { return };
                 let piece = |k: &str| delta.get(k).and_then(Value::as_str).unwrap_or_default();
-                match (self.entries.get_mut(ix), delta.get("type").and_then(Value::as_str)) {
+                match (self.t.entries.get_mut(ix), delta.get("type").and_then(Value::as_str)) {
                     (Some(Entry::Text { text, .. }), Some("text_delta")) => text.push_str(piece("text")),
                     (Some(Entry::Thinking { text, .. }), Some("thinking_delta")) => text.push_str(piece("thinking")),
                     (Some(Entry::Tool(t)), Some("input_json_delta")) => t.partial.push_str(piece("partial_json")),
@@ -669,8 +348,8 @@ impl Transcript {
                 }
             },
             Some("content_block_stop") => {
-                let Some(&ix) = index.and_then(|i| self.blocks.get(&i)) else { return };
-                match self.entries.get_mut(ix) {
+                let Some(&ix) = index.and_then(|i| self.f.blocks.get(&i)) else { return };
+                match self.t.entries.get_mut(ix) {
                     Some(Entry::Text { streaming, .. } | Entry::Thinking { streaming, .. }) => *streaming = false,
                     Some(Entry::Tool(t)) => {
                         if let Ok(input) = serde_json::from_str(&t.partial) {
@@ -684,7 +363,7 @@ impl Transcript {
             Some("message_delta" | "message_stop" | "ping") => {},
             Some("error") => {
                 let text = ev.pointer("/error/message").and_then(Value::as_str).unwrap_or("The response stopped with an error");
-                self.entries.push(Entry::Notice { text: text.to_owned(), error: true });
+                self.t.entries.push(Entry::Notice { text: text.to_owned(), error: true });
             },
             other => self.raw(format!("A stream event “{}”", other.unwrap_or("?")), ev),
         }
@@ -696,16 +375,16 @@ impl Transcript {
         for block in blocks {
             let whole = new_entry(block, false);
             // The entry its stream made, if it streamed.
-            let streamed = self.streamed.get_mut(&msg).and_then(|(ixs, used)| {
+            let streamed = self.f.streamed.get_mut(&msg).and_then(|(ixs, used)| {
                 let ix = ixs.get(*used).copied()?;
                 *used += 1;
                 Some(ix)
             });
             match streamed {
                 Some(ix) => {
-                    if let (Some(Entry::Tool(t)), Entry::Tool(w)) = (self.entries.get_mut(ix), &whole) {
+                    if let (Some(Entry::Tool(t)), Entry::Tool(w)) = (self.t.entries.get_mut(ix), &whole) {
                         t.input = w.input.clone();
-                    } else if let Some(e) = self.entries.get_mut(ix) {
+                    } else if let Some(e) = self.t.entries.get_mut(ix) {
                         *e = whole;
                     }
                 },
@@ -718,7 +397,7 @@ impl Transcript {
 
     fn user(&mut self, v: &Value) {
         let uuid = v.get("uuid").and_then(Value::as_str).unwrap_or_default();
-        if self.sent.contains(uuid) || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        if self.f.sent.contains(uuid) || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
             return;
         }
         // What the tool reported besides its text: `tool_use_result` in the
@@ -737,7 +416,7 @@ impl Transcript {
                             let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or_default();
                             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                             let out = result_text(b.get("content"));
-                            match self.tools.get(id).and_then(|&i| self.entries.get_mut(i)) {
+                            match self.f.tools.get(id).and_then(|&i| self.t.entries.get_mut(i)) {
                                 Some(Entry::Tool(t)) => {
                                     t.result = Some(out);
                                     t.error = error;
@@ -763,7 +442,7 @@ impl Transcript {
                 if !text.is_empty() || !images.is_empty() {
                     self.user_text(&text, images);
                 }
-                self.entries.extend(extra);
+                self.t.entries.extend(extra);
             },
             Some(other) => self.raw("A user message of another shape".into(), other),
             None => {},
@@ -775,7 +454,7 @@ impl Transcript {
     fn user_text(&mut self, text: &str, images: Vec<UserImage>) {
         let t = text.trim();
         if t.starts_with("[Request interrupted") {
-            self.entries.push(Entry::Notice { text: "Interrupted".into(), error: false });
+            self.t.entries.push(Entry::Notice { text: "Interrupted".into(), error: false });
             return;
         }
         // Notes the CLI writes for the model, not for the user.
@@ -786,11 +465,11 @@ impl Transcript {
         if let Some(name) = tag(t, "command-name") {
             let args = tag(t, "command-args").unwrap_or_default();
             let typed = if args.is_empty() { name.to_owned() } else { format!("{name} {args}") };
-            self.entries.push(Entry::User { text: typed, images });
+            self.t.entries.push(Entry::User { text: typed, images });
             return;
         }
         if let Some(cmd) = tag(t, "bash-input") {
-            self.entries.push(Entry::User { text: format!("! {cmd}"), images });
+            self.t.entries.push(Entry::User { text: format!("! {cmd}"), images });
             return;
         }
         // What a command printed.
@@ -798,17 +477,17 @@ impl Transcript {
             let error = t.starts_with("<local-command-stderr") || t.starts_with("<bash-stderr");
             let out = strip_command_tags(t);
             if !out.is_empty() {
-                self.entries.push(Entry::Notice { text: out, error });
+                self.t.entries.push(Entry::Notice { text: out, error });
             }
             return;
         }
         // A background task's news, as its summary.
         if t.starts_with("<task-notification") {
             let text = tag(t, "summary").map_or_else(|| t.to_owned(), str::to_owned);
-            self.entries.push(Entry::Notice { text, error: false });
+            self.t.entries.push(Entry::Notice { text, error: false });
             return;
         }
-        self.entries.push(Entry::User { text: text.to_owned(), images });
+        self.t.entries.push(Entry::User { text: text.to_owned(), images });
     }
 
     fn result(&mut self, v: &Value) {
@@ -838,16 +517,16 @@ impl Transcript {
             }
         });
         if let Some(path) = v.get("result").and_then(Value::as_str).and_then(tern_bridge::context::handoff_path) {
-            self.handoff = Some(Some(path));
+            self.t.handoff = Some(Some(path));
         }
         let ms = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
         // The turn's end says it was stopped.
-        if interrupted && matches!(self.entries.last(), Some(Entry::Notice { text, .. }) if text == "Interrupted") {
-            self.entries.pop();
+        if interrupted && matches!(self.t.entries.last(), Some(Entry::Notice { text, .. }) if text == "Interrupted") {
+            self.t.entries.pop();
         }
         self.settle();
-        self.entries.push(Entry::TurnEnd(TurnEnd { ms, interrupted, error }));
-        self.busy = false;
+        self.t.entries.push(Entry::TurnEnd(TurnEnd { ms, interrupted, error }));
+        self.t.busy = false;
     }
 
     /// Claude's answer to a request of the chat's (`initialize`), or a
@@ -857,28 +536,28 @@ impl Transcript {
         let body = r.get("response");
         if let Some(Value::Array(commands)) = body.and_then(|b| b.get("commands")) {
             let s = |c: &Value, k: &str| c.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-            self.commands = command_list(commands);
+            self.t.commands = command_list(commands);
             if let Some(Value::Array(models)) = body.and_then(|b| b.get("models")) {
-                self.models = models
+                self.t.models = models
                     .iter()
                     .map(|m| Model { value: s(m, "value"), name: s(m, "displayName"), description: s(m, "description") })
                     .filter(|m| !m.value.is_empty())
                     .collect();
             }
             if let Some(mode) = body.and_then(|b| b.get("current_permission_mode")).and_then(Value::as_str) {
-                self.permission_mode = Some(mode.to_owned());
+                self.t.permission_mode = Some(mode.to_owned());
             }
             return;
         }
         // A replayed answer to a form.
-        if let Some(Entry::Elicit(e)) = self.asks.get(id).and_then(|&i| self.entries.get(i))
+        if let Some(Entry::Elicit(e)) = self.f.asks.get(id).and_then(|&i| self.t.entries.get(i))
             && e.answer.is_none()
         {
             let answer = match body.and_then(|b| b.get("action")).and_then(Value::as_str) {
                 Some("accept") => ElicitAnswer::Accept(body.and_then(|b| b.get("content")).cloned().unwrap_or(Value::Null)),
                 _ => ElicitAnswer::Decline,
             };
-            self.set_elicit_answer(id, answer);
+            self.t.set_elicit_answer(id, answer);
             return;
         }
         let answer = match body.and_then(|b| b.get("behavior")).and_then(Value::as_str) {
@@ -886,8 +565,8 @@ impl Transcript {
             Some("deny") => Answer::Deny,
             _ => return,
         };
-        if matches!(self.asks.get(id).and_then(|&i| self.entries.get(i)), Some(Entry::Ask(a)) if a.answer.is_none()) {
-            self.set_answer(id, answer);
+        if matches!(self.f.asks.get(id).and_then(|&i| self.t.entries.get(i)), Some(Entry::Ask(a)) if a.answer.is_none()) {
+            self.t.set_answer(id, answer);
         }
     }
 
@@ -906,7 +585,7 @@ impl Transcript {
                     answer: None,
                 };
                 let ix = self.push(Entry::Ask(ask));
-                self.asks.insert(id, ix);
+                self.f.asks.insert(id, ix);
                 None
             },
             // An MCP server asks the user for input.
@@ -928,7 +607,7 @@ impl Transcript {
                 let url = (s("mode") == "url").then(|| s("url")).filter(|u| !u.is_empty());
                 let e = Elicit { request_id: id.clone(), server: s("mcp_server_name"), message: s("message"), url, fields, answer: None };
                 let ix = self.push(Entry::Elicit(e));
-                self.asks.insert(id, ix);
+                self.f.asks.insert(id, ix);
                 None
             },
             other => {
@@ -943,28 +622,17 @@ impl Transcript {
 
     fn push(&mut self, e: Entry) -> usize {
         if let Entry::Tool(t) = &e {
-            self.tools.insert(t.id.clone(), self.entries.len());
+            self.f.tools.insert(t.id.clone(), self.t.entries.len());
         }
-        self.entries.push(e);
-        self.entries.len() - 1
+        self.t.entries.push(e);
+        self.t.entries.len() - 1
     }
 
-    /// Nothing streams any more; tools that never answered are left as they are.
-    fn settle(&mut self) {
-        for e in &mut self.entries {
-            if let Entry::Text { streaming, .. } | Entry::Thinking { streaming, .. } = e {
-                *streaming = false;
-            }
-        }
-        for i in self.asks.values() {
-            if let Some(Entry::Ask(a)) = self.entries.get_mut(*i)
-                && a.answer.is_none()
-            {
-                a.answer = Some(Answer::Withdrawn);
-            }
-        }
-        self.blocks.clear();
-        self.stream_msg = None;
+    /// Nothing streams any more (see [`Transcript::settle`]).
+    pub(crate) fn settle(&mut self) {
+        self.t.settle();
+        self.f.blocks.clear();
+        self.f.stream_msg = None;
     }
 }
 
@@ -990,7 +658,7 @@ fn new_entry(block: &Value, streaming: bool) -> Entry {
 }
 
 /// The lines a chat's record holds (`{"ms": …, "line": …}` each, as the
-/// daemon writes them): for [`Transcript::load_with`]. None when there is
+/// daemon writes them): for [`ClaudeFold::load`]. None when there is
 /// no record.
 pub fn read_record(path: &Path) -> Vec<(u64, Value)> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
@@ -1115,7 +783,59 @@ pub(crate) fn success(id: &str, response: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
     use super::*;
+
+    /// A transcript with Claude's fold beside it, read as the transcript.
+    #[derive(Default)]
+    struct Transcript {
+        t: crate::model::Transcript,
+        fold: ClaudeFold,
+    }
+
+    impl Transcript {
+        fn apply(&mut self, v: &Value) -> Option<Value> {
+            self.fold.apply(&mut self.t, v)
+        }
+
+        fn apply_line(&mut self, line: &str) -> Option<Value> {
+            self.fold.apply_line(&mut self.t, line)
+        }
+
+        fn load_with(path: &Path, before: Option<u64>, extra: Vec<(u64, Value)>) -> std::io::Result<Self> {
+            let mut fold = ClaudeFold::default();
+            Ok(Self { t: fold.load(path, before, extra)?, fold })
+        }
+
+        fn load_before(path: &Path, before: Option<u64>) -> std::io::Result<Self> {
+            Self::load_with(path, before, Vec::new())
+        }
+
+        fn load(path: &Path) -> std::io::Result<Self> {
+            Self::load_with(path, None, Vec::new())
+        }
+
+        /// As the driver's `user_line` then the chat's `push_user`.
+        fn push_user(&mut self, text: &str, images: Vec<UserImage>, uuid: &str) {
+            self.fold.sent.insert(uuid.to_owned());
+            self.t.push_user(text, images);
+        }
+    }
+
+    impl std::ops::Deref for Transcript {
+        type Target = crate::model::Transcript;
+        fn deref(&self) -> &Self::Target {
+            &self.t
+        }
+    }
+
+    impl std::ops::DerefMut for Transcript {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.t
+        }
+    }
 
     fn feed(t: &mut Transcript, frames: &[Value]) {
         for f in frames {
@@ -1263,11 +983,11 @@ Handoff: `docs/h.md`"}));
         let mut t = Transcript::default();
         t.apply(&json!({"type":"assistant","message":{"id":"m","model":"m","content":[],"usage":{"input_tokens":10}}}));
         t.apply(&json!({"type":"result","subtype":"success","modelUsage":{"m":{"contextWindow":100}}}));
-        assert_eq!(t.meter.reading().map(|r| r.percent), Some(10.));
+        assert_eq!(t.context.map(|r| r.percent), Some(10.));
         let before = t.entries.len();
         t.apply(&json!({"type":"conversation_reset"}));
         assert_eq!(t.entries.len(), before);
-        assert_eq!(t.meter.reading(), None);
+        assert_eq!(t.context, None);
         assert_eq!(t.handoff.take(), Some(None));
     }
 

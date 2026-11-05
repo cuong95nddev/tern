@@ -6784,6 +6784,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "semver",
  "tempfile",
+ "tern-agent",
  "tern-mux",
  "tern-term",
 ]

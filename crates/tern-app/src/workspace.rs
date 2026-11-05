@@ -859,9 +859,9 @@ impl Workspace {
                     }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
-                SavedTab::Chat { agent: _, session, account, mux, guard, handoff } => {
+                SavedTab::Chat { agent, session, account, mux, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
-                    this.add_chat(&account, Some(session), mux, window, cx);
+                    this.add_chat(&agent, &account, Some(session), mux, window, cx);
                     if let Some(CenterTab::Chat { view, .. }) = this.tabs.get(before) {
                         view.update(cx, |v, _| {
                             v.set_guard(crate::agents::ContextGuard::from_saved(guard));
@@ -958,7 +958,7 @@ impl Workspace {
                 CenterTab::Chat { view, .. } => {
                     let v = view.read(cx);
                     SavedTab::Chat {
-                        agent: AgentId::new(tern_agent::CLAUDE),
+                        agent: v.agent(),
                         session: v.session().to_owned(),
                         account: (v.account() != accounts::DEFAULT).then(|| v.account().to_owned()),
                         mux: v.chat_id(),
@@ -1221,23 +1221,37 @@ impl Workspace {
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
         match active.as_slice() {
-            [one] => self.add_chat(&one.clone(), None, None, window, cx),
+            [one] => self.add_chat(&AgentId::new(tern_agent::CLAUDE), &one.clone(), None, None, window, cx),
             _ => {
-                let then: PickThen = Rc::new(|this, id, window, cx| this.add_chat(id, None, None, window, cx));
+                let then: PickThen =
+                    Rc::new(|this, id, window, cx| this.add_chat(&AgentId::new(tern_agent::CLAUDE), id, None, None, window, cx));
                 let note = "Turn accounts on or off in the account panel at the bottom of the window";
                 self.pick_account("New Claude Chat As".into(), note.into(), None, then, window, cx)
             },
         }
     }
 
-    /// A Claude chat tab running as `account`: conversation `session`, or a
-    /// new one; attached to the daemon's chat `mux` when it still runs.
-    fn add_chat(&mut self, account: &str, session: Option<String>, mux: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A chat tab with `agent` running as `account`: conversation
+    /// `session`, or a new one; attached to the daemon's chat `mux` when it
+    /// still runs. Nothing when the agent has no chat driver.
+    fn add_chat(
+        &mut self,
+        agent: &AgentId,
+        account: &str,
+        session: Option<String>,
+        mux: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(driver) = tern_chat::chat_driver(agent.as_str()) else {
+            log::warn!("chat: {agent} has no chat driver");
+            return;
+        };
         let (account, _) = claude_env(account, cx);
         let account = account.to_owned();
         let root = self.root.clone();
         let connector = self.services.mux.clone();
-        let view = cx.new(|cx| ChatView::new(root, account, session, mux, connector, window, cx));
+        let view = cx.new(|cx| ChatView::new(driver, root, account, session, mux, connector, window, cx));
         let sub = cx.subscribe_in(&view, window, |this, view, ev: &ChatEvent, window, cx| match ev {
             ChatEvent::Title => cx.notify(),
             // Attached (maybe to a new daemon): its id goes into the saved
@@ -1606,7 +1620,7 @@ impl Workspace {
     pub fn adopt_chat(&mut self, c: &tern_mux::proto::ChatInfo, window: &mut Window, cx: &mut Context<Self>) {
         let account = if c.account.is_empty() { accounts::DEFAULT } else { c.account.as_str() };
         let session = (!c.session.is_empty()).then(|| c.session.clone());
-        self.add_chat(account, session, Some(c.id), window, cx);
+        self.add_chat(&c.agent_id(), account, session, Some(c.id), window, cx);
     }
 
     /// A tab for background session `s` that no tab shows. A Claude one
@@ -1804,7 +1818,7 @@ impl Workspace {
         // Made in the old tab's pane, then put in its place.
         self.focused = self.pane_of(ix);
         if to_chat {
-            self.add_chat(&account, session, None, window, cx);
+            self.add_chat(&AgentId::new(tern_agent::CLAUDE), &account, session, None, window, cx);
         } else {
             self.add_term(TabKind::claude(), None, session, None, &account, window, cx);
         }
@@ -5416,7 +5430,7 @@ impl Workspace {
                 "ok".into()
             },
             "chat-new" => {
-                self.add_chat(accounts::DEFAULT, None, None, window, cx);
+                self.add_chat(&AgentId::new(tern_agent::CLAUDE), accounts::DEFAULT, None, None, window, cx);
                 "ok".into()
             },
             // `claude-switch`: its name before other agents.
@@ -5435,7 +5449,14 @@ impl Workspace {
                 }
             },
             cmd if cmd.starts_with("chat-open ") => {
-                self.add_chat(accounts::DEFAULT, Some(cmd["chat-open ".len()..].trim().to_owned()), None, window, cx);
+                self.add_chat(
+                    &AgentId::new(tern_agent::CLAUDE),
+                    accounts::DEFAULT,
+                    Some(cmd["chat-open ".len()..].trim().to_owned()),
+                    None,
+                    window,
+                    cx,
+                );
                 "ok".into()
             },
             cmd if cmd.starts_with("chat-") => {

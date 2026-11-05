@@ -3327,7 +3327,7 @@
             "element": "chat.ask",
             "children": [
               { "element": "chat.ask.title", "wrap": true, "text": "Do you trust {folder}?" },
-              { "element": "chat.meta", "wrap": true, "text": "Claude Code runs this folder's hooks and tools as soon as it starts. Trust it only if you know where its code comes from." },
+              { "element": "chat.meta", "wrap": true, "text": "{agent} runs this folder's hooks and tools as soon as it starts. Trust it only if you know where its code comes from." },
               {
                 "layout": "row",
                 "align": "center",
@@ -3349,7 +3349,7 @@
     "children": [
       { "icon": "sparkles", "element": "chat.empty.icon" },
       { "text": "Send a message to start the conversation." },
-      { "element": "chat.empty.note", "text": "Claude Code runs here with your settings, tools, hooks and MCP servers." }
+      { "element": "chat.empty.note", "text": "{agent} runs here with your settings, tools, hooks and MCP servers." }
     ]
   },
   "chat.composer": {
@@ -3385,13 +3385,13 @@
             "align": "center",
             "element": "chat.composer.bar",
             "children": [
-              { "button": "mode", "element": "chat.composer.button", "size": "xsmall", "icon": "shield-check", "label": "{mode}", "tooltip": "How Claude asks before it acts: click for the next" },
-              { "button": "model", "element": "chat.composer.button", "size": "xsmall", "icon": "sparkles", "label": "{model}", "tooltip": "The model Claude runs" },
+              { "when": "can_mode", "button": "mode", "element": "chat.composer.button", "size": "xsmall", "icon": "shield-check", "label": "{mode}", "tooltip": "How {agent_short} asks before it acts: click for the next" },
+              { "when": "can_model", "button": "model", "element": "chat.composer.button", "size": "xsmall", "icon": "sparkles", "label": "{model}", "tooltip": "The model {agent_short} runs" },
               { "grow": 1 },
-              { "button": "attach", "element": "chat.composer.button", "size": "xsmall", "icon": "image", "tooltip": "Attach images (or paste or drop them)" },
+              { "when": "can_attach", "button": "attach", "element": "chat.composer.button", "size": "xsmall", "icon": "image", "tooltip": "Attach images (or paste or drop them)" },
               { "when": "!busy", "button": "send", "variant": "primary", "size": "small", "icon": "arrow-up", "disabled": "!typed", "tooltip": "Send (Enter)" },
               { "when": "busy && typed", "button": "send", "size": "small", "icon": "arrow-up", "tooltip": "Queue after this turn (Enter)" },
-              { "when": "busy", "button": "stop", "variant": "secondary", "size": "small", "icon": "square", "tooltip": "Stop" }
+              { "when": "busy && can_stop", "button": "stop", "variant": "secondary", "size": "small", "icon": "square", "tooltip": "Stop" }
             ]
           }
         ]
@@ -3424,7 +3424,7 @@
   },
   "menu.chat_model": {
     "children": [
-      { "when": "!loaded", "text": "The models show once Claude has started" },
+      { "when": "!loaded", "text": "The models show once {agent_short} has started" },
       {
         "each": "models",
         "item": {

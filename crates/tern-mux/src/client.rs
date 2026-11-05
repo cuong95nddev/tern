@@ -97,7 +97,7 @@ pub enum ChatEvent {
 pub type ChatSink = Arc<dyn Fn(ChatEvent) + Send + Sync>;
 
 pub enum OpenChat {
-    Spawn(ChatSpec),
+    Spawn(Box<ChatSpec>),
     Attach { id: u64 },
 }
 
@@ -543,7 +543,7 @@ impl MuxClient {
                         *a = a.replace(" --settings {tern-settings}", "");
                     }
                 }
-                ClientMsg::SpawnChat { req, spec }
+                ClientMsg::SpawnChat { req, spec: *spec }
             },
             OpenChat::Attach { id } => ClientMsg::AttachChat { req, id },
         };

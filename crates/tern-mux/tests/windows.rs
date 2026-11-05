@@ -104,7 +104,7 @@ fn chats_get_hooks_and_handoffs() {
             l.lock().unwrap().push(line);
         }
     });
-    let chat = c.open_chat(OpenChat::Spawn(spec), sink);
+    let chat = c.open_chat(OpenChat::Spawn(Box::new(spec)), sink);
     let said = |what: &str| lines.lock().unwrap().iter().any(|l| l.contains(what));
     wait_until("settings json", || said("\"hooks\""));
     wait_until("the chat's id", || chat.id().is_some());

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::transcript::Tool;
+use crate::model::Tool;
 
 /// What a tool does, for wording and grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

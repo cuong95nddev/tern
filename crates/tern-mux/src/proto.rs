@@ -32,7 +32,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 16;
+pub const MINOR: u32 = 17;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -58,6 +58,8 @@ pub const PALETTE_MINOR: u32 = 14;
 pub const CHAT_GUARD_MINOR: u32 = 15;
 // MINOR 16: `SessionInfo.agent` and `agent_session` (older clients read
 // `claude` and `claude_session`, still filled).
+// MINOR 17: `ChatSpec.agent`, `ChatInfo.agent` and `HandedChat.agent` (none
+// means Claude, the only agent older builds chat with).
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 5;
@@ -258,6 +260,21 @@ pub struct ChatSpec {
     /// history of the chat reads them back.
     #[serde(default)]
     pub record: Option<PathBuf>,
+    /// The agent it runs (an id of `tern_agent`); none is Claude.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+impl ChatSpec {
+    /// The agent it runs.
+    pub fn agent_id(&self) -> tern_agent::AgentId {
+        chat_agent(self.agent.as_deref())
+    }
+}
+
+/// A chat's agent: `agent`, or Claude when none was said (older builds).
+fn chat_agent(agent: Option<&str>) -> tern_agent::AgentId {
+    tern_agent::AgentId::new(agent.unwrap_or(tern_agent::CLAUDE))
 }
 
 /// A chat the daemon runs (`ListChats`).
@@ -274,6 +291,16 @@ pub struct ChatInfo {
     pub status: ActivityStatus,
     /// The first message the user sent.
     pub title: Option<String>,
+    /// The agent it runs (see [`ChatSpec::agent`]).
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+impl ChatInfo {
+    /// The agent it runs.
+    pub fn agent_id(&self) -> tern_agent::AgentId {
+        chat_agent(self.agent.as_deref())
+    }
 }
 
 /// A service: a command run for an agent, in a session of its own.
@@ -557,6 +584,15 @@ pub struct HandedChat {
     pub record: Option<PathBuf>,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+impl HandedChat {
+    /// The agent it runs.
+    pub fn agent_id(&self) -> tern_agent::AgentId {
+        chat_agent(self.agent.as_deref())
+    }
 }
 
 impl SessionInfo {
@@ -1050,6 +1086,27 @@ mod tests {
         let old: SessionInfo15 = reencode(&info);
         assert!(old.claude);
         assert_eq!(old.claude_session.as_deref(), Some("s"));
+    }
+
+    /// `ChatInfo` as a daemon before MINOR 17 sent it.
+    #[derive(Serialize, Deserialize, Debug, Default)]
+    struct ChatInfo16 {
+        id: u64,
+        cwd: PathBuf,
+        session: String,
+        account: String,
+        attached: bool,
+        exited: bool,
+        status: ActivityStatus,
+        title: Option<String>,
+    }
+
+    #[test]
+    fn an_old_daemons_chat_is_claudes() {
+        let info: ChatInfo = reencode(&ChatInfo16 { id: 1, ..Default::default() });
+        assert_eq!(info.agent_id().as_str(), "claude");
+        let codex = ChatInfo { id: 2, agent: Some("codex".into()), ..Default::default() };
+        assert_eq!(reencode::<_, ChatInfo>(&codex).agent_id().as_str(), "codex");
     }
 
     #[test]

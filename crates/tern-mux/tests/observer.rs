@@ -49,7 +49,7 @@ fn watcher_follows_the_chats() {
         cwd: "/".into(),
         ..Default::default()
     };
-    let chat = c.open_chat(tern_mux::client::OpenChat::Spawn(spec), std::sync::Arc::new(|_| {}));
+    let chat = c.open_chat(tern_mux::client::OpenChat::Spawn(Box::new(spec)), std::sync::Arc::new(|_| {}));
     let working = |list: &[proto::ChatInfo]| {
         list.iter()
             .any(|i| i.attached && i.status == tern_term::status::ActivityStatus::Working && i.title.as_deref() == Some("Fix the bug"))

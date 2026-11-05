@@ -1011,6 +1011,7 @@ impl Server {
                 cwd: c.meta.cwd.clone(),
                 session: c.session(),
                 account: c.meta.account.clone(),
+                agent: Some(c.meta.agent.to_string()),
                 attached: c.attached(),
                 exited: c.exited().is_some(),
                 status: c.status(),
@@ -1558,6 +1559,7 @@ impl Server {
                 account: handed.meta.account,
                 record: handed.meta.record,
                 token: handed.token,
+                agent: Some(handed.meta.agent.to_string()),
             }));
             // Parked before it goes, so a failure below reads again.
             if let Some((_, parked)) = io {
@@ -1747,7 +1749,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
     }
     let mut chat_readers = Vec::new();
     for (c, io) in handed_chats {
-        let meta = crate::chat::ChatMeta { cwd: c.cwd, session: c.session, account: c.account, record: c.record };
+        let agent = c.agent_id();
+        let meta = crate::chat::ChatMeta { cwd: c.cwd, session: c.session, account: c.account, record: c.record, agent };
         let handed = crate::chat::Handed { meta, token: c.token, title: c.title, lines: c.lines, stderr: c.stderr, exited: c.exited, io };
         let (chat, parked) = ChatHost::adopt(c.id, c.pid, c.started, handed, server.chat_notify());
         chat_readers.extend(parked.map(|p| (chat.clone(), p)));

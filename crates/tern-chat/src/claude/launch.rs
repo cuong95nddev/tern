@@ -2,58 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// How Claude asks before it acts (`--permission-mode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionMode {
-    /// Asks before edits and commands.
-    Default,
-    /// Edits files without asking.
-    AcceptEdits,
-    /// Only plans, changes nothing.
-    Plan,
-    /// Decides itself what is safe to run.
-    Auto,
-    /// Never asks (`--dangerously-skip-permissions`).
-    Bypass,
-}
-
-impl PermissionMode {
-    /// The modes the user cycles through (Bypass only when Claude started in it).
-    pub const ALL: [Self; 4] = [Self::Default, Self::AcceptEdits, Self::Plan, Self::Auto];
-
-    /// Its name on the wire.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::AcceptEdits => "acceptEdits",
-            Self::Plan => "plan",
-            Self::Auto => "auto",
-            Self::Bypass => "bypassPermissions",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().chain([Self::Bypass]).find(|m| m.as_str() == s)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Default => "Ask first",
-            Self::AcceptEdits => "Accept edits",
-            Self::Plan => "Plan",
-            Self::Auto => "Auto",
-            Self::Bypass => "Bypass",
-        }
-    }
-
-    /// The one after it, as Shift+Tab cycles them in the terminal.
-    pub fn next(self) -> Self {
-        match Self::ALL.iter().position(|m| *m == self) {
-            Some(i) => Self::ALL[(i + 1) % Self::ALL.len()],
-            None => Self::Default,
-        }
-    }
-}
+use crate::model::PermissionMode;
 
 /// What a chat starts Claude with.
 #[derive(Debug, Clone)]
@@ -91,12 +40,31 @@ impl Launch {
     }
 }
 
+/// The shell line that starts Claude: `user`'s own arguments, as typed
+/// (shell syntax), and `args`, each quoted with `quote` for the shell that
+/// runs the line. The daemon puts the hook settings file's path in place of
+/// the placeholder (or drops the flag without hooks).
+pub fn claude_line(user: &str, args: &[String], quote: fn(&str) -> String) -> String {
+    let mut line = String::from("claude");
+    if !user.is_empty() {
+        line.push(' ');
+        line.push_str(user);
+    }
+    line.push_str(" --settings {tern-settings}");
+    for a in args {
+        line.push(' ');
+        line.push_str(&quote(a));
+    }
+    line
+}
+
 /// The lines a chat writes to Claude's stdin (one JSON message each).
 pub mod wire {
     use serde_json::{Value, json};
 
-    use super::{PermissionMode, deny_message, new_session_id};
-    use crate::transcript::{Answer, Ask, Elicit, ElicitAnswer, success};
+    use super::{deny_message, new_session_id};
+    use crate::claude::fold::success;
+    use crate::model::{Answer, Ask, Elicit, ElicitAnswer, PermissionMode};
 
     fn control(request: Value) -> String {
         json!({ "type": "control_request", "request_id": new_session_id(), "request": request }).to_string()
@@ -255,6 +223,14 @@ mod tests {
         std::fs::write(folder.join("x.jsonl"), "").unwrap();
         assert_eq!(transcript_path(dir.path(), Path::new("/a/b.c"), "x"), Some(folder.join("x.jsonl")));
         assert_eq!(transcript_path(dir.path(), Path::new("/a/b.c"), "y"), None);
+    }
+
+    #[test]
+    fn claude_gets_the_hook_settings_placeholder_as_it_is() {
+        let args = ["--verbose".to_owned()];
+        let q = |s: &str| format!("<{s}>");
+        assert_eq!(claude_line("", &args, q), "claude --settings {tern-settings} <--verbose>");
+        assert_eq!(claude_line("--foo", &args, q), "claude --foo --settings {tern-settings} <--verbose>");
     }
 
     #[test]

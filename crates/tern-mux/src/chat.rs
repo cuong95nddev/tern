@@ -135,13 +135,34 @@ impl State {
 }
 
 /// Whose chat it is: what a UI that finds it without a tab opens one with.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct ChatMeta {
     pub cwd: std::path::PathBuf,
     pub session: String,
     pub account: String,
     /// Where MCP forms' lines are kept (see [`ChatSpec::record`]).
     pub record: Option<std::path::PathBuf>,
+    /// The agent it runs.
+    pub agent: tern_agent::AgentId,
+}
+
+impl Default for ChatMeta {
+    fn default() -> Self {
+        Self {
+            cwd: Default::default(),
+            session: Default::default(),
+            account: Default::default(),
+            record: None,
+            agent: tern_agent::AgentId::new(tern_agent::CLAUDE),
+        }
+    }
+}
+
+impl ChatMeta {
+    /// Its agent's short name, as notifications call it.
+    fn agent_name(&self) -> String {
+        tern_agent::registry().get(self.agent.as_str()).map_or_else(|| self.agent.to_string(), |d| d.short_name.clone())
+    }
 }
 
 pub(crate) struct ChatHost {
@@ -220,6 +241,7 @@ impl ChatHost {
                 session: spec.session.clone(),
                 account: spec.account.clone(),
                 record: spec.record.clone(),
+                agent: spec.agent_id(),
             },
             token,
             stdin: Mutex::new(stdin),
@@ -356,7 +378,9 @@ impl ChatHost {
         let host = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(AFTER_HOOK);
-            let (_, line) = tern_chat::wire::user(&host.session(), &text, &[]);
+            // Its agent's own user message (only agents with a chat driver run as chats).
+            let Some(mut driver) = tern_chat::chat_driver(host.meta.agent.as_str()) else { return };
+            let (_, line) = driver.user_line(&host.session(), &text, &[]);
             host.write(&line);
         });
     }
@@ -591,7 +615,10 @@ impl ChatHost {
                     owner.chat_line(self.id, &line);
                     None
                 },
-                None => v.as_ref().and_then(notice).map(|body| (st.title.clone().unwrap_or_else(|| "Claude".into()), body)),
+                None => {
+                    let name = self.meta.agent_name();
+                    v.as_ref().and_then(|v| notice(v, &name)).map(|body| (st.title.clone().unwrap_or(name), body))
+                },
             }
         };
         if let Some((title, body)) = notice
@@ -629,15 +656,16 @@ fn user_text(v: &Value) -> Option<String> {
     (!line.is_empty()).then(|| line.chars().take(60).collect())
 }
 
-/// What a line tells the user while no UI is connected.
-fn notice(v: &Value) -> Option<String> {
+/// What a line tells the user while no UI is connected; `agent` names the
+/// agent that wrote it.
+fn notice(v: &Value, agent: &str) -> Option<String> {
     match v.get("type")?.as_str()? {
         "control_request" if v.pointer("/request/subtype")?.as_str()? == "can_use_tool" => {
             Some(match v.pointer("/request/tool_name").and_then(Value::as_str) {
-                Some("AskUserQuestion") => "Claude has a question".into(),
-                Some("ExitPlanMode") => "Claude has a plan to approve".into(),
-                Some(tool) => format!("Claude asks to use {tool}"),
-                None => "Claude asks for permission".into(),
+                Some("AskUserQuestion") => format!("{agent} has a question"),
+                Some("ExitPlanMode") => format!("{agent} has a plan to approve"),
+                Some(tool) => format!("{agent} asks to use {tool}"),
+                None => format!("{agent} asks for permission"),
             })
         },
         "control_request" if v.pointer("/request/subtype")?.as_str()? == "elicitation" => {
@@ -658,8 +686,8 @@ fn notice(v: &Value) -> Option<String> {
             };
             Some(match v.get("subtype").and_then(Value::as_str) {
                 _ if stopped => return None,
-                Some("success") => "Claude finished".into(),
-                _ => "Claude stopped with an error".into(),
+                Some("success") => format!("{agent} finished"),
+                _ => format!("{agent} stopped with an error"),
             })
         },
         _ => None,
@@ -824,14 +852,15 @@ read a; echo '{"type":"result","subtype":"success"}'; read b"#;
     fn tells_forms_and_failures_but_not_a_stop() {
         use serde_json::json;
         let form = json!({"type":"control_request","request_id":"e","request":{"subtype":"elicitation","mcp_server_name":"deploy"}});
-        assert_eq!(notice(&form).as_deref(), Some("deploy asks for your input"));
+        assert_eq!(notice(&form, "Claude").as_deref(), Some("deploy asks for your input"));
         let mut st = State::default();
         st.follow(&form);
         assert_eq!(st.asks.len(), 1);
         let stopped = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"});
-        assert_eq!(notice(&stopped), None);
+        assert_eq!(notice(&stopped, "Claude"), None);
         let failed = json!({"type":"result","subtype":"error_during_execution","terminal_reason":"model_error","errors":["500"]});
-        assert_eq!(notice(&failed).as_deref(), Some("Claude stopped with an error"));
+        assert_eq!(notice(&failed, "Claude").as_deref(), Some("Claude stopped with an error"));
+        assert_eq!(notice(&failed, "Codex").as_deref(), Some("Codex stopped with an error"));
     }
 
     fn sh(script: &str) -> ChatSpec {

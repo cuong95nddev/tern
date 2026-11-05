@@ -306,7 +306,7 @@ fn a_running_chat_moves_to_the_new_daemon() {
     let c = client(&p.dir);
     let (sink1, ev1) = chat_sink();
     let spec = proto::ChatSpec { session: "conv-1".into(), ..chat_spec(r#"echo '{"n":1}'; read a; echo "{\"got\":\"$a\"}"; read b"#) };
-    let chat = c.open_chat(OpenChat::Spawn(spec), sink1);
+    let chat = c.open_chat(OpenChat::Spawn(Box::new(spec)), sink1);
     let attached = |ev: &Arc<Mutex<Vec<ChatEvent>>>| {
         ev.lock().unwrap().iter().find_map(|e| match e {
             ChatEvent::Attached { id, lines, .. } => Some((*id, lines.clone())),

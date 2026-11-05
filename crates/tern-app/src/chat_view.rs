@@ -27,7 +27,8 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
 use serde_json::{Value, json};
-use tern_chat::{Answer, Ask, Elicit, ElicitAnswer, Entry, FieldKind, Launch, PermissionMode, Transcript, UserImage, summary, wire};
+use tern_agent::AgentId;
+use tern_chat::{Answer, Ask, ChatDriver, Elicit, ElicitAnswer, Entry, FieldKind, PermissionMode, Transcript, UserImage, summary};
 use tern_mux::client::{ChatEvent as MuxChatEvent, ChatSink, Connector, OpenChat, RemoteChat};
 use tern_mux::proto::{ChatExit, ChatSpec};
 
@@ -133,6 +134,9 @@ pub struct ChatView {
     /// The conversation's id: resumed with it after a restart.
     session: String,
     t: Transcript,
+    /// The agent's chat protocol: folds its lines into `t`, makes the lines
+    /// written to it.
+    driver: Box<dyn ChatDriver>,
     mux: Arc<Connector>,
     /// Its chat in the daemon, while the tab holds it.
     chat: Option<RemoteChat>,
@@ -198,7 +202,7 @@ pub struct ChatView {
     /// The handoff it can go on from.
     handoff: Handoff,
     waiting_for_start: Option<Waiting>,
-    /// Claude may start in its folder (see [`crate::folder_trust`]).
+    /// The agent may start in its folder (see [`crate::folder_trust`]).
     trusted: bool,
 }
 
@@ -211,10 +215,13 @@ impl Focusable for ChatView {
 }
 
 impl ChatView {
-    /// A chat in `root` running as `account`: conversation `session` when
-    /// given (its history shown, resumed at the first message), else a new
-    /// one; attached to the daemon's chat `chat_id` when that still runs.
+    /// A chat with the agent `driver` talks to, in `root` running as
+    /// `account`: conversation `session` when given (its history shown,
+    /// resumed at the first message), else a new one; attached to the
+    /// daemon's chat `chat_id` when that still runs.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        driver: Box<dyn ChatDriver>,
         root: PathBuf,
         account: String,
         session: Option<String>,
@@ -223,9 +230,9 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(1, 12).submit_on_enter(true).placeholder("Ask Claude anything, or / for commands")
-        });
+        let short = crate::agents::agent_short_name(&AgentId::new(driver.agent()));
+        let placeholder = format!("Ask {short} anything, or / for commands");
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 12).submit_on_enter(true).placeholder(placeholder));
         let input_sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { secondary: false, shift: false } => this.send(window, cx),
             InputEvent::Change => {
@@ -243,12 +250,14 @@ impl ChatView {
         });
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let session = session.unwrap_or_else(tern_chat::new_session_id);
-        let trusted = crate::folder_trust::trusted(&account, &root);
+        // Folder trust is Claude Code's own record; other agents aren't asked here.
+        let trusted = driver.agent() != tern_agent::CLAUDE || crate::folder_trust::trusted(&account, &root);
         let mut this = Self {
             root,
             account,
             session,
             t: Transcript::default(),
+            driver,
             mux,
             chat: None,
             chat_id: None,
@@ -277,7 +286,7 @@ impl ChatView {
             was_busy: false,
             scroller,
             input,
-            title: "Claude Chat".to_owned(),
+            title: format!("{short} Chat"),
             _input_sub: input_sub,
             _events: None,
             _ticker: None,
@@ -300,6 +309,11 @@ impl ChatView {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The agent it talks to.
+    pub fn agent(&self) -> AgentId {
+        AgentId::new(self.driver.agent())
     }
 
     pub fn session(&self) -> &str {
@@ -416,15 +430,18 @@ impl ChatView {
         self.live = false;
     }
 
-    /// Show the conversation Claude saved, up to `before` (see
-    /// [`Transcript::load_before`]).
+    /// Show the conversation the agent saved, up to `before` (see
+    /// [`ChatDriver::load`]).
     fn load_history(&mut self, before: Option<u64>) {
         let record = record_path(&self.session).map(|p| tern_chat::read_record(&p)).unwrap_or_default();
-        self.t = saved_path(&self.account, &self.root, &self.session)
-            .and_then(|path| {
-                Transcript::load_with(&path, before, record).map_err(|e| log::warn!("chat: read {}: {e}", path.display())).ok()
-            })
-            .unwrap_or_default();
+        let mut t = Transcript::default();
+        if let Some(path) = saved_path(&self.account, &self.root, &self.session)
+            && let Err(e) = self.driver.load(&mut t, &path, before, record)
+        {
+            log::warn!("chat: read {}: {e}", path.display());
+            t = Transcript::default();
+        }
+        self.t = t;
         self.open.clear();
         self.picks.clear();
         self.form_inputs.clear();
@@ -444,9 +461,14 @@ impl ChatView {
     /// Start Claude in the daemon: resuming the conversation when Claude saved it.
     fn start(&mut self, cx: &mut Context<Self>) {
         let resume = saved_path(&self.account, &self.root, &self.session).is_some();
-        let launch =
-            Launch { session: self.session.clone(), resume, model: self.model_picked.clone(), mode: self.mode_picked.then_some(self.mode) };
-        let line = claude_line(&crate::window_state::claude_args(), &launch.args());
+        let line = self.driver.command(
+            &crate::window_state::claude_args(),
+            &self.session,
+            resume,
+            self.model_picked.as_deref(),
+            self.mode_picked.then_some(self.mode),
+            crate::workspace::shell_quote,
+        );
         let (_, env) = crate::workspace::claude_env(&self.account, cx);
         let spec = ChatSpec {
             program: crate::platform::shell(),
@@ -456,10 +478,11 @@ impl ChatView {
             session: self.session.clone(),
             account: self.account.clone(),
             record: record_path(&self.session),
+            agent: Some(self.driver.agent().to_owned()),
         };
         // Before anything the user sends.
-        self.outbox.insert(0, wire::initialize());
-        self.connect(OpenChat::Spawn(spec), cx);
+        self.outbox.splice(0..0, self.driver.start_lines());
+        self.connect(OpenChat::Spawn(Box::new(spec)), cx);
     }
 
     /// Start Claude unless it runs: it then says which commands and models
@@ -526,7 +549,7 @@ impl ChatView {
                 Err(e) => {
                     this.outbox.clear();
                     this.live = false;
-                    this.t.ended(Some(format!("Cannot reach Tern's background daemon: {e}")));
+                    this.driver.ended(&mut this.t, Some(format!("Cannot reach Tern's background daemon: {e}")));
                     this.refresh(cx);
                     false
                 },
@@ -574,7 +597,7 @@ impl ChatView {
                         // The history Claude saved before this program, then what it said.
                         self.load_history(Some(started));
                         for line in &lines {
-                            self.t.apply_line(line);
+                            self.driver.fold_line(&mut self.t, line);
                         }
                         self.t.resume_busy(exited.is_none());
                         // The first message may be among the replayed lines.
@@ -591,8 +614,8 @@ impl ChatView {
                     }
                 },
                 MuxChatEvent::Line(line) => {
-                    if let Some(reply) = self.t.apply_line(&line) {
-                        self.write(reply.to_string());
+                    if let Some(reply) = self.driver.fold_line(&mut self.t, &line) {
+                        self.write(reply);
                     }
                     self.follow_mode();
                 },
@@ -608,7 +631,7 @@ impl ChatView {
                     self.chat = None;
                     self.chat_id = None;
                     self.live = false;
-                    self.t.ended(Some(e));
+                    self.driver.ended(&mut self.t, Some(e));
                 },
                 // The daemon handed off or quit: attach again.
                 MuxChatEvent::Lost => {
@@ -631,7 +654,7 @@ impl ChatView {
     /// What Claude's lines said of the conversation: how full it is, its
     /// handoff, and the one `/clear` started in its place.
     fn follow_conversation(&mut self, cx: &mut Context<Self>) {
-        let context = self.t.meter.reading().map(ContextUse::from);
+        let context = self.t.context.map(ContextUse::from);
         if context != self.context {
             self.context = context;
             cx.emit(ChatEvent::Context);
@@ -663,10 +686,11 @@ impl ChatView {
             (code, _) => {
                 let code = code.map_or_else(String::new, |c| format!(" ({c})"));
                 let sep = if exit.stderr.is_empty() { "" } else { ": " };
-                Some(format!("Claude exited{code}{sep}{}", exit.stderr))
+                let name = crate::agents::agent_short_name(&AgentId::new(self.driver.agent()));
+                Some(format!("{name} exited{code}{sep}{}", exit.stderr))
             },
         };
-        self.t.ended(why);
+        self.driver.ended(&mut self.t, why);
         if let Some(chat) = self.chat.take() {
             chat.close();
         }
@@ -702,7 +726,7 @@ impl ChatView {
         self.warm(cx);
         let attachments = std::mem::take(&mut self.attachments);
         let images: Vec<(&str, &[u8])> = attachments.iter().map(|a| (a.image.format().mime_type(), a.image.bytes())).collect();
-        let (uuid, line) = wire::user(&self.session, &text, &images);
+        let (_, line) = self.driver.user_line(&self.session, &text, &images);
         self.write(line);
         if self.t.entries.iter().all(|e| !matches!(e, Entry::User { .. })) {
             let title = if text.is_empty() { attachments.first().map_or("", |a| a.name.as_str()) } else { text.as_str() };
@@ -717,7 +741,7 @@ impl ChatView {
                 image
             })
             .collect();
-        self.t.push_user(&text, sent, &uuid);
+        self.t.push_user(&text, sent);
         self.input.update(cx, |i, cx| i.set_value("", window, cx));
         self.start_ticker(cx);
         self.refresh(cx);
@@ -803,8 +827,10 @@ impl ChatView {
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
-        if self.chat.is_some() {
-            self.write(wire::interrupt());
+        if self.chat.is_some()
+            && let Some(line) = self.driver.interrupt_line()
+        {
+            self.write(line);
         }
         cx.notify();
     }
@@ -816,16 +842,20 @@ impl ChatView {
     fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         self.mode = mode;
         self.mode_picked = true;
-        if self.chat.is_some() {
-            self.write(wire::set_permission_mode(mode));
+        if self.chat.is_some()
+            && let Some(line) = self.driver.mode_line(mode)
+        {
+            self.write(line);
         }
         cx.notify();
     }
 
     /// Run `model` (a value of [`Transcript::models`]) from the next turn on.
     fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
-        if self.live {
-            self.write(wire::set_model(&model));
+        if self.live
+            && let Some(line) = self.driver.model_line(&model)
+        {
+            self.write(line);
         }
         self.model_picked = Some(model);
         cx.notify();
@@ -883,7 +913,9 @@ impl ChatView {
 
     fn answer(&mut self, ix: usize, answer: Answer, cx: &mut Context<Self>) {
         let Some(Entry::Ask(ask)) = self.t.entries.get(ix).cloned() else { return };
-        self.write(wire::answer(&ask, &answer));
+        if let Some(line) = self.driver.answer_line(&ask, &answer) {
+            self.write(line);
+        }
         self.t.set_answer(&ask.request_id, answer);
         self.picks.retain(|p| p.0 != ix);
         self.refresh(cx);
@@ -1463,7 +1495,9 @@ impl ChatView {
                 Err(_) => return,
             },
         };
-        self.write(wire::elicit(&e, &answer));
+        if let Some(line) = self.driver.elicit_line(&e, &answer) {
+            self.write(line);
+        }
         self.t.set_elicit_answer(&e.request_id, answer);
         self.form_inputs.retain(|k, _| k.0 != ix);
         self.form_picks.retain(|k, _| k.0 != ix);
@@ -1576,7 +1610,7 @@ impl ChatView {
                 plan = Some(s("plan").to_owned());
                 ("Approve this plan?".to_owned(), String::new())
             },
-            "AskUserQuestion" => ("Claude has a question".to_owned(), String::new()),
+            "AskUserQuestion" => (format!("{} has a question", crate::agents::agent_short_name(&self.agent())), String::new()),
             "WebFetch" => ("Fetch this page?".to_owned(), s("url").to_owned()),
             name => {
                 let detail = serde_json::to_string_pretty(input).unwrap_or_default();
@@ -1817,10 +1851,18 @@ impl Render for ChatView {
             },
             None => (Vec::new(), 0),
         };
+        let agent = AgentId::new(self.driver.agent());
+        let caps = self.driver.caps();
         let scope = template::Scope::new("chat")
             .var("empty", empty)
             .var("busy", self.t.busy)
             .var("typed", typed)
+            .var("agent", crate::agents::agent_name(&agent))
+            .var("agent_short", crate::agents::agent_short_name(&agent))
+            .var("can_mode", caps.permission_modes)
+            .var("can_model", caps.models)
+            .var("can_attach", caps.images)
+            .var("can_stop", caps.interrupt)
             .var("mode", self.mode.label())
             .var("model", self.model_label())
             .var("slash", slash.is_some())
@@ -1907,6 +1949,7 @@ impl Render for ChatView {
                     let models: Vec<(String, String, String)> =
                         self.t.models.iter().map(|m| (m.value.clone(), m.name.clone(), m.description.clone())).collect();
                     let on = self.model_picked.clone().unwrap_or_else(|| "default".to_owned());
+                    let short = crate::agents::agent_short_name(&self.agent());
                     b.dropdown_caret(true)
                         .dropdown_menu(move |m, window, cx| {
                             let entries = models
@@ -1927,7 +1970,10 @@ impl Render for ChatView {
                                     let _ = me.update(cx, |this, cx| this.set_model(value.clone(), cx));
                                 }))
                             });
-                            let scope = template::Scope::new("chat-model").var("loaded", !models.is_empty()).list("models", entries);
+                            let scope = template::Scope::new("chat-model")
+                                .var("loaded", !models.is_empty())
+                                .var("agent_short", short.as_str())
+                                .list("models", entries);
                             template::menu("menu.chat_model", scope, m.scrollable(true), items, window, cx)
                         })
                         .into_any_element()
@@ -1957,33 +2003,8 @@ fn thumb_key(image: &UserImage) -> usize {
     image.bytes.as_ptr() as usize
 }
 
-/// The shell line that starts Claude: `user`'s own arguments, as typed
-/// (shell syntax), and `args`. The daemon puts the hook settings file's path
-/// in place of the placeholder (or drops the flag without hooks).
-fn claude_line(user: &str, args: &[String]) -> String {
-    let mut line = String::from("claude");
-    if !user.is_empty() {
-        line.push(' ');
-        line.push_str(user);
-    }
-    line.push_str(" --settings {tern-settings}");
-    for a in args {
-        line.push(' ');
-        line.push_str(&crate::workspace::shell_quote(a));
-    }
-    line
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn claude_gets_the_hook_settings_placeholder_as_it_is() {
-        let args = ["--verbose".to_owned()];
-        let quoted = crate::workspace::shell_quote("--verbose");
-        assert_eq!(super::claude_line("", &args), format!("claude --settings {{tern-settings}} {quoted}"));
-        assert_eq!(super::claude_line("--foo", &args), format!("claude --foo --settings {{tern-settings}} {quoted}"));
-    }
-
     use super::{command_matches, web_url};
 
     #[test]
