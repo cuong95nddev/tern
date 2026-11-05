@@ -79,21 +79,18 @@ pub fn codex_hooks_arg(command: &str) -> String {
     format!("{{{}}}", parts.join(","))
 }
 
-fn hook_file(dir: &Path, token: &str) -> PathBuf {
-    dir.join(format!("codex-hooks-{token}.json"))
-}
-
 /// Write the tab's hook endpoint to a private file and return its path: `ps`
-/// shows Codex's arguments, so they name this file and not the token.
+/// shows Codex's arguments, so they name this file (itself named for the
+/// token's hash) and not the endpoint's token.
 pub fn write_codex_hook_file(dir: &Path, token: &str, hook_url: &str) -> io::Result<PathBuf> {
-    let path = hook_file(dir, token);
+    let path = crate::hooks::token_file(dir, "codex-hooks", token);
     let mut f = crate::hooks::create_private(dir, &path)?;
     f.write_all(json!({ "hook_url": hook_url }).to_string().as_bytes())?;
     Ok(path)
 }
 
 pub fn remove_codex_hook_file(dir: &Path, token: &str) {
-    let _ = std::fs::remove_file(hook_file(dir, token));
+    let _ = std::fs::remove_file(crate::hooks::token_file(dir, "codex-hooks", token));
 }
 
 /// The command a hook of a tab with hook file `file` runs. Quoted for the
@@ -148,12 +145,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn launch_args_name_the_file_and_not_the_token() {
-        let args =
-            codex_launch_args(std::path::Path::new("/A p/tern"), std::path::Path::new("/r/codex-hooks-tok.json"), crate::statusline::quote);
+    fn launch_args_show_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let token = "0123456789abcdef";
+        let file = write_codex_hook_file(&run, token, "http://127.0.0.1:1/hook/x").unwrap();
+        let args = codex_launch_args(std::path::Path::new("/A p/tern"), &file, crate::statusline::quote);
         assert!(args.starts_with("-c 'hooks={"), "{args}");
         assert!(args.contains("--hook"), "{args}");
-        assert!(!args.contains("/hook/"), "{args}");
+        assert!(!args.contains(token), "{args}");
     }
 
     /// Needs Codex on the PATH: it must trust what Tern passes it.

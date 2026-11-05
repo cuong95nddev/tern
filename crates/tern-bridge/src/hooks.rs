@@ -189,12 +189,21 @@ pub fn write_claude_settings(
     exe: Option<&std::path::Path>,
     version: Option<crate::claude_version::Version>,
 ) -> std::io::Result<PathBuf> {
-    let path = dir.join(format!("claude-settings-{token}.json"));
+    let path = token_file(dir, "claude-settings", token);
     let status_line = exe.map(|e| crate::statusline::command(e, &path));
     let relay = exe.map(|e| crate::relay::command(e, &path));
     let mut f = create_private(dir, &path)?;
     f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref(), version).as_bytes())?;
     Ok(path)
+}
+
+/// The private file `prefix` of the tab with hook token `token`, in `dir`.
+/// Named for the token's hash: `ps` shows the path, and the token must not
+/// show with it.
+pub(crate) fn token_file(dir: &std::path::Path, prefix: &str, token: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let name: String = Sha256::digest(token.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect();
+    dir.join(format!("{prefix}-{name}.json"))
 }
 
 /// Create `path` for writing, in `dir`: it must be (or become) a 0700
@@ -223,6 +232,8 @@ pub(crate) fn create_private(dir: &std::path::Path, path: &std::path::Path) -> s
 }
 
 pub fn remove_claude_settings(dir: &std::path::Path, token: &str) {
+    let _ = std::fs::remove_file(token_file(dir, "claude-settings", token));
+    // What a daemon that handed its tabs over may have named it.
     let _ = std::fs::remove_file(dir.join(format!("claude-settings-{token}.json")));
 }
 
@@ -406,6 +417,17 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_settings_path_shows_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let token = "0123456789abcdef";
+        let path = super::write_claude_settings(&run, token, "http://127.0.0.1:1/hook/x", None, None).unwrap();
+        assert!(!path.to_string_lossy().contains(token), "{}", path.display());
+        super::remove_claude_settings(&run, token);
+        assert!(!path.exists());
+    }
+
     #[test]
     fn apply_patch_paths_are_the_files_it_touched() {
         let patch = "*** Begin Patch\n*** Add File: c.txt\n+y\n*** Update File: /abs/d.rs\n*** Move to: e.rs\n*** Delete File: f.txt\n*** End Patch";
