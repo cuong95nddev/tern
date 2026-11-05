@@ -1,0 +1,23 @@
+{
+  "id": "claude",
+  "name": "Claude Code",
+  "short_name": "Claude",
+  "command": "claude",
+  "processes": ["claude"],
+  "logo": { "light": "claude", "dark": "claude" },
+  "resume": ["claude", "--resume", "{session}"],
+  "skills_dir": ".claude/skills",
+  "screen": {
+    "blocked": [
+      { "bottom_contains": ["esc to cancel", "enter to confirm"] },
+      { "bottom_contains": ["esc to cancel", "enter to select"] },
+      { "bottom_contains": "do you want to proceed?" },
+      { "bottom_contains": "waiting for permission" },
+      { "bottom_contains": "do you want to allow this connection?" }
+    ],
+    "working": [
+      { "title_lead": [[9680, 9683], [10240, 10495]] },
+      { "bottom_contains": "esc to interrupt" }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "tern-agent"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

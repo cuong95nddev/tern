@@ -1,0 +1,16 @@
+{
+  "id": "opencode",
+  "name": "OpenCode",
+  "command": "opencode",
+  "processes": ["opencode"],
+  "logo": { "light": "opencode-light", "dark": "opencode-dark" },
+  "resume": ["opencode", "--session", "{session}"],
+  "skills_dir": ".agents/skills",
+  "screen": {
+    "blocked": [
+      { "bottom_contains": "[y/n]" },
+      { "bottom_contains": "do you want to proceed?" },
+      { "bottom_contains": "waiting for user confirmation" }
+    ]
+  }
+}

@@ -6652,6 +6652,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-agent"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "tern-app"
 version = "0.10.1"
 dependencies = [

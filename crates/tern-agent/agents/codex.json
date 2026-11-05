@@ -1,0 +1,22 @@
+{
+  "id": "codex",
+  "name": "Codex",
+  "command": "codex",
+  "processes": ["codex"],
+  "logo": { "light": "openai-light", "dark": "openai-dark" },
+  "resume": ["codex", "resume", "{session}"],
+  "skills_dir": ".agents/skills",
+  "screen": {
+    "blocked": [
+      { "title_contains": "Action Required" },
+      { "bottom_contains": "press enter to confirm or esc to cancel" },
+      { "bottom_contains": "allow command?" },
+      { "bottom_contains": "enter to submit answer" },
+      { "bottom_contains": "[y/n]" }
+    ],
+    "working": [
+      { "title_any_char": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" },
+      { "bottom_contains": "to interrupt)" }
+    ]
+  }
+}

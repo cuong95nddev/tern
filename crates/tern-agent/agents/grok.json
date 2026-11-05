@@ -1,0 +1,16 @@
+{
+  "id": "grok",
+  "name": "Grok",
+  "command": "grok",
+  "processes": ["grok"],
+  "logo": { "light": "grok-light", "dark": "grok-dark" },
+  "resume": [],
+  "skills_dir": null,
+  "screen": {
+    "blocked": [
+      { "bottom_contains": "[y/n]" },
+      { "bottom_contains": "do you want to proceed?" },
+      { "bottom_contains": "waiting for user confirmation" }
+    ]
+  }
+}
