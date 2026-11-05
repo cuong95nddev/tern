@@ -241,6 +241,40 @@ fn a_users_config_content_is_added_to() {
 }
 
 #[test]
+fn an_opencode_event_tells_its_tabs_session_and_a_stop_past_the_limit_steers() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_opencode("2.0.30");
+    let post = |kind: &str, data: &str| {
+        format!(
+            r#"curl -s -X POST -H 'content-type: application/json' -d '{{"hook_event_name":"OpenCode","type":"{kind}","data":{data}}}' "$url"; echo; "#
+        )
+    };
+    let url = r#"url=$(sed -n 's/.*"hook_url":"\([^"]*\)".*/\1/p' "$TERN_OPENCODE_HOOK_FILE"); "#;
+    let step = |tokens: u32| {
+        format!(
+            r#"curl -s -X POST -d '{{"hook_event_name":"OpenCode","type":"session.step.ended","window":100,"data":{{"sessionID":"ses_1","tokens":{{"input":{tokens}}}}}}}' "$url"; echo; "#
+        )
+    };
+    let script = format!(
+        "{url}{}{}read x; {}{}read y",
+        post("session.created", r#"{"sessionID":"ses_1"}"#),
+        step(10),
+        step(90),
+        post("session.execution.succeeded", r#"{"sessionID":"ses_1"}"#),
+    );
+    let s = c.open(opencode_tab(&path, &script), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    wait_until("session", || c.list().unwrap().iter().any(|i| i.id == id && i.agent_session.as_deref() == Some("ses_1")));
+    c.set_context_guard(id, 50, false);
+    s.write(b"\n");
+    wait_until("steer", || screen(&s).contains(r#"{"steer":{"#) && screen(&s).contains(r#""resume":true"#));
+    s.close();
+}
+
+#[test]
 fn a_codex_hook_reaches_its_own_tab() {
     use tern_term::agent_status::TurnState;
     let d = daemon(Duration::from_secs(60));

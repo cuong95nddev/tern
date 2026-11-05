@@ -9,6 +9,7 @@ pub mod graphics;
 pub mod keys;
 pub mod mirror;
 pub mod mouse;
+pub mod opencode_status;
 pub mod osc;
 pub mod palette;
 pub mod procs;

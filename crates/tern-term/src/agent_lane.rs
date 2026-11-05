@@ -9,12 +9,14 @@ use serde_json::Value;
 use crate::agent_status::AgentStatus;
 use crate::claude_status::ClaudeTracker;
 use crate::codex_status::CodexTracker;
+use crate::opencode_status::OpenCodeTracker;
 
 /// A hook lane: times are milliseconds since the Unix epoch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentLane {
     Claude(ClaudeTracker),
     Codex(CodexTracker),
+    OpenCode(OpenCodeTracker),
 }
 
 impl AgentLane {
@@ -23,6 +25,7 @@ impl AgentLane {
         match id {
             tern_agent::CLAUDE => Some(Self::Claude(ClaudeTracker::default())),
             tern_agent::CODEX => Some(Self::Codex(CodexTracker::default())),
+            tern_agent::OPENCODE => Some(Self::OpenCode(OpenCodeTracker::default())),
             _ => None,
         }
     }
@@ -32,6 +35,7 @@ impl AgentLane {
         match self {
             Self::Claude(_) => tern_agent::CLAUDE,
             Self::Codex(_) => tern_agent::CODEX,
+            Self::OpenCode(_) => tern_agent::OPENCODE,
         }
     }
 
@@ -41,6 +45,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.on_event(raw, now, stop_blocked),
             Self::Codex(t) => t.on_event(raw, now, stop_blocked),
+            Self::OpenCode(t) => t.on_event(raw, now, stop_blocked),
         }
     }
 
@@ -49,6 +54,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.interrupted(now),
             Self::Codex(t) => t.interrupted(now),
+            Self::OpenCode(t) => t.interrupted(now),
         }
     }
 
@@ -57,6 +63,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.question_answered(now),
             Self::Codex(t) => t.question_answered(now),
+            Self::OpenCode(t) => t.question_answered(now),
         }
     }
 
@@ -64,6 +71,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.main_agent_busy(),
             Self::Codex(t) => t.main_agent_busy(),
+            Self::OpenCode(t) => t.main_agent_busy(),
         }
     }
 
@@ -71,6 +79,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.asking(),
             Self::Codex(t) => t.asking(),
+            Self::OpenCode(t) => t.asking(),
         }
     }
 
@@ -79,6 +88,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.current(now),
             Self::Codex(t) => t.current(now),
+            Self::OpenCode(t) => t.current(now),
         }
     }
 
@@ -87,6 +97,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.deadline(),
             Self::Codex(t) => t.deadline(),
+            Self::OpenCode(t) => t.deadline(),
         }
     }
 
@@ -95,6 +106,7 @@ impl AgentLane {
         match self {
             Self::Claude(t) => t.knows(),
             Self::Codex(t) => t.knows(),
+            Self::OpenCode(t) => t.knows(),
         }
     }
 }

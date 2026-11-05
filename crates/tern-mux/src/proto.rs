@@ -24,6 +24,7 @@ use tern_term::agent_status::AgentStatus;
 use tern_term::claude_status::ClaudeTracker;
 use tern_term::codex_status::CodexTracker;
 use tern_term::mirror::Marker;
+use tern_term::opencode_status::OpenCodeTracker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
 use tern_term::{SpawnConfig, TermSize};
@@ -33,7 +34,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 18;
+pub const MINOR: u32 = 19;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -61,6 +62,7 @@ pub const PALETTE_MINOR: u32 = 14;
 pub const CHAT_GUARD_MINOR: u32 = 15;
 // MINOR 16: `SessionInfo.agent` and `agent_session` (older clients read
 // `claude` and `claude_session`, still filled).
+// MINOR 19: `HandedSession.opencode` (older daemons drop it).
 // MINOR 17: `ChatSpec.agent`, `ChatInfo.agent` and `HandedChat.agent` (none
 // means Claude, the only agent older builds chat with).
 /// The handoff messages' layout; a daemon adopts from every version up to
@@ -571,6 +573,9 @@ pub struct HandedSession {
     /// Its Codex's hook state (a daemon older than MINOR 18 starts without it).
     #[serde(default)]
     pub codex: Option<CodexTracker>,
+    /// Its OpenCode's event state (a daemon older than MINOR 19 starts without it).
+    #[serde(default)]
+    pub opencode: Option<OpenCodeTracker>,
 }
 
 /// A chat, as handed to the new daemon.
@@ -1137,6 +1142,24 @@ mod tests {
         assert_eq!(info.agent_id().as_str(), "claude");
         let codex = ChatInfo { id: 2, agent: Some("codex".into()), ..Default::default() };
         assert_eq!(reencode::<_, ChatInfo>(&codex).agent_id().as_str(), "codex");
+    }
+
+    #[test]
+    fn an_opencode_lane_is_handed_over() {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        struct Old {
+            codex: Option<CodexTracker>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct New {
+            codex: Option<CodexTracker>,
+            #[serde(default)]
+            opencode: Option<OpenCodeTracker>,
+        }
+        let new = New { codex: None, opencode: Some(OpenCodeTracker::default()) };
+        assert!(reencode::<_, New>(&new).opencode.is_some());
+        assert!(reencode::<_, New>(&Old { codex: None }).opencode.is_none());
     }
 
     #[test]

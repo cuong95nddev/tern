@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use tern_agent::AgentId;
 use tern_bridge::context::{Action, Guard, Policy};
+use tern_bridge::opencode_fold::{self, OpenCodeFold};
 use tern_bridge::{HookEvent, HookServer, codex_hooks, opencode_hooks};
 #[cfg(unix)]
 use tern_term::agent_lane::AgentLane;
@@ -196,6 +197,8 @@ struct Session {
     /// How full its Claude conversation's context window is, and its
     /// handoff past the limit.
     guard: Guard,
+    /// What its OpenCode's events mean, in an OpenCode tab.
+    fold: Option<OpenCodeFold>,
     /// The limit its tab set (none until it does).
     policy: Policy,
     /// Its tab muted its notifications.
@@ -485,12 +488,21 @@ const UI_SKIPS: [&str; 9] = [
     "SessionEnd",
 ];
 
-fn type_after_turn(host: &Arc<Host>, action: Action) {
+/// What `agent` is told to start a fresh conversation with.
+fn clear_command(agent: Option<&AgentId>) -> &'static str {
+    match agent {
+        Some(a) if a.is(tern_agent::OPENCODE) => "/new",
+        _ => "/clear",
+    }
+}
+
+fn type_after_turn(host: &Arc<Host>, agent: Option<&AgentId>, action: Action) {
+    let clear = clear_command(agent).to_owned();
     let lines = match action {
         Action::None => return,
-        Action::Clear => vec!["/clear".to_owned()],
+        Action::Clear => vec![clear],
         Action::Prompt(p) => vec![p],
-        Action::ClearPrompt(p) => vec!["/clear".to_owned(), p],
+        Action::ClearPrompt(p) => vec![clear, p],
     };
     let host = host.clone();
     std::thread::spawn(move || {
@@ -503,10 +515,16 @@ fn type_after_turn(host: &Arc<Host>, action: Action) {
     });
 }
 
+/// What folds the events of a tab of `agent`, when it needs it.
+fn fold_for(agent: Option<&AgentId>) -> Option<OpenCodeFold> {
+    agent.filter(|a| a.is(tern_agent::OPENCODE)).map(|_| OpenCodeFold::default())
+}
+
 /// The guard of a tab of `agent`.
 pub(crate) fn guard_for(agent: Option<&AgentId>) -> Guard {
     match agent {
-        Some(a) if a.is(tern_agent::CODEX) => Guard::starting_at_first_turn(),
+        // Neither says a word of a fresh conversation before its first turn.
+        Some(a) if a.is(tern_agent::CODEX) || a.is(tern_agent::OPENCODE) => Guard::starting_at_first_turn(),
         _ => Guard::default(),
     }
 }
@@ -804,7 +822,7 @@ impl Server {
                     // Waiting on the user (a permission) counts as busy: typing
                     // would answer it.
                     let busy = matches!(s.host.status(), ActivityStatus::Working | ActivityStatus::Blocked);
-                    type_after_turn(&s.host, s.guard.request(busy));
+                    type_after_turn(&s.host, s.agent.as_ref(), s.guard.request(busy));
                 } else if let Some(chat) = st.chats.get(&id) {
                     chat.ask_handoff();
                 }
@@ -812,7 +830,7 @@ impl Server {
             ClientMsg::ResumeHandoff { id, path } => {
                 let mut st = self.state.lock().unwrap();
                 if let Some(s) = st.sessions.get_mut(&id) {
-                    type_after_turn(&s.host, s.guard.resume_from(path));
+                    type_after_turn(&s.host, s.agent.as_ref(), s.guard.resume_from(path));
                 } else if let Some(chat) = st.chats.get(&id) {
                     chat.resume_handoff(path);
                 }
@@ -1285,6 +1303,7 @@ impl Server {
                     held: false,
                     hooks: VecDeque::new(),
                     guard: guard_for(agent.as_ref()),
+                    fold: fold_for(agent.as_ref()),
                     agent,
                     claude_session: None,
                     policy: Policy::default(),
@@ -1437,6 +1456,9 @@ impl Server {
 
     /// Hook `ev` came; the answer for Claude Code, if any.
     fn on_hook(&self, ev: HookEvent) -> Option<serde_json::Value> {
+        if ev.event == opencode_fold::EVENT {
+            return self.on_opencode_event(&ev);
+        }
         let chat = self.state.lock().unwrap().chats.values().find(|c| c.token.as_deref() == Some(ev.token.as_str())).cloned();
         if let Some(chat) = chat {
             return chat.on_hook(&ev);
@@ -1450,7 +1472,7 @@ impl Server {
                 s.claude_session = Some(id.clone());
             }
             let (reply, action) = s.guard.on_event(&ev, s.policy);
-            type_after_turn(&s.host, action);
+            type_after_turn(&s.host, s.agent.as_ref(), action);
             match s.owner.as_ref().and_then(Weak::upgrade) {
                 // The UI has the status from the daemon: it wants only the
                 // events it reads files, the session and the handoff from.
@@ -1477,6 +1499,28 @@ impl Server {
             host.agent_hook(&ev.raw, ev.event == "Stop" && blocked);
         }
         reply
+    }
+
+    /// Tern's plugin in an OpenCode tab posted `ev`: what it stands for comes
+    /// in as hooks would, and the answer is what the plugin is to do.
+    fn on_opencode_event(&self, ev: &HookEvent) -> Option<serde_json::Value> {
+        let hooks = {
+            let mut st = self.state.lock().unwrap();
+            let s = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str()))?;
+            s.fold.as_mut()?.on_event(&ev.raw)
+        };
+        let mut answer = None;
+        for hook in hooks {
+            let Some(hook) = HookEvent::parse(ev.token.clone(), hook.to_string().as_bytes()) else { continue };
+            let session = hook.session_id.clone();
+            if let (Some(reply), Some(session)) = (self.on_hook(hook), session) {
+                answer = Some((session, reply));
+            }
+        }
+        let (session, reply) = answer?;
+        let mut st = self.state.lock().unwrap();
+        let s = st.sessions.values_mut().find(|s| s.token.as_deref() == Some(ev.token.as_str()))?;
+        s.fold.as_mut()?.answer(&session, &reply)
     }
 
     /// Hook `ev` came from an agent with no status line: how full its context
@@ -1624,10 +1668,11 @@ impl Server {
         for (id, host, token, claude_session, hooks, service, agent) in sessions {
             let paused = host.pause()?;
             let fd = paused.as_ref().and_then(|_| host.master_fd());
-            let (claude, codex) = match host.lane() {
-                Some(AgentLane::Claude(t)) => (Some(t), None),
-                Some(AgentLane::Codex(t)) => (None, Some(t)),
-                None => (None, None),
+            let (claude, codex, opencode) = match host.lane() {
+                Some(AgentLane::Claude(t)) => (Some(t), None, None),
+                Some(AgentLane::Codex(t)) => (None, Some(t), None),
+                Some(AgentLane::OpenCode(t)) => (None, None, Some(t)),
+                None => (None, None, None),
             };
             let session = HandedSession {
                 id,
@@ -1649,6 +1694,7 @@ impl Server {
                 // On the wire as a Claude tracker: what older daemons take.
                 claude,
                 codex,
+                opencode,
                 agent: agent.map(|a| a.to_string()),
             };
             handoff.paused.extend(paused);
@@ -1838,7 +1884,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             let observer: Arc<dyn Observer> = server.clone();
             let (host, driver) =
                 Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, s.images, observer)?;
-            if let Some(lane) = s.claude.map(AgentLane::Claude).or(s.codex.map(AgentLane::Codex)) {
+            if let Some(lane) = s.claude.map(AgentLane::Claude).or(s.codex.map(AgentLane::Codex)).or(s.opencode.map(AgentLane::OpenCode)) {
                 host.adopt_lane(lane);
             }
             drivers.extend(driver);
@@ -1853,6 +1899,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                 Session {
                     host,
                     guard: guard_for(agent.as_ref()),
+                    fold: fold_for(agent.as_ref()),
                     agent,
                     token: s.token,
                     owner: None,
@@ -2162,6 +2209,17 @@ mod tests {
     #[cfg(unix)]
     fn quotes_for_sh() {
         assert_eq!(shell_quote("/a b/it's"), r"'/a b/it'\''s'");
+    }
+
+    #[test]
+    fn opencode_clears_with_new() {
+        use tern_agent::AgentId;
+
+        use crate::server::clear_command;
+
+        assert_eq!(clear_command(Some(&AgentId::new(tern_agent::OPENCODE))), "/new");
+        assert_eq!(clear_command(Some(&AgentId::new(tern_agent::CODEX))), "/clear");
+        assert_eq!(clear_command(None), "/clear");
     }
 
     #[test]
