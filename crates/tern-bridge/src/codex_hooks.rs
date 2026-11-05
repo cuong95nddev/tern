@@ -205,6 +205,7 @@ mod tests {
         }
         let reply = lines.find_map(|l| serde_json::from_str::<serde_json::Value>(&l.unwrap()).ok().filter(|v| v["id"] == 1)).unwrap();
         child.kill().unwrap();
+        child.wait().unwrap();
         let hooks = reply.pointer("/result/data/0/hooks").and_then(serde_json::Value::as_array).unwrap();
         let ours: Vec<_> = hooks.iter().filter(|h| h["sourcePath"].as_str().is_some_and(|p| p.contains("<session-flags>"))).collect();
         assert_eq!(ours.len(), CODEX_EVENTS.len(), "{hooks:?}");
