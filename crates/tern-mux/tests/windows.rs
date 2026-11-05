@@ -28,7 +28,7 @@ fn spawn_detach_reattach() {
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
     let s = c.open(
-        Open::Spawn { cfg: ps("Write-Host before; $x = Read-Host; Write-Host after:$x; Read-Host"), hook: false, seed: None },
+        Open::Spawn { cfg: ps("Write-Host before; $x = Read-Host; Write-Host after:$x; Read-Host"), hook: false, seed: None, agent: None },
         SIZE,
         1000,
         sink1,
@@ -58,7 +58,7 @@ fn exit_code_is_reported() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("$null = Read-Host; exit 4"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("$null = Read-Host; exit 4"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     s.write(b"\r".to_vec());
     wait_until("exit", || ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(4)))));
@@ -69,7 +69,12 @@ fn hook_settings_are_substituted() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Get-Content -Raw {tern-settings}; Read-Host"), hook: true, seed: None }, SIZE, 1000, sink);
+    let s = c.open(
+        Open::Spawn { cfg: ps("Get-Content -Raw {tern-settings}; Read-Host"), hook: true, seed: None, agent: None },
+        SIZE,
+        1000,
+        sink,
+    );
     wait_until("ready", || ready_id(&ev).is_some());
     let token = ev.lock().unwrap().iter().find_map(|e| match e {
         TermEvent::Ready { token, .. } => token.clone(),
@@ -122,7 +127,7 @@ fn quiet_session_keeps_its_connection() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     std::thread::sleep(Duration::from_secs(5));
     assert!(c.alive(), "the connection dropped while the program was quiet");
@@ -152,7 +157,7 @@ fn idle_daemon_exits() {
     let mut d = daemon(Duration::from_millis(300));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     s.close();
     drop(c);
@@ -164,7 +169,7 @@ fn ended_programs_keep_the_daemon_a_while() {
     let mut d = daemon(Duration::from_millis(200));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("exit 3"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("exit 3"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     wait_until("exited", || c.list().unwrap().iter().any(|i| i.id == id && i.exited));
@@ -201,7 +206,7 @@ fn a_seeded_terminal_starts_below_the_old_screen() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Write-Host fresh; Read-Host"), hook: false, seed: Some(seed) }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Write-Host fresh; Read-Host"), hook: false, seed: Some(seed), agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("output", || screen(&s).contains("fresh"));
     let term = s.term().lock();
@@ -234,7 +239,7 @@ fn closing_at_once_ends_the_program() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: ps("Read-Host"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     let pid = c.list().unwrap().iter().find(|i| i.id == id).unwrap().pid;
@@ -248,7 +253,8 @@ fn closing_ends_the_programs_below_the_shell() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: ps("Write-Host started; ping -t 127.0.0.1"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s =
+        c.open(Open::Spawn { cfg: ps("Write-Host started; ping -t 127.0.0.1"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     // Any language's ping names the address it pings.
     wait_until("output", || screen(&s).contains("127.0.0.1"));

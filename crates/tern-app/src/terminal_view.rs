@@ -660,7 +660,7 @@ impl TerminalView {
         let spawn_cfg = cfg.clone();
         let open = move |seed| match attach {
             Some(id) => Open::Attach { id },
-            None => Open::Spawn { cfg: spawn_cfg, hook, seed },
+            None => Open::Spawn { cfg: spawn_cfg, hook, seed, agent: None },
         };
         self.exited = None;
         self.spawn_error = None;

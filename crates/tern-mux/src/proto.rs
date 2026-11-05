@@ -33,13 +33,15 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 17;
+pub const MINOR: u32 = 18;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
 pub const GUARD_MINOR: u32 = 5;
 // MINOR 6: the daemon sends `Image` and `ImagesGone` (older clients skip them).
 // MINOR 7: the daemon sends `Control` and takes `Drive`.
+/// The first MINOR whose daemon takes `Spawn`'s `agent`.
+pub const AGENT_SPAWN_MINOR: u32 = 18;
 /// The first MINOR whose daemon takes `AskHandoff` and `ResumeHandoff`.
 pub const ASK_HANDOFF_MINOR: u32 = 8;
 /// The first MINOR whose daemon takes `Mute`.
@@ -100,6 +102,9 @@ pub enum ClientMsg {
         hook: bool,
         #[serde(default, with = "serde_bytes")]
         seed: Option<Vec<u8>>,
+        /// The agent `hook` is for (MINOR 18); none is Claude.
+        #[serde(default)]
+        agent: Option<String>,
     },
     Attach {
         req: u64,
@@ -560,6 +565,9 @@ pub struct HandedSession {
     /// Its Claude's hook state (handoff 4).
     #[serde(default)]
     pub claude: Option<ClaudeTracker>,
+    /// The agent its hooks are for (none: Claude, from older daemons).
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Its Codex's hook state (a daemon older than MINOR 18 starts without it).
     #[serde(default)]
     pub codex: Option<CodexTracker>,
@@ -889,8 +897,8 @@ mod tests {
     fn client_messages_round_trip() {
         let msgs = vec![
             ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "0.1.2".into(), role: Role::Ui },
-            ClientMsg::Spawn { req: 1, cfg: cfg(), hook: true, seed: None },
-            ClientMsg::Spawn { req: 5, cfg: cfg(), hook: false, seed: Some(vec![1, 2, 3]) },
+            ClientMsg::Spawn { req: 1, cfg: cfg(), hook: true, seed: None, agent: None },
+            ClientMsg::Spawn { req: 5, cfg: cfg(), hook: false, seed: Some(vec![1, 2, 3]), agent: Some("codex".into()) },
             ClientMsg::HandOff { req: 6, exe: "/usr/bin/tern".into() },
             ClientMsg::Attach { req: 2, id: 7, size: SIZE },
             ClientMsg::Detach { id: 7 },
@@ -909,6 +917,24 @@ mod tests {
         for m in &msgs {
             assert_eq!(&read_frame::<ClientMsg>(&mut r, MAX_CLIENT_FRAME).unwrap().unwrap(), m);
         }
+    }
+
+    #[test]
+    fn a_spawn_from_before_agents_is_claudes() {
+        #[derive(Serialize)]
+        enum Old {
+            Spawn {
+                req: u64,
+                cfg: SpawnConfig,
+                hook: bool,
+                #[serde(with = "serde_bytes")]
+                seed: Option<Vec<u8>>,
+            },
+        }
+        let mut buf = vec![];
+        write_frame(&mut buf, &Old::Spawn { req: 1, cfg: cfg(), hook: true, seed: None }).unwrap();
+        let got = read_frame::<ClientMsg>(&mut Cursor::new(buf), MAX_CLIENT_FRAME).unwrap().unwrap();
+        assert!(matches!(got, ClientMsg::Spawn { hook: true, agent: None, .. }), "{got:?}");
     }
 
     #[test]

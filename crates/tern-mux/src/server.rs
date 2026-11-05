@@ -27,8 +27,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use tern_agent::AgentId;
 use tern_bridge::context::{Action, Guard, Policy};
-use tern_bridge::{HookEvent, HookServer};
+use tern_bridge::{HookEvent, HookServer, codex_hooks};
 #[cfg(unix)]
 use tern_term::agent_lane::AgentLane;
 use tern_term::agent_status::AgentStatus;
@@ -172,7 +173,9 @@ struct Session {
     held: bool,
     /// Hook requests that came while no one was attached.
     hooks: VecDeque<Vec<u8>>,
-    /// `session_id` of its latest Claude hook event.
+    /// The agent its hooks are for, when it has them.
+    agent: Option<AgentId>,
+    /// `session_id` of its agent's latest hook event.
     claude_session: Option<String>,
     /// How full its Claude conversation's context window is, and its
     /// handoff past the limit.
@@ -795,7 +798,7 @@ impl Server {
                 }
                 conn.send(ServerMsg::Revealed { req, delivered: ui.is_some() });
             },
-            ClientMsg::Spawn { req, cfg, hook, seed } => self.spawn(conn, req, cfg, hook, seed),
+            ClientMsg::Spawn { req, cfg, hook, seed, agent } => self.spawn(conn, req, cfg, hook, seed, agent),
             ClientMsg::Attach { req, id, size } => self.attach(conn, req, id, size),
             ClientMsg::Detach { id } => {
                 let mut st = self.state.lock().unwrap();
@@ -941,13 +944,12 @@ impl Server {
             .unwrap()
             .sessions
             .values()
-            .map(|s| (s.host.clone(), s.token.is_some(), s.claude_session.clone(), s.service.clone()))
+            .map(|s| (s.host.clone(), s.agent.clone(), s.claude_session.clone(), s.service.clone()))
             .collect();
         let mut list: Vec<_> = sessions
             .into_iter()
-            .map(|(h, claude, claude_session, service)| {
-                // Only Claude tabs get a hook token so far.
-                let agent = SessionInfo::with_agent(h.id(), claude.then_some(tern_agent::CLAUDE), claude_session);
+            .map(|(h, agent, claude_session, service)| {
+                let agent = SessionInfo::with_agent(h.id(), agent.as_ref().map(AgentId::as_str), claude_session);
                 SessionInfo {
                     claude: agent.claude,
                     claude_session: agent.claude_session,
@@ -1055,7 +1057,7 @@ impl Server {
             scrollback: 0,
         };
         let hook = spec.args.iter().any(|a| a.contains(SETTINGS_PLACEHOLDER));
-        let token = self.hook_settings(&probe, &mut spec.args, hook);
+        let token = self.hook_settings(&spec.agent_id(), &probe, &mut spec.args, hook);
         match ChatHost::spawn(id, &spec, token.clone(), self.chat_notify()) {
             Ok(chat) => {
                 log::info!("chat {id}: started pid {}", chat.pid);
@@ -1086,13 +1088,14 @@ impl Server {
         self.state.lock().unwrap().sessions.get(&id).map(|s| s.host.clone())
     }
 
-    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>) {
+    fn spawn(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>, agent: Option<String>) {
         if !self.wait_handoff(conn) {
             return;
         }
         let seed = seed.and_then(|s| proto::unpack_snapshot(&s).map_err(|e| log::warn!("bad seed: {e}")).ok());
         let sizes = vec![(Arc::downgrade(conn), cfg.size)];
-        match self.start(cfg, hook, seed, sizes, None) {
+        let agent = AgentId::new(agent.as_deref().unwrap_or(tern_agent::CLAUDE));
+        match self.start(cfg, hook.then_some(agent), seed, sizes, None) {
             Ok(id) => self.attach_host(conn, req, id, None),
             Err(message) => conn.send(ServerMsg::Error { req, message }),
         }
@@ -1105,7 +1108,7 @@ impl Server {
         }
         service.started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         log::info!("service {:?}: {}", service.name, service.command);
-        match self.start(cfg, false, None, Vec::new(), Some(service)) {
+        match self.start(cfg, None, None, Vec::new(), Some(service)) {
             Ok(id) => {
                 let pid = self.host(id).map_or(0, |h| h.pid());
                 conn.send(ServerMsg::ServiceStarted { req, id, pid });
@@ -1127,30 +1130,27 @@ impl Server {
         !conn.dead.load(Ordering::Acquire)
     }
 
-    /// With `hook`, a token for a Claude started as `probe` and the settings
-    /// file its hooks reach this daemon by. `args` get the file's path in
-    /// place of the placeholder, or lose the flag without one.
-    fn hook_settings(&self, probe: &SpawnConfig, args: &mut [String], hook: bool) -> Option<String> {
+    /// With `hook`, a token for agent `agent` started as `probe`, and what
+    /// its hooks reach this daemon by: `args` get that in place of the
+    /// placeholder, or lose the placeholder without one (an agent that
+    /// can't take Tern's hooks runs without).
+    fn hook_settings(&self, agent: &AgentId, probe: &SpawnConfig, args: &mut [String], hook: bool) -> Option<String> {
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
-                let version = crate::claude_probe::version(probe, SETTINGS_PLACEHOLDER);
-                match tern_bridge::write_claude_settings(
-                    &self.run_dir,
-                    &token,
-                    &hooks.hook_url(&token),
-                    std::env::current_exe().ok().as_deref(),
-                    version,
-                ) {
-                    Ok(path) => {
-                        let quoted = shell_quote(&path.to_string_lossy());
+                match self.hook_args(agent, probe, hooks, &token) {
+                    Ok(Some(text)) => {
                         for a in args.iter_mut() {
-                            *a = a.replace(SETTINGS_PLACEHOLDER, &quoted);
+                            *a = a.replace(SETTINGS_PLACEHOLDER, &text);
                         }
                         Some(token)
                     },
+                    Ok(None) => {
+                        hooks.unregister(&token);
+                        None
+                    },
                     Err(e) => {
-                        log::warn!("can't write Claude settings: {e}");
+                        log::warn!("can't write {agent}'s hook settings: {e}");
                         hooks.unregister(&token);
                         None
                     },
@@ -1160,17 +1160,41 @@ impl Server {
         };
         if token.is_none() {
             for a in args.iter_mut() {
-                *a = a.replace(&format!(" --settings {SETTINGS_PLACEHOLDER}"), "").replace(SETTINGS_PLACEHOLDER, "");
+                *a = a
+                    .replace(&format!(" --settings {SETTINGS_PLACEHOLDER}"), "")
+                    .replace(&format!(" {SETTINGS_PLACEHOLDER}"), "")
+                    .replace(SETTINGS_PLACEHOLDER, "");
             }
         }
         token
+    }
+
+    /// What goes in `agent`'s command line for its hooks to reach `token`'s
+    /// endpoint, its files written; `None` when it can't take them.
+    fn hook_args(&self, agent: &AgentId, probe: &SpawnConfig, hooks: &HookServer, token: &str) -> io::Result<Option<String>> {
+        let registry = tern_agent::registry();
+        let command = registry.get(agent.as_str()).map_or(agent.as_str(), |d| d.command.as_str());
+        let version = crate::agent_probe::version(command, probe, SETTINGS_PLACEHOLDER);
+        let exe = std::env::current_exe().ok();
+        match agent.as_str() {
+            tern_agent::CLAUDE => {
+                let path = tern_bridge::write_claude_settings(&self.run_dir, token, &hooks.hook_url(token), exe.as_deref(), version)?;
+                Ok(Some(shell_quote(&path.to_string_lossy())))
+            },
+            tern_agent::CODEX => {
+                let Some(exe) = exe.filter(|_| codex_hooks::codex_wired(version)) else { return Ok(None) };
+                let path = codex_hooks::write_codex_hook_file(&self.run_dir, token, &hooks.hook_url(token))?;
+                Ok(Some(codex_hooks::codex_launch_args(&exe, &path, shell_quote)))
+            },
+            _ => Ok(None),
+        }
     }
 
     /// Start a session running `cfg`; its id, or why it didn't start.
     fn start(
         self: &Arc<Self>,
         mut cfg: SpawnConfig,
-        hook: bool,
+        hook: Option<AgentId>,
         seed: Option<Snapshot>,
         sizes: Vec<(Weak<Conn>, TermSize)>,
         service: Option<ServiceSpec>,
@@ -1180,7 +1204,9 @@ impl Server {
         // the daemon who asked for a service).
         cfg.env.insert("TERN_SESSION_ID".into(), id.to_string());
         let probe = cfg.clone();
-        let token = self.hook_settings(&probe, &mut cfg.args, hook);
+        let agent = hook.clone().unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE));
+        let token = self.hook_settings(&agent, &probe, &mut cfg.args, hook.is_some());
+        let agent = token.is_some().then_some(agent);
         let observer: Arc<dyn Observer> = self.clone();
         let host = match Host::spawn(id, &cfg, seed, observer) {
             Ok(h) => h,
@@ -1192,6 +1218,9 @@ impl Server {
             },
         };
         log::info!("session {id}: started pid {}", host.pid());
+        if let Some(agent) = &agent {
+            host.set_agent(agent.as_str());
+        }
         {
             let mut st = self.state.lock().unwrap();
             st.sessions.insert(
@@ -1205,6 +1234,7 @@ impl Server {
                     driver: None,
                     held: false,
                     hooks: VecDeque::new(),
+                    agent,
                     claude_session: None,
                     guard: Guard::default(),
                     policy: Policy::default(),
@@ -1351,6 +1381,7 @@ impl Server {
             h.unregister(token);
         }
         tern_bridge::remove_claude_settings(&self.run_dir, token);
+        codex_hooks::remove_codex_hook_file(&self.run_dir, token);
     }
 
     /// Hook `ev` came; the answer for Claude Code, if any.
@@ -1411,7 +1442,12 @@ impl Server {
         // Only agent sessions are asked: one Tern can't name is a Claude tab
         // (spawned with a hook token) between its programs.
         let registry = tern_agent::registry();
-        let agent = registry.detect(&programs).or_else(|| registry.get(tern_agent::CLAUDE)).map_or("Claude", |d| d.short_name.as_str());
+        let own = self.state.lock().unwrap().sessions.get(&id).and_then(|s| s.agent.clone());
+        let own = own.and_then(|a| registry.get(a.as_str()));
+        let agent = own
+            .or_else(|| registry.detect(&programs))
+            .or_else(|| registry.get(tern_agent::CLAUDE))
+            .map_or("Claude", |d| d.short_name.as_str());
         let task = host.and_then(|h| h.title()).and_then(|t| tern_term::status::task_name(&t, agent));
         (agent.to_owned(), task)
     }
@@ -1479,7 +1515,7 @@ impl Server {
                 .iter()
                 .map(|(&id, s)| {
                     let hooks = s.hooks.iter().cloned().collect::<Vec<_>>();
-                    (id, s.host.clone(), s.token.clone(), s.claude_session.clone(), hooks, s.service.clone())
+                    (id, s.host.clone(), s.token.clone(), s.claude_session.clone(), hooks, s.service.clone(), s.agent.clone())
                 })
                 .collect();
             v.sort_by_key(|s| s.0);
@@ -1510,7 +1546,7 @@ impl Server {
             chats: chats.len() as u32,
         };
         proto::write_frame_with_fds(&stream, &begin, &fds)?;
-        for (id, host, token, claude_session, hooks, service) in sessions {
+        for (id, host, token, claude_session, hooks, service, agent) in sessions {
             let paused = host.pause()?;
             let fd = paused.as_ref().and_then(|_| host.master_fd());
             let (claude, codex) = match host.lane() {
@@ -1538,6 +1574,7 @@ impl Server {
                 // On the wire as a Claude tracker: what older daemons take.
                 claude,
                 codex,
+                agent: agent.map(|a| a.to_string()),
             };
             handoff.paused.extend(paused);
             let msg = HandoffMsg::Session(Box::new(session));
@@ -1735,6 +1772,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                 s.id,
                 Session {
                     host,
+                    agent: s.agent.as_deref().map(AgentId::new).or_else(|| s.token.as_ref().map(|_| AgentId::new(tern_agent::CLAUDE))),
                     token: s.token,
                     owner: None,
                     viewers: Vec::new(),

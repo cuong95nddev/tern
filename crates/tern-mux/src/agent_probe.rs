@@ -1,14 +1,15 @@
-//! Which Claude Code a Claude tab will start: asked of `claude --version`,
-//! run the way the tab runs `claude` (its shell, its env), so a version
-//! manager's shim picks the same one. Its settings name only the hook
-//! events that version knows (see [`tern_bridge::claude_version`]).
+//! Which version of its agent a tab will start: asked of `<cli> --version`,
+//! run the way the tab runs the agent (its shell, its env), so a version
+//! manager's shim picks the same one. A Claude's settings name only the hook
+//! events that version knows (see [`tern_bridge::claude_version`]); a Codex
+//! too old has no hooks (see [`tern_bridge::codex_hooks`]).
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tern_bridge::claude_version::{self, Version};
+use tern_bridge::version::{self, Version};
 use tern_term::SpawnConfig;
 
 /// A version this old is asked again (on the side: the old one serves
@@ -23,16 +24,16 @@ struct Known {
     asking: bool,
 }
 
-/// Per shell program: what its `claude --version` said.
+/// Per shell program, agent command and PATH: what its `--version` said.
 static KNOWN: Mutex<Option<HashMap<String, Known>>> = Mutex::new(None);
 
-/// The version of the Claude that `cfg` (a Claude tab's, its command the
-/// argument with `placeholder` in it) starts; `None` when it can't be told.
+/// The version of agent CLI `command` that `cfg` (the tab's, its command
+/// the argument with `placeholder` in it) starts; `None` when it can't be told.
 /// The first ask waits for the answer; later ones get the last answer and
 /// ask again on the side once it is old.
-pub fn version(cfg: &SpawnConfig, placeholder: &str) -> Option<Version> {
-    let probe = probe_command(cfg, placeholder)?;
-    let key = probe.0.clone();
+pub fn version(command: &str, cfg: &SpawnConfig, placeholder: &str) -> Option<Version> {
+    let probe = probe_command(command, cfg, placeholder)?;
+    let key = format!("{}\0{command}\0{}", probe.0, cfg.env.get("PATH").map_or("", String::as_str));
     {
         let mut known = KNOWN.lock().unwrap();
         let known = known.get_or_insert_with(HashMap::new);
@@ -54,15 +55,15 @@ pub fn version(cfg: &SpawnConfig, placeholder: &str) -> Option<Version> {
     version
 }
 
-/// What to run: the tab's shell, its arguments with the `claude …` command
-/// swapped for `claude --version`, its env and folder.
+/// What to run: the tab's shell, its arguments with the agent's command
+/// swapped for `<command> --version`, its env and folder.
 type Probe = (String, Vec<String>, HashMap<String, String>, Option<std::path::PathBuf>);
 
-fn probe_command(cfg: &SpawnConfig, placeholder: &str) -> Option<Probe> {
+fn probe_command(command: &str, cfg: &SpawnConfig, placeholder: &str) -> Option<Probe> {
     let program = cfg.program.clone().or_else(|| std::env::var("SHELL").ok().filter(|s| !s.is_empty()))?;
     let at = cfg.args.iter().position(|a| a.contains(placeholder))?;
     let mut args = cfg.args.clone();
-    args[at] = if cfg!(windows) { "& claude --version; exit $LASTEXITCODE".into() } else { "exec claude --version".into() };
+    args[at] = if cfg!(windows) { format!("& {command} --version; exit $LASTEXITCODE") } else { format!("exec {command} --version") };
     Some((program, args, cfg.env.clone(), cfg.cwd.clone()))
 }
 
@@ -81,15 +82,15 @@ fn run((program, args, env, cwd): &Probe) -> Option<Version> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                log::warn!("claude --version gave no answer");
+                log::warn!("{args:?}: --version gave no answer");
                 return None;
             },
         }
     }
     let mut out = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    let version = claude_version::parse(&out);
-    log::info!("Claude Code {version:?}");
+    let version = version::parse(&out);
+    log::info!("{args:?}: {version:?}");
     version
 }
 
@@ -107,10 +108,10 @@ mod tests {
             size: tern_term::TermSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
             scrollback: 0,
         };
-        let (program, args, ..) = probe_command(&cfg, "{s}").unwrap();
+        let (program, args, ..) = probe_command("claude", &cfg, "{s}").unwrap();
         assert_eq!(program, "/bin/sh");
         assert_eq!(args, ["-lic", "exec claude --version"]);
-        assert!(probe_command(&SpawnConfig { args: vec!["-l".into()], ..cfg }, "{s}").is_none());
+        assert!(probe_command("claude", &SpawnConfig { args: vec!["-l".into()], ..cfg }, "{s}").is_none());
     }
 
     #[test]

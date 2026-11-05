@@ -69,7 +69,7 @@ fn viewer_watches_and_types_beside_the_owner() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("output", || screen(&s).contains("before"));
     let id = s.id().unwrap();
@@ -145,7 +145,7 @@ fn a_viewer_has_the_session_until_the_owner_takes_it_back() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: echo_once(), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("output", || screen(&s).contains("before"));
     let id = s.id().unwrap();

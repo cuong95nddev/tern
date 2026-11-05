@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::version::Version;
+
 /// The events a Codex tab's hooks report: the name Codex's config has for
 /// each, and the label its trust keys and hashes have.
 pub const CODEX_EVENTS: [(&str, &str); 9] = [
@@ -22,6 +24,15 @@ pub const CODEX_EVENTS: [(&str, &str); 9] = [
     ("Stop", "stop"),
     ("Interrupt", "interrupt"),
 ];
+
+/// The first Codex Tern's hooks were checked on; an older one, or one whose
+/// version can't be told, runs without them.
+const FIRST_WIRED: Version = (0, 166, 0);
+
+/// Whether a Codex of `version` gets Tern's hooks.
+pub fn codex_wired(version: Option<Version>) -> bool {
+    version.is_some_and(|v| v >= FIRST_WIRED)
+}
 
 /// Hooks passed by `-c` have this for their source in a trust key.
 const SESSION_FLAGS_SOURCE: &str = "/<session-flags>/config.toml";
@@ -109,6 +120,14 @@ pub fn codex_launch_args(exe: &Path, file: &Path, quote: fn(&str) -> String) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_known_new_enough_codex_is_wired() {
+        assert!(codex_wired(Some((0, 166, 0))));
+        assert!(codex_wired(Some((1, 0, 0))));
+        assert!(!codex_wired(Some((0, 165, 9))));
+        assert!(!codex_wired(None));
+    }
 
     #[test]
     fn trusted_hash_matches_codex_0_166() {

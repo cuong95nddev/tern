@@ -496,7 +496,7 @@ impl Host {
         let mut hooks = self.shared.hooks.lock().unwrap();
         hooks.hooked = true;
         hooks.idle_reads = 0;
-        // Only Claude tabs get hooks so far.
+        // No lane was set: an older client's tab, which is Claude's.
         let lane = hooks.lane.get_or_insert_with(|| AgentLane::for_agent(tern_agent::CLAUDE).expect("Claude has a lane"));
         if let Some(st) = lane.on_event(raw, epoch_ms(), stop_blocked) {
             hooks.apply(self.id, st, &self.shared.status, &*self.observer);
@@ -504,6 +504,11 @@ impl Host {
         drop(hooks);
         // Its lease and session-file reads may have changed.
         let _ = self.shared.poller.notify();
+    }
+
+    /// Its hooks are agent `agent`'s.
+    pub fn set_agent(&self, agent: &str) {
+        self.shared.hooks.lock().unwrap().lane = AgentLane::for_agent(agent);
     }
 
     /// Its agent's status from its hooks, once one came.

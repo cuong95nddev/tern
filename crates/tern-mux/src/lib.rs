@@ -1,8 +1,8 @@
 //! Background sessions: the `tern --server` daemon that keeps terminals
 //! running while Tern is closed, and the client the UI talks to it with.
 
+mod agent_probe;
 mod chat;
-mod claude_probe;
 pub mod client;
 #[cfg(unix)]
 pub mod fdpass;

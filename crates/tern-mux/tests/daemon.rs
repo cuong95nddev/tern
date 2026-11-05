@@ -58,7 +58,12 @@ fn spawn_detach_reattach() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("echo before; read x; echo after:$x; read y"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(
+        Open::Spawn { cfg: sh("echo before; read x; echo after:$x; read y"), hook: false, seed: None, agent: None },
+        SIZE,
+        1000,
+        sink1,
+    );
     wait_until("ready", || ready_id(&ev1).is_some());
     wait_until("output", || screen(&s).contains("before"));
     let id = s.id().unwrap();
@@ -100,7 +105,7 @@ fn spawn_error_is_reported() {
     let (sink, ev) = sink();
     let mut cfg = sh("true");
     cfg.cwd = Some("/nonexistent/dir".into());
-    let _s = c.open(Open::Spawn { cfg, hook: false, seed: None }, SIZE, 1000, sink);
+    let _s = c.open(Open::Spawn { cfg, hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("error", || ev.lock().unwrap().iter().any(|e| matches!(e, TermEvent::SpawnError(_) | TermEvent::Ready { .. })));
 }
 
@@ -109,7 +114,7 @@ fn hook_settings_are_substituted() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("cat {tern-settings}; read x"), hook: true, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("cat {tern-settings}; read x"), hook: true, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let token = ev.lock().unwrap().iter().find_map(|e| match e {
         TermEvent::Ready { token, .. } => token.clone(),
@@ -121,11 +126,73 @@ fn hook_settings_are_substituted() {
 }
 
 #[test]
+fn codex_tab_gets_its_hook_args() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_codex("0.166.0");
+    let s = c.open(codex_tab(&path, r#"echo "[$1]"; printf '%s\n' "$2" | cut -c1-20; read x"#), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("hook args", || screen(&s).contains("[-c]") && screen(&s).contains("hooks={SessionStart"));
+    s.close();
+}
+
+#[test]
+fn an_old_codex_runs_without_hooks() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let (_dir, path) = fake_codex("0.100.0");
+    let s = c.open(codex_tab(&path, r#"echo "args:$#"; read x"#), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("no args", || screen(&s).contains("args:0"));
+    let id = s.id().unwrap();
+    assert!(c.list().unwrap().iter().any(|i| i.id == id && i.agent.is_none()));
+    s.close();
+}
+
+#[test]
+fn a_codex_that_cant_be_found_runs_without_hooks() {
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (sink, ev) = sink();
+    let s = c.open(codex_tab("/usr/bin:/bin", r#"echo "args:$#"; read x"#), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    wait_until("no args", || screen(&s).contains("args:0"));
+    s.close();
+}
+
+#[test]
+fn a_codex_hook_reaches_its_own_tab() {
+    use tern_term::agent_status::TurnState;
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let (_dir, path) = fake_codex("0.166.0");
+    let post = r#"curl -s -X POST -H 'content-type: application/json' -d '{"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"codex-1"}' "$url" >/dev/null; "#;
+    let (sink_a, ev_a) = sink();
+    let a = c.open(codex_tab(&path, &format!("{CODEX_URL}{post}read x")), SIZE, 1000, sink_a);
+    let (sink_b, ev_b) = sink();
+    let b = c.open(codex_tab(&path, "read x"), SIZE, 1000, sink_b);
+    wait_until("ready", || ready_id(&ev_a).is_some() && ready_id(&ev_b).is_some());
+    let id = a.id().unwrap();
+    wait_until("session", || {
+        c.list()
+            .unwrap()
+            .iter()
+            .any(|i| i.id == id && !i.claude && i.agent.as_deref() == Some("codex") && i.agent_session.as_deref() == Some("codex-1"))
+    });
+    wait_until("status", || agent_statuses(&ev_a).last().is_some_and(|s| s.state == TurnState::Working));
+    assert!(agent_statuses(&ev_b).is_empty());
+    a.close();
+    b.close();
+}
+
+#[test]
 fn exit_survives_detach() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x; exit 4"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh("read x; exit 4"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev1).is_some());
     let id = s.id().unwrap();
     drop(s);
@@ -143,7 +210,7 @@ fn server_loss_ends_sessions() {
     let d = daemon(Duration::from_millis(300));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     // Kill the connection from the server side: the daemon process of a real
     // run would have died; here, close all its sessions and let it idle out.
@@ -180,7 +247,7 @@ fn slow_client_is_dropped() {
     proto::write_frame(&mut raw, &ClientMsg::Hello { major: MAJOR, minor: MINOR, app_version: "t".into(), role: proto::Role::Ui }).unwrap();
     proto::write_frame(
         &mut raw,
-        &ClientMsg::Spawn { req: 1, cfg: sh("yes 0123456789012345678901234567890123456789"), hook: false, seed: None },
+        &ClientMsg::Spawn { req: 1, cfg: sh("yes 0123456789012345678901234567890123456789"), hook: false, seed: None, agent: None },
     )
     .unwrap();
     raw.flush().unwrap();
@@ -188,7 +255,7 @@ fn slow_client_is_dropped() {
     let c = client(&d.dir);
     wait_until("flood session", || !c.list().unwrap().is_empty());
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("echo fine; read x"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("echo fine; read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("output", || screen(&s).contains("fine"));
     // The stalled one gets disconnected once it is 1 MiB behind: after a
@@ -216,7 +283,7 @@ fn connector_keeps_one_connection() {
     let conn = tern_mux::client::Connector::new(d.dir.clone(), false, Arc::new(|_, _| {}), Arc::new(|_| {}));
     assert!(!conn.connected());
     let (sink, ev) = sink();
-    let s = conn.get().unwrap().open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = conn.get().unwrap().open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     assert!(conn.connected());
     // Same connection: the session is visible to the next `get`.
@@ -236,7 +303,7 @@ fn attach_to_an_exited_session_reports_the_exit() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("echo bye; sleep 0.3; exit 5"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh("echo bye; sleep 0.3; exit 5"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev1).is_some());
     let id = s.id().unwrap();
     drop(s);
@@ -253,10 +320,10 @@ fn closing_before_the_reply_ends_the_session() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink1, _ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     s.close(); // before `Attached` came back
     let (sink2, _ev2) = sink();
-    let s2 = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink2);
+    let s2 = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink2);
     drop(s2); // dropped before the reply: detached, still listed
     wait_until("only the dropped one left", || {
         let l = c.list().unwrap();
@@ -272,7 +339,7 @@ fn size_set_before_the_reply_wins() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink1, ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev1).is_some());
     let id = s.id().unwrap();
     drop(s);
@@ -297,7 +364,7 @@ fn dropped_connection_reports_loss_and_lets_go_of_the_pty() {
     let c = client(&d.dir);
     let (sink, ev) = sink();
     let s = c.open(
-        Open::Spawn { cfg: sh("sleep 0.5; head -c 2000000 /dev/zero | tr '\\0' x; read x"), hook: false, seed: None },
+        Open::Spawn { cfg: sh("sleep 0.5; head -c 2000000 /dev/zero | tr '\\0' x; read x"), hook: false, seed: None, agent: None },
         SIZE,
         1000,
         sink,
@@ -314,11 +381,16 @@ fn lagging_session_is_detached_alone() {
     let d = daemon_with(Duration::from_secs(60), usize::MAX, 200);
     let c = client(&d.dir);
     let (sink_a, ev_a) = sink();
-    let a = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None }, SIZE, 1000, sink_a);
+    let a = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None, agent: None }, SIZE, 1000, sink_a);
     wait_until("a ready", || ready_id(&ev_a).is_some());
     let (sink_b, ev_b) = sink();
     let b = c.open(
-        Open::Spawn { cfg: sh("sleep 0.3; head -c 5000 /dev/zero | tr '\\0' x; echo; echo flood; read x"), hook: false, seed: None },
+        Open::Spawn {
+            cfg: sh("sleep 0.3; head -c 5000 /dev/zero | tr '\\0' x; echo; echo flood; read x"),
+            hook: false,
+            seed: None,
+            agent: None,
+        },
         SIZE,
         1000,
         sink_b,
@@ -347,7 +419,7 @@ fn input_before_the_reply_is_kept() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     s.write(b"early\n".to_vec()); // before `Attached` came back
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("echo", || screen(&s).contains("got:early"));
@@ -361,7 +433,7 @@ fn big_input_goes_in_pieces() {
     let (sink, ev) = sink();
     let out = d.dir.join("got");
     let s = c.open(
-        Open::Spawn { cfg: sh(&format!("stty raw -echo; head -c 20000000 > {}", out.display())), hook: false, seed: None },
+        Open::Spawn { cfg: sh(&format!("stty raw -echo; head -c 20000000 > {}", out.display())), hook: false, seed: None, agent: None },
         SIZE,
         1000,
         sink,
@@ -386,7 +458,7 @@ fn closing_ends_the_foreground_job() {
     let mut cfg = sh("");
     cfg.args = vec!["-i".into()];
     cfg.env.insert("PS1".into(), "$ ".into());
-    let s = c.open(Open::Spawn { cfg, hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg, hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     s.write(format!("sh -c 'trap \"\" HUP; echo $$ > {}; while :; do sleep 0.1; done'\n", pidfile.display()).into_bytes());
     wait_until("job", || std::fs::read_to_string(&pidfile).is_ok_and(|p| p.ends_with('\n')));
@@ -437,7 +509,7 @@ fn watch_gets_the_list_and_its_changes() {
     assert!(next_list(&mut r).is_empty());
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x; exit 3"), hook: true, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("read x; exit 3"), hook: true, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     let list = loop {
@@ -462,7 +534,7 @@ fn watch_pushes_only_changes() {
     let mut held = vec![];
     for _ in 0..5 {
         let (sink, ev) = sink();
-        held.push((c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink), ev));
+        held.push((c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink), ev));
     }
     for (_, ev) in &held {
         wait_until("ready", || ready_id(ev).is_some());
@@ -526,7 +598,7 @@ fn claude_session_comes_from_hooks() {
     let (sink, ev) = sink();
     // Post a hook like Claude Code does, using the URL in the settings file.
     let script = r#"url=$(sed -n 's/.*"url": *"\([^"]*\)".*/\1/p' {tern-settings} | head -1); curl -s -X POST -H 'content-type: application/json' -d '{"hook_event_name":"Stop","session_id":"abc-123"}' "$url" >/dev/null; read x"#;
-    let s = c.open(Open::Spawn { cfg: sh(script), hook: true, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh(script), hook: true, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     wait_until("claude_session", || {
@@ -569,7 +641,7 @@ fn a_claude_tabs_status_comes_from_its_hooks() {
     );
     script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[]}"#);
     script += "read z";
-    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None }, SIZE, 1000, tab);
+    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None, agent: None }, SIZE, 1000, tab);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     let last = || agent_statuses(&ev).last().cloned();
@@ -594,7 +666,12 @@ fn the_users_handoff_is_typed_to_an_idle_agent() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y; echo then:$y; read z"), hook: true, seed: None }, SIZE, 1000, sink);
+    let s = c.open(
+        Open::Spawn { cfg: sh("read x; echo got:$x; read y; echo then:$y; read z"), hook: true, seed: None, agent: None },
+        SIZE,
+        1000,
+        sink,
+    );
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     assert!(c.takes_handoffs());

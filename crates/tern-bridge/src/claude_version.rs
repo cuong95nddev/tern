@@ -6,8 +6,7 @@
 //! line) over one name they don't know, so a tab's settings name only the
 //! events its Claude knows.
 
-/// A version, `major.minor.patch`.
-pub type Version = (u32, u32, u32);
+pub use crate::version::{Version, parse};
 
 /// The first version that knows each hook event.
 const FIRST_VERSIONS: &[(&str, Version)] = &[
@@ -37,15 +36,6 @@ const UNRESOLVED: Version = STATUS_LINE;
 /// `SessionEnd` is known from 1.0.85, but its delivery was measured only on
 /// 2.1.261 (Orca writes it from there).
 const SESSION_END_FROM: Version = (2, 1, 261);
-
-/// The version in `claude --version`'s output (`2.1.312 (Claude Code)`).
-pub fn parse(output: &str) -> Option<Version> {
-    output.split(|c: char| !(c.is_ascii_digit() || c == '.')).find_map(|word| {
-        let mut parts = word.split('.');
-        let v = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
-        parts.next().is_none().then_some(v)
-    })
-}
 
 /// Whether a Claude of `version` (`None`: not known) knows hook `event`.
 pub fn knows_event(version: Option<Version>, event: &str) -> bool {

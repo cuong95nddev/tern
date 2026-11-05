@@ -87,7 +87,12 @@ fn a_running_program_moves_to_the_new_daemon() {
     let p = daemon_pair();
     let c = client(&p.dir);
     let (sink1, ev1) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("echo before; read x; echo after:$x; read y"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(
+        Open::Spawn { cfg: sh("echo before; read x; echo after:$x; read y"), hook: false, seed: None, agent: None },
+        SIZE,
+        1000,
+        sink1,
+    );
     wait_until("ready", || ready_id(&ev1).is_some());
     wait_until("output", || screen(&s).contains("before"));
     let id = s.id().unwrap();
@@ -118,11 +123,11 @@ fn ended_sessions_and_claude_tabs_carry_over() {
     let p = daemon_pair();
     let c = client(&p.dir);
     let (sink1, ev1) = sink();
-    let ended = c.open(Open::Spawn { cfg: sh("echo done; exit 4"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let ended = c.open(Open::Spawn { cfg: sh("echo done; exit 4"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("exit", || ev1.lock().unwrap().iter().any(|e| matches!(e, TermEvent::Exit(Some(4)))));
     let ended = ended.id().unwrap();
     let (sink2, ev2) = sink();
-    let claude = c.open(Open::Spawn { cfg: sh("read x"), hook: true, seed: None }, SIZE, 1000, sink2);
+    let claude = c.open(Open::Spawn { cfg: sh("read x"), hook: true, seed: None, agent: None }, SIZE, 1000, sink2);
     wait_until("ready", || ready_id(&ev2).is_some());
     let claude = claude.id().unwrap();
 
@@ -140,19 +145,21 @@ fn ended_sessions_and_claude_tabs_carry_over() {
     assert!(screen(&s).contains("done"), "{}", screen(&s));
 }
 
+/// The agent statuses `ev` got from the daemon, in order.
+fn statuses(ev: &Mutex<Vec<TermEvent>>) -> Vec<tern_term::agent_status::AgentStatus> {
+    ev.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            TermEvent::AgentStatus(s) => Some((**s).clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn a_claude_tabs_hook_state_carries_over() {
     use tern_term::agent_status::TurnState;
-    let statuses = |ev: &Mutex<Vec<TermEvent>>| -> Vec<tern_term::agent_status::AgentStatus> {
-        ev.lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                TermEvent::AgentStatus(s) => Some((**s).clone()),
-                _ => None,
-            })
-            .collect()
-    };
     let p = daemon_pair();
     let c = client(&p.dir);
     let (sink1, ev1) = sink();
@@ -168,7 +175,7 @@ fn a_claude_tabs_hook_state_carries_over() {
     script += "read x; while :; do ";
     script += &post(r#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[]}"#);
     script += "sleep 0.1; done";
-    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh(&script), hook: true, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev1).is_some());
     wait_until("monitoring", || statuses(&ev1).last().is_some_and(|s| s.monitoring));
     let id = s.id().unwrap();
@@ -187,13 +194,47 @@ fn a_claude_tabs_hook_state_carries_over() {
 }
 
 #[test]
+fn a_codex_tabs_agent_and_lane_carry_over() {
+    use tern_term::agent_status::TurnState;
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = sink();
+    let (_dir, path) = fake_codex("0.166.0");
+    let post = |body: &str| format!(r#"curl -s -X POST -H 'content-type: application/json' -d '{body}' "$url" >/dev/null; "#);
+    let mut script = CODEX_URL.to_owned();
+    script += &post(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"hi"}"#);
+    // Posted until it reaches the new daemon: here the old one, in the same
+    // process, still takes some (a real one has exited).
+    script += "read x; while :; do ";
+    script += &post(r#"{"hook_event_name":"Interrupt","session_id":"s"}"#);
+    script += "sleep 0.1; done";
+    let s = c.open(codex_tab(&path, &script), SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    wait_until("working", || statuses(&ev1).last().is_some_and(|s| s.state == TurnState::Working));
+    let id = s.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let c = client(&p.dir);
+    assert!(c.list().unwrap().iter().any(|i| i.id == id && i.agent.as_deref() == Some("codex") && !i.claude));
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("status after the handoff", || statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Working));
+    s.write(b"\n".to_vec());
+    // Only a Codex lane takes `Interrupt` for the turn's end.
+    wait_until("interrupted", || statuses(&ev2).last().is_some_and(|s| s.state == TurnState::Done));
+    s.close();
+}
+
+#[test]
 fn kitty_images_carry_over() {
     let p = daemon_pair();
     let c = client(&p.dir);
     let (sink1, ev1) = sink();
     // A 1x1 RGB image with a virtual placement, then one known by number only.
     let script = r"printf '\033_Ga=T,U=1,i=7,f=24,s=1,v=1,c=2,r=1,q=2;AAAA\033\\\033_Ga=t,I=3,f=24,s=1,v=1,q=2;AAAA\033\\'; echo sent; read x; printf '\033_Ga=p,I=3,U=1,c=4,r=2\033\\'; echo placed; read y";
-    let s = c.open(Open::Spawn { cfg: sh(script), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh(script), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev1).is_some());
     wait_until("images", || s.images().len() == 2);
     let id = s.id().unwrap();
@@ -228,7 +269,7 @@ fn a_failed_adoption_leaves_the_old_daemon_serving() {
     });
     let c = client(&p.dir);
     let (sink1, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None }, SIZE, 1000, sink1);
+    let s = c.open(Open::Spawn { cfg: sh("read x; echo got:$x; read y"), hook: false, seed: None, agent: None }, SIZE, 1000, sink1);
     wait_until("ready", || ready_id(&ev).is_some());
 
     assert!(hand_off(&p.dir).is_err());
@@ -240,7 +281,7 @@ fn a_failed_adoption_leaves_the_old_daemon_serving() {
     // And it takes new connections and programs.
     let c2 = client(&p.dir);
     let (sink2, ev2) = sink();
-    let _s2 = c2.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink2);
+    let _s2 = c2.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink2);
     wait_until("ready", || ready_id(&ev2).is_some());
     assert!(!p.old.is_finished());
 }
@@ -257,7 +298,7 @@ fn a_seeded_terminal_starts_below_the_old_screen() {
     let d = daemon(Duration::from_secs(60));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("echo fresh; read x"), hook: false, seed: Some(seed) }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("echo fresh; read x"), hook: false, seed: Some(seed), agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     wait_until("output", || screen(&s).contains("fresh"));
     let term = s.term().lock();

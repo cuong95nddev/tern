@@ -65,10 +65,10 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
-    /// the path of its Claude settings file. With `seed` (a
+    /// what agent `agent` (none: Claude) needs for its hooks. With `seed` (a
     /// [`proto::pack_snapshot`] of `cfg.size`), the terminal starts with
     /// that screen's lines in its scrollback.
-    Spawn { cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>> },
+    Spawn { cfg: SpawnConfig, hook: bool, seed: Option<Vec<u8>>, agent: Option<String> },
     /// Attach to a running (or exited) session.
     Attach { id: u64 },
 }
@@ -498,9 +498,9 @@ impl MuxClient {
         });
         self.inner.pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
-            Open::Spawn { mut cfg, hook, seed } => {
+            Open::Spawn { mut cfg, hook, seed, agent } => {
                 cfg.size = size;
-                ClientMsg::Spawn { req, cfg, hook, seed }
+                ClientMsg::Spawn { req, cfg, hook, seed, agent }
             },
             Open::Attach { id } => ClientMsg::Attach { req, id, size },
         };

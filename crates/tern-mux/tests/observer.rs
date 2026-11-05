@@ -29,7 +29,7 @@ fn watcher_follows_the_list() {
     assert_eq!(sessions(&mut stream), Some(vec![]));
     let c = client(&d.dir);
     let (sink, ev) = sink();
-    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None }, SIZE, 1000, sink);
+    let s = c.open(Open::Spawn { cfg: sh("read x"), hook: false, seed: None, agent: None }, SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
     let id = s.id().unwrap();
     while !sessions(&mut stream).unwrap().iter().any(|i| i.id == id) {}
