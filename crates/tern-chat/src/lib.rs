@@ -26,6 +26,6 @@ pub mod sessions;
 pub mod summary;
 
 pub use claude::{Launch, new_session_id, read_record, wire};
-pub use driver::{ChatCaps, ChatDriver, ChatFollow, Said, chat_driver, chat_follower};
+pub use driver::{ChatCaps, ChatDriver, ChatFollow, Said, chat_driver, chat_follower, replay};
 pub use model::{Answer, Ask, Elicit, ElicitAnswer, Entry, Field, FieldKind, Model, PermissionMode, Tool, Transcript, TurnEnd, UserImage};
 pub use recent::{Recent, recent};

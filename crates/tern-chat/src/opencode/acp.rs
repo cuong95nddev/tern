@@ -119,12 +119,20 @@ impl OpenCodeDriver {
         self.session = Some(session.to_owned());
         t.session_id = Some(session.to_owned());
         (self.opening, self.resuming, self.message) = (false, None, None);
+        // A replayed load's lines looked like a turn at work.
+        (self.turn, t.busy) = (false, false);
+        t.history = t.entries.len();
         t.settle();
         self.flush(t, session)
     }
 
     fn turn_ended(&mut self, t: &mut Transcript, interrupted: bool, error: Option<String>) -> Option<String> {
         let ms = self.started.take().map_or(0, |s| s.elapsed().as_millis() as u64);
+        if let Some(Entry::Text { text, .. }) = self.message.as_ref().and_then(|(_, i)| t.entries.get(*i))
+            && let Some(path) = tern_bridge::context::handoff_path(text)
+        {
+            t.handoff = Some(Some(path));
+        }
         t.settle();
         t.entries.push(Entry::TurnEnd(TurnEnd { ms, interrupted, error }));
         (t.busy, self.turn, self.message) = (false, false, None);
@@ -142,6 +150,15 @@ impl OpenCodeDriver {
                 self.message = Some((id.to_owned(), t.entries.len() - 1));
             },
         }
+    }
+
+    /// A prompt the daemon kept, replayed: the server tells of none it was
+    /// sent live.
+    fn prompted(&mut self, t: &mut Transcript, v: &Value) {
+        let blocks = v.pointer("/params/prompt").and_then(Value::as_array).into_iter().flatten();
+        let text = blocks.filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
+        t.entries.push(Entry::User { text, images: Vec::new() });
+        self.working(t);
     }
 
     /// The agent is at work, on a turn this chat may not have started.
@@ -318,6 +335,10 @@ impl ChatDriver for OpenCodeDriver {
         let v: Value = serde_json::from_str(line).ok()?;
         let reply = match (v.get("method").and_then(Value::as_str), v.get("id")) {
             (Some("session/request_permission"), Some(_)) => self.permission(t, &v),
+            (Some("session/prompt"), Some(_)) => {
+                self.prompted(t, &v);
+                None
+            },
             (Some(other), Some(id)) => {
                 t.entries.push(Entry::Notice { text: format!("A request this chat can't answer: “{other}”"), error: false });
                 let error = json!({ "code": -32601, "message": format!("unsupported request {other}") });
@@ -399,12 +420,20 @@ impl ChatDriver for OpenCodeDriver {
 #[derive(Debug, Default)]
 pub struct OpenCodeFollow {
     session: Option<String>,
+    /// The turn's latest message: its id and what came of it so far.
+    message: String,
+    text: String,
 }
 
 impl ChatFollow for OpenCodeFollow {
     fn follow(&mut self, v: &Value, out: &mut Vec<Said>) {
         let Some(method) = v.get("method").and_then(Value::as_str) else {
-            if v.get("error").is_some() || v.pointer("/result/stopReason").is_some() {
+            if v.get("error").is_some() {
+                out.push(Said::TurnEnded);
+            } else if let Some(stop) = v.pointer("/result/stopReason").and_then(Value::as_str) {
+                if stop != "cancelled" {
+                    out.push(Said::LastText(std::mem::take(&mut self.text)));
+                }
                 out.push(Said::TurnEnded);
             } else if let Some(session) = v.pointer("/result/sessionId").and_then(Value::as_str) {
                 self.session = Some(session.to_owned());
@@ -417,7 +446,15 @@ impl ChatFollow for OpenCodeFollow {
             "session/update" if self.session.as_deref().is_none_or(|s| s == str_at(v, "/params/sessionId")) => {
                 let u = &v["params"]["update"];
                 match str_at(u, "/sessionUpdate") {
-                    "agent_message_chunk" => out.push(Said::Streamed),
+                    // The only copy of a message: it stays for replay.
+                    "agent_message_chunk" => {
+                        let id = str_at(u, "/messageId");
+                        if self.message != id {
+                            id.clone_into(&mut self.message);
+                            self.text.clear();
+                        }
+                        self.text.push_str(str_at(u, "/content/text"));
+                    },
                     "usage_update" => out.extend(reading(u).map(Said::Reading)),
                     _ => {},
                 }
@@ -429,7 +466,8 @@ impl ChatFollow for OpenCodeFollow {
     fn wrote(&mut self, v: &Value, out: &mut Vec<Said>) {
         match v.get("method").and_then(Value::as_str) {
             Some("session/prompt") => {
-                out.push(Said::TurnStarted);
+                self.text.clear();
+                out.extend([Said::TurnStarted, Said::Keep]);
                 let line = str_at(v, "/params/prompt/0/text").lines().next().unwrap_or_default().trim();
                 if !line.is_empty() {
                     out.push(Said::Title(line.chars().take(TITLE_CHARS).collect()));
@@ -440,7 +478,9 @@ impl ChatFollow for OpenCodeFollow {
                 self.session = Some(session.clone());
                 out.push(Said::Session(session));
             },
-            None if v.get("result").is_some() => out.push(Said::Settled(v.get("id").map(id_text).unwrap_or_default())),
+            None if v.get("result").is_some() || v.get("error").is_some() => {
+                out.push(Said::Settled(v.get("id").map(id_text).unwrap_or_default()));
+            },
             _ => {},
         }
     }
@@ -454,6 +494,10 @@ impl ChatFollow for OpenCodeFollow {
             return Some(format!("{agent} stopped with an error"));
         }
         (str_at(v, "/result/stopReason") == "end_turn").then(|| format!("{agent} finished"))
+    }
+
+    fn hookless(&self) -> bool {
+        true
     }
 }
 
@@ -747,11 +791,12 @@ mod tests {
             [
                 Said::Session("s".into()),
                 Said::TurnStarted,
+                Said::Keep,
                 Said::Title("Fix it".into()),
-                Said::Streamed,
                 Said::Reading(reading),
                 Said::Ask("0".into()),
                 Said::Settled("0".into()),
+                Said::LastText("x".into()),
                 Said::TurnEnded,
             ]
         );
@@ -790,5 +835,140 @@ mod tests {
         assert_eq!(say(json!({"id": "p", "result": {"stopReason": "end_turn"}})).as_deref(), Some("OpenCode finished"));
         assert_eq!(say(json!({"id": "p", "result": {"stopReason": "cancelled"}})), None);
         assert_eq!(say(json!({"id": "p", "error": {"message": "x"}})).as_deref(), Some("OpenCode stopped with an error"));
+    }
+
+    fn chunk(id: &str, text: &str) -> String {
+        update(json!({"sessionUpdate": "agent_message_chunk", "messageId": id, "content": {"type": "text", "text": text}}))
+    }
+
+    fn prompt(text: &str) -> String {
+        json!({"id": "p", "method": "session/prompt", "params": {"sessionId": "s", "prompt": [{"type": "text", "text": text}]}}).to_string()
+    }
+
+    fn end_turn() -> String {
+        json!({"id": "p", "result": {"stopReason": "end_turn"}}).to_string()
+    }
+
+    /// `t`'s entries, with what a replay can't know left out.
+    fn shown(t: &Transcript) -> Vec<Entry> {
+        let mut entries = t.entries.clone();
+        for e in &mut entries {
+            if let Entry::TurnEnd(end) = e {
+                end.ms = 0;
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn what_the_daemon_keeps_replays_as_the_chat_went() {
+        let opened_line = json!({"id": "open", "result": {"sessionId": "s"}}).to_string();
+        let tool = update(json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}));
+        let (mut live, mut t) = (OpenCodeDriver::default(), Transcript::default());
+        live.start_lines("new", false, Path::new("/w"));
+        let mut kept = vec![opened_line.clone()];
+        live.fold_line(&mut t, &opened_line);
+        t.push_user("hi", Vec::new());
+        let (_, written) = live.user_line("s", "hi", &[]);
+        kept.push(written);
+        for line in [chunk("m", "hel"), chunk("m", "lo"), tool, end_turn()] {
+            live.fold_line(&mut t, &line);
+            kept.push(line);
+        }
+        let (mut fresh, mut again) = (OpenCodeDriver::default(), Transcript::default());
+        for line in &kept {
+            assert_eq!(fresh.fold_line(&mut again, line), None, "{line}");
+        }
+        again.resume_busy(true);
+        assert_eq!(shown(&again), shown(&t));
+        assert!(!again.busy);
+    }
+
+    #[test]
+    fn a_turn_replayed_unended_still_runs() {
+        let (mut d, mut t) = opened();
+        d.fold_line(&mut t, &prompt("hi"));
+        d.fold_line(&mut t, &chunk("m", "hel"));
+        t.resume_busy(true);
+        assert!(t.busy);
+        assert_eq!(d.user_line("s", "more", &[]).1, "", "it waits for the turn's end");
+    }
+
+    /// A chat replaying the load it opened with.
+    fn loaded(lines: &[String]) -> (OpenCodeDriver, Transcript) {
+        let (mut d, mut t) = (OpenCodeDriver::default(), Transcript::default());
+        let user = update(json!({"sessionUpdate": "user_message_chunk", "messageId": "u", "content": {"type": "text", "text": "old"}}));
+        d.fold_line(&mut t, &user);
+        d.fold_line(&mut t, &chunk("m", "older answer"));
+        d.fold_line(&mut t, &json!({"id": "open", "result": {}}).to_string());
+        for line in lines {
+            d.fold_line(&mut t, line);
+        }
+        t.resume_busy(true);
+        (d, t)
+    }
+
+    #[test]
+    fn a_loaded_chat_reattached_is_idle() {
+        let (mut d, t) = loaded(&[]);
+        assert!(!t.busy);
+        let (_, line) = d.user_line("s", "go on", &[]);
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["method"], "session/prompt");
+    }
+
+    #[test]
+    fn a_turn_after_a_load_reattached_still_runs() {
+        let (_, t) = loaded(&[prompt("go on"), chunk("n", "working")]);
+        assert!(t.busy);
+    }
+
+    #[test]
+    fn a_turn_ending_on_a_handoff_line_tells_its_path() {
+        let (mut d, mut t) = opened();
+        d.fold_line(&mut t, &prompt("write one"));
+        d.fold_line(&mut t, &chunk("m", "Done.\nHandoff: docs/h.md"));
+        d.fold_line(&mut t, &end_turn());
+        assert_eq!(t.handoff, Some(Some("docs/h.md".to_owned())));
+    }
+
+    #[test]
+    fn follow_tells_the_last_message_of_a_turn() {
+        let (mut f, mut out) = (OpenCodeFollow::default(), Vec::new());
+        let value = |l: String| serde_json::from_str::<Value>(&l).unwrap();
+        f.wrote(&value(prompt("go")), &mut out);
+        f.follow(&value(chunk("m", "first")), &mut out);
+        f.follow(&value(chunk("n", "sec")), &mut out);
+        f.follow(&value(chunk("n", "ond")), &mut out);
+        out.clear();
+        f.follow(&value(end_turn()), &mut out);
+        assert_eq!(out, [Said::LastText("second".into()), Said::TurnEnded]);
+    }
+
+    #[test]
+    fn follow_starts_each_turn_with_no_text() {
+        let (mut f, mut out) = (OpenCodeFollow::default(), Vec::new());
+        let value = |l: String| serde_json::from_str::<Value>(&l).unwrap();
+        f.wrote(&value(prompt("go")), &mut out);
+        f.follow(&value(chunk("m", "first")), &mut out);
+        f.follow(&value(end_turn()), &mut out);
+        f.wrote(&value(prompt("again")), &mut out);
+        out.clear();
+        f.follow(&value(end_turn()), &mut out);
+        assert_eq!(out, [Said::LastText(String::new()), Said::TurnEnded]);
+    }
+
+    #[test]
+    fn a_stopped_turn_isnt_a_finished_one() {
+        let (mut f, mut out) = (OpenCodeFollow::default(), Vec::new());
+        f.follow(&json!({"id": "p", "result": {"stopReason": "cancelled"}}), &mut out);
+        assert_eq!(out, [Said::TurnEnded]);
+    }
+
+    #[test]
+    fn a_written_error_settles_like_an_answer() {
+        // The reply to a request this chat can't answer, kept so it isn't sent again.
+        let (mut f, mut out) = (OpenCodeFollow::default(), Vec::new());
+        f.wrote(&json!({"id": 4, "error": {"code": -32601, "message": "x"}}), &mut out);
+        assert_eq!(out, [Said::Settled("4".into())]);
     }
 }

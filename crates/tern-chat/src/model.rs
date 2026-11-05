@@ -345,6 +345,9 @@ pub struct Transcript {
     /// News of its handoff, for the chat to take: one was written (at this
     /// path), or the conversation was cleared (`None`).
     pub handoff: Option<Option<String>>,
+    /// The entries before this one are a conversation's history, loaded as
+    /// it opened: their turns are over, ended or not.
+    pub history: usize,
 }
 
 impl Transcript {
@@ -399,7 +402,7 @@ impl Transcript {
     pub fn resume_busy(&mut self, running: bool) {
         let user = self.entries.iter().rposition(|e| matches!(e, Entry::User { .. }));
         let end = self.entries.iter().rposition(|e| matches!(e, Entry::TurnEnd(_)));
-        self.busy = running && user.is_some() && user > end;
+        self.busy = running && user.is_some_and(|u| u >= self.history) && user > end;
         self.version += 1;
     }
 

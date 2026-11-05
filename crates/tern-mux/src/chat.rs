@@ -12,7 +12,8 @@
 //! It does follow how full the conversation's context window is, for the
 //! guard a Claude tab has too (see [`tern_bridge::context`]): the program's
 //! hooks come to [`ChatHost::on_hook`], and what the guard has to say to
-//! Claude goes in as a user message.
+//! Claude goes in as a user message. A chat with no hooks (OpenCode's) has
+//! its follower say when a turn ends and a conversation opens instead.
 //!
 //! On Unix a chat's pipes go to a newer daemon with the rest (see
 //! `server::hand_off`): its reader parks, the fds and the unended line move.
@@ -76,6 +77,8 @@ struct State {
     /// The conversation now, once Claude said (`/clear` starts another).
     session: Option<String>,
     follower: Follower,
+    /// No hooks tell the guard: what the follower says stands in for them.
+    hookless: bool,
     guard: Guard,
     policy: Policy,
 }
@@ -88,12 +91,15 @@ struct Followed {
     form: bool,
     /// It ends a turn: the turn's streamed lines go.
     ended: bool,
-    /// It settles a request: written, it is kept for replay.
-    settles: bool,
+    /// Written, it is kept for replay: it settles a request, or is part of
+    /// the conversation.
+    keep: bool,
     /// A piece of a message: it goes when its turn ends.
     streamed: bool,
     /// What a notification is titled, as the first message says.
     title: Option<String>,
+    /// What the guard has to say now, for an agent with no hooks.
+    tell: Option<Action>,
 }
 
 /// What reads a chat's lines for [`State`]: its agent's, if it has one.
@@ -114,7 +120,11 @@ impl Default for Follower {
 
 impl State {
     fn new(agent: &tern_agent::AgentId) -> Self {
-        Self { follower: Follower::of(agent.as_str()), guard: crate::server::guard_for(Some(agent)), ..Default::default() }
+        let follower = Follower::of(agent.as_str());
+        let hookless = follower.0.as_ref().is_some_and(|f| f.hookless());
+        // The stand-in `SessionStart` comes as a conversation opens, not with its first turn.
+        let guard = if hookless { Guard::default() } else { crate::server::guard_for(Some(agent)) };
+        Self { follower, hookless, guard, ..Default::default() }
     }
 
     /// Take in `v`, a line read from the program.
@@ -135,6 +145,29 @@ impl State {
         self.take_in(said)
     }
 
+    /// Take in `v`, a line kept by the daemon before: the guard heard it then.
+    #[cfg(unix)]
+    fn follow_kept(&mut self, v: &Value) {
+        let hookless = std::mem::take(&mut self.hookless);
+        self.follow(v);
+        self.hookless = hookless;
+    }
+
+    /// Hook event `raw` the agent has no hook to send: what to tell it, as
+    /// one user message.
+    fn stand_in(&mut self, raw: &Value) -> Option<Action> {
+        let ev = HookEvent::parse(String::new(), raw.to_string().as_bytes())?;
+        let (reply, action) = self.guard.on_event(&ev, self.policy);
+        let reply = reply.unwrap_or_default();
+        let said = reply.get("reason").or_else(|| reply.pointer("/hookSpecificOutput/additionalContext")).and_then(Value::as_str);
+        match (said, action) {
+            (Some(said), Action::Prompt(next)) => Some(Action::Prompt(format!("{said}\n\n{next}"))),
+            (Some(said), Action::None) => Some(Action::Prompt(said.to_owned())),
+            (None, Action::None) => None,
+            (_, action) => Some(action),
+        }
+    }
+
     /// What a line said of the turn and the requests waiting.
     fn take_in(&mut self, said: Vec<Said>) -> Followed {
         let mut line = Followed::default();
@@ -146,13 +179,19 @@ impl State {
                     self.asks.clear();
                     line.ended = true;
                 },
-                Said::Session(id) => self.session = Some(id),
+                Said::Session(id) => {
+                    let another = self.session.as_ref().is_some_and(|old| *old != id);
+                    self.session = Some(id);
+                    if another && self.hookless {
+                        line.tell = self.stand_in(&serde_json::json!({ "hook_event_name": "SessionStart", "source": "clear" }));
+                    }
+                },
                 Said::Ask(id) => {
                     self.asks.insert(id);
                 },
                 Said::Settled(id) => {
                     self.asks.remove(&id);
-                    line.settles = true;
+                    line.keep = true;
                 },
                 Said::Form(id) => {
                     self.forms.insert(id);
@@ -162,6 +201,11 @@ impl State {
                 Said::Reading(r) => self.guard.reading(r.percent, self.policy),
                 Said::Streamed => line.streamed = true,
                 Said::Title(title) => line.title = Some(title),
+                Said::Keep => line.keep = true,
+                Said::LastText(text) if self.hookless => {
+                    line.tell = self.stand_in(&serde_json::json!({ "hook_event_name": "Stop", "last_assistant_message": text }));
+                },
+                Said::LastText(_) => {},
             }
         }
         line
@@ -311,7 +355,7 @@ impl ChatHost {
         for k in &lines {
             if let Ok(v) = serde_json::from_str::<Value>(&k.text) {
                 // Its forms were recorded by the daemon before.
-                state.follow(&v);
+                state.follow_kept(&v);
             }
         }
         state.lines = lines;
@@ -458,13 +502,14 @@ impl ChatHost {
     }
 
     /// Write `line` to the program. One that answers a request is kept for
-    /// replay (Claude doesn't always echo it).
+    /// replay (Claude doesn't always echo it), and so is one its follower
+    /// says comes back from nowhere else.
     pub fn write(&self, line: &str) {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             let form = {
                 let mut st = self.state.lock().unwrap();
                 let followed = st.wrote(&v);
-                if followed.settles {
+                if followed.keep {
                     st.lines.push(Kept { text: line.to_owned(), stream: false });
                 }
                 followed.form
@@ -613,7 +658,7 @@ impl ChatHost {
         None
     }
 
-    fn on_bytes(&self, partial: &mut Vec<u8>, bytes: &[u8]) {
+    fn on_bytes(self: &Arc<Self>, partial: &mut Vec<u8>, bytes: &[u8]) {
         partial.extend_from_slice(bytes);
         while let Some(end) = partial.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = partial.drain(..=end).collect();
@@ -651,11 +696,14 @@ impl ChatHost {
         }
     }
 
-    fn on_line(&self, line: String) {
+    fn on_line(self: &Arc<Self>, line: String) {
         let v: Option<Value> = serde_json::from_str(&line).ok();
-        let followed = v.as_ref().map_or_else(Followed::default, |v| self.state.lock().unwrap().follow(v));
+        let mut followed = v.as_ref().map_or_else(Followed::default, |v| self.state.lock().unwrap().follow(v));
         if let Some(v) = v.as_ref().filter(|_| followed.form) {
             self.record(v);
+        }
+        if let Some(action) = followed.tell.take() {
+            self.tell(action);
         }
         let notice = {
             let mut st = self.state.lock().unwrap();
@@ -777,6 +825,77 @@ mod guard_tests {
         assert_eq!(reply.unwrap().get("decision").unwrap(), "block");
     }
 
+    fn opencode_update(update: Value) -> Value {
+        json!({"method": "session/update", "params": {"sessionId": "one", "update": update}})
+    }
+
+    fn opencode_state() -> State {
+        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..State::new(&tern_agent::AgentId::new(tern_agent::OPENCODE)) };
+        st.follow(&json!({"id": "open", "result": {"sessionId": "one"}}));
+        st
+    }
+
+    /// The lines of a turn `percent` full that ends on `text`.
+    fn opencode_turn(percent: u64, text: &str) -> [Value; 3] {
+        [
+            opencode_update(json!({"sessionUpdate": "usage_update", "used": percent, "size": 100})),
+            opencode_update(json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"type": "text", "text": text}})),
+            json!({"id": "p", "result": {"stopReason": "end_turn"}}),
+        ]
+    }
+
+    /// Run such a turn: what the guard then tells.
+    fn run_opencode_turn(st: &mut State, percent: u64, text: &str) -> Option<Action> {
+        st.wrote(&json!({"id": "p", "method": "session/prompt", "params": {"sessionId": "one", "prompt": [{"type": "text", "text": "go"}]}}));
+        opencode_turn(percent, text).iter().map(|l| st.follow(l).tell).last().flatten()
+    }
+
+    #[test]
+    fn past_its_limit_an_opencode_chat_is_asked_with_a_user_message() {
+        let mut st = opencode_state();
+        let Some(Action::Prompt(asked)) = run_opencode_turn(&mut st, 60, "done") else { panic!("no request") };
+        assert!(asked.contains("write a handoff"), "{asked}");
+        assert_eq!(run_opencode_turn(&mut st, 60, "Handoff: h.md"), Some(Action::Clear));
+        let Some(Action::Prompt(next)) = st.follow(&json!({"id": "x", "result": {"sessionId": "two"}})).tell else { panic!("no prompt") };
+        assert!(next.contains("h.md") && next.ends_with(tern_bridge::context::CONTINUE_PROMPT), "{next}");
+    }
+
+    #[test]
+    fn under_its_limit_an_opencode_chat_is_left_alone() {
+        let mut st = opencode_state();
+        assert_eq!(run_opencode_turn(&mut st, 40, "done"), None);
+    }
+
+    #[test]
+    fn a_handoff_asked_during_an_opencode_turn_is_told_at_its_end() {
+        let mut st = opencode_state();
+        assert_eq!(st.guard.request(true), Action::None);
+        assert!(matches!(run_opencode_turn(&mut st, 10, "done"), Some(Action::Prompt(p)) if p.contains("the user asked")));
+    }
+
+    #[test]
+    fn an_opencode_chat_opening_tells_no_guard() {
+        let mut st = State::new(&tern_agent::AgentId::new(tern_agent::OPENCODE));
+        assert_eq!(st.follow(&json!({"id": "open", "result": {"sessionId": "one"}})).tell, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_lines_of_a_handed_over_chat_ask_nothing_again() {
+        let mut st = opencode_state();
+        for line in opencode_turn(60, "done") {
+            st.follow_kept(&line);
+        }
+        assert!(matches!(run_opencode_turn(&mut st, 60, "done"), Some(Action::Prompt(_))), "the asking is still to come");
+    }
+
+    #[test]
+    fn a_chat_with_hooks_is_left_to_them() {
+        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..Default::default() };
+        turn(&mut st, 60);
+        assert_eq!(st.follow(&json!({"type": "result", "modelUsage": {}})).tell, None);
+    }
+
     #[test]
     fn follows_the_conversation_a_clear_starts() {
         let mut st = State::default();
@@ -789,6 +908,8 @@ mod guard_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use tern_bridge::context::Policy;
+
     use super::*;
 
     #[derive(Default)]
@@ -903,7 +1024,7 @@ done"#;
     fn opencode_server() -> ChatSpec {
         let script = r#"echo '{"id":"open","result":{"sessionId":"one"}}'
 while read -r line; do
-  echo "{\"got\":$line}"
+  printf '{"got":%s}\n' "$line"
   case "$line" in *session/new*) echo '{"id":"x","result":{"sessionId":"two"}}';; esac
 done"#;
         ChatSpec { agent: Some("opencode".into()), ..sh(script) }
@@ -935,7 +1056,63 @@ done"#;
         wait("the prompt", || !prompts(&host).is_empty());
         let prompt = &prompts(&host)[0];
         assert_eq!(prompt["params"]["sessionId"], "two");
-        assert_eq!(prompt["params"]["prompt"][0]["text"], tern_bridge::context::CONTINUE_PROMPT);
+        let text = prompt["params"]["prompt"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Tern: this conversation goes on") && text.ends_with(tern_bridge::context::CONTINUE_PROMPT), "{text}");
+        assert_eq!(prompts(&host).len(), 1);
+        host.kill();
+    }
+
+    /// Run `opencode acp`'s stand-in: it opens session `one`, plays
+    /// `turn` for the first prompt, then echoes what it is told.
+    fn opencode_turn_server(turn: &[&str]) -> ChatSpec {
+        let lines: String = turn.iter().map(|l| format!("echo '{l}'\n")).collect();
+        let script = format!(
+            r#"echo '{{"id":"open","result":{{"sessionId":"one"}}}}'
+read -r first
+{lines}while read -r line; do
+  printf '{{"got":%s}}\n' "$line"
+done"#
+        );
+        ChatSpec { agent: Some("opencode".into()), ..sh(&script) }
+    }
+
+    const OPENCODE_PROMPT: &str = r#"{"id":"p","method":"session/prompt","params":{"sessionId":"one","prompt":[{"type":"text","text":"hi"}]}}"#;
+    const OPENCODE_CHUNK: &str = r#"{"method":"session/update","params":{"sessionId":"one","update":{"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":"hello"}}}}"#;
+    const OPENCODE_END: &str = r#"{"id":"p","result":{"stopReason":"end_turn"}}"#;
+
+    #[test]
+    fn an_opencode_chat_replays_whole_after_its_turn_ended() {
+        let spec = opencode_turn_server(&[OPENCODE_CHUNK, OPENCODE_END]);
+        let host = ChatHost::spawn(14, &spec, None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        wait("the session", || host.session() == "one");
+        host.write(OPENCODE_PROMPT);
+        wait("the turn's end", || !host.state.lock().unwrap().busy);
+        let sink = Arc::new(Lines::default());
+        let owner: Arc<dyn ChatSink> = sink.clone();
+        let mut lines = Vec::new();
+        host.attach(&owner, |kept, _| lines = kept);
+        let mut driver = tern_chat::chat_driver(tern_agent::OPENCODE).unwrap();
+        let mut t = tern_chat::Transcript::default();
+        tern_chat::replay(driver.as_mut(), &mut t, &lines);
+        let said = |e: &tern_chat::Entry| match e {
+            tern_chat::Entry::User { text, .. } | tern_chat::Entry::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        assert_eq!(t.entries.iter().filter_map(said).collect::<Vec<_>>(), ["hi", "hello"]);
+        host.kill();
+    }
+
+    #[test]
+    fn an_opencode_chat_past_its_limit_is_written_the_request() {
+        let usage = r#"{"method":"session/update","params":{"sessionId":"one","update":{"sessionUpdate":"usage_update","used":60,"size":100}}}"#;
+        let spec = opencode_turn_server(&[usage, OPENCODE_CHUNK, OPENCODE_END]);
+        let host = ChatHost::spawn(15, &spec, None, Arc::new(|_: &str, _: &str| {})).unwrap();
+        host.set_policy(Policy { limit: 50, auto_switch: false });
+        wait("the session", || host.session() == "one");
+        host.write(OPENCODE_PROMPT);
+        wait("the guard's message", || !prompts(&host).is_empty());
+        let text = prompts(&host)[0]["params"]["prompt"][0]["text"].as_str().unwrap().to_owned();
+        assert!(text.contains("write a handoff"), "{text}");
         host.kill();
     }
 

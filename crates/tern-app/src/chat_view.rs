@@ -601,8 +601,8 @@ impl ChatView {
                     if self.replay {
                         // The history Claude saved before this program, then what it said.
                         self.load_history(Some(started));
-                        for line in &lines {
-                            self.driver.fold_line(&mut self.t, line);
+                        for reply in tern_chat::replay(self.driver.as_mut(), &mut self.t, &lines) {
+                            self.write(reply);
                         }
                         self.t.resume_busy(exited.is_none());
                         // The first message may be among the replayed lines.

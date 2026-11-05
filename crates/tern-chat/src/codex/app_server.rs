@@ -532,7 +532,9 @@ impl ChatFollow for CodexFollow {
     fn wrote(&mut self, v: &Value, out: &mut Vec<Said>) {
         match v.get("method").and_then(Value::as_str) {
             Some("turn/start") => out.push(Said::TurnStarted),
-            None if v.get("result").is_some() => out.push(Said::Settled(v.get("id").map(id_text).unwrap_or_default())),
+            None if v.get("result").is_some() || v.get("error").is_some() => {
+                out.push(Said::Settled(v.get("id").map(id_text).unwrap_or_default()));
+            },
             _ => {},
         }
     }
@@ -1012,5 +1014,13 @@ mod tests {
         assert_eq!(ended("completed").as_deref(), Some("Codex finished"));
         assert_eq!(ended("interrupted"), None);
         assert_eq!(ended("failed").as_deref(), Some("Codex stopped with an error"));
+    }
+
+    #[test]
+    fn a_written_error_settles_like_an_answer() {
+        // The reply to a request this chat can't answer, kept so it isn't sent again.
+        let (mut f, mut out) = (CodexFollow::default(), Vec::new());
+        f.wrote(&json!({"id": 4, "error": {"code": -32601, "message": "x"}}), &mut out);
+        assert_eq!(out, [Said::Settled("4".into())]);
     }
 }

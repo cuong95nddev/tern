@@ -115,6 +115,12 @@ pub enum Said {
     Streamed,
     /// What a notification about the conversation is titled.
     Title(String),
+    /// The line, one written to the agent, is part of the conversation and
+    /// comes back from nowhere else: it is kept for replay.
+    Keep,
+    /// The turn this line ends finished, on this text: for an agent with no
+    /// hooks to say so (see [`ChatFollow::hookless`]).
+    LastText(String),
 }
 
 /// How the daemon follows a chat without reading the conversation: one per
@@ -132,6 +138,34 @@ pub trait ChatFollow: Send {
     /// What `line`, one the agent wrote, tells the user while no UI is
     /// connected; `agent` names it.
     fn notice(&self, line: &Value, agent: &str) -> Option<String>;
+
+    /// Its chats run with no hooks: the daemon's guard goes by what this
+    /// follower says.
+    fn hookless(&self) -> bool {
+        false
+    }
+}
+
+/// Fold `lines`, what the daemon kept of a chat, into `t`. Gives the replies
+/// they call for that were never written: no UI was there to, and nothing
+/// later in `lines` answers them.
+pub fn replay(driver: &mut dyn ChatDriver, t: &mut Transcript, lines: &[String]) -> Vec<String> {
+    // The request a line answers: by its id, or Claude's `request_id`.
+    fn answers(line: &str) -> Option<Value> {
+        let v: Value = serde_json::from_str(line).ok()?;
+        if v.get("method").is_some() {
+            return None;
+        }
+        v.get("id").or_else(|| v.pointer("/response/request_id")).cloned()
+    }
+    let mut replies: Vec<String> = Vec::new();
+    for line in lines {
+        if let Some(id) = answers(line) {
+            replies.retain(|r| answers(r).as_ref() != Some(&id));
+        }
+        replies.extend(driver.fold_line(t, line));
+    }
+    replies
 }
 
 /// The chat follower of agent `agent`, if it has a chat.
@@ -151,6 +185,61 @@ pub fn chat_driver(agent: &str) -> Option<Box<dyn ChatDriver>> {
         tern_agent::CODEX => Some(Box::new(CodexDriver::default())),
         tern_agent::OPENCODE => Some(Box::new(OpenCodeDriver::default())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn opencode_ask(id: u64) -> String {
+        let call = json!({"toolCallId": "c", "kind": "edit", "title": "", "rawInput": {}});
+        json!({"id": id, "method": "session/request_permission", "params": {"sessionId": "s", "toolCall": call}}).to_string()
+    }
+
+    fn opencode() -> (Box<dyn ChatDriver>, Transcript) {
+        let mut d = chat_driver(tern_agent::OPENCODE).unwrap();
+        d.start_lines("new", false, Path::new("/w"));
+        (d, Transcript::default())
+    }
+
+    #[test]
+    fn an_ask_rejected_with_no_one_there_is_answered_at_last() {
+        let (mut d, mut t) = opencode();
+        let replies = replay(d.as_mut(), &mut t, &[opencode_ask(3)]);
+        let reply: Value = serde_json::from_str(&replies[0]).unwrap();
+        assert_eq!((&reply["id"], &reply["result"]["outcome"]["optionId"]), (&json!(3), &json!("reject")));
+    }
+
+    #[test]
+    fn a_reply_already_kept_isnt_written_again() {
+        let (mut d, mut t) = opencode();
+        let answer = json!({"id": 3, "result": {"outcome": {"outcome": "selected", "optionId": "reject"}}}).to_string();
+        assert_eq!(replay(d.as_mut(), &mut t, &[opencode_ask(3), answer]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_codex_change_declined_with_no_one_there_is_answered_at_last() {
+        let mut d = chat_driver(tern_agent::CODEX).unwrap();
+        let mut t = Transcript::default();
+        let ask = json!({"id": 5, "method": "item/fileChange/requestApproval", "params": {"itemId": "i"}}).to_string();
+        let replies = replay(d.as_mut(), &mut t, &[ask]);
+        assert_eq!(serde_json::from_str::<Value>(&replies[0]).unwrap()["result"]["decision"], "decline");
+    }
+
+    #[test]
+    fn a_claude_reply_kept_is_known_by_its_request() {
+        let mut d = chat_driver(tern_agent::CLAUDE).unwrap();
+        let mut t = Transcript::default();
+        let ask = json!({"type": "control_request", "request_id": "r", "request": {"subtype": "strange"}}).to_string();
+        assert_eq!(replay(d.as_mut(), &mut t, std::slice::from_ref(&ask)).len(), 1);
+        let answer = json!({"type": "control_response", "response": {"subtype": "error", "request_id": "r"}}).to_string();
+        let mut d = chat_driver(tern_agent::CLAUDE).unwrap();
+        assert_eq!(replay(d.as_mut(), &mut Transcript::default(), &[ask, answer]), Vec::<String>::new());
     }
 }
 
