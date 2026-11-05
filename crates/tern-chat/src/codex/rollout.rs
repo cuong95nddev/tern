@@ -46,11 +46,6 @@ pub fn rollout_path(home: &Path, session: &str) -> Option<PathBuf> {
     rollouts(home).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&end)))
 }
 
-/// The conversation last started under `home`.
-pub fn newest_rollout(home: &Path) -> Option<PathBuf> {
-    rollouts(home).next()
-}
-
 /// The end of the rollout at `path`, in whole lines.
 fn tail(path: &Path) -> io::Result<String> {
     let mut f = std::fs::File::open(path)?;
@@ -85,20 +80,24 @@ pub fn context_percent(total: u64, window: u64) -> f32 {
 /// How full the conversation saved at `path` is, by its latest count.
 pub fn context_reading(path: &Path) -> Option<Reading> {
     let text = tail(path).ok()?;
-    let reading = events_back(&text, "token_count").find_map(|p| {
+    events_back(&text, "token_count").find_map(|p| {
         let info = p.get("info")?;
         let total = info.pointer("/last_token_usage/total_tokens")?.as_u64()?;
         let size = info.get("model_context_window")?.as_u64().filter(|s| *s > 0)?;
         Some(Reading { percent: context_percent(total, size), size })
-    });
-    reading
+    })
 }
 
 /// The latest quota the conversation saved at `path` was told.
 pub fn rate_limits(path: &Path) -> Option<Value> {
     let text = tail(path).ok()?;
-    let limits = events_back(&text, "token_count").find_map(|p| p.get("rate_limits").filter(|r| r.is_object()).cloned());
-    limits
+    events_back(&text, "token_count").find_map(|p| p.get("rate_limits").filter(|r| r.is_object()).cloned())
+}
+
+/// The latest quota any conversation under `home` was told: the last few
+/// are looked at, a new one has none before its first answer.
+pub fn latest_rate_limits(home: &Path) -> Option<Value> {
+    rollouts(home).take(8).find_map(|p| rate_limits(&p))
 }
 
 /// The words of item `item` (an `AgentMessage`, a `UserMessage`).
@@ -146,7 +145,7 @@ pub fn read_recent(path: &Path, cwd: Option<&Path>) -> io::Result<Recent> {
 /// The text of the last answer in the conversation saved at `path`.
 pub fn last_text(path: &Path) -> Option<String> {
     let text = tail(path).ok()?;
-    let found = text.lines().rev().find_map(|l| {
+    text.lines().rev().find_map(|l| {
         if !l.contains("task_complete") && !l.contains("AgentMessage") {
             return None;
         }
@@ -157,8 +156,7 @@ pub fn last_text(path: &Path) -> Option<String> {
             "item_completed" if p.pointer("/item/type")?.as_str()? == "AgentMessage" => item_text(p.get("item")?),
             _ => None,
         }
-    });
-    found
+    })
 }
 
 #[cfg(test)]
@@ -283,13 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_rollout_is_the_latest_written() {
+    fn the_latest_quota_is_the_newest_conversations_that_has_one() {
         let home = tempfile::tempdir().unwrap();
         let day = home.path().join("sessions/2026/11/05");
         std::fs::create_dir_all(&day).unwrap();
-        std::fs::write(day.join("rollout-a-1.jsonl"), "").unwrap();
+        std::fs::write(day.join("rollout-a-1.jsonl"), FIXTURE).unwrap();
         std::fs::write(day.join("rollout-b-2.jsonl"), "").unwrap();
-        assert_eq!(newest_rollout(home.path()), Some(day.join("rollout-b-2.jsonl")));
-        assert_eq!(newest_rollout(Path::new("/nonexistent")), None);
+        assert_eq!(latest_rate_limits(home.path()).unwrap()["limit_id"], "codex");
+        assert_eq!(latest_rate_limits(Path::new("/nonexistent")), None);
     }
 }

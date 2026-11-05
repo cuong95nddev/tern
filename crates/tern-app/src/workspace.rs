@@ -5717,6 +5717,12 @@ impl Render for Workspace {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
         }
+        // Whose quota the bar shows.
+        let tab_agent = self.tabs.get(self.active).and_then(CenterTab::term).and_then(|t| t.kind.agent().cloned());
+        if self.usage.read(cx).own() != tab_agent.as_ref().filter(|a| !a.is(tern_agent::CLAUDE)) {
+            let usage = self.usage.clone();
+            cx.defer(move |cx| usage.update(cx, |u, cx| u.set_tab_agent(tab_agent, cx)));
+        }
         // And how full its context window is, with the limit it keeps.
         let context = match self.tabs.get(self.active) {
             Some(CenterTab::Term(t)) if t.kind.has(Capability::Context) => Some(crate::usage_view::ContextShown {

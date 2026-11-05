@@ -46,6 +46,9 @@ const FORCED_FRESH: Duration = Duration::from_secs(60);
 /// No panel drawn for this long: nobody looks, so nothing is read.
 const UNSEEN: Duration = Duration::from_secs(15 * 60);
 
+/// How often an agent's quota is read off its own files.
+const AGENT_READ_EVERY: Duration = Duration::from_secs(60);
+
 const SESSION: Duration = Duration::from_secs(5 * 60 * 60);
 const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -147,6 +150,52 @@ impl UsageSource for ClaudeUsage {
     }
 }
 
+/// Codex's quota: what its latest conversation was told, no network call.
+struct CodexUsage;
+
+impl UsageSource for CodexUsage {
+    fn agent(&self) -> &'static str {
+        tern_agent::CODEX
+    }
+
+    fn read(&self, _: &str, _: bool) -> Outcome {
+        let now = SystemTime::now();
+        let report = tern_chat::codex::rollout::latest_rate_limits(&tern_chat::codex::rollout::codex_home()).and_then(|l| codex_report(&l));
+        Outcome { read_at: report.as_ref().map(|_| now), report, error: None, next_at: now + AGENT_READ_EVERY }
+    }
+}
+
+/// One of Codex's limits, from `primary` or `secondary` in its `rate_limits`.
+fn codex_limit(window: &serde_json::Value) -> Option<Limit> {
+    let minutes = window.get("window_minutes")?.as_u64()?;
+    let (name, short) = match minutes {
+        300 => ("Session".to_owned(), "5h".to_owned()),
+        10_080 => ("Weekly".to_owned(), "W".to_owned()),
+        m if m % 1440 == 0 => (format!("{} days", m / 1440), format!("{}d", m / 1440)),
+        m => (format!("{} hours", m / 60), format!("{}h", m / 60)),
+    };
+    Some(Limit {
+        name,
+        short,
+        used: window.get("used_percent")?.as_f64()? as f32,
+        resets_at: window.get("resets_at").and_then(serde_json::Value::as_u64).map(|s| UNIX_EPOCH + Duration::from_secs(s)),
+        length: Duration::from_secs(minutes * 60),
+    })
+}
+
+/// What Codex's `rate_limits` say; nothing without a limit.
+fn codex_report(limits: &serde_json::Value) -> Option<Report> {
+    let found: Vec<_> = ["primary", "secondary"].iter().filter_map(|k| codex_limit(limits.get(*k)?)).collect();
+    if found.is_empty() {
+        return None;
+    }
+    let plan = limits.get("plan_type").and_then(serde_json::Value::as_str).map(|p| {
+        let mut c = p.chars();
+        c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+    });
+    Some(Report { plan, limits: found, ..Report::default() })
+}
+
 /// The agent whose accounts the usage monitor shows: accounts are Claude's
 /// (see [`crate::accounts`]).
 pub(crate) const ACCOUNT_AGENT: &str = tern_agent::CLAUDE;
@@ -155,6 +204,7 @@ pub(crate) const ACCOUNT_AGENT: &str = tern_agent::CLAUDE;
 pub(crate) fn usage_source(agent: &str) -> Option<Box<dyn UsageSource>> {
     match agent {
         tern_agent::CLAUDE => Some(Box::new(ClaudeUsage)),
+        tern_agent::CODEX => Some(Box::new(CodexUsage)),
         _ => None,
     }
 }
@@ -243,8 +293,11 @@ pub struct UsageStore {
     /// The agent its accounts' quota is read for (see [`ACCOUNT_AGENT`]).
     agent: &'static str,
     accounts: HashMap<String, AccountUsage>,
+    /// The quota of agents with no accounts, by agent.
+    agents: HashMap<String, AccountUsage>,
     seen: Option<Instant>,
     _task: Task<()>,
+    _agents_task: Task<()>,
 }
 
 /// One account's numbers.
@@ -264,6 +317,11 @@ pub struct AccountUsage {
 }
 
 impl AccountUsage {
+    /// An agent's, nothing read yet.
+    fn blank() -> Self {
+        Self { report: None, error: None, updated: None, reading: false, checked: false, due: Instant::now(), forced: false, manual: None }
+    }
+
     /// The last answer at once, from the cache; the first read asks the
     /// service only if it is due.
     fn new(account: &str) -> Self {
@@ -336,7 +394,54 @@ impl UsageStore {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
         });
-        Self { agent, accounts: HashMap::new(), seen: None, _task: task }
+        let sources: Vec<Box<dyn UsageSource>> =
+            tern_agent::registry().all().filter(|d| d.id.as_str() != ACCOUNT_AGENT).filter_map(|d| usage_source(d.id.as_str())).collect();
+        let sources: Vec<std::sync::Arc<dyn UsageSource>> = sources.into_iter().map(Into::into).collect();
+        let agents_task = cx.spawn(async move |this, cx| {
+            loop {
+                for source in &sources {
+                    let due = this.update(cx, |this, _| {
+                        let now = Instant::now();
+                        let looked = this.seen.is_some_and(|s| now.duration_since(s) < UNSEEN);
+                        looked && this.agents.entry(source.agent().to_owned()).or_insert_with(AccountUsage::blank).should_read(now)
+                    });
+                    match due {
+                        Ok(true) => {
+                            let read = source.clone();
+                            let outcome = cx.background_executor().spawn(async move { read.read("", false) }).await;
+                            if this.update(cx, |this, cx| this.take_agent(source.agent(), outcome, cx)).is_err() {
+                                return;
+                            }
+                        },
+                        Ok(false) => {},
+                        Err(_) => return,
+                    }
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        });
+        Self { agent, accounts: HashMap::new(), agents: HashMap::new(), seen: None, _task: task, _agents_task: agents_task }
+    }
+
+    /// Agent `agent`'s numbers, when it has no accounts.
+    pub fn agent_usage(&mut self, agent: &str) -> &AccountUsage {
+        self.agents.entry(agent.to_owned()).or_insert_with(AccountUsage::blank)
+    }
+
+    /// Read agent `agent`'s numbers at the next tick.
+    pub fn refresh_agent(&mut self, agent: &str) {
+        self.seen = Some(Instant::now());
+        self.agents.entry(agent.to_owned()).or_insert_with(AccountUsage::blank).due = Instant::now();
+    }
+
+    fn take_agent(&mut self, agent: &str, o: Outcome, cx: &mut Context<Self>) {
+        let a = self.agents.entry(agent.to_owned()).or_insert_with(AccountUsage::blank);
+        a.checked = true;
+        a.report = o.report;
+        a.error = o.error;
+        a.updated = o.read_at;
+        a.due = Instant::now() + AGENT_READ_EVERY;
+        cx.notify();
     }
 
     /// The agent whose quota it shows: its cards carry that agent's logo.
@@ -752,14 +857,41 @@ pub fn ago(t: SystemTime, now: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_report_names_its_windows() {
+        let limits = serde_json::json!({
+            "primary": {"used_percent": 12.5, "window_minutes": 300, "resets_at": 1_795_000_565},
+            "secondary": {"used_percent": 40.0, "window_minutes": 10080, "resets_at": 1_795_100_000},
+            "plan_type": "plus",
+        });
+        let r = super::codex_report(&limits).unwrap();
+        let names: Vec<_> = r.limits.iter().map(|l| (l.name.as_str(), l.short.as_str(), l.used)).collect();
+        assert_eq!(names, [("Session", "5h", 12.5), ("Weekly", "W", 40.)]);
+        assert_eq!(r.plan.as_deref(), Some("Plus"));
+        assert_eq!(r.limits[0].resets_at, Some(UNIX_EPOCH + Duration::from_secs(1_795_000_565)));
+        assert_eq!(r.limits[1].length, Duration::from_secs(7 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn a_codex_window_of_another_length_says_its_length() {
+        let limits = serde_json::json!({"primary": {"used_percent": 1.0, "window_minutes": 43200, "resets_at": 1}, "secondary": null, "plan_type": "free"});
+        let r = super::codex_report(&limits).unwrap();
+        assert_eq!((r.limits[0].name.as_str(), r.limits[0].short.as_str()), ("30 days", "30d"));
+    }
+
+    #[test]
+    fn codex_report_without_limits_is_none() {
+        assert_eq!(super::codex_report(&serde_json::json!({"primary": null, "secondary": null})), None);
+    }
+
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{Cached, Limit, WEEK, countdown, parse, plan, timestamp, usage_source};
 
     #[test]
-    fn only_claude_has_a_usage_source() {
+    fn claude_and_codex_have_a_usage_source() {
         assert_eq!(usage_source(tern_agent::CLAUDE).map(|s| s.agent()), Some(tern_agent::CLAUDE));
-        assert!(usage_source("codex").is_none());
+        assert_eq!(usage_source("codex").map(|s| s.agent()), Some(tern_agent::CODEX));
         assert!(usage_source("opencode").is_none());
     }
 

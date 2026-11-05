@@ -2289,11 +2289,12 @@
         "style": { "border_top_width": 1, "padding_x": 6, "gap": 0 },
         "children": [
           { "button": "refresh", "element": "usage.card.link", "size": "small", "icon": "refresh-cw", "label": "Refresh", "loading": "reading" },
-          { "button": "dashboard", "element": "usage.card.link", "size": "small", "icon": "chart-pie", "label": "Usage Dashboard" },
-          { "button": "status", "element": "usage.card.link", "size": "small", "icon": "external-link", "label": "Status Page" }
+          { "when": "has_accounts", "button": "dashboard", "element": "usage.card.link", "size": "small", "icon": "chart-pie", "label": "Usage Dashboard" },
+          { "when": "has_accounts", "button": "status", "element": "usage.card.link", "size": "small", "icon": "external-link", "label": "Status Page" }
         ]
       },
       {
+        "when": "has_accounts",
         "element": "usage.card.section",
         "style": { "border_top_width": 1, "padding_x": 6, "gap": 2 },
         "children": [

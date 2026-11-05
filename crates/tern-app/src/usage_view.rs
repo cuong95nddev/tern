@@ -110,6 +110,8 @@ pub struct UsageView {
     /// The account the shown Claude tab runs as; `None` when the shown tab
     /// isn't a Claude one.
     current: Option<String>,
+    /// The agent whose own numbers it shows (see [`own_usage`]).
+    own: Option<tern_agent::AgentId>,
     /// The account the bar shows (see [`shown`]).
     shown: Option<String>,
     /// The card is open.
@@ -135,7 +137,7 @@ impl UsageView {
         let card = cx.new(|cx| {
             cx.observe(&store, |_, _, cx| cx.notify()).detach();
             cx.observe(&accounts, |_, _, cx| cx.notify()).detach();
-            UsageCard { store: store.clone(), accounts: accounts.clone(), bar, current: None }
+            UsageCard { store: store.clone(), accounts: accounts.clone(), bar, current: None, own: None }
         });
         // The times count down by the minute.
         let tick = cx.spawn(async move |this, cx| {
@@ -157,6 +159,7 @@ impl UsageView {
             accounts,
             card,
             current: None,
+            own: None,
             shown: None,
             open: false,
             context: None,
@@ -200,12 +203,36 @@ impl UsageView {
         }
     }
 
+    /// The shown tab runs agent `agent`.
+    pub fn set_tab_agent(&mut self, agent: Option<tern_agent::AgentId>, cx: &mut Context<Self>) {
+        let own = own_usage(agent.as_ref());
+        if self.own != own {
+            self.own = own.clone();
+            self.card.update(cx, |c, cx| {
+                c.own = own;
+                cx.notify();
+            });
+            cx.notify();
+        }
+    }
+
+    /// Whose numbers it shows, when not the accounts'.
+    pub fn own(&self) -> Option<&tern_agent::AgentId> {
+        self.own.as_ref()
+    }
+
     /// Closes the card and asks the workspace for `ev`.
     fn act(&mut self, ev: UsageEvent, cx: &mut Context<Self>) {
         self.open = false;
         cx.emit(ev);
         cx.notify();
     }
+}
+
+/// The agent whose own numbers the bar shows for a tab of agent `tab`: one
+/// with a quota and no accounts. Else it shows Claude's accounts.
+fn own_usage(tab: Option<&tern_agent::AgentId>) -> Option<tern_agent::AgentId> {
+    tab.filter(|a| !a.is(usage::ACCOUNT_AGENT) && tern_agent::registry().has(a.as_str(), tern_agent::Capability::Usage)).cloned()
 }
 
 /// The account the bar shows: the one the shown Claude tab runs as; else
@@ -270,18 +297,24 @@ impl Render for UsageView {
             // The card shows it too.
             self.card.update(cx, |_, cx| cx.notify());
         }
-        let name = self.accounts.read(cx).name(&id);
         let now = SystemTime::now();
+        let own = self.own.clone();
+        let name = own.as_ref().map_or_else(|| self.accounts.read(cx).name(&id), crate::agents::agent_short_name);
         let (limits, note) = self.store.update(cx, |s, _| {
-            let u = s.get(&id);
-            (u.report.as_ref().map(|r| r.limits.iter().map(|l| limit_scope(l, now)).collect()), note(u))
+            let u = match &own {
+                Some(agent) => s.agent_usage(agent.as_str()),
+                None => s.get(&id),
+            };
+            let limits = u.report.as_ref().map(|r| r.limits.iter().map(|l| limit_scope(l, now)).collect());
+            (limits, if own.is_some() && u.report.is_none() { "No usage yet" } else { note(u) })
         });
+        let icon_agent = own.unwrap_or_else(|| self.store.read(cx).agent());
         let mut scope = template::Scope::new("usage")
             .var("name", name)
             .var("note", note)
             .var("open", self.open)
             .var("context_open", self.context_open)
-            .slot("icon", crate::agents::agent_icon(&self.store.read(cx).agent(), cx.theme()))
+            .slot("icon", crate::agents::agent_icon(&icon_agent, cx.theme()))
             .list("limits", limits.unwrap_or_default());
         if let Some(c) = &self.context {
             scope = c.scope(scope);
@@ -383,10 +416,56 @@ pub struct UsageCard {
     bar: WeakEntity<UsageView>,
     /// As the bar's.
     current: Option<String>,
+    /// As the bar's.
+    own: Option<tern_agent::AgentId>,
+}
+
+impl UsageCard {
+    /// The card of agent `agent`, which has no accounts.
+    fn render_own(&mut self, agent: tern_agent::AgentId, cx: &mut Context<Self>) -> AnyElement {
+        let now = SystemTime::now();
+        let scope = self.store.update(cx, |s, _| {
+            let u = s.agent_usage(agent.as_str());
+            let report = u.report.as_ref();
+            let updated = u.updated.map_or_else(|| "Not read yet".to_owned(), |t| format!("Updated {}", usage::ago(t, now)));
+            template::Scope::new("usage.card")
+                .var("title", crate::agents::agent_short_name(&agent))
+                .var("updated", updated)
+                .var("plan", report.and_then(|r| r.plan.clone()).unwrap_or_default())
+                .var("email", "")
+                .var("error", "")
+                .var("extra", "")
+                .var("reading", u.reading)
+                .var("has_accounts", false)
+                .list("limits", report.map(|r| r.limits.iter().map(|l| limit_scope(l, now)).collect()).unwrap_or_default())
+                .list("accounts", Vec::new())
+        });
+        let scope = scope.slot("icon", crate::agents::agent_icon(&agent, cx.theme()));
+        let store = self.store.downgrade();
+        template::render(
+            "usage.card",
+            scope,
+            &mut |name, _, f| match (name, f) {
+                ("refresh", Framed::Button(b)) => {
+                    let (store, agent) = (store.clone(), agent.clone());
+                    b.on_click(move |_, _, cx| {
+                        let _ = store.update(cx, |s, _| s.refresh_agent(agent.as_str()));
+                    })
+                    .into_any_element()
+                },
+                (_, f) => f.into_any_element(),
+            },
+            cx,
+        )
+        .into_any_element()
+    }
 }
 
 impl Render for UsageCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(agent) = self.own.clone() {
+            return self.render_own(agent, cx);
+        }
         // As the bar decided; worked out alike before it drew.
         let before = self.bar.upgrade().and_then(|b| b.read(cx).shown.clone());
         let account = shown(self.current.as_deref(), before.as_deref(), self.accounts.read(cx));
@@ -439,6 +518,7 @@ impl Render for UsageCard {
                 .var("error", error)
                 .var("extra", report.and_then(|r| r.extra.clone()).unwrap_or_default())
                 .var("reading", u.reading)
+                .var("has_accounts", true)
                 .list("limits", limits)
                 .list("accounts", entries)
         });
@@ -507,6 +587,7 @@ impl Render for UsageCard {
             },
             cx,
         )
+        .into_any_element()
     }
 }
 
@@ -610,6 +691,18 @@ impl Render for ContextCard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_bar_follows_the_shown_agent() {
+        use tern_agent::AgentId;
+        let tab = |id: &str| Some(AgentId::new(id));
+        assert_eq!(super::own_usage(tab("codex").as_ref()), tab("codex"));
+        // Claude's are the accounts' numbers; a shell or an agent with no
+        // quota leaves the bar on them.
+        assert_eq!(super::own_usage(tab("claude").as_ref()), None);
+        assert_eq!(super::own_usage(tab("gemini").as_ref()), None);
+        assert_eq!(super::own_usage(None), None);
+    }
+
     use super::ContextShown;
     use crate::agents::{ContextGuard, Handoff};
     use crate::template::Scope;
