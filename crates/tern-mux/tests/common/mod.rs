@@ -115,7 +115,7 @@ pub fn fake_codex(version: &str) -> (tempfile::TempDir, String) {
 }
 
 #[cfg(unix)]
-/// A Codex tab running `script`, in which `$1 $2` are what the daemon put
+/// A Codex tab running `script`, in which `$@` is what the daemon put
 /// in for Tern's hooks.
 pub fn codex_tab(path: &str, script: &str) -> tern_mux::client::Open {
     let mut cfg = sh(&format!("set -- {{tern-settings}}; {script}"));
@@ -125,4 +125,4 @@ pub fn codex_tab(path: &str, script: &str) -> tern_mux::client::Open {
 
 #[cfg(unix)]
 /// Sets `$url` to the hook endpoint of a Codex tab (see [`codex_tab`]).
-pub const CODEX_URL: &str = r#"file=$(printf %s "$2" | sed -n "s/.*--hook '\([^']*\)'.*/\1/p" | head -1); url=$(sed -n 's/.*"hook_url":"\([^"]*\)".*/\1/p' "$file"); "#;
+pub const CODEX_URL: &str = r#"file=$(printf %s "$3" | sed -n "s/.*--hook '\([^']*\)'.*/\1/p" | head -1); url=$(sed -n 's/.*"hook_url":"\([^"]*\)".*/\1/p' "$file"); "#;

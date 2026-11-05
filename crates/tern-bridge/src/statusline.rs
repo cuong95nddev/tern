@@ -54,6 +54,16 @@ pub fn run(settings: &Path) -> i32 {
     }
 }
 
+/// A status line's event saying `reading`, for an agent that has none of its
+/// own: what the context ring and the guard read.
+pub fn event_for(session: &str, reading: crate::context::Reading) -> Value {
+    serde_json::json!({
+        "hook_event_name": EVENT,
+        "session_id": session,
+        "context_window": { "context_window_size": reading.size, "used_percentage": reading.percent },
+    })
+}
+
 /// The hook URL in a tab's settings JSON (Claude's) or hook file (Codex's).
 pub(crate) fn hook_url(settings: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(settings).ok()?;
@@ -127,6 +137,15 @@ fn run_user(cmd: &str, input: &[u8]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reading_makes_a_status_line_event() {
+        let r = crate::context::Reading { percent: 12.5, size: 258_400 };
+        let ev = crate::HookEvent::parse("t".into(), super::event_for("s", r).to_string().as_bytes()).unwrap();
+        assert_eq!((ev.event.as_str(), ev.session_id.as_deref()), (super::EVENT, Some("s")));
+        assert_eq!(ev.raw["context_window"]["context_window_size"], 258_400);
+        assert_eq!(ev.raw["context_window"]["used_percentage"], 12.5);
+    }
+
     use super::*;
 
     #[test]

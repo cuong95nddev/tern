@@ -21,8 +21,8 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 use crate::UnixStream;
 use crate::paths;
 use crate::proto::{
-    self, ASK_HANDOFF_MINOR, CHAT_GUARD_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, GUARD_MINOR,
-    HANDOFF_MINOR, LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, PALETTE_MINOR, Role, ServerMsg, SessionInfo,
+    self, AGENT_SPAWN_MINOR, ASK_HANDOFF_MINOR, CHAT_GUARD_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller,
+    FrameReader, GUARD_MINOR, HANDOFF_MINOR, LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, PALETTE_MINOR, Role, ServerMsg, SessionInfo,
 };
 
 /// What the client asks who runs in a session's foreground with: the PTY
@@ -62,6 +62,19 @@ const MAX_QUEUED_INPUT: usize = 64 << 20;
 /// How long closing the connection waits for queued messages (a tab's
 /// `Close` as the app quits) to go out.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// `cfg` and `hook` for a daemon of `minor`. One that doesn't take `Spawn`'s
+/// `agent` gives every hook tab Claude's settings: another agent runs
+/// without hooks there, as a typed command.
+fn for_daemon(minor: u32, mut cfg: SpawnConfig, hook: bool, agent: Option<&str>) -> (SpawnConfig, bool) {
+    if minor >= AGENT_SPAWN_MINOR || agent.is_none_or(|a| a == tern_agent::CLAUDE) {
+        return (cfg, hook);
+    }
+    for a in &mut cfg.args {
+        *a = a.replace(" {tern-settings}", "").replace("{tern-settings}", "");
+    }
+    (cfg, false)
+}
 
 pub enum Open {
     /// Start a program. With `hook`, `{tern-settings}` in its args becomes
@@ -500,6 +513,7 @@ impl MuxClient {
         let msg = match open {
             Open::Spawn { mut cfg, hook, seed, agent } => {
                 cfg.size = size;
+                let (cfg, hook) = for_daemon(self.inner.server_minor, cfg, hook, agent.as_deref());
                 ClientMsg::Spawn { req, cfg, hook, seed, agent }
             },
             Open::Attach { id } => ClientMsg::Attach { req, id, size },
@@ -1457,6 +1471,24 @@ impl Drop for RemoteSession {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_daemon_before_agents_runs_other_agents_without_hooks() {
+        let cfg = || SpawnConfig {
+            program: None,
+            args: vec!["-c".into(), "codex --x {tern-settings}".into()],
+            cwd: None,
+            env: HashMap::new(),
+            size: TermSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
+            scrollback: 0,
+        };
+        let (old, hook) = for_daemon(17, cfg(), true, Some("codex"));
+        assert_eq!((old.args[1].as_str(), hook), ("codex --x", false));
+        let (new, hook) = for_daemon(18, cfg(), true, Some("codex"));
+        assert_eq!((new.args[1].as_str(), hook), ("codex --x {tern-settings}", true));
+        let (claude, hook) = for_daemon(17, cfg(), true, Some("claude"));
+        assert_eq!((claude.args[1].as_str(), hook), ("codex --x {tern-settings}", true));
+    }
+
     use super::*;
 
     #[test]

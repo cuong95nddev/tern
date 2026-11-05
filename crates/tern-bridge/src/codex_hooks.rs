@@ -114,7 +114,9 @@ fn relay_command(exe: &Path, file: &Path) -> String {
 /// binary, `file` the tab's hook file, `quote` quotes for the shell that
 /// runs the line.
 pub fn codex_launch_args(exe: &Path, file: &Path, quote: fn(&str) -> String) -> String {
-    format!("-c {}", quote(&format!("hooks={}", codex_hooks_arg(&relay_command(exe, file)))))
+    // `-c` keeps it off the shared background server anyway, whose hooks
+    // would run in another tab's env: saying so spares a startup warning.
+    format!("--no-daemon -c {}", quote(&format!("hooks={}", codex_hooks_arg(&relay_command(exe, file)))))
 }
 
 #[cfg(test)]
@@ -170,7 +172,7 @@ mod tests {
         let token = "0123456789abcdef";
         let file = write_codex_hook_file(&run, token, "http://127.0.0.1:1/hook/x").unwrap();
         let args = codex_launch_args(std::path::Path::new("/A p/tern"), &file, crate::statusline::quote);
-        assert!(args.starts_with("-c 'hooks={"), "{args}");
+        assert!(args.starts_with("--no-daemon -c 'hooks={"), "{args}");
         assert!(args.contains("--hook"), "{args}");
         assert!(!args.contains(token), "{args}");
     }

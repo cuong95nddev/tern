@@ -37,6 +37,16 @@ pub fn last_text(agent: &str, path: &Path) -> Option<String> {
     }
 }
 
+/// How full `agent`'s conversation saved at `path` is, for an agent that
+/// tells only there (Claude's status line tells it, see
+/// [`tern_bridge::statusline`]).
+pub fn context_reading(agent: &str, path: &Path) -> Option<tern_bridge::context::Reading> {
+    match agent {
+        tern_agent::CODEX => crate::codex::rollout::context_reading(path),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -64,6 +74,8 @@ mod tests {
         assert_eq!(transcript_path("codex", home.path(), Path::new("/a"), "ID"), Some(path.clone()));
         assert_eq!(last_text("codex", &path).as_deref(), Some("Done."));
         assert_eq!(read_recent("codex", &path, None).unwrap().text.as_deref(), Some("Done."));
+        assert_eq!(context_reading("codex", &path).map(|r| r.size), Some(258_400));
+        assert!(context_reading("claude", &path).is_none());
     }
 
     #[test]

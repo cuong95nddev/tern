@@ -292,8 +292,10 @@ pub struct TerminalView {
     session: Option<RemoteSession>,
     spawn_cfg: SpawnConfig,
     mux: Arc<Connector>,
-    /// Spawn with a Claude hook token.
+    /// Spawn with a hook token.
     hook: bool,
+    /// The agent the hooks are for.
+    hook_agent: Option<String>,
     /// The background session to attach to at the next start.
     attach: Option<u64>,
     /// The session the last start asked to attach to (its id isn't the
@@ -525,6 +527,7 @@ impl TerminalView {
             spawn_cfg,
             mux,
             hook,
+            hook_agent: None,
             attach,
             attach_asked: None,
             lost: None,
@@ -656,11 +659,12 @@ impl TerminalView {
             _ => None,
         };
         let hook = self.hook;
+        let agent = self.hook_agent.clone().filter(|_| hook);
         let attach = self.attach;
         let spawn_cfg = cfg.clone();
         let open = move |seed| match attach {
             Some(id) => Open::Attach { id },
-            None => Open::Spawn { cfg: spawn_cfg, hook, seed, agent: None },
+            None => Open::Spawn { cfg: spawn_cfg, hook, seed, agent },
         };
         self.exited = None;
         self.spawn_error = None;
@@ -851,7 +855,12 @@ impl TerminalView {
         self.spawn_cfg = cfg;
     }
 
-    /// Whether the next start gets a Claude hook token.
+    /// The agent its hooks are for.
+    pub fn set_hook_agent(&mut self, agent: Option<String>) {
+        self.hook_agent = agent;
+    }
+
+    /// Whether the next start gets a hook token.
     pub fn set_hook(&mut self, hook: bool) {
         self.hook = hook;
     }

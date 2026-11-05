@@ -378,17 +378,17 @@ pub fn launch_line(d: &tern_agent::Descriptor) -> String {
     std::iter::once(d.command.clone()).chain(d.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ")
 }
 
-/// The shell line that starts Claude-integrated agent `d` in a tab: its
+/// The shell line that starts agent `d`, which has `Launch`, in a tab: its
 /// command and args, the user's own arguments `user` as typed (shell
 /// syntax), then the hook settings placeholder, which the daemon fills (or
-/// drops without hooks).
+/// drops without hooks): Claude's settings file, what Codex takes whole.
 pub fn start_line(d: &tern_agent::Descriptor, user: &str) -> String {
     let mut line = launch_line(d);
     if !user.is_empty() {
         line.push(' ');
         line.push_str(user);
     }
-    line.push_str(" --settings {tern-settings}");
+    line.push_str(if d.id.is(tern_agent::CLAUDE) { " --settings {tern-settings}" } else { " {tern-settings}" });
     line
 }
 
@@ -475,6 +475,11 @@ mod tests {
     #[test]
     fn claude_starts_with_the_descriptors_command_and_args() {
         let mut d = tern_agent::registry().get(tern_agent::CLAUDE).unwrap().clone();
+        let codex = tern_agent::registry().get("codex").unwrap().clone();
+        assert_eq!(super::start_line(&codex, ""), "codex {tern-settings}");
+        assert_eq!(super::start_line(&codex, "--foo"), "codex --foo {tern-settings}");
+        let id = tern_agent::AgentId::new("codex");
+        assert_eq!(super::resume_line("codex {tern-settings}", &id, "0f-1").as_deref(), Some("codex {tern-settings} resume 0f-1"));
         assert_eq!(super::start_line(&d, ""), "claude --settings {tern-settings}");
         assert_eq!(super::start_line(&d, "--foo"), "claude --foo --settings {tern-settings}");
         d.command = "claude-beta".into();
@@ -497,7 +502,8 @@ mod tests {
     #[test]
     fn guard_is_offered_only_where_context_steer_and_transcript_exist() {
         assert!(super::guard_shown(tern_agent::CLAUDE));
-        assert!(!super::guard_shown("codex"));
+        assert!(super::guard_shown("codex"));
+        assert!(!super::guard_shown("gemini"));
         assert!(!super::guard_shown("no-such-agent"));
     }
 

@@ -373,7 +373,8 @@ impl ChatHost {
         let text = match action {
             Action::None => return,
             Action::Clear => "/clear".to_owned(),
-            Action::Prompt(p) => p,
+            // Only a terminal's guard says it (see `server`).
+            Action::Prompt(p) | Action::ClearPrompt(p) => p,
         };
         let host = self.clone();
         std::thread::spawn(move || {

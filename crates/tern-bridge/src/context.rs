@@ -41,6 +41,9 @@ pub enum Action {
     Clear,
     /// Submit this prompt.
     Prompt(String),
+    /// Clear the conversation, then submit this prompt: for an agent whose
+    /// fresh conversation says nothing until its first turn.
+    ClearPrompt(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -71,6 +74,9 @@ pub struct Guard {
     born_over: bool,
     /// The handoff under way is the user's (see [`Guard::request`]).
     by_user: bool,
+    /// Its agent's `SessionStart` comes with a conversation's first turn
+    /// (Codex), so a cleared one can't wait for it to be prompted.
+    first_turn_start: bool,
 }
 
 /// The line the agent ends its handoff turn with.
@@ -80,6 +86,19 @@ const HANDOFF_LINE: &str = "Handoff:";
 pub const CONTINUE_PROMPT: &str = "Continue the work from the handoff.";
 
 impl Guard {
+    /// The guard of an agent whose `SessionStart` comes with a conversation's
+    /// first turn.
+    pub fn starting_at_first_turn() -> Self {
+        Self { first_turn_start: true, ..Self::default() }
+    }
+
+    /// The conversation is to go on in a fresh one, from `handoff`: what to
+    /// send the terminal.
+    fn clear(&mut self, handoff: Option<String>) -> Action {
+        self.phase = Phase::Written { handoff, clearing: !self.first_turn_start };
+        if self.first_turn_start { Action::ClearPrompt(CONTINUE_PROMPT.into()) } else { Action::Clear }
+    }
+
     /// How full the window is, in percent.
     pub fn percent(&self) -> f32 {
         self.percent
@@ -118,8 +137,7 @@ impl Guard {
     /// conversation: what to send the terminal.
     pub fn resume_from(&mut self, handoff: Option<String>) -> Action {
         self.by_user = false;
-        self.phase = Phase::Written { handoff, clearing: true };
-        Action::Clear
+        self.clear(handoff)
     }
 
     /// Hook `ev` came: the answer for Claude Code (`None` for `{}`), and
@@ -170,8 +188,11 @@ impl Guard {
                     let handoff = last_message(&ev.raw).as_deref().and_then(handoff_path);
                     // The user's own handoff stops: they go on when they say.
                     let clearing = policy.auto_switch && !std::mem::take(&mut self.by_user);
+                    if clearing {
+                        return (None, self.clear(handoff));
+                    }
                     self.phase = Phase::Written { handoff, clearing };
-                    (None, if clearing { Action::Clear } else { Action::None })
+                    (None, Action::None)
                 },
                 _ => none,
             },
@@ -578,6 +599,30 @@ mod tests {
         assert_eq!(g.on_event(&ev(json!({"hook_event_name": "UserPromptSubmit"})), POLICY), (None, Action::None));
         let done = json!({"hook_event_name": "Stop", "last_assistant_message": "Handoff: a.md"});
         assert_eq!(g.on_event(&ev(done), POLICY), (None, Action::None));
+    }
+
+    #[test]
+    fn an_agent_that_starts_at_its_first_turn_is_cleared_and_prompted_at_once() {
+        let policy = Policy { limit: 50, auto_switch: true };
+        let mut g = Guard::starting_at_first_turn();
+        g.reading(60., policy);
+        let (reply, _) = g.on_event(&ev(json!({"hook_event_name": "Stop"})), policy);
+        assert_eq!(reply.unwrap()["decision"], "block");
+        let done = ev(json!({"hook_event_name": "Stop", "stop_hook_active": true, "last_assistant_message": "Handoff: docs/h.md"}));
+        assert_eq!(g.on_event(&done, policy), (None, Action::ClearPrompt(CONTINUE_PROMPT.into())));
+        // Its `SessionStart` comes with that first prompt's turn.
+        let (reply, action) = g.on_event(&ev(json!({"hook_event_name": "SessionStart", "source": "clear"})), policy);
+        assert!(reply.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("docs/h.md"));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn going_on_from_a_handoff_at_a_first_turn_prompts_at_once() {
+        let mut g = Guard::starting_at_first_turn();
+        assert_eq!(g.resume_from(Some("h.md".into())), Action::ClearPrompt(CONTINUE_PROMPT.into()));
+        let (reply, action) = g.on_event(&ev(json!({"hook_event_name": "SessionStart", "source": "clear"})), Policy::default());
+        assert!(reply.is_some());
+        assert_eq!(action, Action::None);
     }
 
     #[test]

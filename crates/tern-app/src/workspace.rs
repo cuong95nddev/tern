@@ -1166,13 +1166,21 @@ impl Workspace {
                 env.remove("no_proxy");
                 (crate::platform::shell_args(), "shell".into())
             },
-            // An agent Tern has no integration for yet: its command, run
-            // as Claude's is (the tab goes on as a shell when it ends).
+            // Its command, run as Claude's is (the tab goes on as a shell
+            // when it ends): with Tern's hooks when it takes them, resuming
+            // conversation `resume`.
             TabKind::Agent(agent) if !agent.is(tern_agent::CLAUDE) => {
                 env.remove("NO_PROXY");
                 env.remove("no_proxy");
                 let registry = tern_agent::registry();
-                let line = registry.get(agent.as_str()).map_or_else(|| agent.to_string(), crate::agents::launch_line);
+                let line = match registry.get(agent.as_str()) {
+                    Some(d) if kind.has(Capability::Launch) => {
+                        let start = crate::agents::start_line(d, "");
+                        resume.and_then(|id| crate::agents::resume_line(&start, agent, id)).unwrap_or(start)
+                    },
+                    Some(d) => crate::agents::launch_line(d),
+                    None => agent.to_string(),
+                };
                 (crate::platform::shell_command_args(&line), crate::agents::agent_short_name(agent).into())
             },
             TabKind::Agent(agent) => {
@@ -1529,7 +1537,12 @@ impl Workspace {
         let config = self.services.terminal.clone();
         let connector = self.services.mux.clone();
         let hook = kind.has(Capability::Status);
-        let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
+        let agent = kind.agent().map(ToString::to_string);
+        let view = cx.new(|cx| {
+            let mut view = TerminalView::new(cfg, hook, mux, title, config, connector, cx);
+            view.set_hook_agent(agent);
+            view
+        });
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
         // Set again at each start (`Ready`): only a `--resume` it starts,

@@ -470,18 +470,29 @@ const UI_SKIPS: [&str; 9] = [
 ];
 
 fn type_after_turn(host: &Arc<Host>, action: Action) {
-    let text = match action {
+    let lines = match action {
         Action::None => return,
-        Action::Clear => "/clear".to_owned(),
-        Action::Prompt(p) => p,
+        Action::Clear => vec!["/clear".to_owned()],
+        Action::Prompt(p) => vec![p],
+        Action::ClearPrompt(p) => vec!["/clear".to_owned(), p],
     };
     let host = host.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(1500));
-        host.input(text.into_bytes());
-        std::thread::sleep(Duration::from_millis(300));
-        host.input(b"\r".to_vec());
+        for line in lines {
+            std::thread::sleep(Duration::from_millis(1500));
+            host.input(line.into_bytes());
+            std::thread::sleep(Duration::from_millis(300));
+            host.input(b"\r".to_vec());
+        }
     });
+}
+
+/// The guard of a tab of `agent`.
+fn guard_for(agent: Option<&AgentId>) -> Guard {
+    match agent {
+        Some(a) if a.is(tern_agent::CODEX) => Guard::starting_at_first_turn(),
+        _ => Guard::default(),
+    }
 }
 
 fn random_id() -> u64 {
@@ -1234,9 +1245,9 @@ impl Server {
                     driver: None,
                     held: false,
                     hooks: VecDeque::new(),
+                    guard: guard_for(agent.as_ref()),
                     agent,
                     claude_session: None,
-                    guard: Guard::default(),
                     policy: Policy::default(),
                     muted: false,
                     service,
@@ -1390,6 +1401,7 @@ impl Server {
         if let Some(chat) = chat {
             return chat.on_hook(&ev);
         }
+        self.read_context(&ev);
         let body = serde_json::to_vec(&ev.raw).unwrap_or_default();
         let (host, reply) = {
             let mut st = self.state.lock().unwrap();
@@ -1425,6 +1437,29 @@ impl Server {
             host.agent_hook(&ev.raw, ev.event == "Stop" && blocked);
         }
         reply
+    }
+
+    /// Hook `ev` came from an agent with no status line: how full its context
+    /// is, off the transcript it names, comes in as a status line would.
+    fn read_context(&self, ev: &HookEvent) {
+        if ev.event == tern_bridge::statusline::EVENT {
+            return;
+        }
+        let agent = self
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .find(|s| s.token.as_deref() == Some(ev.token.as_str()))
+            .and_then(|s| s.agent.clone());
+        let path = ev.raw.get("transcript_path").and_then(serde_json::Value::as_str).map(Path::new);
+        let (Some(agent), Some(path), Some(session)) = (agent, path, &ev.session_id) else { return };
+        let Some(reading) = tern_chat::sessions::context_reading(agent.as_str(), path) else { return };
+        let line = tern_bridge::statusline::event_for(session, reading);
+        if let Some(ev) = HookEvent::parse(ev.token.clone(), line.to_string().as_bytes()) {
+            self.on_hook(ev);
+        }
     }
 
     /// Whether session `id` notifies the user: no UI is attached (it would)
@@ -1768,11 +1803,13 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             }
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
+            let agent = s.agent.as_deref().map(AgentId::new).or_else(|| s.token.as_ref().map(|_| AgentId::new(tern_agent::CLAUDE)));
             st.sessions.insert(
                 s.id,
                 Session {
                     host,
-                    agent: s.agent.as_deref().map(AgentId::new).or_else(|| s.token.as_ref().map(|_| AgentId::new(tern_agent::CLAUDE))),
+                    guard: guard_for(agent.as_ref()),
+                    agent,
                     token: s.token,
                     owner: None,
                     viewers: Vec::new(),
@@ -1781,7 +1818,6 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                     held: false,
                     hooks,
                     claude_session: s.claude_session,
-                    guard: Guard::default(),
                     policy: Policy::default(),
                     muted: false,
                     service: s.service,

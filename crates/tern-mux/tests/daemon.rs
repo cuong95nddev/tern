@@ -131,9 +131,9 @@ fn codex_tab_gets_its_hook_args() {
     let c = client(&d.dir);
     let (sink, ev) = sink();
     let (_dir, path) = fake_codex("0.166.0");
-    let s = c.open(codex_tab(&path, r#"echo "[$1]"; printf '%s\n' "$2" | cut -c1-20; read x"#), SIZE, 1000, sink);
+    let s = c.open(codex_tab(&path, r#"echo "[$1 $2]"; printf '%s\n' "$3" | cut -c1-20; read x"#), SIZE, 1000, sink);
     wait_until("ready", || ready_id(&ev).is_some());
-    wait_until("hook args", || screen(&s).contains("[-c]") && screen(&s).contains("hooks={SessionStart"));
+    wait_until("hook args", || screen(&s).contains("[--no-daemon -c]") && screen(&s).contains("hooks={SessionStart"));
     s.close();
 }
 
@@ -185,6 +185,58 @@ fn a_codex_hook_reaches_its_own_tab() {
     assert!(agent_statuses(&ev_b).is_empty());
     a.close();
     b.close();
+}
+
+/// A rollout that has `total` tokens in a window of 258400.
+fn rollout_at(path: &Path, total: u64) {
+    let line = format!(
+        r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"total_tokens":{total}}},"model_context_window":258400}}}}}}"#
+    );
+    std::fs::write(path, format!("{line}\n")).unwrap();
+}
+
+#[test]
+fn codex_guard_reads_its_rollout_on_each_hook() {
+    let d = daemon(Duration::from_secs(60));
+    let got: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = got.clone();
+    let hooks: tern_mux::client::HookSink = Arc::new(move |_, body| seen.lock().unwrap().push(serde_json::from_slice(&body).unwrap()));
+    let c = MuxClient::connect(&d.dir, false, hooks, Arc::new(|_| {})).unwrap();
+    let (sink, ev) = sink();
+    let (dir, path) = fake_codex("0.166.0");
+    let rollout = dir.path().join("rollout.jsonl");
+    rollout_at(&rollout, 36_640);
+    let body = format!(
+        r#"{{"hook_event_name":"Stop","session_id":"s","transcript_path":"{}","last_assistant_message":"done"}}"#,
+        rollout.display()
+    );
+    let stop = format!(r#"curl -s -X POST -H 'content-type: application/json' -d '{body}' "$url"; echo; "#);
+    let s = c.open(codex_tab(&path, &format!("{CODEX_URL}read x; {stop}read y; {stop}read z")), SIZE, 1000, sink);
+    wait_until("ready", || ready_id(&ev).is_some());
+    let id = s.id().unwrap();
+    c.set_context_guard(id, 50, false);
+    c.list().unwrap(); // After the guard, on the same connection.
+    s.write(b"\n".to_vec());
+    wait_until("under its limit", || screen(&s).lines().any(|l| l == "{}"));
+    assert!(!screen(&s).contains("decision"));
+    // Past the limit by the time of the next hook.
+    rollout_at(&rollout, 160_000);
+    s.write(b"\n".to_vec());
+    wait_until("asked for a handoff", || screen(&s).contains(r#""decision":"block""#));
+    let percents = || -> Vec<u64> {
+        let seen = got.lock().unwrap();
+        let lines = seen.iter().filter(|v| v["hook_event_name"] == tern_bridge::statusline::EVENT);
+        lines.filter_map(|v| v.pointer("/context_window/used_percentage")?.as_f64()).map(|p| p as u64).collect()
+    };
+    wait_until("the UI has the readings", || percents().len() >= 2);
+    assert_eq!(percents(), [10, 60]);
+    assert!(
+        got.lock()
+            .unwrap()
+            .iter()
+            .all(|v| v["hook_event_name"] != tern_bridge::statusline::EVENT || v["context_window"]["context_window_size"] == 258_400)
+    );
+    s.close();
 }
 
 #[test]
