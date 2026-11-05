@@ -4,6 +4,7 @@ pub mod claude_version;
 pub mod codex_hooks;
 pub mod context;
 pub mod hooks;
+pub mod opencode_hooks;
 pub mod relay;
 pub mod statusline;
 pub mod version;
