@@ -116,9 +116,40 @@ mod tests {
     }
 
     #[test]
-    fn gemini_blocks_on_a_yes_no_prompt_and_cannot_tell_working() {
+    fn gemini_from_its_screen() {
         assert_eq!(read("gemini", "gemini", "[y/n]"), Some(Blocked));
-        assert_eq!(read("gemini", "gemini", ""), None);
+        assert_eq!(read("gemini", "gemini", "│ apply this change?\n│ esc to cancel"), Some(Blocked));
+        assert_eq!(read("gemini", "gemini", "│ allow execution of: 'ls'?"), Some(Blocked));
+        assert_eq!(read("gemini", "gemini", "⠏ thinking (esc to cancel, 3s)"), Some(Working));
+        assert_eq!(read("gemini", "gemini", "> type your message"), Some(Idle));
+    }
+
+    #[test]
+    fn cursor_from_its_screen() {
+        assert_eq!(read("cursor", "cursor", "run this command?\nrun (once) (y)\nskip (esc or n)"), Some(Blocked));
+        assert_eq!(read("cursor", "cursor", "write to this file?\nproceed (y)\nkeep (n)"), Some(Blocked));
+        assert_eq!(read("cursor", "cursor", "⬡ generating\nctrl+c to stop"), Some(Working));
+        assert_eq!(read("cursor", "cursor", "→ add a follow-up"), Some(Idle));
+    }
+
+    #[test]
+    fn grok_from_title_and_screen() {
+        assert_eq!(read("grok", "⚠ Action Required - grok", ""), Some(Blocked));
+        assert_eq!(read("grok", "⠋ fixing - grok", "┃  2 (○) yes, proceed"), Some(Blocked));
+        assert_eq!(read("grok", "grok", "1/3:select │ ctrl+o:yolo │ ctrl+c:cancel"), Some(Blocked));
+        assert_eq!(read("grok", "grok", "esc:unselect │ tab:scrollback │ shift+x:dismiss"), Some(Blocked));
+        assert_eq!(read("grok", "⠋ fixing - grok", ""), Some(Working));
+        assert_eq!(read("grok", "grok", "⠧ waiting on subagent… 2.8s   13s ⇣29.7k [stop]"), Some(Working));
+        assert_eq!(read("grok", "grok", "esc:cancel │ ctrl+.:shortcuts"), Some(Working));
+        assert_eq!(read("grok", "grok", "ctrl+.:shortcuts"), Some(Idle));
+    }
+
+    #[test]
+    fn pi_from_its_screen() {
+        assert_eq!(read("pi", "pi", "[y/n]"), Some(Blocked));
+        assert_eq!(read("pi", "pi", "working..."), Some(Working));
+        assert_eq!(read("pi", "pi", "── ⠹ working ──────"), Some(Working));
+        assert_eq!(read("pi", "pi", "the tests are working"), Some(Idle));
     }
 
     #[test]

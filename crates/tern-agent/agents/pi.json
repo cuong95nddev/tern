@@ -3,14 +3,27 @@
   "name": "Pi",
   "command": "pi",
   "processes": ["pi"],
-  "logo": { "light": "pi-light", "dark": "pi-dark" },
+  "logo": {"light": "pi-light", "dark": "pi-dark"},
   "resume": [],
   "skills_dir": null,
   "screen": {
     "blocked": [
-      { "bottom_contains": "[y/n]" },
-      { "bottom_contains": "do you want to proceed?" },
-      { "bottom_contains": "waiting for user confirmation" }
+      {"bottom_contains": "[y/n]"},
+      {"bottom_contains": "do you want to proceed?"},
+      {"bottom_contains": "waiting for user confirmation"}
+    ],
+    "working": [
+      {"bottom_contains": "working..."},
+      {"bottom_contains": "⠋ working"},
+      {"bottom_contains": "⠙ working"},
+      {"bottom_contains": "⠹ working"},
+      {"bottom_contains": "⠸ working"},
+      {"bottom_contains": "⠼ working"},
+      {"bottom_contains": "⠴ working"},
+      {"bottom_contains": "⠦ working"},
+      {"bottom_contains": "⠧ working"},
+      {"bottom_contains": "⠇ working"},
+      {"bottom_contains": "⠏ working"}
     ]
   }
 }

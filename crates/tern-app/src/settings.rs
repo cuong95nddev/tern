@@ -1699,7 +1699,7 @@ A descriptor's fields:
 - `processes`: the program names that tell Tern a terminal runs it.
 - `resume`: the command that resumes a conversation, `{{session}}` standing
   for its id (`[\"codex\", \"resume\", \"{{session}}\"]`), for the agents
-  whose conversations Tern follows (today Claude Code).
+  whose conversations Tern follows (today Claude Code, Codex and OpenCode).
 - `skills_dir`: where its skill files go, under the home folder.
 - `screen`: how its screen says what it does, for agents that don't report
   it: `blocked` and `working`, each a list of rules; any rule of a list

@@ -3,14 +3,19 @@
   "name": "Gemini CLI",
   "command": "gemini",
   "processes": ["gemini"],
-  "logo": { "light": "gemini", "dark": "gemini" },
+  "logo": {"light": "gemini", "dark": "gemini"},
   "resume": [],
   "skills_dir": null,
   "screen": {
     "blocked": [
-      { "bottom_contains": "[y/n]" },
-      { "bottom_contains": "do you want to proceed?" },
-      { "bottom_contains": "waiting for user confirmation" }
+      {"bottom_contains": "│ apply this change"},
+      {"bottom_contains": "│ allow execution"},
+      {"bottom_contains": "[y/n]"},
+      {"bottom_contains": "do you want to proceed?"},
+      {"bottom_contains": "waiting for user confirmation"}
+    ],
+    "working": [
+      {"bottom_contains": "esc to cancel"}
     ]
   }
 }

@@ -2,15 +2,28 @@
   "id": "grok",
   "name": "Grok",
   "command": "grok",
-  "processes": ["grok"],
-  "logo": { "light": "grok-light", "dark": "grok-dark" },
+  "processes": ["grok", "grok-build"],
+  "logo": {"light": "grok-light", "dark": "grok-dark"},
   "resume": [],
   "skills_dir": null,
   "screen": {
     "blocked": [
-      { "bottom_contains": "[y/n]" },
-      { "bottom_contains": "do you want to proceed?" },
-      { "bottom_contains": "waiting for user confirmation" }
+      {"title_contains": "Action Required"},
+      {"bottom_contains": ["┃", "(○)"]},
+      {"bottom_contains": ["┃", "(●)"]},
+      {"bottom_contains": ["ctrl+o:yolo", "ctrl+c:cancel"]},
+      {"bottom_contains": ["tab:scrollback", "shift+x:dismiss"]},
+      {"bottom_contains": ["yes, proceed", "no, reject"]},
+      {"bottom_contains": "[y/n]"},
+      {"bottom_contains": "do you want to proceed?"},
+      {"bottom_contains": "waiting for user confirmation"}
+    ],
+    "working": [
+      {"title_any_char": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"},
+      {"bottom_contains": "[stop]"},
+      {"bottom_contains": ["ctrl+.:shortcuts", "esc:cancel"]},
+      {"bottom_contains": ["ctrl+.:shortcuts", "ctrl+c:cancel"]},
+      {"bottom_contains": ["ctrl+c:cancel", "ctrl+enter:interject"]}
     ]
   }
 }

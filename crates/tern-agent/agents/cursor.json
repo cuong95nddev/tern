@@ -3,14 +3,22 @@
   "name": "Cursor Agent",
   "command": "cursor-agent",
   "processes": ["cursor-agent"],
-  "logo": { "light": "cursor-light", "dark": "cursor-dark" },
+  "logo": {"light": "cursor-light", "dark": "cursor-dark"},
   "resume": [],
   "skills_dir": null,
   "screen": {
     "blocked": [
-      { "bottom_contains": "[y/n]" },
-      { "bottom_contains": "do you want to proceed?" },
-      { "bottom_contains": "waiting for user confirmation" }
+      {"bottom_contains": ["write to this file?", "proceed (y)"]},
+      {"bottom_contains": "run (once) (y)"},
+      {"bottom_contains": "skip (esc or n)"},
+      {"bottom_contains": "(y) (enter)"},
+      {"bottom_contains": "keep (n)"},
+      {"bottom_contains": "[y/n]"},
+      {"bottom_contains": "do you want to proceed?"},
+      {"bottom_contains": "waiting for user confirmation"}
+    ],
+    "working": [
+      {"bottom_contains": "ctrl+c to stop"}
     ]
   }
 }
