@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use tern_bridge::context::{Action, Guard, Policy};
 use tern_bridge::{HookEvent, HookServer};
+#[cfg(unix)]
 use tern_term::agent_lane::AgentLane;
 use tern_term::agent_status::AgentStatus;
 use tern_term::mirror::Marker;

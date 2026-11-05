@@ -1684,6 +1684,49 @@ the background is. A terminal theme from elsewhere becomes a whole theme so:
 for the system's light or dark appearance, and switches when the system does.
 Choosing a theme in the theme picker sets one theme in its place.
 
+## Agents (`agents/*.json`)
+
+Tern knows the coding agents it shows (Claude Code, Codex, OpenCode, Gemini,
+Cursor, Grok, Pi) from descriptors. A file `agents/<id>.json` here changes
+one or adds another; `tern --agents` lists every agent Tern knows, where each
+comes from, and what is wrong in the files.
+
+A descriptor's fields:
+
+- `id`: the agent's id, the file's name without `.json`.
+- `name`, `short_name`: what Tern calls it (`Claude Code`, `Claude`).
+- `command`, `args`: what a new tab of it runs.
+- `processes`: the program names that tell Tern a terminal runs it.
+- `resume`: the command that resumes a conversation, `{{session}}` standing
+  for its id (`[\"codex\", \"resume\", \"{{session}}\"]`).
+- `skills_dir`: where its skill files go, under the home folder.
+- `screen`: how its screen says what it does, for agents that don't report
+  it: `blocked` and `working`, each a list of rules. A rule matches when the
+  terminal's title holds `title_contains`, the bottom lines (lowercased) hold
+  `bottom_contains` (a text, or a list that must all be there), the title holds
+  one of the characters of `title_any_char`, or starts with a character in one
+  of the `title_lead` ranges (code points, inclusive) then a space. Without
+  `working` rules, its screen can't tell working from waiting.
+
+A file with a built-in agent's id changes only the fields it has. Codex with
+a flag of your own:
+
+```json
+{{ \"id\": \"codex\", \"args\": [\"--search\"] }}
+```
+
+A file with a new id adds an agent: it needs `name` and `command`. Tern then
+detects it in terminals, offers \"New <name> Tab\" (File > New Agent Tab and the
+command palette), reads its status from its screen and resumes it when it has
+`resume`:
+
+```json
+{{ \"id\": \"amp\", \"name\": \"Amp\", \"command\": \"amp\", \"processes\": [\"amp\"] }}
+```
+
+Tern's deeper integration (status from the agent's own events, its chat, the
+context ring and handoff, usage) is built in per agent: today Claude Code's.
+
 ### For agents
 
 Tern has commands to check what you change here: `tern --theme` applies the

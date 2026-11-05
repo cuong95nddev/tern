@@ -392,3 +392,13 @@ Each phase is shippable on its own and leaves main green.
   started (needed for the terminal ⇄ chat switch).
 - Codex hook trust: Codex asks to trust hooks in `config.toml`; Orca writes
   trust entries in its managed home (`src/main/codex/trust/`).
+
+## Phase 1 done
+
+Phase 1 (registry, descriptors, one detector, `AgentStatus` and hook lanes,
+`TabKind::Agent`, per-agent actions and menus, the neutral chat model with
+the chat-driver table, and the sessions / usage tables, all filled by Claude)
+is on branch `agent-adapters`, commits `122a1e0..` (2026-11-05). Phase 2
+adds Codex's entries: its hook lane, chat driver (`codex app-server`),
+sessions and usage from rollouts; the daemon's chat follower is still
+Claude stream-json and is generalised then.

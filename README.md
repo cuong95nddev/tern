@@ -24,6 +24,7 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
 ## Features
 
 - **Agent and shell tabs** side by side, with workspaces (one folder each) as tabs across the top of the window
+- **Any CLI agent**: Claude Code, Codex, OpenCode, Gemini, Cursor, Grok and Pi are known with their logos and screen status; add or change one with a JSON file in the config folder's `agents/` (`tern --agents` lists them). Claude Code has the deepest integration: status from its hooks, a chat view, the context ring and handoff, and usage
 - **File explorer** and a light editor that saves, diffs against `HEAD` and renders Markdown
 - **Changes panel** listing the git changes of every repo under the folder; click a file to preview its diff
 - **Scratch files** that save as you type
