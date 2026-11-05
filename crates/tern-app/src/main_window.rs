@@ -1250,6 +1250,9 @@ pub fn control(line: &str, cx: &mut App) -> String {
         open_window(Content::Welcome, None, cx);
         return "ok".into();
     }
+    if let Some((id, text)) = line.trim().strip_prefix("settings-args ").and_then(|l| l.split_once(' ')) {
+        return crate::settings_window::type_args(id, text, cx);
+    }
     if let Some(cmd) = line.trim().strip_prefix("settings-input ") {
         return crate::settings_window::input(cmd, cx);
     }

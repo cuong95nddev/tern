@@ -8,11 +8,16 @@
 //! Drawn by the `settings` templates; the code fills the rows and attaches
 //! what each control does.
 
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::*;
 
+use tern_agent::AgentId;
 use tern_web::access::{self, Access, NewPairing};
 
 #[cfg(target_os = "macos")]
@@ -39,7 +44,7 @@ const SECTIONS: &[(Section, &str, &str, &str)] = &[
     (Section::Appearance, "Appearance", "palette", "Theme, text size and layout."),
     (Section::Terminal, "Terminal", "square-terminal", "Terminal tabs."),
     (Section::Editor, "Editor", "file-code", "The file editor and code blocks."),
-    (Section::Agents, "Agents", "bot", "What the agents panel shows of each agent."),
+    (Section::Agents, "Agents", "bot", "The agents on this computer, what a new tab opens, and what the agents panel shows."),
     (Section::Connections, "Connections", "globe", "Use Tern from your phone or another computer."),
     (Section::Permissions, "Permissions", "shield-check", "What macOS lets Tern do."),
 ];
@@ -139,9 +144,39 @@ pub fn start_remote_at_launch(cx: &mut App) {
 
 type Handler = Rc<dyn Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>)>;
 
+/// Debug control: type `text` in agent `id`'s arguments field and press Return.
+#[cfg(debug_assertions)]
+pub fn type_args(id: &str, text: &str, cx: &mut App) -> String {
+    let Some((h, view)) = cx.default_global::<Open>().0.clone() else { return "error: no Settings window".into() };
+    let Ok(Some(field)) = view.read_with(cx, |v, _| v.arg_fields.get(&AgentId::new(id)).cloned()) else {
+        return "error: no such field".into();
+    };
+    let typed = h.update(cx, |_, window, cx| {
+        field.update(cx, |input, cx| {
+            input.set_value(text.to_owned(), window, cx);
+            cx.emit(InputEvent::Change);
+            cx.emit(InputEvent::PressEnter { secondary: false, shift: false });
+        })
+    });
+    if typed.is_ok() { "ok".into() } else { "error: window closed".into() }
+}
+
+/// Keep `value` as the arguments of agent `id`'s tabs.
+fn save_args(id: &AgentId, value: &str, cx: &mut App) {
+    if id.is(tern_agent::CLAUDE) {
+        crate::window_state::set_claude_args(value);
+    } else {
+        settings::set_value(&["agents", "args", id.as_str()], (!value.is_empty()).then(|| value.into()), cx);
+    }
+}
+
 /// A setting on a page.
 struct Row {
-    title: &'static str,
+    title: String,
+    /// Its agent, whose logo it shows.
+    agent: Option<AgentId>,
+    /// The field for that agent's arguments.
+    field: Option<Entity<InputState>>,
     description: String,
     problem: Option<String>,
     value: Option<String>,
@@ -181,8 +216,16 @@ impl Stepper {
 }
 
 impl Row {
-    fn new(title: &'static str, description: impl Into<String>) -> Self {
-        Row { title, description: description.into(), problem: None, value: None, control: Control::None }
+    fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+        Row {
+            title: title.into(),
+            agent: None,
+            field: None,
+            description: description.into(),
+            problem: None,
+            value: None,
+            control: Control::None,
+        }
     }
 
     fn value(mut self, v: impl Into<String>) -> Self {
@@ -207,9 +250,11 @@ impl Row {
         self
     }
 
-    fn scope(&self, i: usize) -> template::Scope {
+    fn scope(&self, i: usize, theme: &gpui_kit::component::Theme) -> template::Scope {
         let mut s = template::Scope::new(format!("row-{i}"))
-            .var("title", self.title)
+            .slot_opt("icon", self.agent.as_ref().map(|a| crate::agents::agent_icon(a, theme)))
+            .slot_opt("field", self.field.as_ref().map(|f| Input::new(f).small()))
+            .var("title", self.title.clone())
             .var("description", self.description.clone())
             .var("problem", self.problem.clone().unwrap_or_default());
         match &self.control {
@@ -275,6 +320,14 @@ pub struct SettingsView {
     file: serde_json::Value,
     generation: u64,
     remote: Remote,
+    /// Each agent and where its command is, as of the last look.
+    agents: Option<Vec<(AgentId, Option<PathBuf>)>>,
+    looking_for_agents: bool,
+    /// Each installed agent's arguments field, made when the page shows.
+    arg_fields: HashMap<AgentId, Entity<InputState>>,
+    /// The fields changed and not saved yet.
+    args_edited: HashSet<AgentId>,
+    _arg_subs: Vec<Subscription>,
     #[cfg(target_os = "macos")]
     granted: Option<Granted>,
     /// What the desktop does behind the window, as last set.
@@ -309,6 +362,11 @@ impl SettingsView {
             file: settings::file_value(cx),
             generation: generation(cx),
             remote: Remote::default(),
+            agents: None,
+            looking_for_agents: false,
+            arg_fields: HashMap::new(),
+            args_edited: HashSet::new(),
+            _arg_subs: Vec::new(),
             #[cfg(target_os = "macos")]
             granted: None,
             backdrop: crate::style::Backdrop::default(),
@@ -330,8 +388,99 @@ impl SettingsView {
         if section == Section::Permissions && self.section != section {
             self.look_at_permissions(cx);
         }
+        if section == Section::Agents && self.section != section {
+            self.look_for_agents(cx);
+            // Anew from what is saved: the Flags menu or the file may have changed it.
+            self.arg_fields.clear();
+            self._arg_subs.clear();
+        }
         self.section = section;
         cx.notify();
+    }
+
+    /// See which agents are installed, off the UI thread.
+    fn look_for_agents(&mut self, cx: &mut Context<Self>) {
+        if self.looking_for_agents {
+            return;
+        }
+        self.looking_for_agents = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_spawn(async move { crate::agents::installed(&tern_agent::registry()) }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.agents = Some(found);
+                v.looking_for_agents = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Make the arguments field of each installed agent that has none.
+    fn make_arg_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let installed: Vec<AgentId> = self
+            .agents
+            .iter()
+            .flatten()
+            .filter(|(id, at)| at.is_some() && !self.arg_fields.contains_key(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in installed {
+            let value = crate::agents::user_args(&id, cx);
+            let field = cx.new(|cx| InputState::new(window, cx).default_value(value).placeholder("Arguments for new tabs"));
+            let agent = id.clone();
+            self._arg_subs.push(cx.subscribe_in(&field, window, move |this, field, ev: &InputEvent, _, cx| match ev {
+                InputEvent::Change => {
+                    this.args_edited.insert(agent.clone());
+                },
+                InputEvent::PressEnter { .. } | InputEvent::Blur if this.args_edited.remove(&agent) => {
+                    let value = field.read(cx).value().trim().to_owned();
+                    save_args(&agent, &value, cx);
+                },
+                _ => {},
+            }));
+            self.arg_fields.insert(id, field);
+        }
+    }
+
+    /// The agents, those installed first, and the plain terminal a new tab can open instead.
+    fn agent_rows(&mut self, cx: &mut Context<Self>) -> Vec<Row> {
+        let default = self.text(&["agents", "default"], cx).unwrap_or_else(|| tern_agent::CLAUDE.to_owned());
+        let pick = |row: Row, id: String, on: bool| {
+            if on {
+                return row.value("Default");
+            }
+            // Claude, the default's default, leaves the key out.
+            let value = (id != tern_agent::CLAUDE).then(|| id.clone().into());
+            row.action("Make Default", move |_, _, cx| settings::set_value(&["agents", "default"], value.clone(), cx))
+        };
+        let registry = tern_agent::registry();
+        let found = self.agents.clone().unwrap_or_default();
+        let count = found.iter().filter(|(_, at)| at.is_some()).count();
+        let summary = match self.agents {
+            Some(_) => format!("{count} of {} found on your PATH.", found.len()),
+            None => "Looking on your PATH…".to_owned(),
+        };
+        let mut rows = vec![
+            Row::new("Installed agents", summary).action("Look Again", |v, _, cx| v.look_for_agents(cx)).busy(self.looking_for_agents),
+        ];
+        let (here, missing): (Vec<_>, Vec<_>) = found.into_iter().partition(|(_, at)| at.is_some());
+        for (id, at) in here.into_iter().chain(missing) {
+            let Some(d) = registry.get(id.as_str()) else { continue };
+            let on = default == id.as_str();
+            let row = match &at {
+                Some(at) => pick(Row::new(d.name.clone(), crate::dirs::tilde(at)), id.to_string(), on),
+                None => {
+                    let row = Row::new(d.name.clone(), format!("Not installed: no {} on your PATH", d.command));
+                    if on { row.value("Default") } else { row }
+                },
+            };
+            let field = self.arg_fields.get(&id).cloned();
+            rows.push(Row { agent: Some(id), field, ..row });
+        }
+        let shell = default == crate::agents::DEFAULT_SHELL;
+        rows.push(pick(Row::new("Shell", "A plain terminal"), crate::agents::DEFAULT_SHELL.to_owned(), shell));
+        rows
     }
 
     fn found(&mut self, (serving, access): (Option<tern_web::Serving>, Access), cx: &mut Context<Self>) {
@@ -504,7 +653,8 @@ impl SettingsView {
             },
             Section::Agents => {
                 let (tool, toggle_tool) = self.flag(&["agents", "show_tool"], true, cx);
-                vec![
+                let mut rows = self.agent_rows(cx);
+                rows.extend([
                     Row {
                         control: self.number(&["agents", "reply_lines"], 1., 1., (0., settings::MAX_REPLY_LINES as f64), cx),
                         ..Row::new(
@@ -514,7 +664,8 @@ impl SettingsView {
                     },
                     Row::new("Tool call", "The tool the agent called after that reply (\"Running cargo test\").")
                         .switch(tool, move |v, w, cx| toggle_tool(v, w, cx)),
-                ]
+                ]);
+                rows
             },
             Section::Connections => self.remote_rows(),
             #[cfg(target_os = "macos")]
@@ -879,6 +1030,9 @@ fn qr_code(url: &str, cx: &App) -> AnyElement {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::style::sync_backdrop(&mut self.backdrop, window, cx);
+        if self.section == Section::Agents {
+            self.make_arg_fields(window, cx);
+        }
         let rows = self.rows(cx);
         let sections = self::sections();
         let &(_, title, _, subtitle) = *sections.iter().find(|s| s.0 == self.section).expect("every section is listed");
@@ -892,7 +1046,7 @@ impl Render for SettingsView {
             .var("title", title)
             .var("subtitle", subtitle)
             .list("sections", sections)
-            .list("rows", rows.iter().enumerate().map(|(i, r)| r.scope(i)).collect())
+            .list("rows", rows.iter().enumerate().map(|(i, r)| r.scope(i, cx.theme())).collect())
             .slot_opt("extra", if self.section == Section::Connections { self.render_remote(cx) } else { None });
         let me = cx.entity().downgrade();
         let handler =

@@ -36,7 +36,8 @@ pub fn install(cx: &mut App) {
 fn menus() -> Vec<Menu> {
     let registry = tern_agent::registry();
     let claude = registry.get(tern_agent::CLAUDE).map_or("Claude", |d| d.short_name.as_str());
-    let mut file = vec![MenuItem::action(format!("New {claude} Tab"), workspace::NewClaudeTab)];
+    let mut file =
+        vec![MenuItem::action("New Tab", workspace::NewDefaultTab), MenuItem::action(format!("New {claude} Tab"), workspace::NewClaudeTab)];
     if registry.has(tern_agent::CLAUDE, tern_agent::Capability::Chat) {
         file.push(MenuItem::action(format!("New {claude} Chat"), workspace::NewClaudeChat));
     }

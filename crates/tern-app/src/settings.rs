@@ -103,13 +103,24 @@ pub struct AgentsSettings {
     pub reply_lines: Option<u32>,
     /// The tool call it made after that reply, under it (default true).
     pub show_tool: Option<bool>,
+    /// What a new tab (Cmd-T) opens: an agent's id (`tern --agents` lists
+    /// them) or "shell" for a plain terminal (default "claude").
+    pub default: Option<String>,
+    /// Arguments of your own for an agent's tabs, by its id, as typed in a
+    /// shell: `{ "codex": "--search" }`. Claude's are kept with its Flags
+    /// menu, so this has no effect on it; a chat doesn't take them.
+    pub args: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// What the agents panel shows under each agent, as the settings make it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AgentsConfig {
     pub reply_lines: u32,
     pub show_tool: bool,
+    /// `agents.default`, as `settings.json` has it.
+    pub default: Option<String>,
+    /// `agents.args`: an agent's id to the arguments of its tabs.
+    pub args: std::collections::BTreeMap<String, String>,
 }
 
 impl Global for AgentsConfig {}
@@ -124,7 +135,12 @@ impl Default for AgentsConfig {
 pub const MAX_REPLY_LINES: u32 = 10;
 
 pub fn agents_config(s: &AgentsSettings) -> AgentsConfig {
-    AgentsConfig { reply_lines: s.reply_lines.unwrap_or(1).min(MAX_REPLY_LINES), show_tool: s.show_tool.unwrap_or(true) }
+    AgentsConfig {
+        reply_lines: s.reply_lines.unwrap_or(1).min(MAX_REPLY_LINES),
+        show_tool: s.show_tool.unwrap_or(true),
+        default: s.default.clone(),
+        args: s.args.clone().unwrap_or_default(),
+    }
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1380,7 +1396,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `welcome.recent` | `name`, `path` | |
 | `settings` | `title`, `subtitle`; lists `sections`, `rows` | `extra` |
 | `settings.nav_item` | `label`, `icon`, `active` | |
-| `settings.row` | `title`, `description`, `problem`, `value`, `default`, `switch`, `on`, `stepper`, `changed`, `at_min`, `at_max`, `action`, `busy` | |
+| `settings.row` (slots `icon`: an agent's logo, `field`: its arguments) | `title`, `description`, `problem`, `value`, `default`, `switch`, `on`, `stepper`, `changed`, `at_min`, `at_max`, `action`, `busy` | |
 | `settings.remote` | `link`, `dns_link`, `copy_label`, `copy_icon`, `busy` | `qr` |
 | `dialog.trash` | `question` | |
 | `dialog.restart` | `message` | |
@@ -1709,6 +1725,13 @@ A descriptor's fields:
   one of the characters of `title_any_char`, it starts with a character in one
   of the `title_lead` ranges (code points, inclusive) then a space. Without
   `working` rules, its screen can't tell working from waiting.
+
+Settings > Agents shows which agents' commands are on your `PATH` and picks
+what a new tab (Cmd-T) opens: `agents.default` in `{SETTINGS}`, an agent's id or
+`\"shell\"`. Its arguments field adds to what that agent's tabs run, as typed in
+a shell, and saves when you press Return or leave it: `agents.args` in
+`{SETTINGS}`, by id (`{{ \"codex\": \"--search\" }}`), and Claude's are the ones of
+its Flags menu. A chat doesn't take them, except Claude's.
 
 A file with a built-in agent's id changes only the fields it has. Codex with
 a flag of your own:

@@ -232,7 +232,7 @@ fn hook_detail(mut word: String, h: &tern_term::agent_status::AgentStatus) -> St
 /// latest words (`say`, at most `say_lines` lines) and its tool call after
 /// them (`doing`); `recent` when either is shown.
 pub fn recent_vars(mut scope: crate::template::Scope, recent: &tern_chat::Recent, cx: &App) -> crate::template::Scope {
-    let config = cx.try_global::<crate::settings::AgentsConfig>().copied().unwrap_or_default();
+    let config = cx.try_global::<crate::settings::AgentsConfig>().cloned().unwrap_or_default();
     let say = recent.text.as_ref().filter(|_| config.reply_lines > 0);
     let doing = recent.tool.as_ref().filter(|_| config.show_tool);
     scope = scope.var("recent", say.is_some() || doing.is_some());
@@ -372,6 +372,46 @@ pub fn guard_shown(agent: &str) -> bool {
     [Context, Steer, Transcript].into_iter().all(|c| registry.has(agent, c))
 }
 
+/// `agents.default`'s value for a plain terminal.
+pub const DEFAULT_SHELL: &str = "shell";
+
+/// Where `command` (a descriptor's: its first word is the program) is, on
+/// `path` when it is a bare name.
+pub fn find_command(command: &str, path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+    let program = command.split_whitespace().next()?;
+    if program.contains(['/', '\\']) {
+        let full = match program.strip_prefix("~/") {
+            Some(rest) => crate::dirs::home()?.join(rest),
+            None => PathBuf::from(program),
+        };
+        return runnable(&full).then_some(full);
+    }
+    let names: Vec<String> = if cfg!(windows) {
+        ["exe", "cmd", "bat", "com"].iter().map(|x| format!("{program}.{x}")).collect()
+    } else {
+        vec![program.to_owned()]
+    };
+    std::env::split_paths(path?).find_map(|dir: PathBuf| names.iter().map(|n| Path::new(&dir).join(n)).find(|p| runnable(p)))
+}
+
+/// A file that can be run.
+fn runnable(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    #[cfg(unix)]
+    let run = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+    #[cfg(not(unix))]
+    let run = true;
+    meta.is_file() && run
+}
+
+/// Each agent Tern knows and where its command is, none when it isn't
+/// installed. Slow: a login shell may have to say what `PATH` is.
+pub fn installed(registry: &tern_agent::Registry) -> Vec<(AgentId, Option<std::path::PathBuf>)> {
+    let path = crate::platform::login_path().map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH"));
+    registry.all().map(|d| (d.id.clone(), find_command(&d.command, path.as_deref()))).collect()
+}
+
 /// The shell line that starts agent `d` in a tab: its command, then its
 /// args, each quoted when the shell would split or expand it.
 pub fn launch_line(d: &tern_agent::Descriptor) -> String {
@@ -390,6 +430,21 @@ pub fn start_line(d: &tern_agent::Descriptor, user: &str) -> String {
     }
     line.push_str(if d.id.is(tern_agent::CLAUDE) { " --settings {tern-settings}" } else { " {tern-settings}" });
     line
+}
+
+/// The shell line for agent `d` where Tern has no integration for it: its
+/// command, then the user's own arguments `user` as typed.
+pub fn plain_line(d: &tern_agent::Descriptor, user: &str) -> String {
+    let line = launch_line(d);
+    if user.is_empty() { line } else { format!("{line} {user}") }
+}
+
+/// The arguments the user gave agent `id`'s tabs.
+pub fn user_args(id: &AgentId, cx: &App) -> String {
+    if id.is(tern_agent::CLAUDE) {
+        return crate::window_state::claude_args();
+    }
+    cx.try_global::<crate::settings::AgentsConfig>().and_then(|c| c.args.get(id.as_str()).cloned()).unwrap_or_default()
 }
 
 /// `a` as one shell word for the shell Tern runs lines in (see
@@ -459,6 +514,38 @@ pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_users_arguments_follow_an_agents_own() {
+        let mut d = tern_agent::Registry::builtin().get("gemini").unwrap().clone();
+        assert_eq!(super::plain_line(&d, ""), "gemini");
+        d.args = vec!["--a".into()];
+        assert_eq!(super::plain_line(&d, "--model 'x y'"), "gemini --a --model 'x y'");
+        let codex = tern_agent::Registry::builtin().get("codex").unwrap().clone();
+        assert_eq!(super::start_line(&codex, "--search"), "codex --search {tern-settings}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_is_found_only_as_a_program_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tern-find-command-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        for (name, mode) in [("tool", 0o755), ("text", 0o644)] {
+            std::fs::write(dir.join(name), "").unwrap();
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let path = std::env::join_paths([dir.join("none"), dir.clone()]).unwrap();
+        let find = |c: &str| super::find_command(c, Some(&path));
+        assert_eq!(find("tool"), Some(dir.join("tool")));
+        assert_eq!(find("tool --flag"), Some(dir.join("tool")));
+        assert_eq!(find(dir.join("tool").to_str().unwrap()), Some(dir.join("tool")));
+        for missing in ["text", "folder", "absent", ""] {
+            assert_eq!(find(missing), None, "{missing}");
+        }
+        assert_eq!(super::find_command("tool", None), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn shell_words_are_quoted_for_the_shell_that_reads_them() {
         use super::shell_word_for;

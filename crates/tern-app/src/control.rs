@@ -32,6 +32,7 @@
 //!   ws-open PATH, ws-close [N], ws-activate N, ws-reorder FROM TO,
 //!   ws-detach N, ws-move N WINDOW, ws-dropout N X Y, new-window
 //!   settings SECTION open the Settings window at a section (`general`, `connections`, …)
+//!   settings-args ID TEXT   type TEXT in agent ID's arguments field, press Return
 //!   settings-input CMD   `click X Y`, `key K`, … in the Settings window
 //!   restart-background   end the daemon now (Restart Background Terminals, no dialog)
 //!   term-type TEXT   type into the active terminal (`\n` Enter, `\e` Esc, `\a` BEL)

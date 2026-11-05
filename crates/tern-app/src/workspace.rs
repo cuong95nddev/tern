@@ -60,6 +60,7 @@ type PickThen = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Worksp
 actions!(
     workspace,
     [
+        NewDefaultTab,
         NewClaudeTab,
         NewClaudeChat,
         // Its name before other agents, kept for user templates.
@@ -127,7 +128,7 @@ const PANES: &str = "panes";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        bind("cmd-t", NewClaudeTab, None),
+        bind("cmd-t", NewDefaultTab, None),
         bind("cmd-shift-t", NewShellTab, None),
         bind("cmd-n", NewScratch, None),
         bind("cmd-w", CloseTab, None),
@@ -174,6 +175,20 @@ enum TabKind {
 }
 
 impl TabKind {
+    /// What a new tab opens, by `agents.default`: an id Tern doesn't know
+    /// (its file was removed) is Claude's.
+    fn default_of(id: Option<&str>, registry: &tern_agent::Registry) -> Self {
+        match id {
+            Some(crate::agents::DEFAULT_SHELL) => Self::Shell,
+            Some(id) if registry.get(id).is_some() => Self::Agent(AgentId::new(id)),
+            _ => Self::claude(),
+        }
+    }
+
+    fn default_tab(cx: &App) -> Self {
+        Self::default_of(cx.try_global::<crate::settings::AgentsConfig>().and_then(|c| c.default.as_deref()), &tern_agent::registry())
+    }
+
     fn claude() -> Self {
         Self::Agent(AgentId::new(tern_agent::CLAUDE))
     }
@@ -1187,10 +1202,10 @@ impl Workspace {
                 let registry = tern_agent::registry();
                 let line = match registry.get(agent.as_str()) {
                     Some(d) if kind.has(Capability::Launch) => {
-                        let start = crate::agents::start_line(d, "");
+                        let start = crate::agents::start_line(d, &crate::agents::user_args(agent, cx));
                         resume.and_then(|id| crate::agents::resume_line(&start, agent, id)).unwrap_or(start)
                     },
-                    Some(d) => crate::agents::launch_line(d),
+                    Some(d) => crate::agents::plain_line(d, &crate::agents::user_args(agent, cx)),
                     None => agent.to_string(),
                 };
                 (crate::platform::shell_command_args(&line), crate::agents::agent_short_name(agent).into())
@@ -3423,6 +3438,10 @@ impl Workspace {
                 if let Some(ix) = this.pane_active_ix(pane) {
                     this.switch_agent_view(ix, window, cx);
                 }
+            })),
+            "new_default" => b.on_click(on(|this, pane, window, cx| {
+                this.focus_pane_state(pane);
+                this.add_tab(TabKind::default_tab(cx), window, cx);
             })),
             "new_claude" => b.on_click(on(|this, pane, window, cx| {
                 this.focus_pane_state(pane);
@@ -5826,6 +5845,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::dock_part))
             .on_action(cx.listener(Self::pop_out))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
+            .on_action(cx.listener(|this, _: &NewDefaultTab, w, cx| this.add_tab(TabKind::default_tab(cx), w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::claude(), w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
             .on_action(cx.listener(|this, a: &NewAgentChat, w, cx| this.new_agent_chat(AgentId::new(&a.0), w, cx)))
@@ -5932,7 +5952,20 @@ pub fn services(terminal: TerminalConfig) -> Services {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, claude_bg_job, switch_blocker};
+    use super::{ActivityStatus, TabKind, claude_bg_job, switch_blocker};
+
+    #[test]
+    fn a_new_tab_opens_the_default_or_else_claude() {
+        let registry = tern_agent::Registry::builtin();
+        let agent = |id| match TabKind::default_of(id, &registry) {
+            TabKind::Agent(a) => a.to_string(),
+            TabKind::Shell => "shell".to_owned(),
+        };
+        assert_eq!(agent(None), tern_agent::CLAUDE);
+        assert_eq!(agent(Some("codex")), "codex");
+        assert_eq!(agent(Some("shell")), "shell");
+        assert_eq!(agent(Some("removed-agent")), tern_agent::CLAUDE);
+    }
 
     #[test]
     fn an_agent_tab_goes_on_as_a_shell_when_its_agent_ends() {

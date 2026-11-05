@@ -145,10 +145,11 @@ fn commands(registry: &tern_agent::Registry) -> Vec<Command> {
     for d in registry.all() {
         let (id, name) = (d.id.to_string(), d.short_name.clone());
         if d.id.is(tern_agent::CLAUDE) {
-            // ⌘T, and the actions the menus and templates name.
+            // ⌘T opens the default, and the menus and templates name these actions.
+            out.push(Command { title: "New Tab".into(), key: "⌘T", run: action(Rc::new(|| Box::new(workspace::NewDefaultTab))) });
             out.push(Command {
                 title: format!("New {name} Tab").into(),
-                key: "⌘T",
+                key: "",
                 run: action(Rc::new(|| Box::new(workspace::NewClaudeTab))),
             });
         } else {
@@ -846,7 +847,7 @@ mod tests {
     fn commands_filter_by_words_prefix_first() {
         assert_eq!(titles("").len(), commands(&tern_agent::Registry::builtin()).len());
         assert_eq!(titles("split"), ["Split Right", "Split Down"]);
-        assert_eq!(titles("tab new")[..2], ["New Claude Tab", "New Shell Tab"]);
+        assert_eq!(titles("tab new")[..3], ["New Tab", "New Claude Tab", "New Shell Tab"]);
         // A title starting with the query comes before one only containing it.
         assert_eq!(titles("next")[..2], ["Next Tab", "Next Workspace"]);
         assert_eq!(titles("toggle")[0], "Toggle Explorer");
