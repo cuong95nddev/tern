@@ -80,7 +80,7 @@ fully featured agent by data alone; herdr lets data add detection rules.
    status) through descriptors.
 5. A user can add an agent, or override a built-in's descriptor fields
    (command, args, process names, screen rules, resume argv), with a file in
-   `~/.config/tern/agents/<id>.toml`, without rebuilding Tern. Data gives the
+   `~/.config/tern/agents/<id>.json`, without rebuilding Tern. Data gives the
    basic tier; hook/chat/usage capabilities come from Rust adapters.
 
 ## Non-goals
@@ -163,26 +163,28 @@ Built-ins are constants.
 
 An `AgentDescriptor` is plain data:
 
-```toml
-# ~/.config/tern/agents/codex.toml  (or built in)
-id = "codex"
-name = "Codex"
-command = "codex"                 # what a new tab runs
-args = []                         # user-added flags
-processes = ["codex"]             # foreground program names that identify it
-logo = { light = "openai-light.svg", dark = "openai-dark.svg" }
-resume = ["codex", "resume", "{session}"]
-skills_dir = ".agents/skills"     # under $HOME; none = no skills
-
-[[screen.blocked]]                # screen fallback rules (today's read_screen)
-title_contains = "Action Required"
-[[screen.blocked]]
-bottom_contains = "allow command?"
-[[screen.working]]
-title_any_char = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+```jsonc
+// ~/.config/tern/agents/codex.json  (or built in)
+{
+  "id": "codex",
+  "name": "Codex",
+  "command": "codex",               // what a new tab runs
+  "args": [],                       // user-added flags
+  "processes": ["codex"],           // foreground program names that identify it
+  "logo": { "light": "openai-light", "dark": "openai-dark" },
+  "resume": ["codex", "resume", "{session}"],
+  "skills_dir": ".agents/skills",   // under $HOME; absent = no skills
+  "screen": {                       // fallback rules (today's read_screen)
+    "blocked": [{ "title_contains": "Action Required" }, { "bottom_contains": "allow command?" }],
+    "working": [{ "title_any_char": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" }]
+  }
+}
 ```
 
-- Built-in descriptors ship compiled in (one TOML per agent embedded, like
+JSON, like every other Tern config file (`settings.json`, themes,
+`templates.json`); the workspace has no TOML dependency.
+
+- Built-in descriptors ship compiled in (one JSON per agent embedded, like
   `templates.json`). A user file with the same id **overrides fields**; a new
   id **adds** a basic-tier agent (detect, launch, screen status, resume).
 - `processes` replaces both `Agent::detect` and `server.rs::agent_name()`;
@@ -199,9 +201,17 @@ title_any_char = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 ### 2. Capabilities (Rust adapters)
 
-Each built-in agent has an adapter that implements the capability traits it
-supports; the registry maps id → descriptor + optional adapter. Features ask
-the registry, e.g. `registry.get(id).chat()` → `Option<&dyn ChatDriver>`.
+Each built-in agent has an adapter that implements the capabilities it
+supports. Tern's crates are layered (`tern-term`/`tern-bridge` ←
+`tern-chat` ← `tern-mux` ← `tern-app`), so one adapter object cannot hold
+every capability. As in Orca, each capability is a **per-concern table keyed
+by agent id, living in the crate that owns that concern** (the hook lane in
+`tern-term`, the chat driver in `tern-chat`, usage in `tern-app`, …). The
+registry (a new leaf crate) holds descriptors and each built-in's declared
+capability set, so any layer can gate on a capability without depending on
+its implementation. Serializable per-agent state (the hook lane's tracker,
+handed between daemons) is an enum over the built-in lanes rather than a
+trait object.
 
 Sketch of the contracts (names are the builder's to refine):
 
@@ -333,7 +343,7 @@ Each phase is shippable on its own and leaves main green.
 3. **OpenCode.** Config overlay + plugin, lane, sessions, context, steer,
    resume, preview; then the ACP chat driver.
 4. **Basic-tier polish.** Gemini/Cursor/Grok/Pi descriptors, user
-   `agents/*.toml` documented in Tern's config README.
+   `agents/*.json` documented in Tern's config README.
 
 ## Decided (by the user)
 
@@ -349,7 +359,7 @@ Each phase is shippable on its own and leaves main green.
 - First-class targets are Claude, Codex, OpenCode; others stay basic.
 - Chat keeps native protocols per agent, not ACP-for-all.
 - No edits to users' global agent configs; per-launch overlays only.
-- Descriptor format TOML under `~/.config/tern/agents/`.
+- Descriptor format JSON under `~/.config/tern/agents/`.
 - Codex usage from rollout files, not Codex's backend API.
 - Claude accounts stay Claude-only. Codex/OpenCode get one Tern-owned
   overlay home per agent (shared by its tabs, keyed by the user's real home),
