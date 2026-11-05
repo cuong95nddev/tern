@@ -301,7 +301,7 @@ impl ChatView {
                 this.chat_id = Some(id);
                 this.connect(OpenChat::Attach { id }, cx);
             },
-            None => this.load_history(None),
+            None => this.show_saved(cx),
         }
         this.refresh(cx);
         this
@@ -451,6 +451,15 @@ impl ChatView {
         self.title_from_history();
     }
 
+    /// Show the conversation as it was saved: an agent that keeps it to
+    /// itself has to run for that.
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        self.load_history(None);
+        if self.driver.resumes(&self.session) {
+            self.warm(cx);
+        }
+    }
+
     /// Title the tab after the conversation's first message; true when that changed it.
     fn title_from_history(&mut self) -> bool {
         let Some(Entry::User { text, .. }) = self.t.entries.iter().find(|e| matches!(e, Entry::User { .. })) else { return false };
@@ -464,6 +473,10 @@ impl ChatView {
     fn start(&mut self, cx: &mut Context<Self>) {
         let resume =
             saved_path(self.driver.agent(), &self.account, &self.root, &self.session).is_some() || self.driver.resumes(&self.session);
+        // Its load tells the whole conversation: what is on screen would show twice.
+        if self.driver.resumes(&self.session) {
+            self.load_history(None);
+        }
         // The flags the user picked are Claude's.
         let user_args = if self.agent().is(tern_agent::CLAUDE) { crate::window_state::claude_args() } else { String::new() };
         let line = self.driver.command(
@@ -630,7 +643,7 @@ impl ChatView {
                     self.chat = None;
                     self.chat_id = None;
                     self.live = false;
-                    self.load_history(None);
+                    self.show_saved(cx);
                 },
                 MuxChatEvent::Error(e) => {
                     self.chat = None;

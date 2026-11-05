@@ -109,6 +109,16 @@ impl OpenCodeDriver {
         Some(self.prompt_line(session, &queued.join("\n\n")).1)
     }
 
+    /// What the user sent during a load was shown before its history came.
+    fn after_history(&mut self, t: &mut Transcript) {
+        for sent in &self.queued {
+            let Some(at) = t.entries.iter().position(|e| matches!(e, Entry::User { text, .. } if text == sent)) else { continue };
+            let entry = t.entries.remove(at);
+            t.entries.push(entry);
+            self.tools.values_mut().filter(|i| **i > at).for_each(|i| *i -= 1);
+        }
+    }
+
     /// Conversation `session` is open.
     fn opened(&mut self, t: &mut Transcript, session: &str) -> Option<String> {
         // A later one is the fresh conversation a handoff goes on in.
@@ -118,10 +128,13 @@ impl OpenCodeDriver {
         }
         self.session = Some(session.to_owned());
         t.session_id = Some(session.to_owned());
+        if self.resuming.is_some() {
+            self.after_history(t);
+        }
         (self.opening, self.resuming, self.message) = (false, None, None);
         // A replayed load's lines looked like a turn at work.
         (self.turn, t.busy) = (false, false);
-        t.history = t.entries.len();
+        t.history = t.entries.len().saturating_sub(self.queued.len());
         t.settle();
         self.flush(t, session)
     }
@@ -970,5 +983,25 @@ mod tests {
         let (mut f, mut out) = (OpenCodeFollow::default(), Vec::new());
         f.wrote(&json!({"id": 4, "error": {"code": -32601, "message": "x"}}), &mut out);
         assert_eq!(out, [Said::Settled("4".into())]);
+    }
+
+    #[test]
+    fn what_the_user_sent_during_a_load_shows_after_its_history() {
+        let (mut d, mut t) = (OpenCodeDriver::default(), Transcript::default());
+        d.start_lines("s", true, Path::new("/w"));
+        t.push_user("typed", Vec::new());
+        assert_eq!(d.user_line("s", "typed", &[]).1, "");
+        let old = update(json!({"sessionUpdate": "user_message_chunk", "messageId": "u", "content": {"type": "text", "text": "old"}}));
+        let tool = update(json!({"sessionUpdate": "tool_call", "toolCallId": "c", "name": "shell", "kind": "execute", "rawInput": {"command": "ls"}}));
+        for line in [old, tool, chunk("m", "answer")] {
+            d.fold_line(&mut t, &line);
+        }
+        let reply = d.fold_line(&mut t, &json!({"id": "open", "result": {}}).to_string()).expect("the message goes in");
+        assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["params"]["prompt"][0]["text"], "typed");
+        let said: Vec<&str> = t.entries.iter().map(text).filter(|s| !s.is_empty()).collect();
+        assert_eq!(said, ["old", "answer", "typed"]);
+        assert!(t.busy);
+        d.fold_line(&mut t, &update(json!({"sessionUpdate": "tool_call_update", "toolCallId": "c", "status": "completed"})));
+        assert_eq!(tools(&t)[0].result.as_deref(), Some(""), "its tool is still found");
     }
 }
