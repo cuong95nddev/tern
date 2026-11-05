@@ -29,7 +29,7 @@ What a new agent plugs into:
 - A rejected permission ends the turn in a chat as OpenCode does; the row shows `Ended`.
 - A tool that was mid-turn when a chat ended keeps no result.
 - A chat with no hooks is asked for a handoff at its turn's end only: no warning mid-turn. Its guard goes by `ChatFollow::hookless`, and a fresh conversation gets the context and the go-on prompt as one message.
-- A restored OpenCode chat tab starts `opencode acp` at once: its history comes from nowhere else.
+- A restored OpenCode chat tab starts `opencode acp` by itself only in a folder `folder_trust` knows; elsewhere it stays blank until focused. Focus and typing still start any non-Claude chat with no trust question (`chat_view`'s `trusted`), though OpenCode reads the folder's config.
 - A daemon handoff with a chat (`MuxChatEvent::Lost`) is covered by `parks_and_resumes_without_losing_a_line` and `kept_lines_of_a_handed_over_chat_ask_nothing_again`, not run live with OpenCode.
 - Open minors from the final review (`opencode_fold.rs`, `opencode_plugin.js`, `acp.rs`, `chat.rs`):
   - The lane is wiped by the first event after a daemon handoff: seed the fold's `root`.

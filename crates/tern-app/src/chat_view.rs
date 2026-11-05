@@ -452,10 +452,12 @@ impl ChatView {
     }
 
     /// Show the conversation as it was saved: an agent that keeps it to
-    /// itself has to run for that.
+    /// itself has to run for that. Nobody asked it to run, and it reads the
+    /// folder's config, so only in a folder the user trusts: elsewhere it
+    /// waits for them to come to the chat.
     fn show_saved(&mut self, cx: &mut Context<Self>) {
         self.load_history(None);
-        if self.driver.resumes(&self.session) {
+        if self.driver.resumes(&self.session) && crate::folder_trust::trusted(&self.account, &self.root) {
             self.warm(cx);
         }
     }
