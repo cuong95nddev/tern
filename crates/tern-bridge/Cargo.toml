@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 getrandom = "0.4.3"
 serde_json = "1.0.154"
+sha2 = "0.10.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
@@ -15,3 +16,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tempfile = "3.27.0"
+toml = "0.8.23"

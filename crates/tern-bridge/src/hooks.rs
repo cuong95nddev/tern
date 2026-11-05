@@ -1,4 +1,5 @@
-//! Localhost HTTP endpoint for Claude Code `type: "http"` hooks.
+//! Localhost HTTP endpoint for agents' hooks: Claude Code's `type: "http"`
+//! ones, and the commands Codex runs through [`crate::relay`].
 //!
 //! Each terminal tab gets a random token; its `claude` process is launched with
 //! `--settings <json>` (see [`claude_settings_json`]) pointing PostToolUse hooks
@@ -70,6 +71,11 @@ impl HookEvent {
                 paths.push(PathBuf::from(p));
             }
         }
+        if raw.get("tool_name").and_then(Value::as_str) == Some("apply_patch")
+            && let Some(patch) = raw.pointer("/tool_input/command").and_then(Value::as_str)
+        {
+            paths.extend(patch_paths(patch).map(|p| cwd.as_ref().map_or_else(|| PathBuf::from(p), |c| c.join(p))));
+        }
         if let Some(files) = raw.pointer("/tool_response/bashEditDiff/changedFiles").and_then(Value::as_array) {
             for f in files.iter().filter_map(Value::as_str) {
                 let p = PathBuf::from(f);
@@ -89,6 +95,12 @@ impl HookEvent {
             raw,
         })
     }
+}
+
+/// The files a patch of Codex's `apply_patch` touches, as it names them.
+fn patch_paths(patch: &str) -> impl Iterator<Item = &str> {
+    const HEADS: [&str; 4] = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    patch.lines().filter_map(|l| HEADS.iter().find_map(|h| l.strip_prefix(h))).map(str::trim)
 }
 
 /// Takes each hook event; returns the answer for Claude Code, if any (else
@@ -180,8 +192,17 @@ pub fn write_claude_settings(
     let path = dir.join(format!("claude-settings-{token}.json"));
     let status_line = exe.map(|e| crate::statusline::command(e, &path));
     let relay = exe.map(|e| crate::relay::command(e, &path));
+    let mut f = create_private(dir, &path)?;
+    f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref(), version).as_bytes())?;
+    Ok(path)
+}
+
+/// Create `path` for writing, in `dir`: it must be (or become) a 0700
+/// directory owned by the current user, and the file is created exclusively
+/// without following symlinks.
+pub(crate) fn create_private(dir: &std::path::Path, path: &std::path::Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
-    let mut f = {
+    {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let meta = std::fs::symlink_metadata(dir)?;
@@ -189,18 +210,16 @@ pub fn write_claude_settings(
         if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not private"));
         }
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?
-    };
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
+    }
     #[cfg(not(unix))]
-    let mut f = {
+    {
         std::fs::create_dir_all(dir)?;
         if !std::fs::symlink_metadata(dir)?.is_dir() {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings dir is not a directory"));
         }
-        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?
-    };
-    f.write_all(claude_settings_json(hook_url, status_line.as_deref(), relay.as_deref(), version).as_bytes())?;
-    Ok(path)
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    }
 }
 
 pub fn remove_claude_settings(dir: &std::path::Path, token: &str) {
@@ -239,7 +258,7 @@ pub fn sweep_run_dirs(root: &std::path::Path) {
             {
                 let _ = std::fs::remove_dir_all(e.path());
             }
-        } else if name.starts_with("claude-settings-")
+        } else if (name.starts_with("claude-settings-") || name.starts_with("codex-hooks-"))
             && name.ends_with(".json")
             && e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > Duration::from_secs(86_400)))
         {
@@ -387,6 +406,20 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apply_patch_paths_are_the_files_it_touched() {
+        let patch = "*** Begin Patch\n*** Add File: c.txt\n+y\n*** Update File: /abs/d.rs\n*** Move to: e.rs\n*** Delete File: f.txt\n*** End Patch";
+        let raw = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "apply_patch", "cwd": "/w", "tool_input": {"command": patch}});
+        let ev = super::HookEvent::parse("t".into(), raw.to_string().as_bytes()).unwrap();
+        assert_eq!(ev.paths, ["/w/c.txt", "/abs/d.rs", "/w/e.rs", "/w/f.txt"].map(std::path::PathBuf::from));
+    }
+
+    #[test]
+    fn a_patch_line_in_a_shell_command_names_no_file() {
+        let raw = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "*** Add File: c.txt"}});
+        assert!(super::HookEvent::parse("t".into(), raw.to_string().as_bytes()).unwrap().paths.is_empty());
+    }
+
     #[test]
     fn sweeps_dead_run_dirs() {
         let root = std::env::temp_dir().join(format!("tern-sweep-{}", std::process::id()));

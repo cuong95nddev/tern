@@ -1,7 +1,8 @@
-//! Hooks Claude Code runs only as commands (`SessionStart`), run through
-//! Tern: `tern --hook <settings file>` hands the hook's input on stdin to the
-//! tab's hook endpoint (named in its settings file) and prints the answer
-//! for Claude Code, with what the agent should know of Tern's commands.
+//! Hooks an agent runs only as commands (Claude Code's `SessionStart`, all of
+//! Codex's), run through Tern: `tern --hook <settings file>` hands the hook's
+//! input on stdin to the tab's hook endpoint (named in its settings file) and
+//! prints the answer for the agent, a new conversation's with what the agent
+//! should know of Tern's commands.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -24,8 +25,18 @@ pub fn run(settings: &Path, guide: &str) -> i32 {
     }
     let Some(url) = std::fs::read(settings).ok().and_then(|s| crate::statusline::hook_url(&s)) else { return 0 };
     let answer = crate::statusline::post(&url, &input).ok().and_then(|a| serde_json::from_slice::<Value>(&a).ok());
-    let _ = std::io::stdout().write_all(with_guide(answer, guide).to_string().as_bytes());
+    let event = serde_json::from_slice::<Value>(&input).ok().and_then(|v| v.get("hook_event_name")?.as_str().map(str::to_owned));
+    let answer = answer_for(event.as_deref().unwrap_or_default(), answer, guide);
+    let _ = std::io::stdout().write_all(answer.to_string().as_bytes());
     0
+}
+
+/// What the agent gets for hook `event`, the tab's answer being `answer`.
+fn answer_for(event: &str, answer: Option<Value>, guide: &str) -> Value {
+    match event {
+        "SessionStart" => with_guide(answer, guide),
+        _ => answer.filter(Value::is_object).unwrap_or_else(|| json!({})),
+    }
 }
 
 /// The tab's `answer` with `guide` added to the context it gives Claude.
@@ -55,6 +66,15 @@ mod tests {
         let v = super::with_guide(Some(handoff), "guide");
         assert_eq!(v["x"], 1);
         assert_eq!(context(v), "go on\n\nguide");
+    }
+
+    #[test]
+    fn only_a_session_start_gets_the_guide() {
+        let block = json!({"decision": "block", "reason": "r"});
+        assert_eq!(super::answer_for("Stop", Some(block.clone()), "guide"), block);
+        assert_eq!(super::answer_for("PostToolUse", None, "guide"), json!({}));
+        let start = super::answer_for("SessionStart", None, "guide");
+        assert_eq!(start["hookSpecificOutput"]["additionalContext"], "guide");
     }
 
     #[test]

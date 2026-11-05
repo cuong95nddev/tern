@@ -54,10 +54,10 @@ pub fn run(settings: &Path) -> i32 {
     }
 }
 
-/// The hook URL in a tab's settings JSON.
+/// The hook URL in a tab's settings JSON (Claude's) or hook file (Codex's).
 pub(crate) fn hook_url(settings: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(settings).ok()?;
-    v.pointer("/hooks/Stop/0/hooks/0/url")?.as_str().map(str::to_owned)
+    v.get("hook_url").or_else(|| v.pointer("/hooks/Stop/0/hooks/0/url"))?.as_str().map(str::to_owned)
 }
 
 /// POST `body` to `url` (`http://127.0.0.1:<port>/<path>`); the answer's
