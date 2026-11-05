@@ -1399,13 +1399,10 @@ impl Server {
     fn agent_name(&self, id: u64) -> (String, Option<String>) {
         let host = self.host(id);
         let programs = host.as_ref().map(|h| h.foreground_programs()).unwrap_or_default();
-        let agent = if programs.iter().any(|p| p.contains("codex")) {
-            "Codex"
-        } else if programs.iter().any(|p| p.contains("opencode")) {
-            "OpenCode"
-        } else {
-            "Claude"
-        };
+        // Only agent sessions are asked: one Tern can't name is a Claude tab
+        // (spawned with a hook token) between its programs.
+        let registry = tern_agent::registry();
+        let agent = registry.detect(&programs).or_else(|| registry.get(tern_agent::CLAUDE)).map_or("Claude", |d| d.short_name.as_str());
         let task = host.and_then(|h| h.title()).and_then(|t| tern_term::status::task_name(&t, agent));
         (agent.to_owned(), task)
     }

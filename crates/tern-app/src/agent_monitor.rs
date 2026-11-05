@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
-use crate::agents::Agent;
 use crate::main_window;
 use crate::template::{self, Framed, Scope};
 use crate::terminal_view::ActivityStatus;
 use crate::window_grip::{Edge, Grips};
 use crate::workspace::Workspace;
+use tern_agent::AgentId;
 
 actions!(tern, [ToggleAgentMonitor]);
 
@@ -146,7 +146,7 @@ struct Entry {
     workspace: String,
     tab: EntityId,
     title: String,
-    agent: Agent,
+    agent: AgentId,
     status: ActivityStatus,
     view: AgentView,
 }
@@ -178,7 +178,7 @@ fn entries(cx: &mut App) -> Vec<Entry> {
                 workspace: workspace.clone(),
                 tab,
                 title,
-                agent: Agent::Claude,
+                agent: AgentId::new(tern_agent::CLAUDE),
                 status,
                 view: AgentView::Chat(view),
             });
@@ -300,10 +300,10 @@ impl Render for Monitor {
             }
             // As in the agents panel (`agents.tab`).
             let item = Scope::new("agent")
-                .var("label", crate::agents::display_name(&e.title, e.agent))
+                .var("label", crate::agents::display_name(&e.title, &e.agent))
                 .var("shown", true)
                 .var("kind", "agent")
-                .slot("icon", e.agent.icon(&theme));
+                .slot("icon", crate::agents::agent_icon(&e.agent, &theme));
             let item = match &e.view {
                 AgentView::Term(v) => crate::agents::ring_vars(item, v.read(cx), false, None, &theme),
                 AgentView::Chat(v) => crate::agents::chat_ring_vars(item, v.read(cx), &theme),

@@ -44,7 +44,9 @@ To change how Tern looks, edit the files in Tern's config folder (its README.md 
 what is wrong in the files, and where they are. Run it after editing them.
   {tern} --theme NAME   switch to a theme, saved in settings.json
   {tern} --shot         save a PNG of the Tern window showing your folder, as it was last drawn, and print its path. \
-Read that file to look at it after changing how Tern looks."
+Read that file to look at it after changing how Tern looks.
+  {tern} --agents       the coding agents Tern knows (its config folder's agents/*.json adds or changes them) and what \
+is wrong in those files."
     )
 }
 
@@ -59,7 +61,7 @@ pub fn guide() -> String {
 pub fn run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (flag, rest) = args.split_first()?;
-    if !matches!(flag.as_str(), "--service" | "--theme" | "--shot" | "--skill") {
+    if !matches!(flag.as_str(), "--service" | "--theme" | "--shot" | "--skill" | "--agents") {
         return None;
     }
     let ctx = Context {
@@ -94,12 +96,14 @@ enum Command {
     Restart { name: String },
     Theme { name: Option<String> },
     Shot,
+    Agents,
 }
 
 fn parse(flag: &str, args: &[String]) -> Result<Command, String> {
     match flag {
         "--skill" => Ok(Command::Guide),
         "--shot" => Ok(Command::Shot),
+        "--agents" => Ok(Command::Agents),
         "--theme" => match args {
             [] => Ok(Command::Theme { name: None }),
             names => Ok(Command::Theme { name: Some(names.join(" ")) }),
@@ -169,6 +173,10 @@ fn parse_service(args: &[String]) -> Result<Command, String> {
 fn call(ctx: &Context, command: &Command) -> Result<String, String> {
     match command {
         Command::Guide => Ok(guide()),
+        Command::Agents => {
+            let (registry, problems) = tern_agent::Registry::load(Some(&crate::dirs::config().join("agents")));
+            Ok(agents_text(&registry, &problems))
+        },
         Command::Theme { name: None } => ask_ui(json!({ "op": "status" })).map(|a| describe_status(&a)),
         Command::Theme { name: Some(name) } => ask_ui(json!({ "op": "set_theme", "name": name })).map(|a| describe_status(&a)),
         Command::Shot => {
@@ -179,6 +187,33 @@ fn call(ctx: &Context, command: &Command) -> Result<String, String> {
         },
         _ => services_call(ctx, command),
     }
+}
+
+/// The agents Tern knows, one per line (id, name, command, what Tern does
+/// for it), then what is wrong in the user's files (`agents/<id>.json`).
+fn agents_text(registry: &tern_agent::Registry, problems: &[String]) -> String {
+    use tern_agent::Capability::*;
+    const CAPS: [(tern_agent::Capability, &str); 9] = [
+        (Launch, "launch"),
+        (Status, "status"),
+        (Session, "session"),
+        (Transcript, "transcript"),
+        (Context, "context"),
+        (Steer, "steer"),
+        (Usage, "usage"),
+        (Chat, "chat"),
+        (Skills, "skills"),
+    ];
+    let mut out: Vec<String> = registry
+        .all()
+        .map(|d| {
+            let caps: Vec<&str> = CAPS.iter().filter(|(c, _)| registry.has(d.id.as_str(), *c)).map(|(_, n)| *n).collect();
+            let caps = if caps.is_empty() { "detect, screen".to_owned() } else { format!("detect, screen, {}", caps.join(", ")) };
+            format!("{}\t{}\t{}\t{caps}", d.id, d.name, d.command)
+        })
+        .collect();
+    out.extend(problems.iter().map(|p| format!("error: {p}")));
+    out.join("\n")
 }
 
 /// Ask the Tern window `request` (see `agent_ui`): its answer, or why not.
@@ -448,6 +483,19 @@ mod tests {
         assert_eq!(parse("--theme", &args("Tern Dark")), Ok(Command::Theme { name: Some("Tern Dark".into()) }));
         assert_eq!(parse("--shot", &[]), Ok(Command::Shot));
         assert_eq!(parse("--skill", &[]), Ok(Command::Guide));
+        assert_eq!(parse("--agents", &[]), Ok(Command::Agents));
+    }
+
+    #[test]
+    fn agents_listing_names_every_builtin_and_its_problems() {
+        let registry = tern_agent::Registry::builtin();
+        let text = agents_text(&registry, &["amp.json: a new agent needs a \"name\"".to_owned()]);
+        for id in tern_agent::Registry::builtin_ids() {
+            assert!(text.lines().any(|l| l.starts_with(id)), "{id}");
+        }
+        let claude = text.lines().find(|l| l.starts_with("claude")).unwrap();
+        assert!(claude.contains("Claude Code") && claude.contains("chat"), "{claude}");
+        assert_eq!(text.lines().filter(|l| l.starts_with("error: ")).count(), 1);
     }
 
     #[test]

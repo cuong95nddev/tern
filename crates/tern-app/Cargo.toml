@@ -45,6 +45,7 @@ tree-sitter-rust = "0.24"
 tree-sitter-swift = "0.7"
 tree-sitter-typescript = "0.23"
 tern-bridge = { version = "0.1.0", path = "../tern-bridge" }
+tern-agent = { path = "../tern-agent" }
 tern-chat = { path = "../tern-chat" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
 tern-lsp = { path = "../tern-lsp" }

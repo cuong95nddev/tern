@@ -302,10 +302,35 @@ fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
         "/vendor/addon-unicode11.js" => (include_bytes!("../assets/vendor/addon-unicode11.js"), "text/javascript; charset=utf-8"),
         "/vendor/addon-webgl.js" => (include_bytes!("../assets/vendor/addon-webgl.js"), "text/javascript; charset=utf-8"),
         "/manifest.json" => (include_bytes!("../assets/manifest.json"), "application/manifest+json"),
-        // The app's own logo, as its agents panel draws it.
-        "/agents/claude.svg" => (include_bytes!("../../tern-app/assets/agents/claude.svg"), "image/svg+xml"),
-        _ => return None,
+        _ => return agent_logo(path),
     })
+}
+
+/// The agents' logos, as the app's agents panel draws them.
+fn agent_logo(path: &str) -> Option<(&'static [u8], &'static str)> {
+    macro_rules! logos {
+        ($($name:literal),* $(,)?) => {
+            match path.strip_prefix("/agents/")?.strip_suffix(".svg")? {
+                $($name => include_bytes!(concat!("../../tern-app/assets/agents/", $name, ".svg")).as_slice(),)*
+                _ => return None,
+            }
+        };
+    }
+    let svg = logos![
+        "claude",
+        "gemini",
+        "openai-light",
+        "openai-dark",
+        "opencode-light",
+        "opencode-dark",
+        "cursor-light",
+        "cursor-dark",
+        "grok-light",
+        "grok-dark",
+        "pi-light",
+        "pi-dark",
+    ];
+    Some((svg, "image/svg+xml"))
 }
 
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'";
@@ -496,6 +521,17 @@ mod tests {
             assert!(asset(p).is_some_and(|(b, _)| !b.is_empty()), "{p}");
         }
         assert!(asset("/../Cargo.toml").is_none());
+    }
+
+    #[test]
+    fn every_builtin_agent_logo_is_served() {
+        let registry = tern_agent::Registry::builtin();
+        for logo in registry.all().filter_map(|d| d.logo.as_ref()) {
+            for stem in [&logo.light, &logo.dark] {
+                let path = format!("/agents/{stem}.svg");
+                assert!(asset(&path).is_some(), "{path}");
+            }
+        }
     }
 
     #[test]

@@ -98,6 +98,10 @@ fn main() {
     if let Some(code) = agent_cli::run() {
         std::process::exit(code);
     }
+    // The agents Tern knows, with the user's files laid over the built-ins.
+    for problem in tern_agent::init(Some(&dirs::config().join("agents"))) {
+        log::warn!("agents: {problem}");
+    }
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());
     // The background daemon that runs the terminals (started by the UI).

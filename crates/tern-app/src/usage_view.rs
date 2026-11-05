@@ -22,7 +22,7 @@ use gpui_kit::component::{Selectable, Sizable as _};
 use gpui_kit::*;
 
 use crate::accounts::{self, AccountStore};
-use crate::agents::{Agent, ContextGuard, ContextUse, Handoff};
+use crate::agents::{ContextGuard, ContextUse, Handoff};
 use crate::template::{self, Framed};
 use crate::usage::{self, AccountUsage, Limit, UsageStore};
 
@@ -274,7 +274,7 @@ impl Render for UsageView {
             .var("note", note)
             .var("open", self.open)
             .var("context_open", self.context_open)
-            .slot("icon", Agent::Claude.icon(cx.theme()))
+            .slot("icon", crate::agents::agent_icon(&tern_agent::AgentId::new(tern_agent::CLAUDE), cx.theme()))
             .list("limits", limits.unwrap_or_default());
         if let Some(c) = &self.context {
             scope = c.scope(scope);
@@ -435,7 +435,7 @@ impl Render for UsageCard {
                 .list("limits", limits)
                 .list("accounts", entries)
         });
-        let scope = scope.slot("icon", Agent::Claude.icon(cx.theme()));
+        let scope = scope.slot("icon", crate::agents::agent_icon(&tern_agent::AgentId::new(tern_agent::CLAUDE), cx.theme()));
         let (bar, accounts, tab) = (self.bar.clone(), self.accounts.downgrade(), self.current.clone());
         // Closes the card and asks the workspace for an event.
         let act = move |ev: UsageEvent| {

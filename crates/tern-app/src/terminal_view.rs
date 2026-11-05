@@ -41,10 +41,10 @@ use tern_term::{SpawnConfig, TermEvent, TermSize};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 
-use crate::agents::Agent;
 use crate::links::{self, Link};
 use crate::platform::bind;
 use crate::terminal_find::{Matches, Query};
+use tern_agent::AgentId;
 
 actions!(
     terminal,
@@ -397,7 +397,7 @@ pub struct TerminalView {
     /// [`Ticker`] ticks since the program last wrote (after a quiet 10s).
     idle_ticks: u32,
     /// The coding agent running in the foreground, if any.
-    agent: Option<Agent>,
+    agent: Option<AgentId>,
     /// The shells `agent` runs commands in.
     shells: Vec<AgentShell>,
     /// When the program last wrote something.
@@ -478,22 +478,24 @@ impl Ticker {
                                 let Some(f) = f else { return Default::default() };
                                 let programs = f.programs();
                                 let shells = if agent { f.agent_shells() } else { Vec::new() };
-                                let claude = (Agent::detect(&programs) == Some(Agent::Claude)).then(|| f.pid()).flatten().and_then(|pid| {
+                                let agent = tern_agent::registry().detect(&programs).map(|d| d.id.clone());
+                                // Claude Code keeps a file per process with its status.
+                                let claude = agent.as_ref().filter(|a| a.is(tern_agent::CLAUDE)).and(f.pid()).and_then(|pid| {
                                     let dir = sessions.iter().find(|d| d.join(format!("{pid}.json")).is_file())?;
                                     tern_term::status::claude_session_status(dir, pid)
                                 });
-                                (programs, shell.then(|| f.cwd()).flatten(), shells, claude)
+                                (agent, shell.then(|| f.cwd()).flatten(), shells, claude)
                             })
                             .collect::<Vec<_>>()
                     })
                     .await;
                 cx.update(|cx| {
-                    for (v, (programs, cwd, shells, claude)) in views.into_iter().zip(found) {
+                    for (v, (agent, cwd, shells, claude)) in views.into_iter().zip(found) {
                         let _ = v.update(cx, |view, cx| {
                             if cwd.is_some() {
                                 view.last_cwd = cwd;
                             }
-                            view.set_agent(Agent::detect(&programs), cx);
+                            view.set_agent(agent, cx);
                             view.set_shells(shells, cx);
                             view.set_session_file_status(claude, cx);
                         });
@@ -755,8 +757,8 @@ impl TerminalView {
         self.seen_done
     }
 
-    pub fn agent(&self) -> Option<Agent> {
-        self.agent
+    pub fn agent(&self) -> Option<AgentId> {
+        self.agent.clone()
     }
 
     /// A Claude tab's status from its hooks, once one came.
@@ -881,7 +883,7 @@ impl TerminalView {
         })
     }
 
-    fn set_agent(&mut self, agent: Option<Agent>, cx: &mut Context<Self>) {
+    fn set_agent(&mut self, agent: Option<AgentId>, cx: &mut Context<Self>) {
         // The session may have ended while its programs were read.
         let agent = agent.filter(|_| self.session.is_some());
         if agent != self.agent {
@@ -1133,13 +1135,13 @@ impl TerminalView {
     }
 
     /// For an agent that doesn't report its status, read it off its title
-    /// and screen (`Agent::read_screen`), else off its output.
+    /// and screen (see `tern_agent::ScreenRules`), else off its output.
     fn read_agent_status(&mut self, cx: &mut Context<Self>) {
         use ActivityStatus::*;
         if self.reports_status || self.exited.is_some() {
             return;
         }
-        let Some(agent) = self.agent else {
+        let Some(agent) = self.agent.clone() else {
             // It ended mid-turn: done.
             if matches!(self.status, Working | Blocked) {
                 self.set_status(None, cx);
@@ -1147,8 +1149,7 @@ impl TerminalView {
             return;
         };
         let bottom = self.bottom_text(AGENT_SCREEN_LINES);
-        let read = agent
-            .read_screen(&self.raw_title, &bottom)
+        let read = crate::agents::read_screen(&agent, &self.raw_title, &bottom)
             .unwrap_or_else(|| if self.last_output.elapsed() < Duration::from_millis(1500) { Working } else { None });
         // A turn's spinner may pause: it ends on a second read.
         if read == None && self.status == Working {

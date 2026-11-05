@@ -6,18 +6,18 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 
-use crate::agents::Agent;
 use crate::main_window;
 use crate::terminal_view::{TerminalView, escape_path};
 use crate::workspace::Workspace;
+use tern_agent::AgentId;
 
 /// Agents offered for a new tab.
-pub const NEW_AGENTS: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::OpenCode];
+pub const NEW_AGENTS: [&str; 3] = [tern_agent::CLAUDE, tern_agent::CODEX, tern_agent::OPENCODE];
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum Dest {
     Tab { window: AnyWindowHandle, ws: EntityId, tab: EntityId },
-    New { window: AnyWindowHandle, ws: EntityId, agent: Agent },
+    New { window: AnyWindowHandle, ws: EntityId, agent: AgentId },
 }
 
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub struct Choice {
     pub folder: String,
     /// The label under the folder.
     pub item: String,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentId>,
     pub dest: Dest,
 }
 
@@ -48,12 +48,13 @@ pub fn choices(cx: &mut App) -> Vec<Choice> {
                 dest: Dest::Tab { window: *window, ws: ws.entity_id(), tab: t.id },
             });
         }
-        for agent in NEW_AGENTS {
+        for agent in NEW_AGENTS.map(AgentId::new) {
+            let agent_name = crate::agents::agent_name(&agent);
             out.push(Choice {
-                label: format!("New {} tab in {name}", agent.name()),
+                label: format!("New {agent_name} tab in {name}"),
                 folder: name.to_string(),
-                item: format!("New {} tab", agent.name()),
-                agent: Some(agent),
+                item: format!("New {agent_name} tab"),
+                agent: Some(agent.clone()),
                 dest: Dest::New { window: *window, ws: ws.entity_id(), agent },
             });
         }
@@ -73,7 +74,7 @@ pub fn default_choice(choices: &[Choice], cx: &mut App) -> Option<usize> {
     shown
         .and_then(|id| choices.iter().position(|c| is_tab(c, id)))
         .or_else(|| choices.iter().position(|c| matches!(c.dest, Dest::Tab { .. }) && c.agent.is_some()))
-        .or_else(|| choices.iter().position(|c| matches!(c.dest, Dest::New { agent: Agent::Claude, .. })))
+        .or_else(|| choices.iter().position(|c| matches!(&c.dest, Dest::New { agent, .. } if agent.is(tern_agent::CLAUDE))))
 }
 
 /// One step of handing captures to a terminal.
@@ -114,6 +115,7 @@ pub fn deliver(dest: Dest, paths: Vec<PathBuf>, prompt: String, cx: &mut App) ->
     };
     let Some(ws) = find_ws(window, ws_id, cx) else { return Task::ready(Err("That workspace is closed".into())) };
     main_window::reveal(window, &ws, cx);
+    let fresh = matches!(dest, Dest::New { .. });
     let view = window
         .update(cx, |_, w, cx| {
             ws.update(cx, |ws, cx| match dest {
@@ -127,7 +129,6 @@ pub fn deliver(dest: Dest, paths: Vec<PathBuf>, prompt: String, cx: &mut App) ->
         .ok()
         .flatten();
     let Some(view) = view else { return Task::ready(Err("That tab is closed".into())) };
-    let fresh = matches!(dest, Dest::New { .. });
     cx.spawn(async move |cx| {
         if fresh {
             wait_ready(&view, cx).await?;

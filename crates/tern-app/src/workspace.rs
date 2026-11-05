@@ -24,7 +24,6 @@ use tern_mux::client::Connector;
 use tern_term::{SpawnConfig, TermSize};
 
 use crate::accounts;
-use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_review::ChangesReview;
 use crate::changes_view::{ChangesEvent, ChangesView};
@@ -50,6 +49,7 @@ use crate::theme_picker::OpenSettingsFile;
 use crate::usage_view::{UsageEvent, UsageView};
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspace, TabLayout};
+use tern_agent::AgentId;
 
 /// What a name dialog does with the typed name (see `Workspace::ask_name`).
 type ApplyName = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
@@ -481,7 +481,7 @@ pub struct Workspace {
 pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentId>,
     /// The workspace's active tab.
     pub active: bool,
     pub view: Entity<TerminalView>,
@@ -1483,7 +1483,7 @@ impl Workspace {
             let Some(term) = t.term() else { continue };
             let v = term.view.read(cx);
             let Some(agent) = v.agent().filter(|_| !v.shells().is_empty()) else { continue };
-            let agent = crate::agents::display_name(&self.tab_info(i, cx).0, agent);
+            let agent = crate::agents::display_name(&self.tab_info(i, cx).0, &agent);
             rows.extend(v.shells().iter().map(|s| ShellRow { tab: t.entity_id(), agent: agent.clone(), shell: s.clone() }));
         }
         rows.sort_by_key(|r| (r.shell.started, r.shell.pid));
@@ -1498,7 +1498,7 @@ impl Workspace {
             let Some(term) = t.term() else { continue };
             let v = term.view.read(cx);
             if let (Some(agent), Some(id)) = (v.agent(), v.mux_id()) {
-                names.insert(id, crate::agents::display_name(&self.tab_info(i, cx).0, agent));
+                names.insert(id, crate::agents::display_name(&self.tab_info(i, cx).0, &agent));
             }
         }
         names
@@ -2588,7 +2588,7 @@ impl Workspace {
     /// tab is named for, for its notifications.
     fn task_of(&self, view: &Entity<TerminalView>, cx: &App) -> (String, Option<String>) {
         let v = view.read(cx);
-        let agent = v.agent().map_or("Claude", |a| a.name()).to_owned();
+        let agent = v.agent().map_or_else(|| "Claude".to_owned(), |a| crate::agents::agent_name(&a));
         let rename = self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view == *view).and_then(|t| t.rename.clone());
         let title = rename.map_or_else(|| v.title().to_string(), |r| r.to_string());
         let task = tern_term::status::task_name(&title, &agent);
@@ -2873,7 +2873,7 @@ impl Workspace {
                 Some(TermTabInfo {
                     id: t.view.entity_id(),
                     title: self.tab_info(i, cx).0,
-                    agent: t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude)),
+                    agent: t.view.read(cx).agent().or_else(|| (t.kind == TabKind::Claude).then(|| AgentId::new(tern_agent::CLAUDE))),
                     active: i == self.active,
                     view: t.view.clone(),
                 })
@@ -2917,8 +2917,8 @@ impl Workspace {
                 match &self.tabs[i] {
                     CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => {
                         let v = t.view.read(cx);
-                        let (now, agent) = (v.status(), v.agent().unwrap_or(Agent::Claude));
-                        let scope = crate::agents::recent_vars(row(crate::agents::display_name(&label, agent)), &t.recent, cx);
+                        let (now, agent) = (v.status(), v.agent().unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE)));
+                        let scope = crate::agents::recent_vars(row(crate::agents::display_name(&label, &agent)), &t.recent, cx);
                         Some((id, crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme()), now))
                     },
                     CenterTab::Chat { view, .. } => {
@@ -2980,12 +2980,17 @@ impl Workspace {
 
     /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
-    pub fn new_agent_tab(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
-        let kind = if agent == Agent::Claude { TabKind::Claude } else { TabKind::Shell };
+    pub fn new_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let kind = if agent.is(tern_agent::CLAUDE) { TabKind::Claude } else { TabKind::Shell };
         self.add_tab(kind, window, cx);
         let view = self.tabs.get(self.active)?.term()?.view.clone();
         if kind == TabKind::Shell {
-            view.update(cx, |v, cx| v.write_input(format!("{}\r", agent.command()).into_bytes(), cx));
+            let registry = tern_agent::registry();
+            let line = registry.get(agent.as_str()).map_or_else(
+                || agent.to_string(),
+                |d| [d.command.clone()].into_iter().chain(d.args.iter().cloned()).collect::<Vec<_>>().join(" "),
+            );
+            view.update(cx, |v, cx| v.write_input(format!("{line}\r").into_bytes(), cx));
         }
         Some(view)
     }
@@ -3092,11 +3097,11 @@ impl Workspace {
             CenterTab::Log { .. } => {
                 return Some(Icon::new(AssetIcon::GitCommitHorizontal).text_color(mono).small().flex_shrink_0().into_any_element());
             },
-            CenterTab::Chat { .. } => return Some(Agent::Claude.icon(theme).into_any_element()),
+            CenterTab::Chat { .. } => return Some(crate::agents::agent_icon(&AgentId::new(tern_agent::CLAUDE), theme)),
         };
-        let agent = t.view.read(cx).agent().or((t.kind == TabKind::Claude).then_some(Agent::Claude));
+        let agent = t.view.read(cx).agent().or_else(|| (t.kind == TabKind::Claude).then(|| AgentId::new(tern_agent::CLAUDE)));
         Some(match agent {
-            Some(a) => a.icon(theme).into_any_element(),
+            Some(a) => crate::agents::agent_icon(&a, theme),
             None => Icon::new(AssetIcon::SquareTerminal).text_color(mono).small().flex_shrink_0().into_any_element(),
         })
     }
