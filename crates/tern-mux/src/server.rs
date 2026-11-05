@@ -1804,6 +1804,10 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
             let agent = s.agent.as_deref().map(AgentId::new).or_else(|| s.token.as_ref().map(|_| AgentId::new(tern_agent::CLAUDE)));
+            // A lane that knows nothing yet isn't handed over.
+            if let Some(a) = agent.as_ref().filter(|_| host.lane().is_none()) {
+                host.set_agent(a.as_str());
+            }
             st.sessions.insert(
                 s.id,
                 Session {

@@ -2,7 +2,8 @@
 //!
 //! [`CodexDriver`] folds what the server says for the UI, [`CodexFollow`] is
 //! what the daemon reads of the same lines. Both leave out other threads'
-//! lines: a sub-agent's, or those of the thread a handoff left behind.
+//! notifications: a sub-agent's, or those of the thread a handoff left
+//! behind. Its requests they take, unanswered they would hold its turn.
 
 use std::collections::HashMap;
 use std::io;
@@ -40,9 +41,9 @@ fn wire_id(text: &str) -> Value {
     text.parse::<u64>().map_or_else(|_| json!(text), |n| json!(n))
 }
 
-/// `line` is about a thread other than `thread`.
+/// `line` tells of a thread other than `thread`.
 fn elsewhere(line: &Value, thread: Option<&str>) -> bool {
-    let of = line.pointer("/params/threadId").and_then(Value::as_str);
+    let of = line.pointer("/params/threadId").and_then(Value::as_str).filter(|_| line.get("id").is_none());
     matches!((of, thread), (Some(of), Some(thread)) if of != thread)
 }
 
@@ -117,6 +118,11 @@ fn item_result(item: &Value) -> (String, bool) {
     }
 }
 
+/// The line that opens conversation `thread`.
+fn resume_line(thread: &str) -> String {
+    json!({ "id": OPEN, "method": "thread/resume", "params": { "threadId": thread } }).to_string()
+}
+
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({ "id": id, "method": method, "params": params }).to_string()
 }
@@ -130,6 +136,9 @@ pub struct CodexDriver {
     turn: Option<String>,
     /// The conversation was asked for and isn't open yet.
     opening: bool,
+    /// The conversation to resume, until it has opened: a refused resume is
+    /// asked again with the next message.
+    resuming: Option<String>,
     /// What the user sent meanwhile.
     queued: Vec<String>,
     /// Messages sent that the server is yet to echo: already shown.
@@ -314,6 +323,7 @@ impl CodexDriver {
             self.thread = Some(thread.to_owned());
             t.session_id = Some(thread.to_owned());
             self.opening = false;
+            self.resuming = None;
             let queued = std::mem::take(&mut self.queued);
             return (!queued.is_empty()).then(|| self.turn_line(thread, &queued.join("\n\n")).1);
         }
@@ -354,13 +364,14 @@ impl ChatDriver for CodexDriver {
     fn start_lines(&mut self, session: &str, resume: bool) -> Vec<String> {
         self.opening = true;
         let open = if resume {
-            json!({ "id": OPEN, "method": "thread/resume", "params": { "threadId": session } })
+            self.resuming = Some(session.to_owned());
+            resume_line(session)
         } else {
             // It runs in the chat's folder.
-            json!({ "id": OPEN, "method": "thread/start", "params": {} })
+            json!({ "id": OPEN, "method": "thread/start", "params": {} }).to_string()
         };
         let hello = json!({ "id": 0, "method": "initialize", "params": { "clientInfo": { "name": "tern", "version": env!("CARGO_PKG_VERSION") } } });
-        vec![hello.to_string(), json!({ "method": "initialized" }).to_string(), open.to_string()]
+        vec![hello.to_string(), json!({ "method": "initialized" }).to_string(), open]
     }
 
     fn fold_line(&mut self, t: &mut Transcript, line: &str) -> Option<String> {
@@ -382,9 +393,11 @@ impl ChatDriver for CodexDriver {
 
     fn user_line(&mut self, session: &str, text: &str, _: &[(&str, &[u8])]) -> (String, String) {
         self.sent.push(text.to_owned());
-        if self.opening {
+        if self.opening || self.resuming.is_some() {
             self.queued.push(text.to_owned());
-            return (crate::new_session_id(), String::new());
+            let line = self.resuming.as_deref().filter(|_| !self.opening).map(resume_line).unwrap_or_default();
+            self.opening = true;
+            return (crate::new_session_id(), line);
         }
         self.turn_line(self.thread.as_deref().unwrap_or(session), text)
     }
@@ -742,6 +755,33 @@ mod tests {
         assert_eq!(d.fold_line(&mut t, &refused), None);
         assert!(matches!(t.entries.last(), Some(Entry::Notice { text, error: true }) if text.contains("still open")), "{:?}", t.entries);
         assert!(!t.busy);
+    }
+
+    #[test]
+    fn a_message_after_a_refused_resume_resumes_first() {
+        let (mut d, mut t) = (CodexDriver::default(), Transcript::default());
+        d.start_lines(THREAD, true);
+        d.fold_line(&mut t, &server_lines(0).pop().unwrap());
+        let (_, line) = d.user_line(THREAD, "hi", &[]);
+        let again: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!((&again["method"], &again["params"]["threadId"]), (&json!("thread/resume"), &json!(THREAD)));
+        let opened = json!({"id": 1, "result": {"thread": {"id": THREAD}}}).to_string();
+        let reply: Value = serde_json::from_str(&d.fold_line(&mut t, &opened).unwrap()).unwrap();
+        assert_eq!((&reply["method"], &reply["params"]["input"][0]["text"]), (&json!("turn/start"), &json!("hi")));
+    }
+
+    #[test]
+    fn a_request_of_another_thread_is_still_asked() {
+        let (mut d, mut t) = fed(1);
+        let line = json!({"id": 9, "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "sub", "itemId": "i", "command": "ls"}});
+        d.fold_line(&mut t, &line.to_string());
+        assert!(matches!(t.entries.last(), Some(Entry::Ask(a)) if a.request_id == "9"), "{:?}", t.entries.last());
+        let (mut f, mut out) = (CodexFollow::default(), Vec::new());
+        f.follow(&json!({"id": 1, "result": {"thread": {"id": "main"}}}), &mut out);
+        out.clear();
+        f.follow(&line, &mut out);
+        assert_eq!(out, [Said::Ask("9".into())]);
     }
 
     #[test]

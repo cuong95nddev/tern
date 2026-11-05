@@ -228,6 +228,37 @@ fn a_codex_tabs_agent_and_lane_carry_over() {
 }
 
 #[test]
+fn a_codex_tab_without_a_hook_yet_keeps_its_lane() {
+    use tern_term::agent_status::TurnState;
+    let p = daemon_pair();
+    let c = client(&p.dir);
+    let (sink1, ev1) = sink();
+    let (_dir, path) = fake_codex("0.166.0");
+    let post = |body: &str| format!(r#"curl -s -X POST -H 'content-type: application/json' -d '{body}' "$url" >/dev/null; "#);
+    let mut script = CODEX_URL.to_owned();
+    // Each one a few times: here the old daemon, in the same process, still
+    // takes some (a real one has exited).
+    let prompt = post(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"hi"}"#);
+    let interrupt = post(r#"{"hook_event_name":"Interrupt","session_id":"s"}"#);
+    script += &format!("read x; while :; do {0}{0}{0}{1}{1}{1}sleep 0.1; done", prompt, interrupt);
+    let s = c.open(codex_tab(&path, &script), SIZE, 1000, sink1);
+    wait_until("ready", || ready_id(&ev1).is_some());
+    let id = s.id().unwrap();
+
+    hand_off(&p.dir).unwrap();
+    p.old.join().unwrap().unwrap();
+
+    let c = client(&p.dir);
+    let (sink2, ev2) = sink();
+    let s = c.open(Open::Attach { id }, SIZE, 1000, sink2);
+    wait_until("reattached", || ready_id(&ev2) == Some(id));
+    s.write(b"\n".to_vec());
+    // Only a Codex lane takes `Interrupt` for the turn's end.
+    wait_until("interrupted", || statuses(&ev2).iter().any(|s| s.state == TurnState::Done));
+    s.close();
+}
+
+#[test]
 fn kitty_images_carry_over() {
     let p = daemon_pair();
     let c = client(&p.dir);
