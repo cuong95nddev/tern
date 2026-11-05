@@ -20,6 +20,10 @@ What a new agent plugs into:
 - `tern-chat`: `sessions.rs` table, `chat_driver`, `chat_follower`. `codex/app_server.rs` and `opencode/acp.rs` are the models; `acp.rs` is the one to reuse for any ACP agent.
 - `tern-app`: `start_line`, `spawn_config`, usage (`UsageStore::agent_usage`), `chat_agents` feeds the menus.
 
+## Basic-tier screen rules, as tested
+
+Run live in the dev app on 2026-11-05: Pi 1.5.0 (Working) and Gemini CLI 0.67.0 (Working, the tool approval and the folder trust question as Blocked), both against local mocks. Grok 1.0.70 and Cursor Agent 2026.11.05 reached only their login screens: their Working and approval rules come from herdr's manifests and have not met a real turn. Scratch setup: `PI_CODING_AGENT_DIR` with `models.json` for Pi; `GEMINI_CLI_HOME`, `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` for Gemini, whose mock must also answer the router's `generateContent` with JSON.
+
 ## Left from phase 3
 
 - `synthetic` with `resume: false` during a turn wasn't measured, only between turns.

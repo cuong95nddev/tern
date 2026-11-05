@@ -119,7 +119,8 @@ mod tests {
     fn gemini_from_its_screen() {
         assert_eq!(read("gemini", "gemini", "[y/n]"), Some(Blocked));
         assert_eq!(read("gemini", "gemini", "│ apply this change?\n│ esc to cancel"), Some(Blocked));
-        assert_eq!(read("gemini", "gemini", "│ allow execution of: 'ls'?"), Some(Blocked));
+        assert_eq!(read("gemini", "gemini", "│ allow execution of [shell]?"), Some(Blocked));
+        assert_eq!(read("gemini", "gemini", "│ do you trust the files in this folder?\n│ ● 1. trust folder (work)"), Some(Blocked));
         assert_eq!(read("gemini", "gemini", "⠏ thinking (esc to cancel, 3s)"), Some(Working));
         assert_eq!(read("gemini", "gemini", "> type your message"), Some(Idle));
     }

@@ -10,6 +10,7 @@
     "blocked": [
       {"bottom_contains": "│ apply this change"},
       {"bottom_contains": "│ allow execution"},
+      {"bottom_contains": "do you trust the files in this folder?"},
       {"bottom_contains": "[y/n]"},
       {"bottom_contains": "do you want to proceed?"},
       {"bottom_contains": "waiting for user confirmation"}
