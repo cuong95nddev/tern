@@ -8,11 +8,13 @@ use serde_json::Value;
 
 use crate::agent_status::AgentStatus;
 use crate::claude_status::ClaudeTracker;
+use crate::codex_status::CodexTracker;
 
 /// A hook lane: times are milliseconds since the Unix epoch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentLane {
     Claude(ClaudeTracker),
+    Codex(CodexTracker),
 }
 
 impl AgentLane {
@@ -20,6 +22,7 @@ impl AgentLane {
     pub fn for_agent(id: &str) -> Option<Self> {
         match id {
             tern_agent::CLAUDE => Some(Self::Claude(ClaudeTracker::default())),
+            tern_agent::CODEX => Some(Self::Codex(CodexTracker::default())),
             _ => None,
         }
     }
@@ -28,6 +31,7 @@ impl AgentLane {
     pub fn agent(&self) -> &'static str {
         match self {
             Self::Claude(_) => tern_agent::CLAUDE,
+            Self::Codex(_) => tern_agent::CODEX,
         }
     }
 
@@ -36,6 +40,7 @@ impl AgentLane {
     pub fn on_event(&mut self, raw: &Value, now: u64, stop_blocked: bool) -> Option<AgentStatus> {
         match self {
             Self::Claude(t) => t.on_event(raw, now, stop_blocked),
+            Self::Codex(t) => t.on_event(raw, now, stop_blocked),
         }
     }
 
@@ -43,6 +48,7 @@ impl AgentLane {
     pub fn interrupted(&mut self, now: u64) -> Option<AgentStatus> {
         match self {
             Self::Claude(t) => t.interrupted(now),
+            Self::Codex(t) => t.interrupted(now),
         }
     }
 
@@ -50,18 +56,21 @@ impl AgentLane {
     pub fn question_answered(&mut self, now: u64) -> Option<AgentStatus> {
         match self {
             Self::Claude(t) => t.question_answered(now),
+            Self::Codex(t) => t.question_answered(now),
         }
     }
 
     pub fn main_agent_busy(&self) -> bool {
         match self {
             Self::Claude(t) => t.main_agent_busy(),
+            Self::Codex(t) => t.main_agent_busy(),
         }
     }
 
     pub fn asking(&self) -> bool {
         match self {
             Self::Claude(t) => t.asking(),
+            Self::Codex(t) => t.asking(),
         }
     }
 
@@ -69,6 +78,7 @@ impl AgentLane {
     pub fn current(&mut self, now: u64) -> Option<AgentStatus> {
         match self {
             Self::Claude(t) => t.current(now),
+            Self::Codex(t) => t.current(now),
         }
     }
 
@@ -76,6 +86,7 @@ impl AgentLane {
     pub fn deadline(&self) -> Option<u64> {
         match self {
             Self::Claude(t) => t.deadline(),
+            Self::Codex(t) => t.deadline(),
         }
     }
 
@@ -83,6 +94,7 @@ impl AgentLane {
     pub fn knows(&self) -> bool {
         match self {
             Self::Claude(t) => t.knows(),
+            Self::Codex(t) => t.knows(),
         }
     }
 }
@@ -117,7 +129,17 @@ mod tests {
 
     #[test]
     fn unknown_agents_have_no_lane() {
-        assert!(AgentLane::for_agent("codex").is_none());
+        assert!(AgentLane::for_agent("gemini").is_none());
+    }
+
+    #[test]
+    fn a_codex_lane_folds_and_serializes() {
+        let mut lane = AgentLane::for_agent("codex").unwrap();
+        assert_eq!(lane.agent(), "codex");
+        lane.on_event(&json!({"hook_event_name": "UserPromptSubmit", "prompt": "hi", "session_id": "s"}), 1, false);
+        let back: AgentLane = serde_json::from_value(serde_json::to_value(&lane).unwrap()).unwrap();
+        assert!(back.main_agent_busy());
+        assert_eq!(back.agent(), "codex");
     }
 
     #[test]

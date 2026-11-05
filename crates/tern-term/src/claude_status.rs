@@ -508,7 +508,7 @@ impl ClaudeTracker {
         Some(self.build(resolution, manual_compact))
     }
 
-    /// Claude's turn was cancelled (Esc, Ctrl+C: it sends no hook): the main
+    /// Claude's turn was cancelled (Esc, Ctrl+C: it sends no hook; Codex does): the main
     /// agent's turn is done, as a cancellation. The work it left running
     /// stays until it reports its own end.
     pub fn interrupted(&mut self, now: u64) -> Option<AgentStatus> {

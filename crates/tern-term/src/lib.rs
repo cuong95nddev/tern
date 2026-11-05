@@ -3,6 +3,7 @@
 pub mod agent_lane;
 pub mod agent_status;
 pub mod claude_status;
+pub mod codex_status;
 pub mod env;
 pub mod graphics;
 pub mod keys;

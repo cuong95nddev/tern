@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tern_term::agent_status::AgentStatus;
 use tern_term::claude_status::ClaudeTracker;
+use tern_term::codex_status::CodexTracker;
 use tern_term::mirror::Marker;
 use tern_term::snapshot::Snapshot;
 use tern_term::status::ActivityStatus;
@@ -559,6 +560,9 @@ pub struct HandedSession {
     /// Its Claude's hook state (handoff 4).
     #[serde(default)]
     pub claude: Option<ClaudeTracker>,
+    /// Its Codex's hook state (a daemon older than MINOR 18 starts without it).
+    #[serde(default)]
+    pub codex: Option<CodexTracker>,
 }
 
 /// A chat, as handed to the new daemon.

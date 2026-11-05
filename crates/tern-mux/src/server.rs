@@ -1513,6 +1513,11 @@ impl Server {
         for (id, host, token, claude_session, hooks, service) in sessions {
             let paused = host.pause()?;
             let fd = paused.as_ref().and_then(|_| host.master_fd());
+            let (claude, codex) = match host.lane() {
+                Some(AgentLane::Claude(t)) => (Some(t), None),
+                Some(AgentLane::Codex(t)) => (None, Some(t)),
+                None => (None, None),
+            };
             let session = HandedSession {
                 id,
                 pid: host.pid(),
@@ -1531,9 +1536,8 @@ impl Server {
                 images: host.handed_images(),
                 service,
                 // On the wire as a Claude tracker: what older daemons take.
-                claude: host.lane().map(|lane| match lane {
-                    AgentLane::Claude(t) => t,
-                }),
+                claude,
+                codex,
             };
             handoff.paused.extend(paused);
             let msg = HandoffMsg::Session(Box::new(session));
@@ -1722,8 +1726,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             let observer: Arc<dyn Observer> = server.clone();
             let (host, driver) =
                 Host::adopt(s.id, s.pid, fd, snapshot, s.scrollback, s.exited, s.writes, s.scheme_reports, s.images, observer)?;
-            if let Some(tracker) = s.claude {
-                host.adopt_lane(AgentLane::Claude(tracker));
+            if let Some(lane) = s.claude.map(AgentLane::Claude).or(s.codex.map(AgentLane::Codex)) {
+                host.adopt_lane(lane);
             }
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
