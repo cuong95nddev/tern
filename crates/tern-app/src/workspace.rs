@@ -2886,7 +2886,8 @@ impl Workspace {
             return;
         };
         // Whose transcript the hook names, when Tern can read it.
-        let transcript_agent = tab.kind.agent().filter(|_| tab.kind.has(Capability::Transcript)).cloned();
+        let agent = tab.kind.agent().cloned();
+        let transcript_agent = agent.clone().filter(|_| tab.kind.has(Capability::Transcript));
         let status_line = ev.event == tern_bridge::statusline::EVENT;
         if status_line {
             let context = crate::agents::ContextUse::read(&ev.raw);
@@ -2937,7 +2938,7 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        self.tree.update(cx, |t, cx| t.mark_agent_edit(&paths, cx));
+        self.tree.update(cx, |t, cx| t.mark_agent_edit(&paths, agent.as_ref(), cx));
         let batch = ChangeBatch { paths, git_repos: vec![], rescan: false };
         self.changes.update(cx, |c, cx| c.files_changed(&batch, cx));
         self.files_changed(&batch, window, cx);

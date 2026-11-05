@@ -1,10 +1,10 @@
 //! Explorer pane: virtualized rows over [`tern_fs::FileTree`], live-updated by
-//! the fs watcher, with git status and "edited by Claude" badges. Files and
+//! the fs watcher, with git status and "edited by <agent>" badges. Files and
 //! folders are created, renamed, moved, copied and trashed the way VS Code's
 //! explorer does it: inline name editing, a context menu, multi-selection,
 //! drag and drop and the same keys.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -16,6 +16,7 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use tern_agent::AgentId;
 use tern_fs::{ChangeBatch, FileTree, FsWatcher, GitStatus, ops};
 
 use crate::file_icons;
@@ -132,7 +133,8 @@ type Then = Box<dyn FnOnce(&mut FileTreeView, &mut Context<FileTreeView>)>;
 pub struct FileTreeView {
     tree: FileTree,
     git: HashMap<PathBuf, GitStatus>,
-    agent_touched: HashSet<PathBuf>,
+    /// Files an agent edited, each with what its badge says.
+    agent_touched: HashMap<PathBuf, SharedString>,
     /// Every selected entry (⌘-click and ⇧-click add to it).
     selected: Vec<PathBuf>,
     /// The entry the keyboard acts on, and where a ⇧-click range starts.
@@ -184,7 +186,7 @@ impl FileTreeView {
         let mut this = Self {
             tree: FileTree::unloaded(root.clone()),
             git: HashMap::new(),
-            agent_touched: HashSet::new(),
+            agent_touched: HashMap::new(),
             selected: vec![],
             cursor: None,
             edit: None,
@@ -266,9 +268,10 @@ impl FileTreeView {
         }
     }
 
-    /// Mark files an agent edited (from its hooks).
-    pub fn mark_agent_edit(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.agent_touched.extend(paths.iter().cloned());
+    /// Mark files `agent` edited (from its hooks).
+    pub fn mark_agent_edit(&mut self, paths: &[PathBuf], agent: Option<&AgentId>, cx: &mut Context<Self>) {
+        let tip: SharedString = edited_by(agent).into();
+        self.agent_touched.extend(paths.iter().map(|p| (p.clone(), tip.clone())));
         let applied = self.tree.apply_changes(paths.iter().map(PathBuf::as_path));
         self.applied(applied, cx);
         cx.notify();
@@ -548,7 +551,7 @@ impl FileTreeView {
         let follow = |p: &PathBuf| p.strip_prefix(from).map(|r| to.join(r)).unwrap_or_else(|_| p.clone());
         self.selected = self.selected.iter().map(follow).collect();
         self.cursor = self.cursor.as_ref().map(follow);
-        self.agent_touched = self.agent_touched.iter().map(follow).collect();
+        self.agent_touched = self.agent_touched.iter().map(|(p, tip)| (follow(p), tip.clone())).collect();
         self.show(to.to_path_buf(), cx);
         cx.emit(FileTreeEvent::Moved { from: from.to_path_buf(), to: to.to_path_buf() });
     }
@@ -928,7 +931,8 @@ impl FileTreeView {
         };
         let drop_dir = if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(self.root()).to_path_buf() };
 
-        let mut scope = agent_edited(template::Scope::new(ROW), self.agent_touched.contains(path))
+        let edited = self.agent_touched.get(path).cloned();
+        let mut scope = agent_edited(template::Scope::new(ROW), edited.is_some())
             .var("indent", style::row_indent(ROW, row.depth, cx))
             .var("folder", is_dir)
             .var("open", row.expanded)
@@ -964,6 +968,12 @@ impl FileTreeView {
                         move |this, d: &ExternalPaths, window, cx| this.import(drop_dir.clone(), d.paths(), window, cx)
                     }))
                     .into_any_element(),
+                ("edited", Framed::Box(d)) => {
+                    let tip = edited.clone().unwrap_or_default();
+                    d.id(("edited", ix))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                        .into_any_element()
+                },
                 (_, f) => f.into_any_element(),
             },
             cx,
@@ -1076,6 +1086,14 @@ fn agent_edited(scope: template::Scope, edited: bool) -> template::Scope {
     scope.var("agent_edited", edited).var("claude", edited)
 }
 
+/// What the badge of a file `agent` edited says.
+fn edited_by(agent: Option<&AgentId>) -> String {
+    match agent {
+        Some(agent) => format!("Edited by {}", crate::agents::agent_short_name(agent)),
+        None => "Edited by an agent".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1083,5 +1101,16 @@ mod tests {
         let scope = super::agent_edited(crate::template::Scope::new("t"), true);
         assert_eq!(scope.text_var("agent_edited").as_deref(), Some("true"));
         assert_eq!(scope.text_var("claude").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn edited_badge_names_the_agent() {
+        assert_eq!(super::edited_by(Some(&tern_agent::AgentId::new("codex"))), "Edited by Codex");
+        assert_eq!(super::edited_by(Some(&tern_agent::AgentId::new("claude"))), "Edited by Claude");
+    }
+
+    #[test]
+    fn an_edit_from_no_known_agent_says_so() {
+        assert_eq!(super::edited_by(None), "Edited by an agent");
     }
 }

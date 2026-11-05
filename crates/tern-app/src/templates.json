@@ -267,7 +267,7 @@
       { "slot": "icon" },
       { "when": "editing", "slot": "field" },
       { "when": "!editing", "grow": 1, "nowrap": true, "text": "{name}", "style": { "text": "{name_color}" } },
-      { "when": "!editing && agent_edited", "text": "✦", "style": { "font_size": "$explorer.row.detail_font_size", "text": "$accent.foreground" } },
+      { "when": "!editing && agent_edited", "frame": "edited", "children": [{ "text": "✦", "style": { "font_size": "$explorer.row.detail_font_size", "text": "$accent.foreground" } }] },
       { "when": "!editing && git && !folder", "text": "{git}", "style": { "font_size": "$explorer.row.detail_font_size", "text": "{name_color}" } }
     ]
   },
