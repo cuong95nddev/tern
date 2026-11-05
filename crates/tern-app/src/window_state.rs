@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use tern_agent::AgentId;
+
 use gpui_kit::*;
 
 fn file() -> PathBuf {
@@ -291,14 +293,16 @@ pub fn toggle_flag(args: &str, flag: &str) -> String {
 
 /// One center tab of a saved workspace. Terminals reattach to their
 /// background session (`mux`) when it still runs; otherwise they come back
-/// as new processes, and a Claude tab resumes its conversation.
+/// as new processes, and an agent tab resumes its conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SavedTab {
-    /// `account`: the Claude account it runs as; `None` is the default one.
-    /// `guard`: the context limit and auto switch it keeps, when turned on
-    /// (see [`crate::agents::ContextGuard`]). `handoff`: the path of the
-    /// handoff it can go on from (see [`crate::agents::Handoff`]).
-    Claude {
+    /// A tab running `agent`. `account`: the Claude account it runs as;
+    /// `None` is the default one. `guard`: the context limit and auto switch
+    /// it keeps, when turned on (see [`crate::agents::ContextGuard`]).
+    /// `handoff`: the path of the handoff it can go on from (see
+    /// [`crate::agents::Handoff`]).
+    Agent {
+        agent: AgentId,
         name: Option<String>,
         session: Option<String>,
         mux: Option<u64>,
@@ -321,10 +325,11 @@ pub enum SavedTab {
         from: Option<String>,
     },
     GitLog,
-    /// A Claude chat: its conversation, the account it runs as (`None` is
+    /// An agent's chat: its conversation, the account it runs as (`None` is
     /// the default one), and its chat in the daemon.
-    /// `guard` and `handoff`: as a Claude tab's.
+    /// `guard` and `handoff`: as an agent tab's.
     Chat {
+        agent: AgentId,
         session: String,
         account: Option<String>,
         mux: Option<u64>,
@@ -461,7 +466,7 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
             for (i, tab) in ws.tabs.iter().enumerate() {
                 let group = ws.tab_groups.get(i).copied().flatten().map(|g| format!("@{g}\t")).unwrap_or_default();
                 let line = match tab {
-                    SavedTab::Claude { name, session, mux, account, guard, handoff } => {
+                    SavedTab::Agent { agent, name, session, mux, account, guard, handoff } => {
                         let mux = mux.map(|m| m.to_string()).unwrap_or_default();
                         let guard = guard.map(encode_guard);
                         // The field after `mux` is a one-workspace build's folder.
@@ -471,7 +476,12 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                             (_, guard, None) => format!("\t\t{}\t{}", opt(account), guard.unwrap_or_default()),
                             (_, guard, handoff) => format!("\t\t{}\t{}\t{}", opt(account), guard.unwrap_or_default(), opt(handoff)),
                         };
-                        format!("claude\t{}\t{}\t{mux}{rest}", opt(session), opt(name))
+                        // A Claude tab keeps the line older builds read.
+                        if agent.is(tern_agent::CLAUDE) {
+                            format!("claude\t{}\t{}\t{mux}{rest}", opt(session), opt(name))
+                        } else {
+                            format!("agent\t{}\t{}\t{}\t{mux}{rest}", field(agent.as_str()), opt(session), opt(name))
+                        }
                     },
                     SavedTab::Shell { name, mux } => format!("shell\t{}\t{}", opt(name), mux.map(|m| m.to_string()).unwrap_or_default()),
                     SavedTab::File(p) => format!("file\t{}", path(p)),
@@ -481,11 +491,16 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                         format!("commit_diff\t{}\t{}\t{}\t{}", path(repo), field(hash), field(rel), opt(from))
                     },
                     SavedTab::GitLog => "git_log".to_owned(),
-                    SavedTab::Chat { session, account, mux, guard, handoff } => {
+                    SavedTab::Chat { agent, session, account, mux, guard, handoff } => {
                         let mux = mux.map(|m| m.to_string()).unwrap_or_default();
-                        let rest = match (guard, handoff) {
-                            (None, None) => String::new(),
-                            (guard, handoff) => format!("\t{}\t{}", guard.map(encode_guard).unwrap_or_default(), opt(handoff)),
+                        // A Claude chat keeps the line older builds read.
+                        let agent = (!agent.is(tern_agent::CLAUDE)).then(|| field(agent.as_str()));
+                        let rest = match (guard, handoff, agent) {
+                            (None, None, None) => String::new(),
+                            (guard, handoff, None) => format!("\t{}\t{}", guard.map(encode_guard).unwrap_or_default(), opt(handoff)),
+                            (guard, handoff, Some(agent)) => {
+                                format!("\t{}\t{}\t{agent}", guard.map(encode_guard).unwrap_or_default(), opt(handoff))
+                            },
                         };
                         format!("chat\t{}\t{}\t{mux}{rest}", field(session), opt(account))
                     },
@@ -512,15 +527,11 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
     let kind = parts.next()?;
     let mut next = || parts.next().filter(|s| !s.is_empty()).map(str::to_owned);
     Some(match kind {
-        "claude" => {
-            let session = next();
-            let name = next();
-            let mux = next().and_then(|m| m.parse().ok());
-            let _folder = next();
-            let account = next();
-            let guard = next().and_then(|g| decode_guard(&g));
-            let handoff = next();
-            SavedTab::Claude { session, name, mux, account, guard, handoff }
+        // A Claude tab, as every build writes it: no agent field.
+        "claude" => agent_tab(AgentId::new(tern_agent::CLAUDE), &mut next),
+        "agent" => {
+            let agent = AgentId::new(&next()?);
+            agent_tab(agent, &mut next)
         },
         "shell" => {
             let name = next();
@@ -531,15 +542,29 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "scratch" => SavedTab::Scratch(next()?.into()),
         "commit_diff" => SavedTab::CommitDiff { repo: next()?.into(), hash: next()?, rel: next()?, from: next() },
         "git_log" => SavedTab::GitLog,
-        "chat" => SavedTab::Chat {
-            session: next()?,
-            account: next(),
-            mux: next().and_then(|m| m.parse().ok()),
-            guard: next().and_then(|g| decode_guard(&g)),
-            handoff: next(),
+        "chat" => {
+            let session = next()?;
+            let account = next();
+            let mux = next().and_then(|m| m.parse().ok());
+            let guard = next().and_then(|g| decode_guard(&g));
+            let handoff = next();
+            let agent = AgentId::new(next().as_deref().unwrap_or(tern_agent::CLAUDE));
+            SavedTab::Chat { agent, session, account, mux, guard, handoff }
         },
         _ => return None,
     })
+}
+
+/// An agent tab from its line's fields after its agent.
+fn agent_tab(agent: AgentId, next: &mut impl FnMut() -> Option<String>) -> SavedTab {
+    let session = next();
+    let name = next();
+    let mux = next().and_then(|m| m.parse().ok());
+    let _folder = next();
+    let account = next();
+    let guard = next().and_then(|g| decode_guard(&g));
+    let handoff = next();
+    SavedTab::Agent { agent, session, name, mux, account, guard, handoff }
 }
 
 /// The folder a terminal line of a one-workspace build's session starts in
@@ -547,6 +572,7 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
 fn tab_cwd(line: &str) -> Option<PathBuf> {
     let at = match line.split('\t').next()? {
         "claude" => 4,
+        "agent" => 5,
         "shell" => 3,
         _ => return None,
     };
@@ -574,7 +600,7 @@ fn split_merged(ws: SavedWorkspace, merged: Merged) -> (Vec<SavedWorkspace>, usi
     let mut active_ws = 0;
     for (i, tab) in ws.tabs.into_iter().enumerate() {
         let place = match &tab {
-            SavedTab::Claude { .. } | SavedTab::Shell { .. } => merged.cwds.get(i).cloned().flatten().map_or(0, |c| home(&c)),
+            SavedTab::Agent { .. } | SavedTab::Shell { .. } => merged.cwds.get(i).cloned().flatten().map_or(0, |c| home(&c)),
             SavedTab::File(p) | SavedTab::Diff(p) | SavedTab::CommitDiff { repo: p, .. } => home(p),
             SavedTab::Scratch(_) | SavedTab::GitLog | SavedTab::Chat { .. } => 0,
         };
@@ -732,6 +758,7 @@ mod tests {
     };
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
     use std::path::PathBuf;
+    use tern_agent::AgentId;
 
     #[test]
     #[cfg(unix)]
@@ -768,7 +795,8 @@ mod tests {
                     SavedWorkspace {
                         folder: PathBuf::from("/a b/c"),
                         tabs: vec![
-                            SavedTab::Claude {
+                            SavedTab::Agent {
+                                agent: claude(),
                                 name: None,
                                 session: Some("s-1".into()),
                                 mux: Some(42),
@@ -776,7 +804,8 @@ mod tests {
                                 guard: None,
                                 handoff: None,
                             },
-                            SavedTab::Claude {
+                            SavedTab::Agent {
+                                agent: claude(),
                                 name: Some("api work".into()),
                                 session: None,
                                 mux: None,
@@ -796,7 +825,8 @@ mod tests {
                                 from: Some("old.rs".into()),
                             },
                             SavedTab::GitLog,
-                            SavedTab::Claude {
+                            SavedTab::Agent {
+                                agent: claude(),
                                 name: None,
                                 session: Some("s-2".into()),
                                 mux: None,
@@ -804,7 +834,8 @@ mod tests {
                                 guard: Some((50, true)),
                                 handoff: None,
                             },
-                            SavedTab::Claude {
+                            SavedTab::Agent {
+                                agent: claude(),
                                 name: None,
                                 session: None,
                                 mux: Some(3),
@@ -812,8 +843,16 @@ mod tests {
                                 guard: Some((70, false)),
                                 handoff: Some("h.md".into()),
                             },
-                            SavedTab::Chat { session: "c-1".into(), account: None, mux: Some(9), guard: None, handoff: None },
                             SavedTab::Chat {
+                                agent: claude(),
+                                session: "c-1".into(),
+                                account: None,
+                                mux: Some(9),
+                                guard: None,
+                                handoff: None,
+                            },
+                            SavedTab::Chat {
+                                agent: claude(),
                                 session: "c-2".into(),
                                 account: Some("account-2".into()),
                                 mux: None,
@@ -859,7 +898,15 @@ mod tests {
         );
         assert_eq!(
             b.tabs,
-            [SavedTab::Claude { name: None, session: Some("s-1".into()), mux: Some(42), account: None, guard: None, handoff: None }]
+            [SavedTab::Agent {
+                agent: claude(),
+                name: None,
+                session: Some("s-1".into()),
+                mux: Some(42),
+                account: None,
+                guard: None,
+                handoff: None
+            }]
         );
         assert_eq!(sub.tabs, [SavedTab::File("/b/sub/x.rs".into())]);
         assert_eq!((&a.tab_groups[..], &b.tab_groups[..], &sub.tab_groups[..]), (&[None, None, None][..], &[Some(0)][..], &[Some(0)][..]));
@@ -925,7 +972,8 @@ mod tests {
         assert_eq!(
             w[0].workspaces[0].tabs,
             vec![
-                SavedTab::Claude {
+                SavedTab::Agent {
+                    agent: claude(),
                     name: Some("name".into()),
                     session: Some("s-1".into()),
                     mux: None,
@@ -937,6 +985,81 @@ mod tests {
                 SavedTab::Shell { name: Some("n".into()), mux: None },
             ]
         );
+    }
+
+    fn claude() -> AgentId {
+        AgentId::new(tern_agent::CLAUDE)
+    }
+
+    fn one_tab(line: &str) -> SavedTab {
+        let (w, _) = decode_session(&format!("window 0\n\t/a\n\t\t{line}\n"));
+        w[0].workspaces[0].tabs[0].clone()
+    }
+
+    #[test]
+    fn a_window_saved_before_agents_restores_claude_tabs() {
+        assert_eq!(
+            one_tab("claude\ts-1\tWork\t42\t\tacct\t60s\t/r/h.md"),
+            SavedTab::Agent {
+                agent: claude(),
+                session: Some("s-1".into()),
+                name: Some("Work".into()),
+                mux: Some(42),
+                account: Some("acct".into()),
+                guard: Some((60, true)),
+                handoff: Some("/r/h.md".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_old_chat_line_is_a_claude_chat() {
+        assert_eq!(
+            one_tab("chat\tsess\t\t7"),
+            SavedTab::Chat { agent: claude(), session: "sess".into(), account: None, mux: Some(7), guard: None, handoff: None }
+        );
+    }
+
+    #[test]
+    fn agent_tabs_round_trip() {
+        let codex = AgentId::new(tern_agent::CODEX);
+        let tabs = vec![
+            SavedTab::Agent {
+                agent: codex.clone(),
+                name: None,
+                session: Some("t-1".into()),
+                mux: Some(5),
+                account: None,
+                guard: None,
+                handoff: None,
+            },
+            SavedTab::Agent {
+                agent: codex.clone(),
+                name: Some("n".into()),
+                session: None,
+                mux: None,
+                account: None,
+                guard: Some((40, false)),
+                handoff: Some("h.md".into()),
+            },
+            SavedTab::Agent {
+                agent: claude(),
+                name: None,
+                session: Some("s".into()),
+                mux: Some(1),
+                account: None,
+                guard: None,
+                handoff: None,
+            },
+            SavedTab::Chat { agent: codex, session: "c".into(), account: None, mux: None, guard: None, handoff: None },
+        ];
+        let windows = vec![SavedWindow {
+            placement: None,
+            workspaces: vec![SavedWorkspace { tab_groups: vec![None; tabs.len()], tabs, ..SavedWorkspace::fresh("/a".into()) }],
+            active: 0,
+        }];
+        let (back, _) = decode_session(&encode_session(&windows, &Default::default()));
+        assert_eq!(back[0].workspaces[0].tabs, windows[0].workspaces[0].tabs);
     }
 
     #[test]

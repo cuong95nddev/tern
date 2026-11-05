@@ -23,7 +23,7 @@ fn builtin_capabilities(id: &str) -> &'static [Capability] {
     use Capability::*;
     match id {
         CLAUDE => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Chat, Skills],
-        _ => &[Launch],
+        _ => &[],
     }
 }
 
@@ -204,6 +204,15 @@ mod tests {
         let (r, problems) = user(&[("amp.json", r#"{"id":"amp"}"#)]);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(r.get("amp").is_none());
+    }
+
+    #[test]
+    fn only_claude_launches_with_tern_wired_in_so_far() {
+        let r = Registry::builtin();
+        assert!(r.has("claude", Capability::Launch));
+        for id in ["codex", "opencode", "gemini", "cursor", "grok", "pi"] {
+            assert!(!r.has(id, Capability::Launch), "{id}");
+        }
     }
 
     #[test]

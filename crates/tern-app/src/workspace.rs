@@ -49,7 +49,7 @@ use crate::theme_picker::OpenSettingsFile;
 use crate::usage_view::{UsageEvent, UsageView};
 use crate::viewer::{self, Viewer, ViewerEvent};
 use crate::window_state::{self, SavedGroup, SavedPanels, SavedTab, SavedWorkspace, TabLayout};
-use tern_agent::AgentId;
+use tern_agent::{AgentId, Capability};
 
 /// What a name dialog does with the typed name (see `Workspace::ask_name`).
 type ApplyName = Rc<dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>)>;
@@ -152,10 +152,36 @@ pub fn bind_keys(cx: &mut App) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum TabKind {
-    Claude,
+    /// Runs an agent with Tern's integration (`Capability::Launch`).
+    Agent(AgentId),
     Shell,
+}
+
+impl TabKind {
+    fn claude() -> Self {
+        Self::Agent(AgentId::new(tern_agent::CLAUDE))
+    }
+
+    /// The agent it runs.
+    fn agent(&self) -> Option<&AgentId> {
+        match self {
+            Self::Agent(a) => Some(a),
+            Self::Shell => None,
+        }
+    }
+
+    /// Tern has `cap` for the agent it runs.
+    fn has(&self, cap: Capability) -> bool {
+        self.agent().is_some_and(|a| tern_agent::registry().has(a.as_str(), cap))
+    }
+
+    /// It runs Claude Code: accounts, `claude attach` and its session files
+    /// are Claude's own.
+    fn is_claude(&self) -> bool {
+        self.agent().is_some_and(|a| a.is(tern_agent::CLAUDE))
+    }
 }
 
 struct TermTab {
@@ -815,16 +841,18 @@ impl Workspace {
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             let before = this.tabs.len();
             match tab {
-                SavedTab::Claude { name, session, mux, account, guard, handoff } => {
+                SavedTab::Agent { agent, name, session, mux, account, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
-                    this.add_term(TabKind::Claude, name, session, mux, &account, window, cx);
+                    let kind =
+                        if tern_agent::registry().has(agent.as_str(), Capability::Launch) { TabKind::Agent(agent) } else { TabKind::Shell };
+                    this.add_term(kind, name, session, mux, &account, window, cx);
                     if let Some(CenterTab::Term(t)) = this.tabs.get_mut(before) {
                         t.guard = crate::agents::ContextGuard::from_saved(guard);
                         t.handoff = handoff.map_or_else(Default::default, crate::agents::Handoff::Written);
                     }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
-                SavedTab::Chat { session, account, mux, guard, handoff } => {
+                SavedTab::Chat { agent: _, session, account, mux, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
                     this.add_chat(&account, Some(session), mux, window, cx);
                     if let Some(CenterTab::Chat { view, .. }) = this.tabs.get(before) {
@@ -895,8 +923,9 @@ impl Workspace {
                 CenterTab::Term(t) => {
                     let name = t.rename.as_ref().map(|r| r.to_string());
                     let mux = t.view.read(cx).mux_id();
-                    match t.kind {
-                        TabKind::Claude => SavedTab::Claude {
+                    match &t.kind {
+                        TabKind::Agent(agent) => SavedTab::Agent {
+                            agent: agent.clone(),
                             name,
                             session: t.session.clone(),
                             mux,
@@ -922,6 +951,7 @@ impl Workspace {
                 CenterTab::Chat { view, .. } => {
                     let v = view.read(cx);
                     SavedTab::Chat {
+                        agent: AgentId::new(tern_agent::CLAUDE),
                         session: v.session().to_owned(),
                         account: (v.account() != accounts::DEFAULT).then(|| v.account().to_owned()),
                         mux: v.chat_id(),
@@ -1094,18 +1124,19 @@ impl Workspace {
     /// How to start a terminal of `kind` running as Claude account
     /// `account`: a Claude tab, or a shell one that runs `claude` as it.
     /// One removed since runs as the default account.
-    fn spawn_config(&self, kind: TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, &'static str) {
+    fn spawn_config(&self, kind: &TabKind, resume: Option<&str>, account: &str, cx: &mut App) -> (SpawnConfig, &'static str) {
         let shell = crate::platform::shell();
         let (account, mut env) = claude_env(account, cx);
         env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").to_owned());
         let (args, title) = match kind {
-            TabKind::Shell => {
+            // Only Claude launches with Tern's integration so far.
+            TabKind::Shell | TabKind::Agent(_) if !kind.is_claude() => {
                 // Only Claude's hooks need the proxy bypass.
                 env.remove("NO_PROXY");
                 env.remove("no_proxy");
                 (crate::platform::shell_args(), "shell")
             },
-            TabKind::Claude => {
+            TabKind::Agent(_) | TabKind::Shell => {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
                 // the placeholder (or drops the flag without hooks).
@@ -1142,7 +1173,8 @@ impl Workspace {
     /// A new tab of `kind`. A Claude one runs as the active account, or
     /// asks which when several are.
     fn add_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        if kind == TabKind::Shell {
+        // Only Claude has accounts.
+        if !kind.is_claude() {
             return self.add_term(kind, None, None, None, accounts::DEFAULT, window, cx);
         }
         let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
@@ -1237,7 +1269,7 @@ impl Workspace {
 
     /// A new Claude tab running as `account`.
     pub fn new_claude_tab_as(&mut self, account: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_term(TabKind::Claude, None, None, None, account, window, cx);
+        self.add_term(TabKind::claude(), None, None, None, account, window, cx);
     }
 
     /// Ask for an active account but `except`, titled `title` with `note`
@@ -1344,7 +1376,7 @@ impl Workspace {
     /// (the accounts share them).
     fn switch_account(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active) else { return };
-        if t.kind != TabKind::Claude || t.account == id {
+        if !t.kind.is_claude() || t.account == id {
             return;
         }
         t.account = id.to_owned();
@@ -1352,7 +1384,7 @@ impl Workspace {
         t.session = None;
         t.resuming = false;
         let view = t.view.clone();
-        let (cfg, _) = self.spawn_config(TabKind::Claude, None, id, cx);
+        let (cfg, _) = self.spawn_config(&TabKind::claude(), None, id, cx);
         view.update(cx, |v, cx| {
             v.set_spawn_config(cfg);
             v.set_hook(true);
@@ -1440,10 +1472,10 @@ impl Workspace {
     ) {
         // Known once the daemon answers (`TerminalEvent::Ready`).
         let token = None;
-        let (cfg, title) = self.spawn_config(kind, session.as_deref(), account, cx);
+        let (cfg, title) = self.spawn_config(&kind, session.as_deref(), account, cx);
         let config = self.services.terminal.clone();
         let connector = self.services.mux.clone();
-        let hook = kind == TabKind::Claude;
+        let hook = kind.has(Capability::Status);
         let view = cx.new(|cx| TerminalView::new(cfg, hook, mux, title, config, connector, cx));
         let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
         let rename = rename.map(Into::into);
@@ -1522,7 +1554,7 @@ impl Workspace {
         if let Some(ix) = self.tabs.iter().position(|t| t.term().is_some_and(|t| t.follows.as_ref() == Some(&output))) {
             return self.activate(ix, window, cx);
         }
-        let (mut cfg, _) = self.spawn_config(TabKind::Shell, None, accounts::DEFAULT, cx);
+        let (mut cfg, _) = self.spawn_config(&TabKind::Shell, None, accounts::DEFAULT, cx);
         // From its start, and on past the shell's end. Run directly, not
         // through a shell: the path is whatever the agent's shell opened.
         let Some(path) = output.to_str() else { return self.show_tab(row.tab, window, cx) };
@@ -1576,7 +1608,7 @@ impl Workspace {
                 })
                 .unwrap_or_else(|| accounts::DEFAULT.into());
             // Claude names its tab itself.
-            self.add_term(TabKind::Claude, None, s.agent_session_id().map(str::to_owned), Some(s.id), &account, window, cx);
+            self.add_term(TabKind::claude(), None, s.agent_session_id().map(str::to_owned), Some(s.id), &account, window, cx);
         } else {
             self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), accounts::DEFAULT, window, cx);
         }
@@ -1676,9 +1708,11 @@ impl Workspace {
             return None;
         }
         let v = t.view.read(cx);
-        match t.kind {
-            TabKind::Claude => {
-                matches!(v.status(), ActivityStatus::Working | ActivityStatus::Blocked).then(|| "Claude, mid-turn".to_owned())
+        match &t.kind {
+            TabKind::Agent(agent) => {
+                let registry = tern_agent::registry();
+                let name = registry.get(agent.as_str()).map_or_else(|| agent.to_string(), |d| d.short_name.clone());
+                matches!(v.status(), ActivityStatus::Working | ActivityStatus::Blocked).then(|| format!("{name}, mid-turn"))
             },
             TabKind::Shell => v.foreground_job(),
         }
@@ -1711,7 +1745,7 @@ impl Workspace {
     /// conversation the other way: `Some(to_chat)`.
     fn claude_view_switch(&self, ix: usize) -> Option<bool> {
         match self.tabs.get(ix)? {
-            CenterTab::Term(t) if t.kind == TabKind::Claude => Some(true),
+            CenterTab::Term(t) if t.kind.has(Capability::Chat) => Some(true),
             CenterTab::Chat { .. } => Some(false),
             _ => None,
         }
@@ -1757,7 +1791,7 @@ impl Workspace {
         if to_chat {
             self.add_chat(&account, session, None, window, cx);
         } else {
-            self.add_term(TabKind::Claude, None, session, None, &account, window, cx);
+            self.add_term(TabKind::claude(), None, session, None, &account, window, cx);
         }
         let Some(mut new) = self.tabs.pop() else { return };
         match &mut new {
@@ -2474,7 +2508,7 @@ impl Workspace {
 
     /// Tell the daemon the context guard of `view`'s Claude tab.
     fn send_guard(&mut self, view: &Entity<TerminalView>, cx: &App) {
-        let Some(t) = self.term_tab_mut(view).filter(|t| t.kind == TabKind::Claude) else { return };
+        let Some(t) = self.term_tab_mut(view).filter(|t| t.kind.has(Capability::Steer)) else { return };
         let guard = t.guard;
         if let Some(id) = view.read(cx).mux_id() {
             self.services.mux.set_context_guard(id, guard.sent_limit(), guard.auto_switch);
@@ -2492,7 +2526,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind == TabKind::Claude))
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind.has(Capability::Steer)))
         else {
             return;
         };
@@ -2513,7 +2547,7 @@ impl Workspace {
 
     /// The shown Claude tab, with its daemon session's id.
     fn shown_claude_mut(&mut self, cx: &App) -> Option<(&mut TermTab, u64)> {
-        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind == TabKind::Claude))
+        let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind.has(Capability::Steer)))
         else {
             return None;
         };
@@ -2622,7 +2656,7 @@ impl Workspace {
                     t.token = token.clone();
                     // A Claude started anew runs `--resume` of its session
                     // (see `spawn_config`); one it reattached to doesn't.
-                    t.resuming = !*attached && t.kind == TabKind::Claude && t.session.is_some();
+                    t.resuming = !*attached && t.kind.has(Capability::Session) && t.session.is_some();
                 }
                 // The daemon (maybe a new one) keeps its limit, and its mute.
                 self.send_guard(view, cx);
@@ -2639,7 +2673,7 @@ impl Workspace {
             // fails at once, a new one starts (see `Exited`).
             TerminalEvent::Restored => {
                 if let Some(t) = self.term_tab_mut(view) {
-                    t.resuming = t.kind == TabKind::Claude && t.session.is_some();
+                    t.resuming = t.kind.has(Capability::Session) && t.session.is_some();
                 }
             },
             TerminalEvent::Exited { code, quick, live } => {
@@ -2648,14 +2682,14 @@ impl Workspace {
                 if *live
                     && *code == Some(0)
                     && let Some(t) = self.term_tab_mut(view)
-                    && t.kind == TabKind::Claude
+                    && t.kind.agent().is_some()
                 {
                     t.kind = TabKind::Shell;
                     t.token = None;
                     t.session = None;
                     t.resuming = false;
                     let account = t.account.clone();
-                    let (cfg, _) = self.spawn_config(TabKind::Shell, None, &account, cx);
+                    let (cfg, _) = self.spawn_config(&TabKind::Shell, None, &account, cx);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.set_hook(false);
@@ -2671,7 +2705,7 @@ impl Workspace {
                     Some(t) if t.resuming && *quick && code.is_some_and(|c| c != 0) => {
                         t.resuming = false;
                         t.session = None;
-                        Some(t.account.clone())
+                        Some((t.kind.clone(), t.account.clone()))
                     },
                     Some(t) => {
                         t.resuming = false;
@@ -2679,19 +2713,19 @@ impl Workspace {
                     },
                     None => None,
                 };
-                if let Some(account) = restart {
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, None, &account, cx);
+                if let Some((kind, account)) = restart {
+                    let (cfg, _) = self.spawn_config(&kind, None, &account, cx);
                     view.update(cx, |v, cx| {
                         v.set_spawn_config(cfg);
                         v.start(cx);
                     });
                     cx.emit(WorkspaceEvent::TabsChanged);
                 } else if let Some(t) = self.term_tab_mut(view)
-                    && t.kind == TabKind::Claude
+                    && t.kind.has(Capability::Session)
                 {
                     // Enter restarts it: resume the conversation it had.
-                    let (session, account) = (t.session.clone(), t.account.clone());
-                    let (cfg, _) = self.spawn_config(TabKind::Claude, session.as_deref(), &account, cx);
+                    let (kind, session, account) = (t.kind.clone(), t.session.clone(), t.account.clone());
+                    let (cfg, _) = self.spawn_config(&kind, session.as_deref(), &account, cx);
                     view.update(cx, |v, _| v.set_spawn_config(cfg));
                 }
                 cx.notify();
@@ -2802,9 +2836,9 @@ impl Workspace {
             tab.session = ev.session_id.clone();
             // Should Claude have to start again (Enter, its daemon
             // restarted), it resumes this conversation.
-            if tab.kind == TabKind::Claude {
-                let (view, account) = (tab.view.clone(), tab.account.clone());
-                let (cfg, _) = self.spawn_config(TabKind::Claude, ev.session_id.as_deref(), &account, cx);
+            if tab.kind.has(Capability::Session) {
+                let (view, kind, account) = (tab.view.clone(), tab.kind.clone(), tab.account.clone());
+                let (cfg, _) = self.spawn_config(&kind, ev.session_id.as_deref(), &account, cx);
                 view.update(cx, |v, _| v.set_spawn_config(cfg));
             }
             cx.emit(WorkspaceEvent::TabsChanged);
@@ -2872,7 +2906,7 @@ impl Workspace {
                 Some(TermTabInfo {
                     id: t.view.entity_id(),
                     title: self.tab_info(i, cx).0,
-                    agent: t.view.read(cx).agent().or_else(|| (t.kind == TabKind::Claude).then(|| AgentId::new(tern_agent::CLAUDE))),
+                    agent: t.view.read(cx).agent().or_else(|| t.kind.agent().cloned()),
                     active: i == self.active,
                     view: t.view.clone(),
                 })
@@ -2914,7 +2948,7 @@ impl Workspace {
                         .slot_opt("icon", self.tab_icon(i, None, cx))
                 };
                 match &self.tabs[i] {
-                    CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => {
+                    CenterTab::Term(t) if t.kind.agent().is_some() || t.view.read(cx).agent().is_some() => {
                         let v = t.view.read(cx);
                         let (now, agent) = (v.status(), v.agent().unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE)));
                         let scope = crate::agents::recent_vars(row(crate::agents::display_name(&label, &agent)), &t.recent, cx);
@@ -2980,10 +3014,12 @@ impl Workspace {
     /// Open a tab running `agent`: a Claude tab, or a shell that starts it.
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
-        let kind = if agent.is(tern_agent::CLAUDE) { TabKind::Claude } else { TabKind::Shell };
+        let kind =
+            if tern_agent::registry().has(agent.as_str(), Capability::Launch) { TabKind::Agent(agent.clone()) } else { TabKind::Shell };
+        let shell = kind == TabKind::Shell;
         self.add_tab(kind, window, cx);
         let view = self.tabs.get(self.active)?.term()?.view.clone();
-        if kind == TabKind::Shell {
+        if shell {
             let registry = tern_agent::registry();
             let line = registry.get(agent.as_str()).map_or_else(
                 || agent.to_string(),
@@ -3045,7 +3081,7 @@ impl Workspace {
         if label.chars().count() > 28 {
             label = label.chars().take(27).collect::<String>() + "…";
         }
-        let prefix = if t.kind == TabKind::Claude { "✦ " } else { "" };
+        let prefix = if t.kind.agent().is_some() { "✦ " } else { "" };
         let name = format!("{prefix}{label}").into();
         (label, name, Some(badge))
     }
@@ -3066,7 +3102,7 @@ impl Workspace {
     /// What tab `i` holds, for a template to pick its icon by.
     fn tab_kind(&self, i: usize, cx: &App) -> &'static str {
         match &self.tabs[i] {
-            CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => "agent",
+            CenterTab::Term(t) if t.kind.agent().is_some() || t.view.read(cx).agent().is_some() => "agent",
             CenterTab::Term(_) => "shell",
             CenterTab::File { .. } => "file",
             CenterTab::Scratch { .. } => "scratch",
@@ -3098,7 +3134,7 @@ impl Workspace {
             },
             CenterTab::Chat { .. } => return Some(crate::agents::agent_icon(&AgentId::new(tern_agent::CLAUDE), theme)),
         };
-        let agent = t.view.read(cx).agent().or_else(|| (t.kind == TabKind::Claude).then(|| AgentId::new(tern_agent::CLAUDE)));
+        let agent = t.view.read(cx).agent().or_else(|| t.kind.agent().cloned());
         Some(match agent {
             Some(a) => crate::agents::agent_icon(&a, theme),
             None => Icon::new(AssetIcon::SquareTerminal).text_color(mono).small().flex_shrink_0().into_any_element(),
@@ -3299,7 +3335,7 @@ impl Workspace {
             })),
             "new_claude" => b.on_click(on(|this, pane, window, cx| {
                 this.focus_pane_state(pane);
-                this.add_tab(TabKind::Claude, window, cx);
+                this.add_tab(TabKind::claude(), window, cx);
             })),
             "new_shell" => b.on_click(on(|this, pane, window, cx| {
                 this.focus_pane_state(pane);
@@ -3351,7 +3387,7 @@ impl Workspace {
             let items: template::MenuItems = Rc::new(move |name, entry| match name {
                 // The menu of a folder that isn't the shown one: the action
                 // would reach the shown workspace, so open the tab in this one.
-                "workspace::NewClaudeTab" => on_ws_shown(&ws, |this, window, cx| this.add_tab(TabKind::Claude, window, cx)),
+                "workspace::NewClaudeTab" => on_ws_shown(&ws, |this, window, cx| this.add_tab(TabKind::claude(), window, cx)),
                 "workspace::NewShellTab" => on_ws_shown(&ws, |this, window, cx| this.add_tab(TabKind::Shell, window, cx)),
                 "workspace::NewScratch" => on_ws_shown(&ws, |this, window, cx| this.new_scratch("txt", window, cx)),
                 "flag" => {
@@ -3738,7 +3774,7 @@ impl Workspace {
             type Handler = fn(&mut Workspace, u64, &mut Window, &mut Context<Workspace>);
             let f: Handler = match name {
                 "rename" => Self::rename_group,
-                "new_claude" => |this, g, w, cx| this.new_tab_in_group(TabKind::Claude, g, w, cx),
+                "new_claude" => |this, g, w, cx| this.new_tab_in_group(TabKind::claude(), g, w, cx),
                 "new_shell" => |this, g, w, cx| this.new_tab_in_group(TabKind::Shell, g, w, cx),
                 "toggle" => Self::toggle_group,
                 "color" => {
@@ -4640,7 +4676,7 @@ impl Workspace {
         if tabs.len() >= 2 && tabs.contains(&ix) {
             self.move_tab_to_pane(self.tabs[ix].entity_id(), new, window, cx);
         } else {
-            let kind = tabs.contains(&ix).then(|| self.tabs[ix].term()).flatten().map_or(TabKind::Shell, |t| t.kind);
+            let kind = tabs.contains(&ix).then(|| self.tabs[ix].term()).flatten().map_or(TabKind::Shell, |t| t.kind.clone());
             self.focused = new;
             self.add_tab(kind, window, cx);
         }
@@ -5589,14 +5625,14 @@ impl Render for Workspace {
         }
         // The bar marks the account the shown Claude tab runs as. Told
         // after this draw, not during it.
-        let current = self.tabs.get(self.active).and_then(CenterTab::term).filter(|t| t.kind == TabKind::Claude).map(|t| t.account.clone());
+        let current = self.tabs.get(self.active).and_then(CenterTab::term).filter(|t| t.kind.is_claude()).map(|t| t.account.clone());
         if self.usage.read(cx).current() != current.as_deref() {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
         }
         // And how full its context window is, with the limit it keeps.
         let context = match self.tabs.get(self.active) {
-            Some(CenterTab::Term(t)) if t.kind == TabKind::Claude => Some(crate::usage_view::ContextShown {
+            Some(CenterTab::Term(t)) if t.kind.has(Capability::Context) => Some(crate::usage_view::ContextShown {
                 usage: t.context,
                 guard: t.guard,
                 handoff: t.handoff.clone(),
@@ -5656,7 +5692,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::dock_part))
             .on_action(cx.listener(Self::pop_out))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::dropped_outside))
-            .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::Claude, w, cx)))
+            .on_action(cx.listener(|this, _: &NewClaudeTab, w, cx| this.add_tab(TabKind::claude(), w, cx)))
             .on_action(cx.listener(|this, _: &NewClaudeChat, w, cx| this.new_chat(w, cx)))
             .on_action(cx.listener(|this, _: &SwitchClaudeView, w, cx| this.switch_claude_view(this.active, w, cx)))
             .on_action(cx.listener(|this, _: &NewShellTab, w, cx| this.add_tab(TabKind::Shell, w, cx)))

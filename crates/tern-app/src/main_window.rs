@@ -149,7 +149,7 @@ pub fn restore_session(cx: &mut App) -> bool {
         .flat_map(|w| &w.workspaces)
         .flat_map(|ws| &ws.tabs)
         .filter_map(|t| match t {
-            window_state::SavedTab::Claude { mux, .. }
+            window_state::SavedTab::Agent { mux, .. }
             | window_state::SavedTab::Shell { mux, .. }
             | window_state::SavedTab::Chat { mux, .. } => *mux,
             _ => None,
@@ -341,7 +341,8 @@ pub fn reveal_session(id: u64, cx: &mut App) {
 /// shows it: no default Claude tab beside it.
 pub fn adoption_workspace(s: &tern_mux::proto::SessionInfo, home: &Path) -> window_state::SavedWorkspace {
     let tab = if s.agent_id().is_some_and(|a| a.is(tern_agent::CLAUDE)) {
-        window_state::SavedTab::Claude {
+        window_state::SavedTab::Agent {
+            agent: tern_agent::AgentId::new(tern_agent::CLAUDE),
             name: None,
             session: s.agent_session_id().map(str::to_owned),
             mux: Some(s.id),
@@ -1399,7 +1400,15 @@ mod tests {
         assert_eq!(w.folder, std::path::Path::new("/home"));
         assert_eq!(
             w.tabs,
-            [SavedTab::Claude { name: None, session: Some("s".into()), mux: Some(8), account: None, guard: None, handoff: None }]
+            [SavedTab::Agent {
+                agent: tern_agent::AgentId::new(tern_agent::CLAUDE),
+                name: None,
+                session: Some("s".into()),
+                mux: Some(8),
+                account: None,
+                guard: None,
+                handoff: None
+            }]
         );
     }
 
