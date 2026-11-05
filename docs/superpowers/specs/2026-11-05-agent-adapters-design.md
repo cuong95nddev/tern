@@ -223,21 +223,23 @@ Sketch of the contracts (names are the builder's to refine):
   account env. Codex: `--no-daemon -c hooks={…}`, the hooks with their trust
   hashes in one session-flags argument. No overlay home: conversations stay
   in `~/.codex/sessions` and there is no config to mirror. Needs Codex 0.166;
-  an older one, or one Tern can't find, runs without hooks. OpenCode: an
-  `OPENCODE_CONFIG_DIR` overlay with Tern's plugin
-  (Orca `src/main/opencode/hook-service.ts`).
+  an older one, or one Tern can't find, runs without hooks. OpenCode 2:
+  `--standalone`, with Tern's plugin named in `OPENCODE_CONFIG_CONTENT`
+  (see "Settled for OpenCode"); no overlay.
 - `HookLane`: turns one raw hook/plugin event into normalized `AgentEvent`s,
   and keeps the per-tab tracker. Claude: today's `ClaudeTracker` lane,
   unchanged. Codex: hook events `SessionStart, UserPromptSubmit, PreToolUse,
   PermissionRequest, PostToolUse, SubagentStart/Stop, Stop, Interrupt`
   (Orca `codex-hook-definition.ts`, mapping in `providers/codex-state.ts`).
-  OpenCode: plugin events (`session.status`, `tool.execute.*`,
-  `permission.asked`, `question.asked`, `session.idle`, `session.error`, child
-  sessions as subagents; herdr `assets/opencode/herdr-agent-state.js`).
+  OpenCode 2: the events of a plugin's `ctx.event.subscribe`
+  (`session.execution.started/succeeded/failed/interrupted`,
+  `session.tool.called/success`, `permission.asked/replied`,
+  `form.created/replied/cancelled`, `session.created` with a parent as a
+  subagent; Orca `src/main/opencode2/status-plugin-setup-source.ts`).
 - `Sessions`: session id from events; transcript path; resume argv (from the
   descriptor template). Claude `~/.claude/projects/<slug>/<id>.jsonl`; Codex
   `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`; OpenCode its SQLite
-  store (`~/.local/share/opencode/opencode.db`).
+  store (`~/.local/share/opencode/opencode.db`, table `session_v2`).
 - `TranscriptReader`: latest assistant text (handoff), recent sentence + tool
   (sidebar preview), edited files (badges). Claude: today's `recent.rs` and
   `last_transcript_text`. Codex: rollout records. OpenCode: plugin events
@@ -245,7 +247,8 @@ Sketch of the contracts (names are the builder's to refine):
 - `ContextMeter`: `{percent, size}` per conversation. Claude: status line and
   stream-json usage (today). Codex: rollout `event_msg/token_count` gives
   `last_token_usage` and `model_context_window` (verified in a local rollout).
-  OpenCode: message token counts from plugin events / DB, window from model.
+  OpenCode: `session.step.ended` tokens from the plugin, window from
+  `ctx.model.list` (`limit.context`); in a chat, ACP `usage_update`.
 - `Steer`: deliver text to the agent at a safe point: the session-start guide,
   "write a handoff now", "go on from this handoff". Claude: hook answers
   (`additionalContext`, `Stop` block), as today. Others: the hook answer if
@@ -364,9 +367,7 @@ Each phase is shippable on its own and leaves main green.
 - Descriptor format JSON under `~/.config/tern/agents/`.
 - Codex usage from rollout files, not Codex's backend API.
 - Claude accounts stay Claude-only: the account model stays inside Claude's
-  adapter. Codex has no home of Tern's (see `Launch`); OpenCode gets one
-  Tern-owned overlay (shared by its tabs, keyed by the user's real home), not
-  per account and not per tab.
+  adapter. Neither Codex nor OpenCode has a home of Tern's (see `Launch`).
 - Steering and metering have two surfaces. Terminal tabs: the hook lane
   (Claude hook answers; others hook answer or idle paste). Chats: the chat
   driver owns both, as the daemon does today for Claude chats (guard text sent
@@ -386,10 +387,39 @@ Each phase is shippable on its own and leaves main green.
 
 ## Open items for the builder to verify
 
-- Whether OpenCode's plugin API can inject a message into the session
-  (`client.session.prompt` with `noReply`, per its SDK docs) for `steer`.
-- Whether `opencode acp` can resume a session the TUI started (needed for the
-  terminal ⇄ chat switch).
+None left. Settled for OpenCode (2.0.30, phase 3, measured in a scratch home
+against a local mock provider):
+
+- A plugin is `export default { id, setup }`; the v1 shape fails to load.
+  `setup(ctx)` gets `ctx.session`, `ctx.event.subscribe`, `ctx.model`.
+- `OPENCODE_CONFIG_DIR` replaces the user's config directory: their plugins
+  stop loading, which is why Orca mirrors it. `OPENCODE_CONFIG_CONTENT` adds
+  to it: `{"plugins":["<dir>"]}` loads Tern's plugin beside the user's own,
+  both those in `plugins/` and those their config lists. The entry must be a
+  directory with a `package.json`.
+- The TUI uses one background service by default, so a tab's environment
+  doesn't reach a server plugin (per Orca's code; not measured here).
+  `--standalone` gives each tab a private server that inherits the tab's
+  environment (measured), so no TUI plugin is needed. Cost: a server per tab,
+  374 MB at idle in an empty folder (its TUI took 206 MB).
+- `steer`: `ctx.session.synthetic({sessionID, text, resume: true})` reaches the
+  model and opens a new turn, and the TUI shows it. `noReply` is gone.
+- `--session <id>` creates a session under an id Tern chooses, so a tab knows
+  its session before the first turn. Tried with `ses_` and 25 more
+  characters; OpenCode's own ids have 26.
+- `opencode acp` resumes a session the TUI started: `session/load` replays it
+  and `session/prompt` goes on. The other way too: `--session` shows the
+  chat's turns. Both were tried with the other side closed, not open at once.
+- ACP gives `session/request_permission` (`once`, `always`, reject),
+  `session/cancel` (`stopReason: cancelled`), and `usage_update` with
+  `{used, size}`.
+- OpenCode compacts by itself near the window's end: a turn at 62% of a
+  1000-token window went on to compact. The guard must expect it.
+- Permissions follow the user's config. By default a shell command runs
+  without asking; `{"permission":{"shell":"ask"}}` asks.
+- `opencode run` waits for stdin to end when it isn't a terminal.
+- Credentials such as Copilot's live in the database's `credential` table, not
+  in `auth.json`: a scratch home with only `auth.json` doesn't have them.
 
 Settled for Codex (0.166.0, phase 2):
 
