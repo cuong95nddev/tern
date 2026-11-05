@@ -425,7 +425,7 @@ impl ChatHost {
             let Some(mut driver) = tern_chat::chat_driver(host.meta.agent.as_str()) else { return };
             if clear {
                 let old = host.session();
-                host.write(&driver.clear_line(&old));
+                host.write(&driver.clear_line(&old, &host.meta.cwd));
                 if text.is_some() && !host.wait_for_another_session(&old) {
                     log::warn!("chat {}: no fresh conversation came", host.id);
                     return;

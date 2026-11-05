@@ -462,7 +462,8 @@ impl ChatView {
 
     /// Start Claude in the daemon: resuming the conversation when Claude saved it.
     fn start(&mut self, cx: &mut Context<Self>) {
-        let resume = saved_path(self.driver.agent(), &self.account, &self.root, &self.session).is_some();
+        let resume =
+            saved_path(self.driver.agent(), &self.account, &self.root, &self.session).is_some() || self.driver.resumes(&self.session);
         // The flags the user picked are Claude's.
         let user_args = if self.agent().is(tern_agent::CLAUDE) { crate::window_state::claude_args() } else { String::new() };
         let line = self.driver.command(
@@ -485,7 +486,7 @@ impl ChatView {
             agent: Some(self.driver.agent().to_owned()),
         };
         // Before anything the user sends.
-        self.outbox.splice(0..0, self.driver.start_lines(&self.session, resume));
+        self.outbox.splice(0..0, self.driver.start_lines(&self.session, resume, &self.root));
         self.connect(OpenChat::Spawn(Box::new(spec)), cx);
     }
 

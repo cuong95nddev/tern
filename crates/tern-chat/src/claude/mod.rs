@@ -49,7 +49,7 @@ impl ChatDriver for ClaudeDriver {
         claude_line(&start, user_args, &launch.args(), quote)
     }
 
-    fn start_lines(&mut self, _: &str, _: bool) -> Vec<String> {
+    fn start_lines(&mut self, _: &str, _: bool, _: &Path) -> Vec<String> {
         vec![wire::initialize()]
     }
 
@@ -64,7 +64,7 @@ impl ChatDriver for ClaudeDriver {
         (uuid, line)
     }
 
-    fn clear_line(&mut self, session: &str) -> String {
+    fn clear_line(&mut self, session: &str, _: &Path) -> String {
         self.user_line(session, "/clear", &[]).1
     }
 

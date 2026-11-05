@@ -20,6 +20,19 @@ pub enum Kind {
     Other,
 }
 
+/// The name a tool of ACP `kind`, called `name` by its agent, shows under.
+pub fn acp_name<'a>(kind: &str, name: &'a str) -> &'a str {
+    match (kind, name) {
+        (_, "write") => "Write",
+        ("execute", _) => "Bash",
+        ("edit", _) => "Edit",
+        ("read", _) => "Read",
+        ("search", _) => "Grep",
+        ("fetch", _) => "WebFetch",
+        _ => name,
+    }
+}
+
 pub fn kind(name: &str) -> Kind {
     match name {
         "Read" | "NotebookRead" => Kind::Read,

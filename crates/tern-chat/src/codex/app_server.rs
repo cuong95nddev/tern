@@ -32,12 +32,12 @@ fn str_at<'a>(v: &'a Value, pointer: &str) -> &'a str {
 }
 
 /// A JSON-RPC id as requests are kept by: its text.
-fn id_text(id: &Value) -> String {
+pub(crate) fn id_text(id: &Value) -> String {
     id.as_str().map_or_else(|| id.to_string(), str::to_owned)
 }
 
 /// The id `text` (see [`id_text`]) on the wire.
-fn wire_id(text: &str) -> Value {
+pub(crate) fn wire_id(text: &str) -> Value {
     text.parse::<u64>().map_or_else(|_| json!(text), |n| json!(n))
 }
 
@@ -396,7 +396,7 @@ impl ChatDriver for CodexDriver {
         line
     }
 
-    fn start_lines(&mut self, session: &str, resume: bool) -> Vec<String> {
+    fn start_lines(&mut self, session: &str, resume: bool, _: &Path) -> Vec<String> {
         self.opening = true;
         let open = if resume {
             self.resuming = Some(session.to_owned());
@@ -438,7 +438,7 @@ impl ChatDriver for CodexDriver {
         self.turn_line(self.thread.as_deref().unwrap_or(session), text)
     }
 
-    fn clear_line(&mut self, _: &str) -> String {
+    fn clear_line(&mut self, _: &str, _: &Path) -> String {
         request(&crate::new_session_id(), "thread/start", json!({ "sessionStartSource": "clear" }))
     }
 
@@ -643,19 +643,19 @@ mod tests {
     #[test]
     fn a_new_chat_starts_a_thread_and_an_old_one_resumes_it() {
         let mut d = CodexDriver::default();
-        let start: Vec<Value> = d.start_lines("x", false).iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let start: Vec<Value> = d.start_lines("x", false, Path::new("/w")).iter().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(start[0]["method"], "initialize");
         assert_eq!(start[1]["method"], "initialized");
         assert_eq!(start[2]["method"], "thread/start");
         let mut d = CodexDriver::default();
-        let resume: Value = serde_json::from_str(&d.start_lines("old", true)[2]).unwrap();
+        let resume: Value = serde_json::from_str(&d.start_lines("old", true, Path::new("/w"))[2]).unwrap();
         assert_eq!((&resume["method"], &resume["params"]["threadId"]), (&json!("thread/resume"), &json!("old")));
     }
 
     #[test]
     fn a_message_sent_before_the_thread_opens_goes_in_once_it_has() {
         let (mut d, mut t) = (CodexDriver::default(), Transcript::default());
-        d.start_lines("x", false);
+        d.start_lines("x", false, Path::new("/w"));
         let (_, line) = d.user_line("x", "hi", &[]);
         assert_eq!(line, "", "nothing to write yet");
         let lines = server_lines(1);
@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn resume_refused_is_a_notice() {
         let (mut d, mut t) = (CodexDriver::default(), Transcript::default());
-        d.start_lines(THREAD, true);
+        d.start_lines(THREAD, true, Path::new("/w"));
         t.busy = true;
         let refused = server_lines(0).pop().unwrap();
         assert!(refused.contains("-32600"), "{refused}");
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn a_message_after_a_refused_resume_resumes_first() {
         let (mut d, mut t) = (CodexDriver::default(), Transcript::default());
-        d.start_lines(THREAD, true);
+        d.start_lines(THREAD, true, Path::new("/w"));
         d.fold_line(&mut t, &server_lines(0).pop().unwrap());
         let (_, line) = d.user_line(THREAD, "hi", &[]);
         let again: Value = serde_json::from_str(&line).unwrap();

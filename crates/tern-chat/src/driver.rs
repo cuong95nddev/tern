@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::claude::{ClaudeDriver, ClaudeFollow};
 use crate::codex::app_server::{CodexDriver, CodexFollow};
 use crate::model::{Answer, Ask, Elicit, ElicitAnswer, PermissionMode, Transcript};
+use crate::opencode::acp::{OpenCodeDriver, OpenCodeFollow};
 
 /// What a driver's agent can do in a chat; the chat shows a control only
 /// when its agent has it.
@@ -48,8 +49,9 @@ pub trait ChatDriver: Send {
     ) -> String;
 
     /// The lines written before anything the user sends, in conversation
-    /// `session`: resumed with `resume`, else it may get another id.
-    fn start_lines(&mut self, session: &str, resume: bool) -> Vec<String>;
+    /// `session`: resumed with `resume`, else it may get another id. It runs
+    /// in folder `cwd`.
+    fn start_lines(&mut self, session: &str, resume: bool, cwd: &Path) -> Vec<String>;
 
     /// Fold one line the agent wrote into `t`; a reply line the chat must
     /// write back, if any.
@@ -60,8 +62,15 @@ pub trait ChatDriver: Send {
     /// nothing to write yet, it goes in by [`Self::fold_line`]'s reply.
     fn user_line(&mut self, session: &str, text: &str, images: &[(&str, &[u8])]) -> (String, String);
 
-    /// The line that goes on in a fresh conversation in place of `session`.
-    fn clear_line(&mut self, session: &str) -> String;
+    /// The line that goes on in a fresh conversation in place of `session`,
+    /// in folder `cwd`.
+    fn clear_line(&mut self, session: &str, cwd: &Path) -> String;
+
+    /// `session` is a saved conversation, without a file of Tern's to tell:
+    /// an agent that keeps them where Tern doesn't read.
+    fn resumes(&self, _session: &str) -> bool {
+        false
+    }
 
     fn answer_line(&self, ask: &Ask, answer: &Answer) -> Option<String>;
 
@@ -130,6 +139,7 @@ pub fn chat_follower(agent: &str) -> Option<Box<dyn ChatFollow>> {
     match agent {
         tern_agent::CLAUDE => Some(Box::<ClaudeFollow>::default()),
         tern_agent::CODEX => Some(Box::<CodexFollow>::default()),
+        tern_agent::OPENCODE => Some(Box::<OpenCodeFollow>::default()),
         _ => None,
     }
 }
@@ -139,6 +149,7 @@ pub fn chat_driver(agent: &str) -> Option<Box<dyn ChatDriver>> {
     match agent {
         tern_agent::CLAUDE => Some(Box::new(ClaudeDriver::default())),
         tern_agent::CODEX => Some(Box::new(CodexDriver::default())),
+        tern_agent::OPENCODE => Some(Box::new(OpenCodeDriver::default())),
         _ => None,
     }
 }
