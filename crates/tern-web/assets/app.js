@@ -198,7 +198,16 @@ function onBytes(data) {
 // listed.
 
 function agents() {
-  return sessions.filter((s) => s.claude);
+  return sessions.filter(isAgent);
+}
+
+// The agent a session was started for (older daemons tell only Claude).
+function agentOf(s) {
+  return s.agent || (s.claude ? "claude" : null);
+}
+
+function isAgent(s) {
+  return agentOf(s) !== null;
 }
 
 function byState(a, b) {
@@ -259,10 +268,10 @@ function glyph(state) {
 }
 
 // The agent's logo, as the app's row draws it.
-function logo() {
+function logo(s) {
   const img = document.createElement("img");
   img.className = "ic";
-  img.src = "/agents/claude.svg";
+  img.src = `/agent/${encodeURIComponent(agentOf(s))}.svg`;
   img.alt = "";
   return img;
 }
@@ -370,7 +379,7 @@ function renderList() {
       const look = statusLook(s);
       li.className = `tab ${s.exited ? "exited" : ""} ${look.state} ${s.id === (pending ?? current) ? "on" : ""}`;
       li.title = look.text;
-      li.append(logo());
+      li.append(logo(s));
       const title = document.createElement("span");
       title.className = "name";
       title.textContent = label(s);
@@ -390,7 +399,7 @@ function renderList() {
 
 // Working times count seconds.
 setInterval(() => {
-  if (sessions.some((s) => s.claude && s.status === "Working" && !s.exited)) {
+  if (sessions.some((s) => isAgent(s) && s.status === "Working" && !s.exited)) {
     if (!$("list-view").hidden) renderList();
     renderTabs();
   }
@@ -423,7 +432,7 @@ function renderTabs() {
     ...list.map((x) => {
       const b = document.createElement("button");
       b.className = `tab ${x.id === id ? "on" : ""}`;
-      b.append(x.claude ? logo() : icon("terminal", "muted"));
+      b.append(isAgent(x) ? logo(x) : icon("terminal", "muted"));
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = label(x);

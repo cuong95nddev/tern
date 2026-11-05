@@ -340,10 +340,10 @@ pub fn reveal_session(id: u64, cx: &mut App) {
 /// A workspace at session `s`'s folder (`home` without one) whose only tab
 /// shows it: no default Claude tab beside it.
 pub fn adoption_workspace(s: &tern_mux::proto::SessionInfo, home: &Path) -> window_state::SavedWorkspace {
-    let tab = if s.claude {
+    let tab = if s.agent_id().is_some_and(|a| a.is(tern_agent::CLAUDE)) {
         window_state::SavedTab::Claude {
             name: None,
-            session: s.claude_session.clone(),
+            session: s.agent_session_id().map(str::to_owned),
             mux: Some(s.id),
             account: None,
             guard: None,

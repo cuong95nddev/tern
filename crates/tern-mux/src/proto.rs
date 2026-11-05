@@ -32,7 +32,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 15;
+pub const MINOR: u32 = 16;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -56,6 +56,8 @@ pub const PALETTE_MINOR: u32 = 14;
 /// The first MINOR whose daemon gives a chat hooks (`{tern-settings}` in its
 /// arguments) and takes `ContextGuard`, `AskHandoff` and `ResumeHandoff` for it.
 pub const CHAT_GUARD_MINOR: u32 = 15;
+// MINOR 16: `SessionInfo.agent` and `agent_session` (older clients read
+// `claude` and `claude_session`, still filled).
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 5;
@@ -557,6 +559,36 @@ pub struct HandedChat {
     pub token: Option<String>,
 }
 
+impl SessionInfo {
+    /// Session `id`, started for `agent` and in its conversation `session`:
+    /// with the fields older clients read filled too.
+    pub fn with_agent(id: u64, agent: Option<&str>, session: Option<String>) -> Self {
+        let claude = agent == Some(tern_agent::CLAUDE);
+        Self {
+            id,
+            claude,
+            claude_session: session.clone().filter(|_| claude),
+            agent: agent.map(str::to_owned),
+            agent_session: session,
+            ..Default::default()
+        }
+    }
+
+    /// The agent it was started for; from an older daemon, which tells only
+    /// whether it is a Claude tab.
+    pub fn agent_id(&self) -> Option<tern_agent::AgentId> {
+        match &self.agent {
+            Some(a) => Some(tern_agent::AgentId::new(a)),
+            None => self.claude.then(|| tern_agent::AgentId::new(tern_agent::CLAUDE)),
+        }
+    }
+
+    /// Its agent's conversation (see [`Self::agent_id`]).
+    pub fn agent_session_id(&self) -> Option<&str> {
+        self.agent_session.as_deref().or(self.claude_session.as_deref())
+    }
+}
+
 /// An image a session holds, as handed to the new daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandedImage {
@@ -587,12 +619,20 @@ pub struct SessionInfo {
     /// The first foreground program (for a label when there is no title).
     #[serde(default)]
     pub program: Option<String>,
-    /// Spawned with a hook token (a Claude tab).
+    /// Spawned with a hook token (a Claude tab): for clients before MINOR
+    /// 16, which don't read `agent`. Read [`Self::agent_id`] instead.
     #[serde(default)]
     pub claude: bool,
-    /// `session_id` of its latest Claude hook event.
+    /// `session_id` of its latest Claude hook event: for clients before
+    /// MINOR 16. Read [`Self::agent_session_id`] instead.
     #[serde(default)]
     pub claude_session: Option<String>,
+    /// The agent it was started for (an id of `tern_agent`), MINOR 16.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Its agent's conversation, from its latest hook event (MINOR 16).
+    #[serde(default)]
+    pub agent_session: Option<String>,
     /// The service it runs (MINOR 10).
     #[serde(default)]
     pub service: Option<ServiceSpec>,
@@ -974,6 +1014,49 @@ mod tests {
         let mut r = Cursor::new(buf);
         assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::SessionsChanged { list }) if list == vec![info]));
         assert!(matches!(read_frame(&mut r, MAX_SERVER_FRAME).unwrap(), Some(ServerMsg::Revealed { req: 3, delivered: true })));
+    }
+
+    /// `SessionInfo` as a daemon before MINOR 16 sent and parsed it.
+    #[derive(Serialize, Deserialize, Debug, Default)]
+    struct SessionInfo15 {
+        id: u64,
+        pid: u32,
+        exited: bool,
+        cwd: Option<PathBuf>,
+        title: Option<String>,
+        claude: bool,
+        claude_session: Option<String>,
+    }
+
+    fn reencode<T: Serialize, U: serde::de::DeserializeOwned>(v: &T) -> U {
+        let mut buf = vec![];
+        write_frame(&mut buf, v).unwrap();
+        read_frame::<U>(&mut Cursor::new(buf), MAX_SERVER_FRAME).unwrap().unwrap()
+    }
+
+    #[test]
+    fn old_daemon_session_reads_as_claude() {
+        let old = SessionInfo15 { id: 1, claude: true, claude_session: Some("s".into()), ..Default::default() };
+        let info: SessionInfo = reencode(&old);
+        assert_eq!(info.agent_id().map(|a| a.to_string()).as_deref(), Some("claude"));
+        assert_eq!(info.agent_session_id(), Some("s"));
+        let shell: SessionInfo = reencode(&SessionInfo15 { id: 2, ..Default::default() });
+        assert_eq!(shell.agent_id(), None);
+    }
+
+    #[test]
+    fn new_daemon_session_still_tells_old_clients_claude() {
+        let info = SessionInfo::with_agent(3, Some("claude"), Some("s".into()));
+        let old: SessionInfo15 = reencode(&info);
+        assert!(old.claude);
+        assert_eq!(old.claude_session.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn a_codex_session_is_not_claude() {
+        let info = SessionInfo::with_agent(4, Some("codex"), None);
+        assert!(!info.claude);
+        assert_eq!(info.agent_id().map(|a| a.to_string()).as_deref(), Some("codex"));
     }
 
     /// What a MINOR 0 peer sent and parsed.

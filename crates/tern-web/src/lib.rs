@@ -306,8 +306,15 @@ fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
     })
 }
 
-/// The agents' logos, as the app's agents panel draws them.
+/// The agents' logos, as the app's agents panel draws them: by asset stem
+/// (`/agents/<stem>.svg`), or by agent id (`/agent/<id>.svg`, its logo for
+/// a dark page).
 fn agent_logo(path: &str) -> Option<(&'static [u8], &'static str)> {
+    if let Some(id) = path.strip_prefix("/agent/").and_then(|p| p.strip_suffix(".svg")) {
+        let registry = tern_agent::registry();
+        let stem = &registry.get(id)?.logo.as_ref()?.dark;
+        return agent_logo(&format!("/agents/{stem}.svg"));
+    }
     macro_rules! logos {
         ($($name:literal),* $(,)?) => {
             match path.strip_prefix("/agents/")?.strip_suffix(".svg")? {
@@ -521,6 +528,13 @@ mod tests {
             assert!(asset(p).is_some_and(|(b, _)| !b.is_empty()), "{p}");
         }
         assert!(asset("/../Cargo.toml").is_none());
+    }
+
+    #[test]
+    fn an_agents_logo_is_served_by_its_id() {
+        assert!(asset("/agent/codex.svg").is_some());
+        assert!(asset("/agent/claude.svg").is_some());
+        assert!(asset("/agent/nobody.svg").is_none());
     }
 
     #[test]

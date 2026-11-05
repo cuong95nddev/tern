@@ -1566,18 +1566,17 @@ impl Workspace {
     /// runs as the account its `claude` does, and resumes its conversation
     /// if it has to start again.
     pub fn adopt_session(&mut self, s: &tern_mux::proto::SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
-        if s.claude {
+        if s.agent_id().is_some_and(|a| a.is(tern_agent::CLAUDE)) {
             let ids: Vec<String> = accounts::store(cx).read(cx).list.iter().map(|a| a.id.clone()).collect();
             let account = s
-                .claude_session
-                .as_deref()
+                .agent_session_id()
                 .and_then(|session| {
                     ids.into_iter()
                         .find(|id| accounts::claude_dir(id).is_some_and(|d| !live_session_files(&d.join("sessions"), session).is_empty()))
                 })
                 .unwrap_or_else(|| accounts::DEFAULT.into());
             // Claude names its tab itself.
-            self.add_term(TabKind::Claude, None, s.claude_session.clone(), Some(s.id), &account, window, cx);
+            self.add_term(TabKind::Claude, None, s.agent_session_id().map(str::to_owned), Some(s.id), &account, window, cx);
         } else {
             self.add_term(TabKind::Shell, s.title.clone(), None, Some(s.id), accounts::DEFAULT, window, cx);
         }

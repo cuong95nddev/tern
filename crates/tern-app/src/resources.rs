@@ -319,7 +319,7 @@ fn attribute(table: &Table, sessions: &[SessionInfo], workspaces: &[TabsOf], app
         let usage = usage_of(Some(s.id), &mut claimed);
         snap.total += usage.unwrap_or_default();
         let label = s.title.clone().or_else(|| s.program.clone()).unwrap_or_else(|| format!("Session {}", s.id));
-        snap.background.push(Item { owner: Owner::Session(s.id), label, agent: s.claude, usage });
+        snap.background.push(Item { owner: Owner::Session(s.id), label, agent: s.agent_id().is_some(), usage });
     }
     snap.app = table.claim(app, &mut claimed);
     if let Some(d) = daemon {

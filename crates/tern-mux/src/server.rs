@@ -944,12 +944,18 @@ impl Server {
             .collect();
         let mut list: Vec<_> = sessions
             .into_iter()
-            .map(|(h, claude, claude_session, service)| SessionInfo {
-                claude,
-                claude_session,
-                service,
-                exit_code: h.exited().flatten(),
-                ..info(&h)
+            .map(|(h, claude, claude_session, service)| {
+                // Only Claude tabs get a hook token so far.
+                let agent = SessionInfo::with_agent(h.id(), claude.then_some(tern_agent::CLAUDE), claude_session);
+                SessionInfo {
+                    claude: agent.claude,
+                    claude_session: agent.claude_session,
+                    agent: agent.agent,
+                    agent_session: agent.agent_session,
+                    service,
+                    exit_code: h.exited().flatten(),
+                    ..info(&h)
+                }
             })
             .collect();
         list.sort_by_key(|i| i.id);
