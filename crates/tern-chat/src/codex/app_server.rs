@@ -41,9 +41,11 @@ fn wire_id(text: &str) -> Value {
     text.parse::<u64>().map_or_else(|_| json!(text), |n| json!(n))
 }
 
-/// `line` tells of a thread other than `thread`.
+/// `line` tells of a thread other than `thread`. A request of any thread is
+/// the user's to answer, and its settling goes with it.
 fn elsewhere(line: &Value, thread: Option<&str>) -> bool {
-    let of = line.pointer("/params/threadId").and_then(Value::as_str).filter(|_| line.get("id").is_none());
+    let settles = line.get("method").and_then(Value::as_str) == Some("serverRequest/resolved");
+    let of = line.pointer("/params/threadId").and_then(Value::as_str).filter(|_| line.get("id").is_none() && !settles);
     matches!((of, thread), (Some(of), Some(thread)) if of != thread)
 }
 
@@ -145,6 +147,9 @@ pub struct CodexDriver {
     sent: Vec<String>,
     /// The entries of the running turn's items, by item id.
     items: HashMap<String, Vec<usize>>,
+    /// The tools of other threads' running items, by item id: shown once one
+    /// asks for approval, for the user to see what they are allowing.
+    others: HashMap<String, Vec<Tool>>,
 }
 
 impl CodexDriver {
@@ -168,6 +173,31 @@ impl CodexDriver {
         let first = t.entries.len();
         t.entries.extend(tools.into_iter().map(Entry::Tool));
         self.items.insert(id.to_owned(), (first..t.entries.len()).collect());
+    }
+
+    /// A line of another thread: only what its requests will need is kept.
+    fn other_thread(&mut self, t: &mut Transcript, v: &Value) {
+        let item = &v["params"]["item"];
+        let id = str_at(item, "/id");
+        match v.get("method").and_then(Value::as_str) {
+            Some("item/started") => {
+                let tools = item_tools(item);
+                if !tools.is_empty() {
+                    self.others.insert(id.to_owned(), tools);
+                }
+            },
+            Some("item/completed") if self.others.remove(id).is_none() && self.items.contains_key(id) => self.item_completed(t, item),
+            _ => {},
+        }
+    }
+
+    /// Show the tools of another thread's item, now that it asks.
+    fn show_other(&mut self, t: &mut Transcript, item: &str) {
+        if let Some(tools) = self.others.remove(item) {
+            let first = t.entries.len();
+            t.entries.extend(tools.into_iter().map(Entry::Tool));
+            self.items.insert(item.to_owned(), (first..t.entries.len()).collect());
+        }
     }
 
     fn item_completed(&mut self, t: &mut Transcript, item: &Value) {
@@ -261,11 +291,16 @@ impl CodexDriver {
         match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 let item = str_at(params, "/itemId");
+                self.show_other(t, item);
                 let tool = self.items.get(item).and_then(|ix| ix.first()).and_then(|&i| t.entries.get(i));
                 let (name, input) = match tool {
                     Some(Entry::Tool(tool)) => (tool.name.clone(), tool.input.clone()),
                     _ if method.contains("commandExecution") => ("Bash".to_owned(), json!({ "command": str_at(params, "/command") })),
-                    _ => ("Edit".to_owned(), json!({})),
+                    // Nothing says what would change: not for the user to allow blind.
+                    _ => {
+                        t.entries.push(Entry::Notice { text: "Declined a file change that came without its details".into(), error: true });
+                        return Some(json!({ "id": v["id"], "result": { "decision": "decline" } }).to_string());
+                    },
                 };
                 let ask = Ask {
                     request_id: id,
@@ -377,6 +412,7 @@ impl ChatDriver for CodexDriver {
     fn fold_line(&mut self, t: &mut Transcript, line: &str) -> Option<String> {
         let v: Value = serde_json::from_str(line).ok()?;
         if elsewhere(&v, self.thread.as_deref()) {
+            self.other_thread(t, &v);
             return None;
         }
         let reply = match (v.get("method").and_then(Value::as_str), v.get("id")) {
@@ -782,6 +818,55 @@ mod tests {
         out.clear();
         f.follow(&line, &mut out);
         assert_eq!(out, [Said::Ask("9".into())]);
+    }
+
+    fn sub_change(id: &str) -> Value {
+        json!({"id": id, "type": "fileChange", "changes": [
+            {"path": "/w/a.txt", "kind": {"type": "update"}, "diff": "-a\n+b\n"},
+            {"path": "/w/b.txt", "kind": {"type": "add"}, "diff": "new\n"},
+        ]})
+    }
+
+    #[test]
+    fn a_change_another_thread_asks_for_shows_every_file() {
+        let (mut d, mut t) = fed(1);
+        let started = json!({"method": "item/started", "params": {"threadId": "sub", "item": sub_change("c")}});
+        d.fold_line(&mut t, &started.to_string());
+        assert!(tools(&t).iter().all(|tool| !tool.id.starts_with("c:")), "not shown until it asks");
+        let ask = json!({"id": 9, "method": "item/fileChange/requestApproval", "params": {"threadId": "sub", "itemId": "c"}});
+        assert_eq!(d.fold_line(&mut t, &ask.to_string()), None);
+        let files: Vec<_> = tools(&t).iter().filter(|x| x.id.starts_with("c:")).map(|x| x.input["file_path"].clone()).collect();
+        assert_eq!(files, [json!("/w/a.txt"), json!("/w/b.txt")]);
+        assert!(matches!(t.entries.last(), Some(Entry::Ask(a)) if a.input["file_path"] == "/w/a.txt"), "{:?}", t.entries.last());
+        let done = json!({"method": "item/completed", "params": {"threadId": "sub", "item": sub_change("c")}});
+        d.fold_line(&mut t, &done.to_string());
+        assert!(tools(&t).iter().filter(|x| x.id.starts_with("c:")).all(|x| x.result.is_some() && !x.error));
+    }
+
+    #[test]
+    fn a_change_nothing_is_known_of_is_declined_not_asked() {
+        let (mut d, mut t) = fed(1);
+        let ask = json!({"id": 9, "method": "item/fileChange/requestApproval", "params": {"threadId": "sub", "itemId": "gone"}});
+        let reply: Value = serde_json::from_str(&d.fold_line(&mut t, &ask.to_string()).expect("a reply")).unwrap();
+        assert_eq!(reply, json!({"id": 9, "result": {"decision": "decline"}}));
+        assert!(!t.entries.iter().any(|e| matches!(e, Entry::Ask(a) if a.request_id == "9")));
+        assert!(matches!(t.entries.last(), Some(Entry::Notice { .. })), "{:?}", t.entries.last());
+    }
+
+    #[test]
+    fn a_request_another_thread_takes_back_is_settled() {
+        let (mut d, mut t) = fed(1);
+        let ask = json!({"id": 9, "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "sub", "itemId": "i", "command": "ls"}});
+        d.fold_line(&mut t, &ask.to_string());
+        let resolved = json!({"method": "serverRequest/resolved", "params": {"threadId": "sub", "requestId": 9}});
+        d.fold_line(&mut t, &resolved.to_string());
+        assert!(matches!(t.entries.last(), Some(Entry::Ask(a)) if a.answer == Some(Answer::Withdrawn)), "{:?}", t.entries.last());
+        let (mut f, mut out) = (CodexFollow::default(), Vec::new());
+        f.follow(&json!({"id": 1, "result": {"thread": {"id": "main"}}}), &mut out);
+        out.clear();
+        f.follow(&resolved, &mut out);
+        assert_eq!(out, [Said::Settled("9".into())]);
     }
 
     #[test]
