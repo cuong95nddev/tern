@@ -5964,6 +5964,7 @@ mod tests {
         use super::{TabKind, chats};
         assert!(chats(&TabKind::claude()));
         assert!(chats(&TabKind::Agent(tern_agent::AgentId::new("codex"))));
+        assert!(chats(&TabKind::Agent(tern_agent::AgentId::new("opencode"))));
         assert!(!chats(&TabKind::Agent(tern_agent::AgentId::new("gemini"))));
         assert!(!chats(&TabKind::Shell));
     }
@@ -5971,7 +5972,7 @@ mod tests {
     #[test]
     fn new_agent_chat_lists_agents_with_chat() {
         let ids: Vec<String> = super::chat_agents().iter().map(ToString::to_string).collect();
-        assert_eq!(ids, ["claude", "codex"]);
+        assert_eq!(ids, ["claude", "codex", "opencode"]);
     }
 
     #[test]

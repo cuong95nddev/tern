@@ -1727,10 +1727,15 @@ when it ends) and reads its status from its screen:
 ```
 
 Tern's deeper integration (status from the agent's own events, its chat, the
-context ring and handoff, usage) is built in per agent: today Claude Code's
-and Codex's. Codex needs version 0.166 or later; an older one runs with its
-status read from its screen. Tern gives it its hooks on the command line (`-c`),
-so nothing is written to `~/.codex`, and its conversations stay there.
+context ring and handoff, usage) is built in per agent: today Claude Code's,
+Codex's and OpenCode's. Codex needs version 0.166 or later; an older one runs
+with its status read from its screen. Tern gives it its hooks on the command
+line (`-c`), so nothing is written to `~/.codex`, and its conversations stay
+there. OpenCode needs version 2.0.30 or later, and an older one runs the same
+way. Tern adds its plugin through `OPENCODE_CONFIG_CONTENT`, so nothing is
+written to OpenCode's folders and your own config and plugins stay in use. Each
+OpenCode tab runs its own server (`--standalone`), which takes a few hundred MB
+of memory. OpenCode has no usage card: it brings its own providers.
 
 ### For agents
 

@@ -835,10 +835,11 @@ mod tests {
             "New Codex Tab",
             "New Codex Chat",
             "New OpenCode Tab",
+            "New OpenCode Chat",
         ] {
             assert!(all.iter().any(|a| a == t), "{t}");
         }
-        assert!(!all.iter().any(|a| a == "New OpenCode Chat"));
+        assert!(!all.iter().any(|a| a == "New Gemini Chat"));
     }
 
     #[test]

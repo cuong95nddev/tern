@@ -413,6 +413,11 @@ against a local mock provider):
 - ACP gives `session/request_permission` (`once`, `always`, reject),
   `session/cancel` (`stopReason: cancelled`), and `usage_update` with
   `{used, size}`.
+- `synthetic` with `resume: false` waits and reaches the model with the next
+  prompt (measured between turns, not during one). `session.created` comes with
+  a conversation's first prompt, not when the TUI opens, so OpenCode's guard is
+  `Guard::starting_at_first_turn`, and a new conversation's context is sent with
+  `resume: true` for a turn of its own. `/new` starts a fresh conversation.
 - OpenCode compacts by itself near the window's end: a turn at 62% of a
   1000-token window went on to compact. The guard must expect it.
 - Permissions follow the user's config. By default a shell command runs
