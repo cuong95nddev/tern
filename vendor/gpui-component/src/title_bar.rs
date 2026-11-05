@@ -44,15 +44,24 @@ pub struct TitleBar {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 1]>,
     on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    controls: bool,
 }
 
 impl TitleBar {
+    /// Whether it draws the window controls (the default): turned off when
+    /// the app draws its own.
+    pub fn controls(mut self, controls: bool) -> Self {
+        self.controls = controls;
+        self
+    }
+
     /// Create a new TitleBar.
     pub fn new() -> Self {
         Self {
             style: StyleRefinement::default(),
             children: SmallVec::new(),
             on_close_window: None,
+            controls: true,
         }
     }
 
@@ -402,8 +411,10 @@ impl RenderOnce for TitleBar {
                         })
                         .children(self.children),
                 )
-                .child(WindowControls {
-                    on_close_window: self.on_close_window,
+                .when(self.controls, |this| {
+                    this.child(WindowControls {
+                        on_close_window: self.on_close_window,
+                    })
                 }),
         )
     }

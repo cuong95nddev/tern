@@ -1,5 +1,5 @@
 //! Services panel: the dev servers and other long-running commands agents
-//! started through Tern's MCP server (`tern --mcp`, see [`crate::mcp`]) in
+//! started through `tern --service` (see [`crate::agent_cli`]) in
 //! the workspace's folder, with their state and the ports they listen on.
 //! Clicking a row opens its terminal in a tab; its buttons open the port in
 //! the browser, restart it, and stop it.
@@ -148,7 +148,7 @@ impl ServicesView {
     }
 
     fn restart(&mut self, row: ServiceRow, cx: &mut Context<Self>) {
-        let task = cx.background_spawn(async move { crate::mcp::restart(row.id, row.spec) });
+        let task = cx.background_spawn(async move { crate::agent_cli::restart(row.id, row.spec) });
         cx.spawn(async move |_, cx| {
             if let Err(e) = task.await {
                 log::warn!("services: restart: {e}");

@@ -3,12 +3,40 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui_kit::component::diff::{Diff, DiffFile, DiffMode, DiffState};
+use gpui_kit::component::diff::{Diff, DiffChangeIndicator, DiffFile, DiffHoverHighlight, DiffHunkSeparator, DiffMode, DiffState};
 use gpui_kit::component::highlighter::Language;
 use gpui_kit::*;
 use tern_fs::ChangeBatch;
 
 use crate::template::{self, Framed, Scope, on_event};
+
+/// `diff` as element `diff` says.
+pub fn styled(diff: Diff, cx: &App) -> Diff {
+    let el = crate::style::el("diff", cx);
+    let hover = match el.text("hover").as_ref() {
+        "line" => DiffHoverHighlight::Line,
+        "line_number" => DiffHoverHighlight::LineNumber,
+        "both" => DiffHoverHighlight::Both,
+        _ => DiffHoverHighlight::None,
+    };
+    let separator = match el.text("hunk_separator").as_ref() {
+        "line_info" => DiffHunkSeparator::LineInfo,
+        "simple" => DiffHunkSeparator::Simple,
+        _ => DiffHunkSeparator::Metadata,
+    };
+    let indicator = match el.text("change_indicator").as_ref() {
+        "bars" => DiffChangeIndicator::Bars,
+        "none" => DiffChangeIndicator::None,
+        _ => DiffChangeIndicator::Signs,
+    };
+    diff.line_number(el.num("line_numbers") != 0.)
+        .syntax_highlight(el.num("syntax_highlight") != 0.)
+        .change_background(el.num("change_background") != 0.)
+        .change_colors(el.color("added"), el.color("removed"))
+        .hover_highlight(hover)
+        .hunk_separator(separator)
+        .change_indicator(indicator)
+}
 
 /// Whether diffs show side by side (`editor.diff_split`).
 pub struct DiffSplit(pub bool);
@@ -116,7 +144,11 @@ impl DiffPane {
                         Some(d) => d.update(cx, |d, cx| d.set_files(files, cx)),
                         None => {
                             let mode = split_mode(cx);
-                            this.diff = Some(cx.new(|cx| DiffState::new(files, cx).with_mode(mode)));
+                            let context = crate::style::el("diff", cx).num_opt("context_lines").map(|n| n.max(0.) as usize);
+                            this.diff = Some(cx.new(|cx| {
+                                let state = DiffState::new(files, cx).with_mode(mode);
+                                if context.is_some() { state.with_context_lines(context) } else { state }
+                            }));
                         },
                     }
                 }
@@ -152,7 +184,7 @@ impl Render for DiffPane {
                     // Side by side, long lines wrap so each side keeps half the
                     // width, as on GitHub; one shared horizontal scroll would
                     // push the right side out of view.
-                    Diff::new(diff).line_number(true).syntax_highlight(true).soft_wrap(split).header_title_suffix(move |_, _, cx| {
+                    styled(Diff::new(diff), cx).soft_wrap(split).header_title_suffix(move |_, _, cx| {
                         template::render(
                             "diff_pane.mode",
                             Scope::new("diff_pane.mode").var("split", split),

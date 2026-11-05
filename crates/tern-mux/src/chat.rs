@@ -9,6 +9,11 @@
 //! is connected, a permission request or a finished turn posts a
 //! notification.
 //!
+//! It does follow how full the conversation's context window is, for the
+//! guard a Claude tab has too (see [`tern_bridge::context`]): the program's
+//! hooks come to [`ChatHost::on_hook`], and what the guard has to say to
+//! Claude goes in as a user message.
+//!
 //! On Unix a chat's pipes go to a newer daemon with the rest (see
 //! `server::hand_off`): its reader parks, the fds and the unended line move.
 
@@ -22,6 +27,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::Value;
+use tern_bridge::HookEvent;
+use tern_bridge::context::{Action, Guard, Meter, Policy};
 use tern_term::status::ActivityStatus;
 
 use crate::proto::{ChatExit, ChatSpec};
@@ -37,6 +44,9 @@ pub(crate) type Notify = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// How much of stderr is kept.
 const STDERR_TAIL: usize = 4096;
+/// How long after a hook its guard's message goes in: Claude has its answer
+/// by then.
+const AFTER_HOOK: Duration = Duration::from_millis(500);
 
 /// A line kept for replay.
 struct Kept {
@@ -59,6 +69,11 @@ struct State {
     asks: std::collections::HashSet<String>,
     /// MCP forms not settled yet, by request id: their lines are recorded.
     forms: std::collections::HashSet<String>,
+    /// The conversation now, once Claude said (`/clear` starts another).
+    session: Option<String>,
+    meter: Meter,
+    guard: Guard,
+    policy: Policy,
 }
 
 impl State {
@@ -80,12 +95,22 @@ impl State {
     /// the turn and the requests waiting.
     fn follow(&mut self, v: &Value) {
         let s = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or_default().to_owned();
-        match v.get("type").and_then(Value::as_str).unwrap_or_default() {
+        self.meter.read(v);
+        let kind = v.get("type").and_then(Value::as_str).unwrap_or_default();
+        // Only these read anew: another line may come after a fresh
+        // conversation's `SessionStart` with the old one's reading.
+        if matches!(kind, "assistant" | "result")
+            && let Some(r) = self.meter.reading()
+        {
+            self.guard.reading(r.percent, self.policy);
+        }
+        match kind {
             "user" => self.busy = true,
             "result" => {
                 self.busy = false;
                 self.asks.clear();
             },
+            "system" if s("/subtype") == "init" => self.session = Some(s("/session_id")),
             // A permission, a question, or an MCP server's form: the user's turn.
             "control_request" if matches!(s("/request/subtype").as_str(), "can_use_tool" | "elicitation") => {
                 self.asks.insert(s("/request_id"));
@@ -98,6 +123,14 @@ impl State {
             },
             _ => {},
         }
+    }
+
+    /// Hook `ev` came: the answer for Claude Code, and what to tell it after.
+    fn on_hook(&mut self, ev: &HookEvent) -> (Option<Value>, Action) {
+        if let Some(id) = &ev.session_id {
+            self.session = Some(id.clone());
+        }
+        self.guard.on_event(ev, self.policy)
     }
 }
 
@@ -117,6 +150,8 @@ pub(crate) struct ChatHost {
     /// When the program started, in ms since the Unix epoch.
     pub started: u64,
     pub meta: ChatMeta,
+    /// What its hooks say they are from; `None` without hooks.
+    pub token: Option<String>,
     stdin: Mutex<Option<File>>,
     state: Mutex<State>,
     /// The program, when this daemon started it (to learn its exit status).
@@ -150,6 +185,7 @@ pub(crate) struct Parked {
 #[cfg(unix)]
 pub(crate) struct Handed {
     pub meta: ChatMeta,
+    pub token: Option<String>,
     pub title: Option<String>,
     pub lines: Vec<String>,
     pub stderr: String,
@@ -163,7 +199,7 @@ fn now_ms() -> u64 {
 }
 
 impl ChatHost {
-    pub fn spawn(id: u64, spec: &ChatSpec, notify: Notify) -> io::Result<Arc<Self>> {
+    pub fn spawn(id: u64, spec: &ChatSpec, token: Option<String>, notify: Notify) -> io::Result<Arc<Self>> {
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args).current_dir(&spec.cwd).envs(&spec.env).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         // Set for a Claude run inside another one; this one is its own.
@@ -185,6 +221,7 @@ impl ChatHost {
                 account: spec.account.clone(),
                 record: spec.record.clone(),
             },
+            token,
             stdin: Mutex::new(stdin),
             state: Mutex::new(State::default()),
             child: Mutex::new(Some(child)),
@@ -220,6 +257,7 @@ impl ChatHost {
             pid,
             started,
             meta: handed.meta,
+            token: handed.token,
             stdin: Mutex::new(stdin),
             state: Mutex::new(state),
             child: Mutex::new(None),
@@ -275,6 +313,52 @@ impl ChatHost {
 
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// The conversation it is in now.
+    pub fn session(&self) -> String {
+        self.state.lock().unwrap().session.clone().unwrap_or_else(|| self.meta.session.clone())
+    }
+
+    /// Its tab keeps the context window in bounds so.
+    pub fn set_policy(&self, policy: Policy) {
+        self.state.lock().unwrap().policy = policy;
+    }
+
+    /// Hook `ev` of its program came; the answer for Claude Code, if any.
+    pub fn on_hook(self: &Arc<Self>, ev: &HookEvent) -> Option<Value> {
+        let (reply, action) = self.state.lock().unwrap().on_hook(ev);
+        self.tell(action);
+        reply
+    }
+
+    /// The user asks for a handoff, to step away.
+    pub fn ask_handoff(self: &Arc<Self>) {
+        let busy = matches!(self.status(), ActivityStatus::Working | ActivityStatus::Blocked);
+        let action = self.state.lock().unwrap().guard.request(busy);
+        self.tell(action);
+    }
+
+    /// The user goes on from the handoff at `path` in a fresh conversation.
+    pub fn resume_handoff(self: &Arc<Self>, path: Option<String>) {
+        let action = self.state.lock().unwrap().guard.resume_from(path);
+        self.tell(action);
+    }
+
+    /// Say what the guard wants to Claude, as a user message: Claude takes
+    /// it when its turn is over.
+    fn tell(self: &Arc<Self>, action: Action) {
+        let text = match action {
+            Action::None => return,
+            Action::Clear => "/clear".to_owned(),
+            Action::Prompt(p) => p,
+        };
+        let host = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(AFTER_HOOK);
+            let (_, line) = tern_chat::wire::user(&host.session(), &text, &[]);
+            host.write(&line);
+        });
     }
 
     pub fn detach(&self, owner: *const ()) {
@@ -347,7 +431,8 @@ impl ChatHost {
     pub fn handed(&self, io: Option<(File, Parked)>) -> Handed {
         let st = self.state.lock().unwrap();
         Handed {
-            meta: self.meta.clone(),
+            meta: ChatMeta { session: st.session.clone().unwrap_or_else(|| self.meta.session.clone()), ..self.meta.clone() },
+            token: self.token.clone(),
             title: st.title.clone(),
             lines: st.lines.iter().map(|k| k.text.clone()).collect(),
             stderr: st.stderr.clone(),
@@ -608,6 +693,67 @@ fn pipe() -> io::Result<(File, File)> {
     Ok(unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) })
 }
 
+#[cfg(test)]
+mod guard_tests {
+    use serde_json::json;
+    use tern_bridge::HookEvent;
+    use tern_bridge::context::{Action, Policy};
+
+    use super::*;
+
+    fn hook(body: Value) -> HookEvent {
+        HookEvent::parse("t".into(), &serde_json::to_vec(&body).unwrap()).unwrap()
+    }
+
+    /// A conversation `percent` full of a window of 100 tokens.
+    fn turn(st: &mut State, percent: u64) {
+        st.follow(&json!({"type": "assistant", "message": {"model": "m", "usage": {"input_tokens": percent}}}));
+        st.follow(&json!({"type": "result", "modelUsage": {"m": {"contextWindow": 100}}}));
+    }
+
+    #[test]
+    fn past_its_limit_a_chat_hands_off_when_it_stops() {
+        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..Default::default() };
+        turn(&mut st, 60);
+        let (reply, action) = st.on_hook(&hook(json!({"hook_event_name": "Stop", "stop_hook_active": false})));
+        assert_eq!(reply.unwrap().get("decision").unwrap(), "block");
+        assert_eq!(action, Action::None);
+        let done = json!({"hook_event_name": "Stop", "stop_hook_active": true, "last_assistant_message": "Handoff: h.md"});
+        assert_eq!(st.on_hook(&hook(done)), (None, Action::Clear));
+    }
+
+    #[test]
+    fn under_its_limit_a_chat_stops_as_it_likes() {
+        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..Default::default() };
+        turn(&mut st, 40);
+        assert_eq!(st.on_hook(&hook(json!({"hook_event_name": "Stop"}))), (None, Action::None));
+    }
+
+    #[test]
+    fn a_cleared_chat_is_not_born_over_its_limit() {
+        let mut st = State { policy: Policy { limit: 50, auto_switch: true }, ..Default::default() };
+        turn(&mut st, 60);
+        st.on_hook(&hook(json!({"hook_event_name": "SessionStart", "source": "clear"})));
+        // Lines of the old conversation's end say nothing of the new one.
+        st.follow(&json!({"type": "command_lifecycle"}));
+        st.follow(&json!({"type": "conversation_reset"}));
+        st.follow(&json!({"type": "result", "modelUsage": {}}));
+        turn(&mut st, 10);
+        turn(&mut st, 60);
+        let (reply, _) = st.on_hook(&hook(json!({"hook_event_name": "Stop", "stop_hook_active": false})));
+        assert_eq!(reply.unwrap().get("decision").unwrap(), "block");
+    }
+
+    #[test]
+    fn follows_the_conversation_a_clear_starts() {
+        let mut st = State::default();
+        st.follow(&json!({"type": "system", "subtype": "init", "session_id": "new"}));
+        assert_eq!(st.session.as_deref(), Some("new"));
+        st.on_hook(&hook(json!({"hook_event_name": "SessionStart", "session_id": "newer", "source": "clear"})));
+        assert_eq!(st.session.as_deref(), Some("newer"));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -659,7 +805,7 @@ mod tests {
 echo '{"type":"control_request","request_id":"e1","request":{"subtype":"elicitation"}}'
 read a; echo '{"type":"result","subtype":"success"}'; read b"#;
         let spec = ChatSpec { record: Some(record.clone()), ..sh(script) };
-        let host = ChatHost::spawn(4, &spec, Arc::new(|_: &str, _: &str| {})).unwrap();
+        let host = ChatHost::spawn(4, &spec, None, Arc::new(|_: &str, _: &str| {})).unwrap();
         wait("the requests", || host.state.lock().unwrap().lines.len() == 2);
         host.write(r#"{"type":"control_response","response":{"subtype":"success","request_id":"p1","response":{}}}"#);
         host.write(r#"{"type":"control_response","response":{"subtype":"success","request_id":"e1","response":{"action":"decline"}}}"#);
@@ -702,7 +848,7 @@ echo '{"type":"user","isReplay":true,"message":{"content":[{"type":"text","text"
 echo '{"type":"stream_event","event":{}}'
 echo '{"type":"result","subtype":"success"}'
 read line; echo "{\"type\":\"echo\",\"got\":$line}"; echo oops >&2; exit 3"#;
-        let host = ChatHost::spawn(1, &sh(script), notify).unwrap();
+        let host = ChatHost::spawn(1, &sh(script), None, notify).unwrap();
         wait("the result", || host.state.lock().unwrap().lines.len() == 2);
         // Unattended: the finished turn notified, titled by the first message.
         assert_eq!(notified.lock().unwrap().as_slice(), ["fix the bug: Claude finished"]);
@@ -730,7 +876,7 @@ read line; echo "{\"type\":\"echo\",\"got\":$line}"; echo oops >&2; exit 3"#;
         let notify: Notify = Arc::new(move |t: &str, b: &str| n.lock().unwrap().push(format!("{t}: {b}")));
         let script =
             r#"read a; echo '{"type":"result","subtype":"success"}'; read b; echo '{"type":"result","subtype":"success"}'; read c"#;
-        let host = ChatHost::spawn(3, &sh(script), notify).unwrap();
+        let host = ChatHost::spawn(3, &sh(script), None, notify).unwrap();
         host.set_muted(true);
         host.write("go");
         wait("the first result", || host.state.lock().unwrap().lines.len() == 1);
@@ -747,7 +893,7 @@ read line; echo "{\"type\":\"echo\",\"got\":$line}"; echo oops >&2; exit 3"#;
     #[test]
     fn parks_and_resumes_without_losing_a_line() {
         let notify: Notify = Arc::new(|_: &str, _: &str| {});
-        let host = ChatHost::spawn(2, &sh(r#"read a; printf '{"n":1}\n{"n":'; read b; printf '2}\n'; read c"#), notify).unwrap();
+        let host = ChatHost::spawn(2, &sh(r#"read a; printf '{"n":1}\n{"n":'; read b; printf '2}\n'; read c"#), None, notify).unwrap();
         let sink = Arc::new(Lines::default());
         let owner: Arc<dyn ChatSink> = sink.clone();
         host.attach(&owner, |_, _| {});

@@ -415,6 +415,41 @@ pub const ELEMENTS: &[Element] = &[
             ("detail_text", Color, "$text_muted"),
         ]],
     },
+    simple!(
+        "title_bar.controls",
+        "The window's own minimize, maximize and close buttons: `visible: 0` leaves them out, for a template to draw its own"
+    ),
+    Element {
+        name: "editor",
+        about: "The code in a file or scratch tab: box properties such as `padding`, `font_size`, `line_height` apply to it, and these say what it shows (0 turns one off). `cursor` is `bar`, `block` or `underline`; `cursor_width` is how thick a bar or underline is",
+        groups: &[&[
+            ("line_numbers", Num, "1"),
+            ("folding", Num, "1"),
+            ("whitespace", Num, "0"),
+            ("gutter_padding", Len, "0"),
+            ("cursor", Text, "bar"),
+            ("cursor_width", Len, ""),
+            ("cursor_blink", Num, "1"),
+            ("tab_size", Num, "2"),
+            ("hard_tabs", Num, "0"),
+            ("indent_guides", Num, "1"),
+        ]],
+    },
+    Element {
+        name: "diff",
+        about: "A diff. `hover` is `none`, `line`, `line_number` or `both`; `hunk_separator` is `metadata`, `line_info` or `simple`; `change_indicator` is `signs`, `bars` or `none`; `context_lines` applies to diffs opened after it changes",
+        groups: &[&[
+            ("line_numbers", Num, "1"),
+            ("syntax_highlight", Num, "1"),
+            ("change_background", Num, "1"),
+            ("hover", Text, "none"),
+            ("hunk_separator", Text, "metadata"),
+            ("change_indicator", Text, "signs"),
+            ("added", Color, "$success.background"),
+            ("removed", Color, "$danger.background"),
+            ("context_lines", Num, ""),
+        ]],
+    },
     simple!("title_bar.update", "The button in the title bar that offers a new version of Tern, left of the others"),
     Element {
         name: "tool_strip.left",
@@ -641,7 +676,7 @@ pub const ELEMENTS: &[Element] = &[
     Element { name: "shells.empty", about: "What the shells panel shows without shells", groups: &[EMPTY] },
     Element {
         name: "services",
-        about: "The services panel: the dev servers agents run through Tern (its MCP server) in the workspace's folder",
+        about: "The services panel: the dev servers agents run through Tern (`tern --service`) in the workspace's folder",
         groups: &[PANEL, &[("start_height", Len, "160")], IMAGE],
     },
     Element { name: "services.header", about: "The services panel's title bar", groups: &[HEADER] },
@@ -2302,7 +2337,7 @@ fn parse_len(raw: &str) -> Option<AbsoluteLength> {
     n(raw.strip_suffix("px").unwrap_or(raw)).map(|v| px(v).into())
 }
 
-fn parse_color(raw: &str) -> Option<Hsla> {
+pub fn parse_color(raw: &str) -> Option<Hsla> {
     match raw {
         "transparent" | "none" => Some(hsla(0., 0., 0., 0.)),
         _ => try_parse_color(raw).ok(),
@@ -2404,6 +2439,10 @@ impl El {
     }
 
     /// A size in pixels (rems at the UI font size).
+    pub fn px_opt(&self, prop: &'static str) -> Option<Pixels> {
+        self.len_opt(prop).map(|l| l.to_pixels(self.looks.rem))
+    }
+
     pub fn px(&self, prop: &'static str) -> Pixels {
         self.len(prop).to_pixels(self.looks.rem)
     }
@@ -2419,7 +2458,7 @@ impl El {
         self.color_opt(prop).unwrap_or_else(|| hsla(0., 0., 0., 0.))
     }
 
-    fn num_opt(&self, prop: &'static str) -> Option<f32> {
+    pub fn num_opt(&self, prop: &'static str) -> Option<f32> {
         match self.get(prop) {
             Some(Val::Num(n)) => Some(*n),
             _ => None,

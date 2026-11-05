@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod accounts;
+mod agent_cli;
 mod agent_monitor;
 mod agent_ui;
 mod agents;
@@ -18,6 +19,7 @@ mod dock;
 mod dock_badge;
 mod file_icons;
 mod file_tree_view;
+mod folder_trust;
 mod frame_trace;
 mod git_log_view;
 #[cfg(not(target_os = "macos"))]
@@ -25,7 +27,6 @@ mod handoff;
 mod links;
 mod main_window;
 mod markers;
-mod mcp;
 mod menus;
 mod palette;
 mod panes;
@@ -90,12 +91,12 @@ fn main() {
     // A Claude Code hook it runs only as a command (see `tern_bridge::relay`).
     if std::env::args().nth(1).as_deref() == Some("--hook") {
         let settings = std::env::args_os().nth(2).map(PathBuf::from).unwrap_or_default();
-        std::process::exit(tern_bridge::relay::run(&settings));
+        std::process::exit(tern_bridge::relay::run(&settings, &agent_cli::guide()));
     }
     env_logger::init();
-    // The MCP server agents run their dev servers through (on stdio).
-    if std::env::args().nth(1).as_deref() == Some("--mcp") {
-        std::process::exit(mcp::run());
+    // What an agent runs Tern with (see `agent_cli`).
+    if let Some(code) = agent_cli::run() {
+        std::process::exit(code);
     }
     // The UI and the daemon both read the added Claude accounts' sessions.
     tern_term::status::set_claude_accounts_dir(accounts::accounts_dir());

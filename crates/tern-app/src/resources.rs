@@ -7,6 +7,7 @@
 //! One store for the app ([`Resources`]); the dialog only draws it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
@@ -337,15 +338,23 @@ pub fn bytes(b: u64) -> String {
     if mb >= 1024. { format!("{:.1} GB", mb / 1024.) } else { format!("{} MB", mb.round()) }
 }
 
-/// CPU for the dialog: `0.4%`, `12%`, `140%`.
+/// CPU for the dialog, from a [`Usage`]'s share of one core to a share of the
+/// whole machine: the scale of the Machine figure beside it, and Task Manager's.
 pub fn percent(cpu: f32) -> String {
-    if cpu < 10. { format!("{cpu:.1}%") } else { format!("{}%", cpu.round()) }
+    static CORES: OnceLock<usize> = OnceLock::new();
+    machine_percent(cpu, *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get())))
+}
+
+/// `cpu` percent of one core on `cores` cores: `0.4%`, `12%`. Never over 100:
+/// a scan takes time, so a sample can read a little more than the time passed.
+fn machine_percent(cpu: f32, cores: usize) -> String {
+    let share = (cpu / cores as f32).min(100.);
+    if share < 10. { format!("{share:.1}%") } else { format!("{}%", share.round()) }
 }
 
 /// Every process the kernel lets this user read.
 #[cfg(target_os = "macos")]
 fn scan() -> Vec<Proc> {
-    use std::sync::OnceLock;
     // CPU times come in Mach ticks (not nanoseconds on Apple silicon).
     static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
     #[allow(deprecated)]
@@ -473,7 +482,7 @@ mod tests {
 
     #[cfg(any(target_os = "macos", windows))]
     use super::scan;
-    use super::{Proc, Sampler, Usage, attribute, bytes, parse_stat, percent};
+    use super::{Proc, Sampler, Usage, attribute, bytes, machine_percent, parse_stat};
 
     fn p(pid: u32, ppid: u32, cpu_ns: u64, mem: u64) -> Proc {
         Proc { pid, ppid, cpu_ns, mem }
@@ -528,8 +537,16 @@ mod tests {
     fn labels() {
         assert_eq!(bytes(5 << 20), "5 MB");
         assert_eq!(bytes(3 << 29), "1.5 GB");
-        assert_eq!(percent(0.42), "0.4%");
-        assert_eq!(percent(140.4), "140%");
+        assert_eq!(machine_percent(0.42, 1), "0.4%");
+        assert_eq!(machine_percent(12.4, 1), "12%");
+    }
+
+    #[test]
+    fn cpu_is_a_share_of_the_whole_machine() {
+        // What the Resources dialog read as 370% on 8 cores.
+        assert_eq!(machine_percent(370., 8), "46%");
+        assert_eq!(machine_percent(800., 8), "100%");
+        assert_eq!(machine_percent(830., 8), "100%");
     }
 
     #[test]

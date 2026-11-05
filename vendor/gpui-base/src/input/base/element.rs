@@ -17,7 +17,7 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
-    input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
+    input::{CaretShape, RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
 };
 
 use super::{
@@ -688,14 +688,23 @@ impl<M: InputModeKind> TextElement<M> {
             // Apply the final horizontal offset to every caret after cursor-follow and
             // deferred scrolling have been resolved, regardless of selection order.
             let cursor_x = bounds.left() + cursor_pos.x + line_number_width;
-            cursor_infos.push(CursorRenderInfo {
-                bounds: Bounds::new(
-                    point(
-                        cursor_x,
-                        bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
-                    ),
-                    size(CURSOR_WIDTH, cursor_height),
+            let cursor_y = bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.);
+            let (cursor_y, cursor_size) = match state.caret.shape {
+                CaretShape::Bar => (
+                    cursor_y,
+                    size(state.caret.width.unwrap_or(CURSOR_WIDTH), cursor_height),
                 ),
+                CaretShape::Block => (cursor_y, size(last_layout.space_width, cursor_height)),
+                CaretShape::Underline => {
+                    let thick = state.caret.width.unwrap_or(px(2.));
+                    (
+                        cursor_y + cursor_height - thick,
+                        size(last_layout.space_width, thick),
+                    )
+                }
+            };
+            cursor_infos.push(CursorRenderInfo {
+                bounds: Bounds::new(point(cursor_x, cursor_y), cursor_size),
                 is_active,
             });
         }
@@ -1132,6 +1141,8 @@ impl<M: InputModeKind> TextElement<M> {
             // Add extra space for fold icons
             line_number_width += FOLD_ICON_HITBOX_WIDTH
         }
+
+        line_number_width += state.gutter_padding;
 
         (line_number_width, line_number_len)
     }
@@ -3342,9 +3353,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         // Paint blinking cursors (shared blink state for all carets)
-        if focused && show_cursor {
+        let caret = self.state.read(cx).caret;
+        if focused && (show_cursor || !caret.blink) {
+            let color = match caret.shape {
+                CaretShape::Block => editor_style.caret.opacity(0.5),
+                _ => editor_style.caret,
+            };
             for cursor_info in prepaint.cursor_infos_with_scroll() {
-                window.paint_quad(fill(cursor_info.bounds, editor_style.caret));
+                window.paint_quad(fill(cursor_info.bounds, color));
             }
         }
 

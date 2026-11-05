@@ -89,6 +89,7 @@ pub struct Scratch {
     editor: Entity<EditorState>,
     /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
     wrap: bool,
+    look: crate::viewer::EditorLook,
     dirty: bool,
     message: Option<SharedString>,
     _subs: Vec<Subscription>,
@@ -118,7 +119,7 @@ impl Scratch {
             }
         });
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().into();
-        Self { path, name, editor, wrap, dirty: false, message: None, _subs: vec![sub], _autosave: None }
+        Self { path, name, editor, wrap, look: Default::default(), dirty: false, message: None, _subs: vec![sub], _autosave: None }
     }
 
     pub fn title(&self) -> &SharedString {
@@ -208,12 +209,13 @@ impl Scratch {
 impl Render for Scratch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::viewer::sync_word_wrap(&self.editor, &mut self.wrap, window, cx);
+        crate::viewer::sync_look(&self.editor, &mut self.look, window, cx);
         let scope = Scope::new("scratch")
             .var("name", self.name.clone())
             .var("message", self.message.clone().unwrap_or_default())
             .var("wrap", self.wrap)
             .var("wrap_key", crate::platform::shortcut("⌥Z"))
-            .slot("editor", Editor::new(&self.editor).bordered(false).h_full());
+            .slot("editor", crate::style::el("editor", cx).apply(Editor::new(&self.editor).bordered(false).h_full()));
         let mut frames = |name: &str, _, f| match (name, f) {
             ("scratch", Framed::Box(d)) => d
                 .key_context("Scratch")

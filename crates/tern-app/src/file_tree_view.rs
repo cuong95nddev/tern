@@ -555,11 +555,11 @@ impl FileTreeView {
 
     // ----- commands -----
 
-    fn on_new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn on_new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
         self.new_entry(false, window, cx);
     }
 
-    fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
         self.new_entry(true, window, cx);
     }
 
@@ -754,12 +754,12 @@ impl FileTreeView {
         if t.is_empty() { vec![self.root().to_path_buf()] } else { t }
     }
 
-    fn on_collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn on_collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
         self.tree.collapse_all();
         cx.notify();
     }
 
-    fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
         tern_fs::tree::reload_global_excludes();
         self.load(self.tree.loaded_dirs(), |_, cx| cx.notify(), cx);
     }

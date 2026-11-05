@@ -99,6 +99,7 @@ pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
     InputHighlighterFactory, SharedHighlightStyleResolver, SyntaxContext, SyntaxContextProvider,
 };
+pub use blink_cursor::{CaretLook, CaretShape};
 pub use indent::TabSize;
 pub use input::{Input, InputState};
 pub use kind::{

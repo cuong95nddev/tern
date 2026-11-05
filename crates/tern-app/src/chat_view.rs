@@ -32,6 +32,7 @@ use tern_mux::client::{ChatEvent as MuxChatEvent, ChatSink, Connector, OpenChat,
 use tern_mux::proto::{ChatExit, ChatSpec};
 
 use crate::accounts;
+use crate::agents::{ContextGuard, ContextUse, Handoff};
 use crate::template::{self, Framed, on_event};
 use crate::terminal_view::ActivityStatus;
 
@@ -60,6 +61,18 @@ pub enum ChatEvent {
     Chat,
     /// Its status changed (working, waiting for the user, done).
     Status,
+    /// How full its context window is changed.
+    Context,
+    /// Its handoff changed, or the conversation it is in: the session
+    /// should be saved.
+    Conversation,
+}
+
+/// What the user asked of a Claude that doesn't run yet: done once it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    HandOff,
+    Resume,
 }
 
 /// Something that opens and closes: by the entry it starts at.
@@ -178,6 +191,15 @@ pub struct ChatView {
     _input_sub: Subscription,
     _events: Option<Task<()>>,
     _ticker: Option<Task<()>>,
+    /// How full its context window is, as last told.
+    context: Option<ContextUse>,
+    /// The limit it keeps.
+    guard: ContextGuard,
+    /// The handoff it can go on from.
+    handoff: Handoff,
+    waiting_for_start: Option<Waiting>,
+    /// Claude may start in its folder (see [`crate::folder_trust`]).
+    trusted: bool,
 }
 
 impl EventEmitter<ChatEvent> for ChatView {}
@@ -213,6 +235,7 @@ impl ChatView {
                 cx.notify();
             },
             InputEvent::Focus => {
+                this.check_trust(cx);
                 this.warm(cx);
                 this.looked(cx);
             },
@@ -220,6 +243,7 @@ impl ChatView {
         });
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let session = session.unwrap_or_else(tern_chat::new_session_id);
+        let trusted = crate::folder_trust::trusted(&account, &root);
         let mut this = Self {
             root,
             account,
@@ -257,6 +281,11 @@ impl ChatView {
             _input_sub: input_sub,
             _events: None,
             _ticker: None,
+            context: None,
+            guard: ContextGuard::default(),
+            handoff: Handoff::default(),
+            waiting_for_start: None,
+            trusted,
         };
         match chat_id {
             Some(id) => {
@@ -284,6 +313,37 @@ impl ChatView {
     /// Its chat in the daemon, to attach to after a restart.
     pub fn chat_id(&self) -> Option<u64> {
         self.chat_id
+    }
+
+    /// How full its context window is, once a turn ended.
+    pub fn context(&self) -> Option<ContextUse> {
+        self.context
+    }
+
+    pub fn guard(&self) -> ContextGuard {
+        self.guard
+    }
+
+    pub fn set_guard(&mut self, guard: ContextGuard) {
+        self.guard = guard;
+    }
+
+    pub fn handoff(&self) -> &Handoff {
+        &self.handoff
+    }
+
+    pub fn set_handoff(&mut self, handoff: Handoff) {
+        self.handoff = handoff;
+    }
+
+    /// Start Claude, to do `what` once it runs (see [`Self::take_waiting`]).
+    pub fn start_for(&mut self, what: Waiting, cx: &mut Context<Self>) {
+        self.waiting_for_start = Some(what);
+        self.warm(cx);
+    }
+
+    pub fn take_waiting(&mut self) -> Option<Waiting> {
+        self.waiting_for_start.take()
     }
 
     /// A turn runs, or a request waits for the user.
@@ -384,25 +444,9 @@ impl ChatView {
     /// Start Claude in the daemon: resuming the conversation when Claude saved it.
     fn start(&mut self, cx: &mut Context<Self>) {
         let resume = saved_path(&self.account, &self.root, &self.session).is_some();
-        let launch = Launch {
-            session: self.session.clone(),
-            resume,
-            model: self.model_picked.clone(),
-            mode: self.mode_picked.then_some(self.mode),
-            mcp_config: crate::workspace::tern_mcp_config(),
-        };
-        let quote = crate::workspace::shell_quote;
-        let mut line = String::from("claude");
-        let user = crate::window_state::claude_args();
-        if !user.is_empty() {
-            // The user's own arguments, as typed (shell syntax).
-            line.push(' ');
-            line.push_str(&user);
-        }
-        for a in launch.args() {
-            line.push(' ');
-            line.push_str(&quote(&a));
-        }
+        let launch =
+            Launch { session: self.session.clone(), resume, model: self.model_picked.clone(), mode: self.mode_picked.then_some(self.mode) };
+        let line = claude_line(&crate::window_state::claude_args(), &launch.args());
         let (_, env) = crate::workspace::claude_env(&self.account, cx);
         let spec = ChatSpec {
             program: crate::platform::shell(),
@@ -418,11 +462,32 @@ impl ChatView {
         self.connect(OpenChat::Spawn(spec), cx);
     }
 
-    /// Start Claude unless it runs: it then says which commands and models it has.
+    /// Start Claude unless it runs: it then says which commands and models
+    /// it has. Not in a folder the user hasn't trusted: it would run the
+    /// folder's hooks.
     fn warm(&mut self, cx: &mut Context<Self>) {
-        if !self.live {
+        if !self.live && self.trusted {
             self.start(cx);
         }
+    }
+
+    /// See whether the folder was trusted meanwhile (in a terminal, another chat).
+    fn check_trust(&mut self, cx: &mut Context<Self>) {
+        if !self.trusted && crate::folder_trust::trusted(&self.account, &self.root) {
+            self.trusted = true;
+            cx.notify();
+        }
+    }
+
+    /// The user trusts the folder: Claude starts.
+    fn trust_folder(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = crate::folder_trust::trust(&self.root) {
+            // It holds for this tab all the same.
+            log::warn!("chat: can't keep {} as trusted: {e}", self.root.display());
+        }
+        self.trusted = true;
+        self.warm(cx);
+        cx.notify();
     }
 
     /// Reach the daemon (off the UI thread: it may have to start) and open
@@ -503,6 +568,8 @@ impl ChatView {
             match e {
                 MuxChatEvent::Attached { id, started, lines, exited } => {
                     self.chat_id = Some(id);
+                    // It runs already: what asking would have kept from happening did.
+                    self.trusted = true;
                     if self.replay {
                         // The history Claude saved before this program, then what it said.
                         self.load_history(Some(started));
@@ -557,7 +624,26 @@ impl ChatView {
             self.started = None;
             self._ticker = None;
         }
+        self.follow_conversation(cx);
         self.refresh(cx);
+    }
+
+    /// What Claude's lines said of the conversation: how full it is, its
+    /// handoff, and the one `/clear` started in its place.
+    fn follow_conversation(&mut self, cx: &mut Context<Self>) {
+        let context = self.t.meter.reading().map(ContextUse::from);
+        if context != self.context {
+            self.context = context;
+            cx.emit(ChatEvent::Context);
+        }
+        let handoff = self.t.handoff.take().map(|news| news.map_or(Handoff::None, Handoff::Written));
+        let handoff = handoff.filter(|h| *h != self.handoff);
+        let session = self.t.session_id.clone().filter(|s| *s != self.session);
+        if handoff.is_some() || session.is_some() {
+            self.handoff = handoff.unwrap_or_else(|| std::mem::take(&mut self.handoff));
+            self.session = session.unwrap_or_else(|| std::mem::take(&mut self.session));
+            cx.emit(ChatEvent::Conversation);
+        }
     }
 
     /// The mode Claude says it is in, unless the user picked one.
@@ -606,6 +692,11 @@ impl ChatView {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_owned();
         if text.is_empty() && self.attachments.is_empty() {
+            return;
+        }
+        self.check_trust(cx);
+        if !self.trusted {
+            // What was typed stays, for once it is.
             return;
         }
         self.warm(cx);
@@ -967,9 +1058,8 @@ impl ChatView {
         let row = f32::from(cx.theme().mono_font_size) * 1.6;
         let lines = d.lines.min(el.num("max_rows").max(1.) as usize);
         let height = f64::from(lines as f32 * row + d.hunks as f32 * 4. + 2.);
-        let diff = Diff::new(&d.state)
+        let diff = crate::diff_pane::styled(Diff::new(&d.state), cx)
             .line_number(d.numbered)
-            .syntax_highlight(true)
             .header_visible(false)
             .hunk_separator(DiffHunkSeparator::Simple);
         Some((diff, height))
@@ -1575,11 +1665,16 @@ impl ChatView {
         self.send(window, cx);
     }
 
+    pub fn debug_trust(&mut self, cx: &mut Context<Self>) {
+        self.trust_folder(cx);
+    }
+
     pub fn debug_state(&self, cx: &App) -> String {
         let rows: Vec<String> = self.rows.iter().map(|r| format!("{r:?}")).collect();
         let slash = self.slash_matches(cx).map(|m| m.iter().take(SLASH_ROWS).map(|c| c.0.clone()).collect::<Vec<_>>());
         format!(
-            "busy={} live={} chat={:?} mode={} model={:?} picked={:?} commands={} models={} slash={:?}@{} session={} entries={} open={:?} rows=[{}]",
+            "trusted={} busy={} live={} chat={:?} mode={} model={:?} picked={:?} commands={} models={} slash={:?}@{} session={} entries={} open={:?} rows=[{}]",
+            self.trusted,
             self.t.busy,
             self.live,
             self.chat_id,
@@ -1735,6 +1830,8 @@ impl Render for ChatView {
             .var("attached", !self.attachments.is_empty())
             .list("attachments", attachments)
             .slot_opt("list", list)
+            .var("untrusted", !self.trusted && self.chat_id.is_none())
+            .var("folder", crate::dirs::tilde(&self.root))
             .slot("input", input);
         template::render(
             "chat",
@@ -1838,6 +1935,9 @@ impl Render for ChatView {
                 ("send", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this: &mut Self, _: &ClickEvent, window, cx| this.send(window, cx))).into_any_element()
                 },
+                ("trust", Framed::Button(b)) => {
+                    b.on_click(on_event(&me, |this: &mut Self, _: &ClickEvent, _, cx| this.trust_folder(cx))).into_any_element()
+                },
                 ("stop", Framed::Button(b)) => {
                     b.on_click(on_event(&me, |this: &mut Self, _: &ClickEvent, _, cx| this.stop(cx))).into_any_element()
                 },
@@ -1857,8 +1957,33 @@ fn thumb_key(image: &UserImage) -> usize {
     image.bytes.as_ptr() as usize
 }
 
+/// The shell line that starts Claude: `user`'s own arguments, as typed
+/// (shell syntax), and `args`. The daemon puts the hook settings file's path
+/// in place of the placeholder (or drops the flag without hooks).
+fn claude_line(user: &str, args: &[String]) -> String {
+    let mut line = String::from("claude");
+    if !user.is_empty() {
+        line.push(' ');
+        line.push_str(user);
+    }
+    line.push_str(" --settings {tern-settings}");
+    for a in args {
+        line.push(' ');
+        line.push_str(&crate::workspace::shell_quote(a));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_gets_the_hook_settings_placeholder_as_it_is() {
+        let args = ["--verbose".to_owned()];
+        let quoted = crate::workspace::shell_quote("--verbose");
+        assert_eq!(super::claude_line("", &args), format!("claude --settings {{tern-settings}} {quoted}"));
+        assert_eq!(super::claude_line("--foo", &args), format!("claude --foo --settings {{tern-settings}} {quoted}"));
+    }
+
     use super::{command_matches, web_url};
 
     #[test]

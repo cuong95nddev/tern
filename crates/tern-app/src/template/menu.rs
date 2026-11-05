@@ -47,11 +47,11 @@ pub struct Content {
 
 impl Templates {
     /// The entries of menu template `name` with `scope`'s values and lists.
-    pub fn menu(&self, name: &str, mut scope: Scope) -> Vec<Entry> {
+    pub fn menu(&self, name: &str, mut scope: Scope, shared: &HashMap<&'static str, Value>) -> Vec<Entry> {
         let Some(root) = self.nodes.get(name) else { return vec![] };
         let mut out = vec![];
         for c in &root.children {
-            entries(c, &mut scope, &[], &mut out);
+            entries(c, &mut scope, &[shared], &mut out);
         }
         tidy(out)
     }

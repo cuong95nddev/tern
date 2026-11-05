@@ -80,6 +80,40 @@ fn hook_settings_are_substituted() {
     s.close();
 }
 
+/// A chat that asks for hooks gets them, and takes the user's handoffs: what
+/// its program is told comes in on its stdin, as a user message.
+#[test]
+fn chats_get_hooks_and_handoffs() {
+    use std::sync::{Arc, Mutex};
+
+    use tern_mux::client::{ChatEvent, ChatSink, OpenChat};
+
+    let d = daemon(Duration::from_secs(60));
+    let c = client(&d.dir);
+    let script = r#"Get-Content -Raw {tern-settings}; while ($null -ne ($l = [Console]::In.ReadLine())) { [Console]::Out.WriteLine((@{got=$l} | ConvertTo-Json -Compress)) }"#;
+    let spec = tern_mux::proto::ChatSpec {
+        program: "powershell".into(),
+        args: vec!["-NoProfile".into(), "-Command".into(), script.into()],
+        cwd: std::env::temp_dir(),
+        ..Default::default()
+    };
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let l = lines.clone();
+    let sink: ChatSink = Arc::new(move |e| {
+        if let ChatEvent::Line(line) = e {
+            l.lock().unwrap().push(line);
+        }
+    });
+    let chat = c.open_chat(OpenChat::Spawn(spec), sink);
+    let said = |what: &str| lines.lock().unwrap().iter().any(|l| l.contains(what));
+    wait_until("settings json", || said("\"hooks\""));
+    wait_until("the chat's id", || chat.id().is_some());
+    assert!(c.takes_chat_handoffs());
+    c.ask_handoff(chat.id().unwrap());
+    wait_until("the handoff request", || said("write a handoff"));
+    chat.close();
+}
+
 /// A program that prints nothing for longer than the hello's read timeout
 /// keeps its connection: the UI used to drop it every 3 s, reattach, and
 /// make the program repaint (a Claude Code tab flickered while idle).

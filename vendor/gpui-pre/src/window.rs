@@ -4999,6 +4999,7 @@ impl Window {
             size: bounds.size.map(|pixels| {
                 DevicePixels::from((pixels.0 * SMOOTH_SVG_SCALE_FACTOR).ceil() as i32)
             }),
+            generation: crate::svg_generation(),
         };
 
         let Some(tile) =

@@ -1,6 +1,7 @@
-//! What an agent asks the window through `tern --mcp` (`mcp.rs`), by way of
-//! the daemon (`ClientMsg::AskUi`): a request and its answer are JSON
-//! objects. `{"op": "status"}` reads the settings and themes again and says
+//! What an agent asks the window through `tern --theme` and `tern --shot`
+//! (`agent_cli.rs`), by way of the daemon (`ClientMsg::AskUi`): a request and
+//! its answer are JSON objects. `{"op": "status"}` reads the settings and
+//! themes again and says
 //! which theme shows and what is wrong; `{"op": "set_theme", "name"}`
 //! chooses a theme; `{"op": "shot", "folder"}` saves a PNG of the window
 //! that shows `folder` (or a folder in it, or one it is in), as the window

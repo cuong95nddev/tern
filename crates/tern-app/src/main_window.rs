@@ -12,14 +12,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
 
 use crate::platform::bind;
 use crate::template::{self, Framed, on_event};
-use crate::theme_picker::{self, OpenSettings, OpenSettingsFile, SelectTheme};
-use crate::workspace::{Panels, ToggleAgents, ToggleEditLayout, Workspace, WorkspaceEvent, confirm_close};
+use crate::theme_picker::{self, OpenSettingsFile, SelectTheme};
+use crate::workspace::{Panels, ToggleAgents, Workspace, WorkspaceEvent, confirm_close};
 use crate::{AppServices, OpenFolder, window_state};
 use tern_term::status::ActivityStatus;
 
@@ -928,12 +928,7 @@ impl MainWindow {
                 }),
             ));
         }
-        let buttons = template::Scope::new("agents.header.buttons")
-            .var("open_key", shortcut("⌘O"))
-            .var("monitor", crate::agent_monitor::window(cx).is_some());
-        // Screenshots are on macOS and Windows.
-        #[cfg(any(target_os = "macos", windows))]
-        let buttons = buttons.var("can_shot", true).var("shots", crate::shot::panel_open(cx));
+        let buttons = template::Scope::new("agents.header.buttons");
         // The close button hides the panel in the workspace it shows.
         let active = self.active_ws().map(|w| w.downgrade());
         let header = crate::dock::panel_header(
@@ -946,7 +941,6 @@ impl MainWindow {
                 ("open", Framed::Button(b)) => {
                     b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)).into_any_element()
                 },
-                ("agent_monitor", Framed::Button(b)) => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
                 ("close", Framed::Button(b)) => {
                     let ws = active.clone();
                     b.on_click(move |_, window, cx| {
@@ -954,8 +948,6 @@ impl MainWindow {
                     })
                     .into_any_element()
                 },
-                #[cfg(any(target_os = "macos", windows))]
-                ("screenshots", Framed::Button(b)) => b.on_click(|_, _, cx| crate::shot::toggle_panel(cx)).into_any_element(),
                 (_, f) => f.into_any_element(),
             },
             cx,
@@ -1294,23 +1286,11 @@ impl MainWindow {
     fn render_title_bar(&self, ws: Option<&Entity<Workspace>>, cx: &mut Context<Self>) -> AnyElement {
         let (parts, clicks) = ws.map(|ws| ws.update(cx, |w, cx| w.title_parts(cx))).unwrap_or_default();
         let (background, settings_error) = ws.map(|ws| ws.read(cx).title_status(cx)).unwrap_or_default();
-        let update = crate::update::offered(cx);
-        let (caffeine_icon, caffeine_tooltip, caffeine_on) = crate::caffeine::button(cx);
-        let mut scope = template::Scope::new("title_bar")
+        let scope = template::Scope::new("title_bar")
             .var("title", self.title.clone())
             .var("background", background)
             .var("settings_error", settings_error)
-            .var("settings_key", crate::platform::shortcut("⌘,").to_string())
-            .var("caffeine_icon", caffeine_icon)
-            .var("caffeine_tooltip", caffeine_tooltip)
-            .var("caffeine_on", caffeine_on)
-            .var("editing_layout", ws.is_some() && crate::dock::editing(cx))
-            .var("title_bar_border", window_state::title_bar_border())
             .list("parts", parts);
-        if let Some((release, installing)) = &update {
-            let label = if *installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
-            scope = scope.var("update", label).var("installing", *installing);
-        }
         let bar = template::render(
             "title_bar",
             scope,
@@ -1319,41 +1299,14 @@ impl MainWindow {
                     let click = click.clone();
                     b.on_click(move |_, w, cx| click(w, cx)).into_any_element()
                 },
-                ("edit_done", Framed::Button(b), _) => {
-                    let ws = ws.map(|ws| ws.downgrade());
-                    b.on_click(move |_, window, cx| {
-                        if let Some(ws) = ws.as_ref().and_then(|ws| ws.upgrade()) {
-                            ws.update(cx, |w, cx| w.toggle_edit_layout(&ToggleEditLayout, window, cx));
-                        }
-                    })
-                    .into_any_element()
-                },
-                ("title_bar_border", Framed::Button(b), _) => b
-                    .on_click(|_, _, cx| {
-                        window_state::set_title_bar_border(!window_state::title_bar_border());
-                        cx.refresh_windows();
-                    })
-                    .into_any_element(),
-                ("caffeine", Framed::Button(b), _) => b.dropdown_menu(crate::caffeine::menu).into_any_element(),
-                ("settings", Framed::Button(b), _) => {
-                    b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element()
-                },
-                ("update", Framed::Button(b), _) => {
-                    let update = update.clone();
-                    b.on_click(move |_, _, cx| {
-                        if let Some((release, false)) = &update {
-                            crate::update::offer(release.clone(), cx)
-                        }
-                    })
-                    .into_any_element()
-                },
                 // Over the bar's drag area: without this, Windows takes a click on a button for the caption's.
                 ("buttons", Framed::Box(d), _) => d.occlude().into_any_element(),
                 (_, f, _) => f.into_any_element(),
             },
             cx,
         );
-        crate::style::el("title_bar", cx).apply(gpui_kit::component::TitleBar::new()).child(bar).into_any_element()
+        let controls = crate::style::el("title_bar.controls", cx).visible();
+        crate::style::el("title_bar", cx).apply(gpui_kit::component::TitleBar::new().controls(controls)).child(bar).into_any_element()
     }
 }
 
@@ -1366,11 +1319,12 @@ impl Render for MainWindow {
         }
         crate::style::sync_backdrop(&mut self.backdrop, window, cx);
         let ws = self.active_ws().cloned();
+        let mut parts = ws.as_ref().map(|ws| ws.read(cx).shared_values(cx)).unwrap_or_default();
+        parts.push(("window_title", self.title.clone().into()));
+        parts.push(("window_maximized", window.is_maximized().into()));
+        template::publish_shared(parts, ws.as_ref().map(|ws| ws.downgrade()), cx);
         let title_bar = self.render_title_bar(ws.as_ref(), cx);
-        let scope = template::Scope::new("window")
-            .var("workspace", ws.is_some())
-            .var("title_bar_border", window_state::title_bar_border())
-            .slot("title_bar", title_bar);
+        let scope = template::Scope::new("window").var("workspace", ws.is_some()).slot("title_bar", title_bar);
         let scope = match ws {
             Some(ws) => scope.slot("workspace", ws),
             None => scope.slot("welcome", self.render_welcome(cx)),

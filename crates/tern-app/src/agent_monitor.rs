@@ -302,6 +302,7 @@ impl Render for Monitor {
             let item = Scope::new("agent")
                 .var("label", crate::agents::display_name(&e.title, e.agent))
                 .var("shown", true)
+                .var("kind", "agent")
                 .slot("icon", e.agent.icon(&theme));
             let item = match &e.view {
                 AgentView::Term(v) => crate::agents::ring_vars(item, v.read(cx), false, None, &theme),

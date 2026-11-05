@@ -85,6 +85,20 @@ pub const SMOOTH_SVG_SCALE_FACTOR: f32 = 2.;
 pub struct RenderSvgParams {
     pub path: SharedString,
     pub size: Size<DevicePixels>,
+    pub generation: u64,
+}
+
+static SVG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The generation SVGs are drawn with now.
+pub fn svg_generation() -> u64 {
+    SVG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Makes every SVG render again from its asset: for when assets changed
+/// under the paths the sprite atlas keeps them by.
+pub fn bump_svg_generation() {
+    SVG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Clone)]

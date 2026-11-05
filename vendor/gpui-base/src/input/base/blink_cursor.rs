@@ -10,6 +10,33 @@ pub(super) const CURSOR_WIDTH: Pixels = px(2.);
 #[cfg(target_os = "macos")]
 pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
 
+/// How a caret is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaretShape {
+    /// A thin line before the character.
+    #[default]
+    Bar,
+    /// A see-through box over the character.
+    Block,
+    /// A line under the character.
+    Underline,
+}
+
+/// A caret's look.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaretLook {
+    pub shape: CaretShape,
+    /// How thick a `Bar` or an `Underline` is; none is the default.
+    pub width: Option<Pixels>,
+    pub blink: bool,
+}
+
+impl Default for CaretLook {
+    fn default() -> Self {
+        Self { shape: CaretShape::Bar, width: None, blink: true }
+    }
+}
+
 /// To manage the Input cursor blinking.
 ///
 /// It will start blinking with a interval of 500ms.

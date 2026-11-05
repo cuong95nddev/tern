@@ -31,7 +31,7 @@ use crate::UnixStream;
 use crate::fdpass;
 
 pub const MAJOR: u32 = 2;
-pub const MINOR: u32 = 14;
+pub const MINOR: u32 = 15;
 /// The first MINOR whose daemon takes `HandOff` (and `Spawn`'s `seed`).
 pub const HANDOFF_MINOR: u32 = 3;
 /// The first MINOR whose daemon takes `ContextGuard`.
@@ -52,6 +52,9 @@ pub const LIST_CHATS_MINOR: u32 = 13;
 /// The first MINOR whose daemon takes `PaletteChanged` and `AskUi` (and
 /// sends `UiAsk`, which older UIs skip).
 pub const PALETTE_MINOR: u32 = 14;
+/// The first MINOR whose daemon gives a chat hooks (`{tern-settings}` in its
+/// arguments) and takes `ContextGuard`, `AskHandoff` and `ResumeHandoff` for it.
+pub const CHAT_GUARD_MINOR: u32 = 15;
 /// The handoff messages' layout; a daemon adopts from every version up to
 /// its own.
 pub const HANDOFF_VERSION: u32 = 5;
@@ -549,6 +552,8 @@ pub struct HandedChat {
     pub account: String,
     #[serde(default)]
     pub record: Option<PathBuf>,
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// An image a session holds, as handed to the new daemon.

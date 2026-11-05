@@ -20,6 +20,11 @@ are measured again. Zed's `main` has the same code. Test:
 `test_uniform_height_hint_survives_first_layout_and_width_change` (the
 published crate's tests need Zed's workspace to build).
 
+`src/svg_renderer.rs` and `Window::paint_svg`: the sprite atlas keeps an SVG by
+its path and size for good, so an asset that changed under its path kept its old
+picture. `RenderSvgParams` has a `generation`, and `bump_svg_generation` makes
+every SVG render again. Tern's `icons` settings use it.
+
 ## gpui-pre-apple 0.3.9 and gpui-pre-windows 0.3.9
 
 `src/metal_renderer.rs` (`build_pipeline_state`, `build_path_sprite_pipeline_state`)
@@ -49,6 +54,12 @@ objc2-user-notifications' `UNNotificationSound` for it.
 
 Left out: `Cargo.lock`.
 
+`src/title_bar.rs`: `TitleBar::controls(false)` leaves out the window controls,
+so an app can draw them where it likes.
+
+`src/diff/mod.rs`: `Diff::change_colors` sets the colors of added and removed
+lines, which were always the theme's `success` and `danger`.
+
 `src/text/compat.rs`, `TextView::image_source`: the component's `TextView`
 wraps gpui-base's and forwards its builder methods, all but `image_source`.
 Without it an image's URL went to GPUI's loader, which only fetches over
@@ -71,6 +82,10 @@ cursor still sits right after it (not one in the last column). Test:
 `vs16_widens_text_emoji`.
 
 ## gpui-base 0.7.3
+
+`src/input/`: `set_caret` (bar, block or underline, its thickness, whether it
+blinks) and `set_gutter_padding` on an input's state, which had these as
+constants.
 
 Left out: `Cargo.lock`.
 
@@ -102,6 +117,6 @@ under it) outside `test-support`: `src/window.rs`, `src/platform.rs`,
 Windows `src/window.rs`, and `src/directx_renderer.rs` take
 `feature = "window-capture"` in their `cfg`s, and each crate's `Cargo.toml`
 declares it (passing it on to the crates under it). Tern turns it on so an
-agent can see the window as it was last drawn (`tern --mcp`'s
-`window_shot`), without screen recording permission and even when the
+agent can see the window as it was last drawn (`tern --shot`),
+without screen recording permission and even when the
 window is covered. The code is unchanged.

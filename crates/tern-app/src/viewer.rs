@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::input::{
-    DefinitionProvider, Editor, EditorState, GoToDefinition, GutterMarker, InputEvent, Position, Rope, RopeExt,
+    CaretLook, CaretShape, DefinitionProvider, Editor, EditorState, GoToDefinition, GutterMarker, InputEvent, Position, Rope, RopeExt,
+    TabSize,
 };
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme, WindowExt};
@@ -53,6 +54,68 @@ pub fn sync_word_wrap(editor: &Entity<EditorState>, wrap: &mut bool, window: &mu
     if *wrap != want {
         *wrap = want;
         editor.update(cx, |ed, cx| ed.set_soft_wrap(want, window, cx));
+    }
+}
+
+/// What element `editor` set in an editor.
+#[derive(Clone, Copy, PartialEq)]
+pub struct EditorLook {
+    line_numbers: bool,
+    folding: bool,
+    whitespace: bool,
+    gutter_padding: Pixels,
+    caret: CaretLook,
+    tab_size: usize,
+    hard_tabs: bool,
+    indent_guides: bool,
+}
+
+impl Default for EditorLook {
+    /// How a new editor looks.
+    fn default() -> Self {
+        let tab = TabSize::default();
+        Self {
+            line_numbers: true,
+            folding: true,
+            whitespace: false,
+            gutter_padding: px(0.),
+            caret: CaretLook::default(),
+            tab_size: tab.tab_size,
+            hard_tabs: tab.hard_tabs,
+            indent_guides: true,
+        }
+    }
+}
+
+/// Bring `editor` to element `editor`; `look` is what it was last set to.
+pub fn sync_look(editor: &Entity<EditorState>, look: &mut EditorLook, window: &mut Window, cx: &mut App) {
+    let el = crate::style::el("editor", cx);
+    let shape = match el.text("cursor").as_ref() {
+        "block" => CaretShape::Block,
+        "underline" => CaretShape::Underline,
+        _ => CaretShape::Bar,
+    };
+    let want = EditorLook {
+        line_numbers: el.num("line_numbers") != 0.,
+        folding: el.num("folding") != 0.,
+        whitespace: el.num("whitespace") != 0.,
+        gutter_padding: el.px("gutter_padding"),
+        caret: CaretLook { shape, width: el.px_opt("cursor_width"), blink: el.num("cursor_blink") != 0. },
+        tab_size: (el.num("tab_size") as usize).max(1),
+        hard_tabs: el.num("hard_tabs") != 0.,
+        indent_guides: el.num("indent_guides") != 0.,
+    };
+    if *look != want {
+        *look = want;
+        editor.update(cx, |ed, cx| {
+            ed.set_line_number(want.line_numbers, window, cx);
+            ed.set_folding(want.folding, window, cx);
+            ed.set_show_whitespaces(want.whitespace, window, cx);
+            ed.set_gutter_padding(want.gutter_padding, cx);
+            ed.set_caret(want.caret, cx);
+            ed.set_tab_size(TabSize { tab_size: want.tab_size, hard_tabs: want.hard_tabs }, cx);
+            ed.set_indent_guides(want.indent_guides, window, cx);
+        });
     }
 }
 
@@ -163,6 +226,7 @@ pub struct Viewer {
     editor: Entity<EditorState>,
     /// The editor's soft wrap, kept in step with [`crate::window_state::word_wrap`].
     wrap: bool,
+    look: EditorLook,
     diff: Option<Entity<DiffPane>>,
     preview: Entity<TextViewState>,
     /// Set when the open file is an image; the body shows it instead of the editor.
@@ -432,6 +496,7 @@ impl Viewer {
             path: None,
             editor,
             wrap,
+            look: EditorLook::default(),
             diff: None,
             preview,
             image: None,
@@ -1035,6 +1100,7 @@ impl Viewer {
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         sync_word_wrap(&self.editor, &mut self.wrap, window, cx);
+        sync_look(&self.editor, &mut self.look, window, cx);
         let name = self.path.as_ref().map(|p| p.strip_prefix(&self.root).unwrap_or(p).display().to_string()).unwrap_or_default();
         let diff_mode = self.mode == Mode::Diff;
         let markdown = self.path.as_deref().is_some_and(is_markdown);
@@ -1061,10 +1127,10 @@ impl Render for Viewer {
             let muted = cx.theme().muted_foreground;
             scope.slot(
                 "image",
-                img(image.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::ScaleDown)
-                    .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element()),
+                img(image.clone()).size_full().object_fit(ObjectFit::ScaleDown).with_fallback({
+                    let failed = crate::template::text("Cannot decode image".to_owned(), cx);
+                    move || div().text_color(muted).child(failed.clone()).into_any_element()
+                }),
             )
         } else if self.mode == Mode::Preview {
             let viewer = me.clone();
@@ -1089,7 +1155,7 @@ impl Render for Viewer {
                     }),
             )
         } else {
-            scope.slot("editor", Editor::new(&self.editor).bordered(false).h_full())
+            scope.slot("editor", crate::style::el("editor", cx).apply(Editor::new(&self.editor).bordered(false).h_full()))
         };
         let focus = self.focus.clone();
         crate::template::render(

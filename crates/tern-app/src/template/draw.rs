@@ -64,8 +64,9 @@ pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyEle
         return div().into_any_element();
     };
     let mut scope = scope;
+    let shared = super::shared::values(cx);
     let mut d = Drawer { frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
-    let root = d.node(&node, &mut scope, &[]).unwrap_or_else(|| div().into_any_element());
+    let root = d.node(&node, &mut scope, &[&shared]).unwrap_or_else(|| div().into_any_element());
     if scope.arrangement.is_none() {
         return root;
     }
@@ -84,8 +85,9 @@ pub fn render_plain(name: &str, scope: Scope, cx: &App) -> AnyElement {
 pub fn render_part(name: &str, scope: Scope, cx: &App) -> AnyElement {
     let mut scope = scope;
     let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
+    let shared = super::shared::values(cx);
     let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
-    d.part_body(name, &mut scope, &[])
+    d.part_body(name, &mut scope, &[&shared])
 }
 
 /// What clicking a menu item does.
@@ -98,8 +100,27 @@ pub type MenuItems = Rc<dyn Fn(&str, Option<usize>) -> Option<MenuHandler>>;
 /// Fills `menu` with menu template `name`'s entries for `scope`; `items`
 /// attaches what its buttons do.
 pub fn menu(name: &str, scope: Scope, menu: PopupMenu, items: MenuItems, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
-    let entries = cx.try_global::<Templates>().map(|t| t.menu(name, scope)).unwrap_or_default();
+    let shared = super::shared::values(cx);
+    let mut entries = cx.try_global::<Templates>().map(|t| t.menu(name, scope, &shared)).unwrap_or_default();
+    respell(&mut entries, cx);
     fill_menu(&entries, menu, &items, window, cx)
+}
+
+/// `entries` with the `texts` settings applied.
+fn respell(entries: &mut [super::menu::Entry], cx: &App) {
+    use super::menu::Entry;
+    let say = |s: &mut SharedString| *s = super::shared::text(s.to_string(), cx).into();
+    for e in entries {
+        match e {
+            Entry::Separator => {},
+            Entry::Label(text) => say(text),
+            Entry::Item(it) => say(&mut it.label),
+            Entry::Submenu { label, entries } => {
+                say(label);
+                respell(entries, cx);
+            },
+        }
+    }
 }
 
 fn fill_menu(entries: &[Entry], mut menu: PopupMenu, items: &MenuItems, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
@@ -229,7 +250,7 @@ impl Drawer<'_, '_> {
                 kids.push(e);
             },
             What::Text(parts) => {
-                let text = fill(parts, &lookup(scope, outer));
+                let text = super::shared::text(fill(parts, &lookup(scope, outer)).to_string(), self.cx);
                 kids.push(look.label(text).into_any_element());
             },
             What::Icon(parts) => {
@@ -342,10 +363,10 @@ impl Drawer<'_, '_> {
             }
         }
         if let Some(label) = &b.label {
-            button = button.label(look.label(fill(label, &get)));
+            button = button.label(look.label(super::shared::text(fill(label, &get).to_string(), self.cx)));
         }
         if let Some(tip) = &b.tooltip {
-            button = button.tooltip(fill(tip, &get));
+            button = button.tooltip(super::shared::text(fill(tip, &get).to_string(), self.cx));
         }
         if b.selected.as_ref().is_some_and(|c| c.holds(&get)) {
             button = button.selected(true);
@@ -359,7 +380,10 @@ impl Drawer<'_, '_> {
         if let Some(action) = b.action.as_ref().and_then(|a| self.cx.build_action(a, None).ok()) {
             button = button.on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
         }
-        (self.frames)(&b.frame, scope.index, Framed::Button(button))
+        match super::shared::button(&b.frame, button, self.cx) {
+            Ok(e) => e,
+            Err(button) => (self.frames)(&b.frame, scope.index, Framed::Button(button)),
+        }
     }
 
     /// What dragging handle `n` drags: the part its scope names, when it may
@@ -1278,6 +1302,11 @@ impl Node {
     }
 }
 
+/// How often a spinning ring redraws. Each redraw lays out and paints the
+/// whole window, so at the display's own rate one small ring can hold a whole
+/// core for as long as an agent works.
+const RING_FPS: f32 = 30.;
+
 /// A ring `full` percent full, as [`super::Spec::ring`] says, in the box
 /// it is drawn in; one that spins turns smoothly, every ring in step.
 fn ring(id: ElementId, full: Option<f32>, look: &style::El) -> AnyElement {
@@ -1289,9 +1318,11 @@ fn ring(id: ElementId, full: Option<f32>, look: &style::El) -> AnyElement {
     }
     div()
         .size_full()
-        .with_animation(id, Animation::new(std::time::Duration::from_secs_f32(spin)).repeat_synced(), move |d, turn| {
-            d.child(ring_at(turn, full, arc, track, width))
-        })
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_secs_f32(spin)).repeat_synced().with_max_fps(RING_FPS),
+            move |d, turn| d.child(ring_at(turn, full, arc, track, width)),
+        )
         .into_any_element()
 }
 

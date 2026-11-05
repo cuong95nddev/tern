@@ -210,6 +210,7 @@ pub struct Diff {
     hunk_separator: DiffHunkSeparator,
     change_indicator: DiffChangeIndicator,
     change_background: bool,
+    change_colors: Option<(Hsla, Hsla)>,
     soft_wrap: bool,
     header: HeaderSlots,
     annotations: Rc<Annotations>,
@@ -239,6 +240,7 @@ impl Diff {
             hunk_separator: DiffHunkSeparator::default(),
             change_indicator: DiffChangeIndicator::default(),
             change_background: true,
+            change_colors: None,
             soft_wrap: false,
             header: HeaderSlots::default(),
             annotations: Rc::default(),
@@ -279,6 +281,11 @@ impl Diff {
         self
     }
     /// Tints changed lines. Default is true. Inline changes stay emphasized.
+    pub fn change_colors(mut self, added: Hsla, removed: Hsla) -> Self {
+        self.change_colors = Some((added, removed));
+        self
+    }
+
     pub fn change_background(mut self, value: bool) -> Self {
         self.change_background = value;
         self
@@ -519,6 +526,7 @@ fn render_diff(
         hunk_separator: props.hunk_separator,
         change_indicator: props.change_indicator,
         change_background: props.change_background,
+        change_colors: props.change_colors,
         soft_wrap,
         header: props.header,
         annotations: props.annotations.clone(),
@@ -752,6 +760,7 @@ struct CodePresentation {
     hunk_separator: DiffHunkSeparator,
     change_indicator: DiffChangeIndicator,
     change_background: bool,
+    change_colors: Option<(Hsla, Hsla)>,
     soft_wrap: bool,
     header: HeaderSlots,
     annotations: Rc<Annotations>,
@@ -1573,9 +1582,9 @@ fn code_line(
     let status = if conflict_part.is_some() {
         conflict_tint(conflict_part, cx)
     } else if side == DiffSide::Original {
-        cx.theme().danger
+        code.change_colors.map_or(cx.theme().danger, |c| c.1)
     } else {
-        cx.theme().success
+        code.change_colors.map_or(cx.theme().success, |c| c.0)
     };
     let selected = code.is_selected(file, side, ix)
         || (code.mode == DiffMode::Unified

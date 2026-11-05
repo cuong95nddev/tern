@@ -28,7 +28,7 @@ pub fn command(exe: &Path, settings: &Path) -> String {
     format!("{} --statusline {}", quote(&exe.to_string_lossy()), quote(&settings.to_string_lossy()))
 }
 
-pub(crate) fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

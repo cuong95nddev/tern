@@ -63,8 +63,6 @@ pub struct Launch {
     pub resume: bool,
     pub model: Option<String>,
     pub mode: Option<PermissionMode>,
-    /// `--mcp-config` (a file's path).
-    pub mcp_config: Option<String>,
 }
 
 impl Launch {
@@ -88,9 +86,6 @@ impl Launch {
         }
         if let Some(m) = self.mode {
             a.extend(["--permission-mode".into(), m.as_str().into()]);
-        }
-        if let Some(c) = &self.mcp_config {
-            a.extend(["--mcp-config".into(), c.clone()]);
         }
         a
     }
@@ -244,7 +239,7 @@ mod tests {
 
     #[test]
     fn args_resume_or_start() {
-        let mut l = Launch { session: "s".into(), resume: false, model: None, mode: Some(PermissionMode::Plan), mcp_config: None };
+        let mut l = Launch { session: "s".into(), resume: false, model: None, mode: Some(PermissionMode::Plan) };
         let a = l.args();
         assert!(a.windows(2).any(|w| w == ["--session-id", "s"]));
         assert!(a.windows(2).any(|w| w == ["--permission-mode", "plan"]));

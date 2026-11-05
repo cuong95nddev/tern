@@ -28,11 +28,11 @@ use crate::agents::Agent;
 use crate::arrange::{self, Arrangement, Kept};
 use crate::changes_review::ChangesReview;
 use crate::changes_view::{ChangesEvent, ChangesView};
-use crate::chat_view::{ChatEvent, ChatView};
+use crate::chat_view::{ChatEvent, ChatView, Waiting};
 use crate::diff_pane::{DiffPane, InCommit};
 use crate::dock::{ActiveDrag, Change, DraggedPart, DropHint, OnChange};
 use crate::file_icons;
-use crate::file_tree_view::{FileTreeEvent, FileTreeView};
+use crate::file_tree_view::{CollapseAll, FileTreeEvent, FileTreeView, NewFile, NewFolder, Refresh};
 use crate::git_log_view::{GitLog, GitLogEvent};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::panes::{self, Edge, Layout, PaneId, Zone};
@@ -85,6 +85,9 @@ actions!(
         ResetLayout,
         NewPanel,
         ToggleEditLayout,
+        ClosePane,
+        RefreshChanges,
+        ReviewChanges,
         FocusTerminal,
         SplitRight,
         SplitDown,
@@ -572,37 +575,6 @@ pub(crate) fn claude_env<'a>(account: &'a str, cx: &mut App) -> (&'a str, std::c
     (account, env)
 }
 
-/// `--mcp-config` for Tern's MCP server, which runs an agent's dev servers
-/// as services: a file's path. Never the JSON itself, which goes through the
-/// shell: Windows PowerShell strips its double quotes, and the `\"` that
-/// would keep them there breaks it in PowerShell 7.3+.
-pub(crate) fn tern_mcp_config() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let path = write_mcp_config(&crate::dirs::data(), &exe).inspect_err(|e| log::warn!("can't write the MCP config: {e}")).ok()?;
-    Some(path.to_string_lossy().into_owned())
-}
-
-/// Write the MCP config for Tern at `exe` in `dir`, unless it is there: one
-/// file per `exe`, as a dev build and an installed Tern share `dir`.
-fn write_mcp_config(dir: &Path, exe: &Path) -> std::io::Result<PathBuf> {
-    use std::hash::{Hash as _, Hasher as _};
-    let text = serde_json::json!({ "mcpServers": { "tern": { "command": exe, "args": ["--mcp"] } } }).to_string();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    exe.hash(&mut hasher);
-    let path = dir.join(format!("mcp-config-{:016x}.json", hasher.finish()));
-    if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
-        return Ok(path);
-    }
-    std::fs::create_dir_all(dir)?;
-    // Whole or not at all: a Claude may be reading it.
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    Ok(path)
-}
-
 pub(crate) fn shell_quote(s: &str) -> String {
     if cfg!(windows) {
         // PowerShell: inside single quotes only `'` is special, and it takes
@@ -852,9 +824,15 @@ impl Workspace {
                     }
                 },
                 SavedTab::Shell { name, mux } => this.add_term(TabKind::Shell, name, None, mux, accounts::DEFAULT, window, cx),
-                SavedTab::Chat { session, account, mux } => {
+                SavedTab::Chat { session, account, mux, guard, handoff } => {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
                     this.add_chat(&account, Some(session), mux, window, cx);
+                    if let Some(CenterTab::Chat { view, .. }) = this.tabs.get(before) {
+                        view.update(cx, |v, _| {
+                            v.set_guard(crate::agents::ContextGuard::from_saved(guard));
+                            v.set_handoff(handoff.map_or_else(Default::default, crate::agents::Handoff::Written));
+                        });
+                    }
                 },
                 SavedTab::File(p) if p.is_file() => this.open_file(p, true, window, cx),
                 SavedTab::Diff(p) => this.open_diff_tab(cx.new(|cx| DiffPane::new(p, cx)), window, cx),
@@ -947,6 +925,11 @@ impl Workspace {
                         session: v.session().to_owned(),
                         account: (v.account() != accounts::DEFAULT).then(|| v.account().to_owned()),
                         mux: v.chat_id(),
+                        guard: v.guard().saved(),
+                        handoff: match v.handoff() {
+                            crate::agents::Handoff::Written(path) => Some(path.clone()),
+                            _ => None,
+                        },
                     }
                 },
             })
@@ -1126,9 +1109,7 @@ impl Workspace {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
                 // the placeholder (or drops the flag without hooks).
-                // And Tern's MCP server, which runs its dev servers as services.
-                let mcp = tern_mcp_config().map(|config| format!(" --mcp-config {}", shell_quote(&config)));
-                let settings = format!("{} --settings {{tern-settings}}", mcp.unwrap_or_default());
+                let settings = " --settings {tern-settings}";
                 // The user's own arguments, as typed (shell syntax).
                 let args = window_state::claude_args();
                 let claude = if args.is_empty() { format!("claude{settings}") } else { format!("claude {args}{settings}") };
@@ -1213,14 +1194,27 @@ impl Workspace {
         let sub = cx.subscribe_in(&view, window, |this, view, ev: &ChatEvent, window, cx| match ev {
             ChatEvent::Title => cx.notify(),
             // Attached (maybe to a new daemon): its id goes into the saved
-            // session, and the daemon keeps its mute.
+            // session, and the daemon keeps its mute and its limit.
             ChatEvent::Chat => {
-                if let Some(id) = view.read(cx).chat_id()
-                    && this.tabs.iter().any(|t| matches!(t, CenterTab::Chat { view: v, muted: true, .. } if v == view))
-                {
-                    this.services.mux.set_muted(id, true);
+                if let Some(id) = view.read(cx).chat_id() {
+                    if this.tabs.iter().any(|t| matches!(t, CenterTab::Chat { view: v, muted: true, .. } if v == view)) {
+                        this.services.mux.set_muted(id, true);
+                    }
+                    let guard = view.read(cx).guard();
+                    this.services.mux.set_context_guard(id, guard.sent_limit(), guard.auto_switch);
+                    match view.update(cx, |v, _| v.take_waiting()) {
+                        Some(Waiting::HandOff) => this.chat_hand_off(view, id, cx),
+                        Some(Waiting::Resume) => this.chat_resume(view, id, cx),
+                        None => {},
+                    }
                 }
-                cx.emit(WorkspaceEvent::TabsChanged)
+                cx.emit(WorkspaceEvent::TabsChanged);
+                cx.notify();
+            },
+            ChatEvent::Context => cx.notify(),
+            ChatEvent::Conversation => {
+                cx.emit(WorkspaceEvent::TabsChanged);
+                cx.notify();
             },
             ChatEvent::Status => {
                 let status = view.read(cx).status();
@@ -1746,6 +1740,14 @@ impl Workspace {
             return;
         }
         let muted = self.tabs[ix].muted();
+        // Its limit and its handoff go along; a handoff asked for ends with
+        // the program.
+        let (guard, handoff) = match &self.tabs[ix] {
+            CenterTab::Term(t) => (t.guard, t.handoff.clone()),
+            CenterTab::Chat { view, .. } => (view.read(cx).guard(), view.read(cx).handoff().clone()),
+            _ => return,
+        };
+        let handoff = if matches!(handoff, crate::agents::Handoff::Written(_)) { handoff } else { Default::default() };
         match &self.tabs[ix] {
             CenterTab::Term(t) => t.view.update(cx, |v, _| v.close()),
             CenterTab::Chat { view, .. } => view.update(cx, |v, _| v.close()),
@@ -1760,8 +1762,14 @@ impl Workspace {
         }
         let Some(mut new) = self.tabs.pop() else { return };
         match &mut new {
-            CenterTab::Term(t) => t.muted = muted,
-            CenterTab::Chat { muted: m, .. } => *m = muted,
+            CenterTab::Term(t) => (t.muted, t.guard, t.handoff) = (muted, guard, handoff),
+            CenterTab::Chat { view, muted: m, .. } => {
+                *m = muted;
+                view.update(cx, |v, _| {
+                    v.set_guard(guard);
+                    v.set_handoff(handoff);
+                });
+            },
             _ => {},
         }
         let (old_id, new_id) = (self.tabs[ix].entity_id(), new.entity_id());
@@ -2280,10 +2288,10 @@ impl Workspace {
                 .content(move |c, window, cx| {
                     let height = f64::from(f32::from(window.viewport_size().height * 0.7));
                     let muted = cx.theme().muted_foreground;
-                    let image = img(shown.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::ScaleDown)
-                        .with_fallback(move || div().text_color(muted).child("Cannot decode image").into_any_element());
+                    let image = img(shown.clone()).size_full().object_fit(ObjectFit::ScaleDown).with_fallback({
+                        let failed = template::text("Cannot decode image".to_owned(), cx);
+                        move || div().text_color(muted).child(failed.clone()).into_any_element()
+                    });
                     let scope = template::Scope::new("image-preview").var("height", height).slot("image", image);
                     c.child(template::render_plain("dialog.image_preview", scope, cx))
                 })
@@ -2476,6 +2484,15 @@ impl Workspace {
 
     /// The shown Claude tab keeps its context window in bounds as `guard` says.
     fn set_guard(&mut self, guard: crate::agents::ContextGuard, cx: &mut Context<Self>) {
+        if let Some(view) = self.shown_chat() {
+            view.update(cx, |v, _| v.set_guard(guard));
+            if let Some(id) = view.read(cx).chat_id() {
+                self.services.mux.set_context_guard(id, guard.sent_limit(), guard.auto_switch);
+            }
+            cx.emit(WorkspaceEvent::TabsChanged);
+            cx.notify();
+            return;
+        }
         let Some(CenterTab::Term(t)) = self.tabs.get_mut(self.active).filter(|t| t.term().is_some_and(|t| t.kind == TabKind::Claude))
         else {
             return;
@@ -2485,6 +2502,14 @@ impl Workspace {
         self.send_guard(&view, cx);
         cx.emit(WorkspaceEvent::TabsChanged);
         cx.notify();
+    }
+
+    /// The shown tab's chat, if it is one.
+    fn shown_chat(&self) -> Option<Entity<ChatView>> {
+        match self.tabs.get(self.active)? {
+            CenterTab::Chat { view, .. } => Some(view.clone()),
+            _ => None,
+        }
     }
 
     /// The shown Claude tab, with its daemon session's id.
@@ -2501,6 +2526,13 @@ impl Workspace {
     /// and stops, for the user to go on from later.
     fn hand_off(&mut self, cx: &mut Context<Self>) {
         let mux = self.services.mux.clone();
+        if let Some(view) = self.shown_chat() {
+            match view.read(cx).chat_id() {
+                Some(id) => self.chat_hand_off(&view, id, cx),
+                None => view.update(cx, |v, cx| v.start_for(Waiting::HandOff, cx)),
+            }
+            return;
+        }
         let Some((t, id)) = self.shown_claude_mut(cx) else { return };
         t.handoff = crate::agents::Handoff::Asked;
         mux.ask_handoff(id);
@@ -2510,9 +2542,32 @@ impl Workspace {
     /// The shown Claude tab goes on from its handoff in a fresh conversation.
     fn resume_handoff(&mut self, cx: &mut Context<Self>) {
         let mux = self.services.mux.clone();
+        if let Some(view) = self.shown_chat() {
+            match view.read(cx).chat_id() {
+                Some(id) => self.chat_resume(&view, id, cx),
+                None => view.update(cx, |v, cx| v.start_for(Waiting::Resume, cx)),
+            }
+            return;
+        }
         let Some((t, id)) = self.shown_claude_mut(cx) else { return };
         let crate::agents::Handoff::Written(path) = std::mem::take(&mut t.handoff) else { return };
         mux.resume_handoff(id, Some(path));
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+    }
+
+    /// Ask chat `id`'s conversation for a handoff.
+    fn chat_hand_off(&mut self, view: &Entity<ChatView>, id: u64, cx: &mut Context<Self>) {
+        view.update(cx, |v, _| v.set_handoff(crate::agents::Handoff::Asked));
+        self.services.mux.ask_handoff(id);
+        cx.notify();
+    }
+
+    /// Chat `id` goes on from its handoff in a fresh conversation.
+    fn chat_resume(&mut self, view: &Entity<ChatView>, id: u64, cx: &mut Context<Self>) {
+        let crate::agents::Handoff::Written(path) = view.read(cx).handoff().clone() else { return };
+        view.update(cx, |v, _| v.set_handoff(Default::default()));
+        self.services.mux.resume_handoff(id, Some(path));
         cx.emit(WorkspaceEvent::TabsChanged);
         cx.notify();
     }
@@ -2856,6 +2911,7 @@ impl Workspace {
                         .var("shown", self.pane_active.get(&self.pane_of(i)) == Some(&id))
                         .var("close_key", close_key.clone())
                         .var("buttons", true)
+                        .var("kind", self.tab_kind(i, cx))
                         .slot_opt("icon", self.tab_icon(i, None, cx))
                 };
                 match &self.tabs[i] {
@@ -3003,6 +3059,19 @@ impl Workspace {
         self.preview_ix(cx) == Some(i)
     }
 
+    /// What tab `i` holds, for a template to pick its icon by.
+    fn tab_kind(&self, i: usize, cx: &App) -> &'static str {
+        match &self.tabs[i] {
+            CenterTab::Term(t) if t.kind == TabKind::Claude || t.view.read(cx).agent().is_some() => "agent",
+            CenterTab::Term(_) => "shell",
+            CenterTab::File { .. } => "file",
+            CenterTab::Scratch { .. } => "scratch",
+            CenterTab::Diff(_) => "diff",
+            CenterTab::Log { .. } => "log",
+            CenterTab::Chat { .. } => "chat",
+        }
+    }
+
     /// Tab `i`'s icon, so every tab's label starts at the same place: a
     /// terminal's agent (else its kind's), a file's type, a diff's.
     fn tab_icon(&self, i: usize, mono: Option<Hsla>, cx: &App) -> Option<AnyElement> {
@@ -3049,6 +3118,26 @@ impl Workspace {
         })
     }
 
+    /// This workspace's values for every template: `<part>_on` says a panel
+    /// shows, `editing_layout` that the layout is edited.
+    pub fn shared_values(&self, cx: &App) -> Vec<(&'static str, template::Value)> {
+        let on = |name, part| (name, self.part_button(part).is_some_and(|(_, on, _)| on).into());
+        let (background, settings_error) = self.title_status(cx);
+        vec![
+            ("background_status", background.into()),
+            ("settings_error", settings_error.into()),
+            on("explorer_on", "explorer"),
+            on("scratches_on", "scratches"),
+            on("changes_on", "changes"),
+            on("shells_on", "shells"),
+            on("services_on", "services"),
+            on("system_on", "system"),
+            on("usage_on", "usage"),
+            on("agents_on", "agents"),
+            ("editing_layout", crate::dock::editing(cx).into()),
+        ]
+    }
+
     /// The buttons of the panels docked on the right, for the main window's
     /// title bar (template `title_bar`, list `parts`), with what each does.
     pub fn title_parts(&mut self, cx: &mut Context<Self>) -> (Vec<template::Scope>, Vec<TitleClick>) {
@@ -3063,7 +3152,14 @@ impl Workspace {
                 let click: TitleClick = Rc::new(move |w, cx| {
                     let _ = me.update(cx, |this, cx| toggle(this, w, cx));
                 });
-                (template::Scope::new(format!("part-{p}")).var("icon", icon).var("on", on).var("tooltip", tooltip), click)
+                (
+                    template::Scope::new(format!("part-{p}"))
+                        .var("part", p.as_str())
+                        .var("icon", icon)
+                        .var("on", on)
+                        .var("tooltip", tooltip),
+                    click,
+                )
             })
             .unzip()
     }
@@ -3205,25 +3301,25 @@ impl Workspace {
                 this.focus_pane_state(pane);
                 this.add_tab(TabKind::Shell, window, cx);
             })),
-            "pane_layout" => {
-                let ws = ws.clone();
-                return Ok(b
-                    .dropdown_menu(move |menu, window, cx| {
-                        let Some(this) = ws.upgrade() else { return menu };
-                        let scope = this.read(cx).layout_menus(template::Scope::new("pane-layout"));
-                        let ws = ws.clone();
-                        template::menu("menu.pane_layout", scope, menu, Rc::new(move |n, e| Self::layout_item(&ws, n, e)), window, cx)
-                    })
-                    .into_any_element());
-            },
+            "pane_layout" => return Ok(Self::pane_layout_menu(b, ws.clone()).into_any_element()),
             "new_tab" => return Ok(Self::new_tab_menu(b, ws.clone()).into_any_element()),
             _ => return Err(Framed::Button(b)),
         }
         .into_any_element())
     }
 
+    /// The pane layout button's menu on `b`.
+    pub fn pane_layout_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
+        b.dropdown_menu(move |menu, window, cx| {
+            let Some(this) = ws.upgrade() else { return menu };
+            let scope = this.read(cx).layout_menus(template::Scope::new("pane-layout"));
+            let ws = ws.clone();
+            template::menu("menu.pane_layout", scope, menu, Rc::new(move |n, e| Self::layout_item(&ws, n, e)), window, cx)
+        })
+    }
+
     /// The new-tab button's menu on `b`.
-    fn new_tab_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
+    pub fn new_tab_menu(b: Button, ws: WeakEntity<Self>) -> impl IntoElement {
         b.dropdown_menu(move |menu, window, cx| {
             let Some(this) = ws.upgrade() else { return menu };
             let args = window_state::claude_args();
@@ -3317,6 +3413,7 @@ impl Workspace {
                         .var("preview", self.is_preview(i, cx))
                         .var("grouped", group.is_some())
                         .var("close_key", close_key.clone())
+                        .var("kind", self.tab_kind(i, cx))
                         .slot_opt("icon", self.tab_icon(i, mono(active), cx));
                     if let Some((b, color)) = badge.filter(|(b, _)| !b.is_empty()) {
                         scope = scope.var("badge", b.trim()).var("badge_color", color);
@@ -5298,6 +5395,10 @@ impl Workspace {
                         "ok".into()
                     },
                     "chat-state" => view.read(cx).debug_state(cx),
+                    "chat-trust" => {
+                        view.update(cx, |v, cx| v.debug_trust(cx));
+                        "ok".into()
+                    },
                     "chat-mode" => view.update(cx, |v, cx| v.debug_mode(arg, cx)),
                     // Click button NAME on the last open request (`allow`, `deny`, ...).
                     "chat-answer" => view.update(cx, |v, cx| v.debug_answer(arg, cx)),
@@ -5355,6 +5456,21 @@ impl Workspace {
                     },
                     _ => "error: file-at REL LINE COL".into(),
                 }
+            },
+            "context-state" => format!("{:?}", self.usage.read(cx).context()),
+            "context-hand-off" => {
+                self.hand_off(cx);
+                "ok".into()
+            },
+            "context-resume" => {
+                self.resume_handoff(cx);
+                "ok".into()
+            },
+            cmd if cmd.starts_with("context-guard ") => {
+                let mut parts = cmd["context-guard ".len()..].split_whitespace();
+                let Some(limit) = parts.next().and_then(|l| l.parse().ok()) else { return "error: context-guard LIMIT [manual]".into() };
+                self.set_guard(crate::agents::ContextGuard { on: true, limit, auto_switch: parts.next().is_none() }, cx);
+                "ok".into()
             },
             cmd if cmd.starts_with("file-open ") => {
                 let path = self.root.join(cmd["file-open ".len()..].trim());
@@ -5475,14 +5591,25 @@ impl Render for Workspace {
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_current(current, cx)));
         }
         // And how full its context window is, with the limit it keeps.
-        let context = self.tabs.get(self.active).and_then(CenterTab::term).filter(|t| t.kind == TabKind::Claude).map(|t| {
-            crate::usage_view::ContextShown {
+        let context = match self.tabs.get(self.active) {
+            Some(CenterTab::Term(t)) if t.kind == TabKind::Claude => Some(crate::usage_view::ContextShown {
                 usage: t.context,
                 guard: t.guard,
                 handoff: t.handoff.clone(),
                 takes_handoffs: self.services.mux.takes_handoffs(),
-            }
-        });
+            }),
+            Some(CenterTab::Chat { view, .. }) => {
+                let v = view.read(cx);
+                Some(crate::usage_view::ContextShown {
+                    usage: v.context(),
+                    guard: v.guard(),
+                    handoff: v.handoff().clone(),
+                    // Before Claude runs there may be no daemon to tell: asking starts it.
+                    takes_handoffs: v.chat_id().is_none() || self.services.mux.takes_chat_handoffs(),
+                })
+            },
+            _ => None,
+        };
         if self.usage.read(cx).context() != context.as_ref() {
             let usage = self.usage.clone();
             cx.defer(move |cx| usage.update(cx, |u, cx| u.set_context(context, cx)));
@@ -5554,6 +5681,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.step_tab(true, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.step_tab(false, w, cx)))
             .on_action(cx.listener(Self::toggle_explorer))
+            // The explorer's and changes' commands from a button outside them; in the explorer, its own handlers come first.
+            .on_action(cx.listener(|this, a: &NewFile, w, cx| this.tree.update(cx, |t, cx| t.on_new_file(a, w, cx))))
+            .on_action(cx.listener(|this, a: &NewFolder, w, cx| this.tree.update(cx, |t, cx| t.on_new_folder(a, w, cx))))
+            .on_action(cx.listener(|this, a: &Refresh, w, cx| this.tree.update(cx, |t, cx| t.on_refresh(a, w, cx))))
+            .on_action(cx.listener(|this, a: &CollapseAll, w, cx| this.tree.update(cx, |t, cx| t.on_collapse_all(a, w, cx))))
+            .on_action(cx.listener(|this, _: &RefreshChanges, _, cx| this.changes.update(cx, |c, cx| c.refresh(true, cx))))
+            .on_action(cx.listener(|this, _: &ReviewChanges, w, cx| this.review_changes(w, cx)))
+            .on_action(cx.listener(|this, _: &ClosePane, w, cx| this.close_pane(this.focused, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSettingsFile, w, cx| this.open_file(settings::settings_path(cx), true, w, cx)))
             .on_action(cx.listener(Self::toggle_changes))
             .on_action(cx.listener(|this, _: &OpenGitLog, window, cx| this.open_git_log(window, cx)))
@@ -5619,28 +5754,7 @@ pub fn services(terminal: TerminalConfig) -> Services {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, claude_bg_job, switch_blocker, write_mcp_config};
-
-    #[test]
-    fn the_mcp_config_is_a_file_per_exe() {
-        let dir = std::env::temp_dir().join(format!("tern-mcp-config-{}", std::process::id()));
-        let exe = std::path::Path::new(r"C:\Program Files\Tern's\tern.exe");
-        let path = write_mcp_config(&dir, exe).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(config["mcpServers"]["tern"]["command"], exe.to_str().unwrap());
-        assert_eq!(config["mcpServers"]["tern"]["args"], serde_json::json!(["--mcp"]));
-        // What the shell is given has no double quote for it to strip.
-        assert!(!path.to_str().unwrap().contains('"'));
-
-        // Another install keeps its own; a damaged file is written again.
-        assert_ne!(write_mcp_config(&dir, std::path::Path::new("/opt/tern")).unwrap(), path);
-        std::fs::write(&path, "{").unwrap();
-        assert_eq!(write_mcp_config(&dir, exe).unwrap(), path);
-        assert!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap()).is_ok());
-        // No temporary file is left behind.
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
+    use super::{ActivityStatus, claude_bg_job, switch_blocker};
 
     #[test]
     fn a_claude_tab_switches_only_while_it_waits() {

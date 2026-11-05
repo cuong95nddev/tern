@@ -40,6 +40,12 @@ impl ContextUse {
     }
 }
 
+impl From<tern_bridge::context::Reading> for ContextUse {
+    fn from(r: tern_bridge::context::Reading) -> Self {
+        Self { percent: r.percent, size: r.size }
+    }
+}
+
 /// A Claude tab's handoff, which its conversation writes when the user
 /// asks (to step away) or past its context limit, and which it can go on
 /// from in a fresh conversation later, also after a restart.

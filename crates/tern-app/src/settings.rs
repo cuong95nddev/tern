@@ -69,6 +69,18 @@ pub struct SettingsFile {
     /// The window's parts as trees of boxes, by name, over the built-in ones
     /// (see `reference/templates.md` and `reference/templates.json`).
     pub templates: BTreeMap<String, crate::template::Spec>,
+    /// Icons to replace everywhere, by name (`folder`, `agents/claude.svg`):
+    /// with another bundled icon's name, or a `.svg` file (absolute, `~/…`,
+    /// or relative to this folder). An icon already drawn changes at the
+    /// moment it is saved.
+    pub icons: BTreeMap<String, String>,
+    /// Icons and colors of files: by file name (`cargo.toml`), `.ext`, a
+    /// folder's `name/`, or `/` for every folder. Each key takes `icon` (as in
+    /// `icons`) and `color`.
+    pub file_icons: BTreeMap<String, crate::file_icons::FileLook>,
+    /// What to write in place of a text Tern shows, by the whole text
+    /// (`"Explorer"`, `"No agents running"`): titles, labels, tooltips, menus.
+    pub texts: BTreeMap<String, String>,
     /// UI colors over the theme's, by theme key (`background`, `border`,
     /// `tab_bar.background`, `list.active.background`, …). A value is
     /// `#rrggbb`, `#rrggbbaa`, or a Tailwind name like `neutral-800` or
@@ -294,6 +306,10 @@ struct TernTheme {
     elements: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Its `templates`, under the settings' ones.
     templates: BTreeMap<String, crate::template::Spec>,
+    /// Its `icons`, `file_icons` and `texts`, under the settings' ones.
+    icons: BTreeMap<String, String>,
+    file_icons: BTreeMap<String, crate::file_icons::FileLook>,
+    texts: BTreeMap<String, String>,
 }
 
 /// Writes the reference files, loads the settings and applies them, and
@@ -590,6 +606,21 @@ fn load(cx: &mut App) {
     let templates = crate::template::compile(&specs, &style::Props::new(&over, &colors, dir), &mut problems);
     templates.check_actions(cx.all_action_names(), &mut problems);
     cx.set_global(templates);
+    let mut icons = theme.icons.clone();
+    icons.extend(settings.icons.clone());
+    let mut file_icons = theme.file_icons.clone();
+    file_icons.extend(settings.file_icons.clone());
+    let changed = crate::file_icons::set_overrides(&icons, &file_icons, dir, &mut problems);
+    if !changed.is_empty() {
+        bump_svg_generation();
+        // The agents' logos are images, kept by the asset system.
+        for path in changed.into_iter().filter(|p| !p.starts_with("icons/")) {
+            ImageSource::Resource(Resource::Embedded(path.into())).remove_asset(cx);
+        }
+    }
+    let mut texts = theme.texts.clone();
+    texts.extend(settings.texts.clone());
+    crate::template::set_texts(texts, cx);
     cx.set_global(crate::dock::LayoutLock(settings.layout.locked));
     cx.set_global(crate::diff_pane::DiffSplit(settings.editor.diff_split));
     let lsp = lsp_config(&settings.lsp);
@@ -1006,6 +1037,18 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             Some(t) => serde_json::from_value(t).map_err(|e| format!("templates: {e}"))?,
             None => BTreeMap::new(),
         };
+        let icons = match take("icons") {
+            Some(i) => serde_json::from_value(i).map_err(|e| format!("icons: {e}"))?,
+            None => BTreeMap::new(),
+        };
+        let file_icons = match take("file_icons") {
+            Some(i) => serde_json::from_value(i).map_err(|e| format!("file_icons: {e}"))?,
+            None => BTreeMap::new(),
+        };
+        let texts = match take("texts") {
+            Some(t) => serde_json::from_value(t).map_err(|e| format!("texts: {e}"))?,
+            None => BTreeMap::new(),
+        };
         if let Some(t) = theme.as_object_mut()
             && !t.contains_key("colors")
             && let Some((colors, dark)) = ui_from_terminal(&terminal)
@@ -1014,7 +1057,7 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             t.entry("mode").or_insert_with(|| if dark { "dark" } else { "light" }.into());
         }
         let ui: ThemeConfig = serde_json::from_value(theme.take()).map_err(|e| e.to_string())?;
-        out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates }));
+        out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates, icons, file_icons, texts }));
     }
     Ok(out)
 }
@@ -1284,7 +1327,7 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 |---|---|---|
 | `window` | `workspace`, `title_bar_border` (a line runs under the title bar: its button shows while the layout is edited) | `welcome`, `workspace` |
 | `workspace` | `explorer`, `scratches`, `changes`, `shells`, `system`, `usage`, `path` | `left_strip`, `agents`, `explorer`, `scratches`, `center`, `changes`, `shells`, `system`, `usage` |
-| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`, `editing_layout` (the layout is edited: its Done button and the title bar line's button show), `title_bar_border` (a line runs under the title bar); list `parts` (`icon`, `on`, `tooltip`) | |
+| `title_bar` | `title`, `background`, `settings_error`, `settings_key`, `caffeine_icon`, `caffeine_tooltip`, `caffeine_on` (the keep-awake cup, lit unless Off; its menu is `menu.caffeine`), `update` (the offer's label, when a new version is offered), `installing`, `editing_layout` (the layout is edited: its Done button and the title bar line's button show), `title_bar_border` (a line runs under the title bar); list `parts` (`part`, `icon`, `on`, `tooltip`) | |
 | `pane` | `focused`, `focus_line`, `vertical`, `title`, `tabs`, `borders` (drawn with its borders: not in a panel group without them; its splits' lines follow it) | `tab_bar`, `vertical_tabs`, `content`, `drop_overlay` |
 | `pane.body` | as `pane` | as `pane` |
 | `panel_header` | `part`, `title`, `count` | `buttons` |
@@ -1405,6 +1448,77 @@ submenu), `each` and `use` (another menu's entries). A `button` with
 clicked, in any template.
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
+
+### In any template
+
+Some values and buttons belong to the app, so every template has them, in any
+bar or panel. The values: `caffeine_icon`, `caffeine_tooltip`, `caffeine_on`,
+`settings_key`, `open_key`, `monitor`, `can_shot`, `shots`, `update`, `installing`,
+`editing_layout`, `title_bar_border`, `window_title`, `window_maximized`,
+`background_status`, `settings_error`, and `explorer_on`, `changes_on`, `scratches_on`,
+`shells_on`, `services_on`, `system_on`, `usage_on`, `agents_on` (that panel shows).
+The buttons, by name: `caffeine` (opens `menu.caffeine`), `settings`,
+`agent_monitor`, `screenshots`, `update`, `edit_done`, `title_bar_border`,
+`new_tab_menu` and `pane_layout_menu` (the focused pane's), `window_minimize`,
+`window_maximize` and `window_close`. With `\"title_bar.controls\": {{ \"visible\": 0 }}`
+in `elements`, the window's own three are left out. Menus read the values too.
+
+```json
+{{ \"button\": \"caffeine\", \"size\": \"small\", \"icon\": \"{{caffeine_icon}}\", \"selected\": \"caffeine_on\", \"tooltip\": \"{{caffeine_tooltip}}\" }}
+```
+
+A button with an `action` goes anywhere too, and acts on the focused pane or
+the workspace: `workspace::ToggleExplorer` (with `\"selected\": \"explorer_on\"`),
+`workspace::SplitRight`, `workspace::ClosePane`, `workspace::NewShellTab`,
+`workspace::RefreshChanges`, `workspace::ReviewChanges`, `file_tree::NewFile`,
+`file_tree::Refresh`. `reference/actions.md` lists them all.
+
+### Icons
+
+`icons` (in `settings.json` or a theme) replaces an icon everywhere it is drawn:
+in templates, the ones Tern picks (file types, the tool strips, tabs) and the
+window's own buttons. A key is an icon's name, or a path for an agent's logo
+(`agents/claude.svg`); a value is another bundled icon or a `.svg` file (absolute,
+`~/…`, or relative to this folder). An icon takes the color of where it is drawn;
+an agent's logo is drawn as an image, so its SVG sets its own colors.
+
+```json
+\"icons\": {{ \"folder\": \"folder-open\", \"agents/claude.svg\": \"icons/my-claude.svg\" }}
+```
+
+### Inside the editor and diffs
+
+The code itself is drawn line by line, not from a template, so it is set with
+elements. `editor` takes box properties (`padding`, `font_size`, `line_height`) and
+`line_numbers`, `folding`, `whitespace`, `gutter_padding`, `cursor` (`bar`, `block`,
+`underline`), `cursor_width`, `cursor_blink`, `tab_size`, `hard_tabs`, `indent_guides`.
+`diff` takes `line_numbers`,
+`syntax_highlight`, `change_background`, `hover`, `hunk_separator`, `change_indicator`,
+the colors `added` and `removed`, and `context_lines`.
+
+```json
+\"elements\": {{
+  \"editor\": {{ \"line_numbers\": 0, \"whitespace\": 1, \"line_height\": 24, \"padding_left\": 12 }},
+  \"diff\": {{ \"change_indicator\": \"bars\", \"hover\": \"line\", \"added\": \"#2ea04380\" }}
+}}
+```
+
+`file_icons` sets a kind of file's icon and color: by its whole name, by `.ext`,
+by a folder's `name/`, or `/` for every folder.
+
+```json
+\"file_icons\": {{ \".rs\": {{ \"icon\": \"icons/rust.svg\", \"color\": \"#dea584\" }}, \"/\": {{ \"color\": \"#e5b95c\" }} }}
+```
+
+`texts` writes something else in place of a text Tern shows, in templates,
+tooltips and menus, by the whole text as shown:
+`\"texts\": {{ \"No agents running\": \"Chưa có agent\" }}`.
+
+To change one place only, use a template. A condition compares text too:
+`\"when\": \"part == \\\"explorer\\\"\"`. In `tool_strip` and `title_bar`, each of `parts`
+has `part`; `agents.tab`, `pane_tab_bar.tab` and `vertical_tabs.tab` have `kind`
+(`agent`, `shell`, `file`, `scratch`, `diff`, `log`, `chat`) to put in place of the
+`icon` slot.
 
 ### Moving panels
 
@@ -1572,11 +1686,11 @@ Choosing a theme in the theme picker sets one theme in its place.
 
 ### For agents
 
-`tern --mcp` (Tern's MCP server) has tools to check what you change here:
-`theme_status` applies the files as saved and says which theme shows and what
-is wrong in them, `set_theme` switches themes, and `window_shot` gives a
-picture of the window as Tern drew it. Look at the picture before saying a
-change looks right.
+Tern has commands to check what you change here: `tern --theme` applies the
+files as saved and says which theme shows and what is wrong in them,
+`tern --theme NAME` switches themes, and `tern --shot` saves a picture of the
+window as Tern drew it and prints its path. Look at the picture before saying a
+change looks right. `tern --skill` tells all an agent can run.
 ",
         dir = dir.display()
     )

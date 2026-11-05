@@ -2474,7 +2474,7 @@
             "element": "resources.cpu",
             "layout": "row",
             "justify": "end",
-            "children": [{ "button": "sort_cpu", "element": "resources.sort", "size": "xsmall", "label": "{cpu_label}", "selected": "by_cpu", "tooltip": "A share of one core: over 100% is more than one core busy" }]
+            "children": [{ "button": "sort_cpu", "element": "resources.sort", "size": "xsmall", "label": "{cpu_label}", "selected": "by_cpu", "tooltip": "A share of the whole machine, all cores together" }]
           },
           {
             "element": "resources.mem",
@@ -3309,7 +3309,36 @@
     "children": [
       { "when": "!empty", "grow": 1, "element": "chat.timeline", "children": [{ "slot": "list" }] },
       { "when": "empty", "use": "chat.empty" },
+      { "when": "untrusted", "use": "chat.trust" },
       { "use": "chat.composer" }
+    ]
+  },
+  "chat.trust": {
+    "element": "chat.row",
+    "layout": "row",
+    "justify": "center",
+    "shrink": 0,
+    "children": [
+      {
+        "element": "chat.lane",
+        "grow": 1,
+        "children": [
+          {
+            "element": "chat.ask",
+            "children": [
+              { "element": "chat.ask.title", "wrap": true, "text": "Do you trust {folder}?" },
+              { "element": "chat.meta", "wrap": true, "text": "Claude Code runs this folder's hooks and tools as soon as it starts. Trust it only if you know where its code comes from." },
+              {
+                "layout": "row",
+                "align": "center",
+                "justify": "end",
+                "element": "chat.ask.buttons",
+                "children": [{ "button": "trust", "element": "chat.ask.button", "variant": "primary", "size": "small", "label": "Trust This Folder" }]
+              }
+            ]
+          }
+        ]
+      }
     ]
   },
   "chat.empty": {

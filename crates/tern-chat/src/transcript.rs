@@ -288,6 +288,11 @@ pub struct Transcript {
     pub busy: bool,
     /// Bumped on every change.
     pub version: u64,
+    /// How full the conversation's context window is.
+    pub meter: tern_bridge::context::Meter,
+    /// News of its handoff, for the chat to take: one was written (at this
+    /// path), or the conversation was cleared (`None`).
+    pub handoff: Option<Option<String>>,
     /// The streamed message's blocks: block index to entry.
     blocks: HashMap<u64, usize>,
     /// The entries streamed for each message, and how many of them its
@@ -459,6 +464,7 @@ impl Transcript {
             return None;
         }
         self.version += 1;
+        self.meter.read(v);
         let Some(kind) = v.get("type").and_then(Value::as_str) else {
             self.raw("A message without a type".into(), v);
             return None;
@@ -487,6 +493,8 @@ impl Transcript {
             // How queued messages stand, and a running tool's heartbeat: the
             // chat shows the turn working its own way.
             "command_lifecycle" | "keep_alive" | "tool_progress" => {},
+            // `/clear`: its echo shows, and a fresh `init` follows.
+            "conversation_reset" => self.handoff = Some(None),
             other => self.raw(format!("A message of type “{other}”"), v),
         }
         None
@@ -829,6 +837,9 @@ impl Transcript {
                 },
             }
         });
+        if let Some(path) = v.get("result").and_then(Value::as_str).and_then(tern_bridge::context::handoff_path) {
+            self.handoff = Some(Some(path));
+        }
         let ms = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
         // The turn's end says it was stopped.
         if interrupted && matches!(self.entries.last(), Some(Entry::Notice { text, .. }) if text == "Interrupted") {
@@ -1235,6 +1246,29 @@ mod tests {
         assert_eq!(end(turns), (false, Some("Stopped: the turn limit was reached".into())));
         // An older CLI: no reason, no errors.
         assert_eq!(end(json!({"type":"result","subtype":"error_during_execution","is_error":true})), (true, None));
+    }
+
+    #[test]
+    fn a_turn_ending_with_a_handoff_line_names_it() {
+        let mut t = Transcript::default();
+        t.apply(&json!({"type":"result","subtype":"success","result":"Nothing to hand off"}));
+        assert_eq!(t.handoff.take(), None);
+        t.apply(&json!({"type":"result","subtype":"success","result":"Done.
+Handoff: `docs/h.md`"}));
+        assert_eq!(t.handoff.take(), Some(Some("docs/h.md".to_owned())));
+    }
+
+    #[test]
+    fn a_cleared_conversation_starts_over_quietly() {
+        let mut t = Transcript::default();
+        t.apply(&json!({"type":"assistant","message":{"id":"m","model":"m","content":[],"usage":{"input_tokens":10}}}));
+        t.apply(&json!({"type":"result","subtype":"success","modelUsage":{"m":{"contextWindow":100}}}));
+        assert_eq!(t.meter.reading().map(|r| r.percent), Some(10.));
+        let before = t.entries.len();
+        t.apply(&json!({"type":"conversation_reset"}));
+        assert_eq!(t.entries.len(), before);
+        assert_eq!(t.meter.reading(), None);
+        assert_eq!(t.handoff.take(), Some(None));
     }
 
     #[test]

@@ -21,8 +21,8 @@ use tern_term::{EventSink, SpawnConfig, TermEvent, TermSize};
 use crate::UnixStream;
 use crate::paths;
 use crate::proto::{
-    self, ASK_HANDOFF_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, GUARD_MINOR, HANDOFF_MINOR,
-    LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, PALETTE_MINOR, Role, ServerMsg, SessionInfo,
+    self, ASK_HANDOFF_MINOR, CHAT_GUARD_MINOR, CHAT_MINOR, ChatExit, ChatInfo, ChatSpec, ClientMsg, Controller, FrameReader, GUARD_MINOR,
+    HANDOFF_MINOR, LIST_CHATS_MINOR, MAJOR, MINOR, MUTE_MINOR, PALETTE_MINOR, Role, ServerMsg, SessionInfo,
 };
 
 /// What the client asks who runs in a session's foreground with: the PTY
@@ -536,7 +536,15 @@ impl MuxClient {
         }
         self.inner.chat_pending.lock().unwrap().insert(req, slot.clone());
         let msg = match open {
-            OpenChat::Spawn(spec) => ClientMsg::SpawnChat { req, spec },
+            OpenChat::Spawn(mut spec) => {
+                if !self.takes_chat_handoffs() {
+                    // It would take the placeholder for an argument.
+                    for a in &mut spec.args {
+                        *a = a.replace(" --settings {tern-settings}", "");
+                    }
+                }
+                ClientMsg::SpawnChat { req, spec }
+            },
             OpenChat::Attach { id } => ClientMsg::AttachChat { req, id },
         };
         if self.inner.send(msg).is_err() && self.inner.chat_pending.lock().unwrap().remove(&req).is_some() {
@@ -600,6 +608,12 @@ impl MuxClient {
     /// `resume_handoff`).
     pub fn takes_handoffs(&self) -> bool {
         self.inner.server_minor >= ASK_HANDOFF_MINOR
+    }
+
+    /// Whether the daemon gives chats hooks and takes their context guard
+    /// and handoffs.
+    pub fn takes_chat_handoffs(&self) -> bool {
+        self.inner.server_minor >= CHAT_GUARD_MINOR
     }
 
     /// Answer the daemon's [`UiRequest::Ask`] `ask` with `answer` (a JSON
@@ -728,6 +742,12 @@ impl Connector {
     /// (doesn't connect).
     pub fn takes_handoffs(&self) -> bool {
         self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).is_some_and(MuxClient::takes_handoffs)
+    }
+
+    /// Whether a live connection's daemon takes chats' handoffs (see
+    /// [`MuxClient::takes_chat_handoffs`]).
+    pub fn takes_chat_handoffs(&self) -> bool {
+        self.cur.lock().unwrap().as_ref().filter(|c| c.alive()).is_some_and(MuxClient::takes_chat_handoffs)
     }
 
     /// Ask session `id`'s Claude for a handoff (see

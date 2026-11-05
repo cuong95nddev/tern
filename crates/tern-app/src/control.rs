@@ -43,8 +43,12 @@
 //!   claude-switch    show the active Claude tab the other way (terminal ⇄ chat)
 //!   chat-send TEXT   send TEXT in the active chat tab
 //!   chat-state       the active chat's rows, busy, mode
+//!   chat-trust       trust its folder, as the question over the message box does
 //!   chat-answer allow|session|deny   answer its open permission request
 //!   chat-mode MODE   set its permission mode (`default`, `acceptEdits`, `plan`, `auto`)
+//!   context-state    the shown Claude tab's context window, limit and handoff
+//!   context-guard LIMIT [manual]   turn its limit on (`manual`: no auto switch)
+//!   context-hand-off, context-resume   the context card's buttons
 //!   @N CMD           send CMD to window N instead of the active one
 
 use std::io::{BufRead, BufReader, Read, Write};

@@ -6656,7 +6656,6 @@ name = "tern-app"
 version = "0.10.1"
 dependencies = [
  "ab_glyph",
- "base64 0.22.1",
  "block2 0.6.2",
  "data-url",
  "dunce",
@@ -6727,6 +6726,7 @@ dependencies = [
  "serde_json",
  "similar",
  "tempfile",
+ "tern-bridge",
 ]
 
 [[package]]
@@ -6796,6 +6796,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tern-bridge",
+ "tern-chat",
  "tern-term",
  "uds_windows",
 ]

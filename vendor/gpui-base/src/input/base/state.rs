@@ -493,6 +493,10 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The unwrapped width of the longest line and what it was measured for.
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
     pub(super) editor_paddings: Edges<Pixels>,
+    /// How its caret is drawn.
+    pub(super) caret: crate::input::CaretLook,
+    /// Room added to the gutter, after what it needs.
+    pub(super) gutter_padding: Pixels,
     /// The style this state paints with: what was projected onto it, with
     /// every colour left unset resolved from the palette that is current. It
     /// is rebuilt at the top of every render, which is what keeps it current
@@ -857,6 +861,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             editor_scrollbar_snapshot: Cell::new(None),
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
+            caret: crate::input::CaretLook::default(),
+            gutter_padding: px(0.),
             deferred_scroll_offset: None,
             placeholder: SharedString::default(),
             mask_pattern: MaskPattern::default(),
@@ -11290,6 +11296,18 @@ impl InputBaseState<crate::input::EditorMode> {
             *l = line_number;
         }
         self
+    }
+
+    /// Set how the caret is drawn.
+    pub fn set_caret(&mut self, caret: crate::input::CaretLook, cx: &mut Context<Self>) {
+        self.caret = caret;
+        cx.notify();
+    }
+
+    /// Set the room added to the gutter.
+    pub fn set_gutter_padding(&mut self, padding: Pixels, cx: &mut Context<Self>) {
+        self.gutter_padding = padding;
+        cx.notify();
     }
 
     /// Set line number.

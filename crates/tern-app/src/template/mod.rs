@@ -31,9 +31,11 @@ use crate::style::{self, Props, Val};
 
 mod draw;
 mod menu;
+mod shared;
 
-#[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
 pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, no_line, on_event, render, render_part, render_plain, split_cell};
+#[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
+pub use shared::{publish as publish_shared, set_texts, text};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -608,6 +610,8 @@ pub struct Cond(Vec<Vec<Test>>);
 enum Test {
     Is(String, bool),
     Cmp(String, Cmp, f64),
+    /// A value is (or isn't) this text.
+    Text(String, bool, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -640,6 +644,13 @@ impl Cond {
 
 impl Test {
     fn parse(t: &str) -> Result<Test, String> {
+        for (op, want) in [("==", true), ("!=", false)] {
+            if let Some((name, text)) = t.split_once(op)
+                && let Some(text) = text.trim().strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+            {
+                return Ok(Test::Text(ident(name.trim())?, want, text.to_owned()));
+            }
+        }
         for (op, cmp) in [("==", Cmp::Eq), ("!=", Cmp::Ne), ("<=", Cmp::Le), (">=", Cmp::Ge), ("<", Cmp::Lt), (">", Cmp::Gt)] {
             if let Some((name, n)) = t.split_once(op) {
                 let n: f64 = n.trim().parse().map_err(|_| format!("\"{}\" is not a number", n.trim()))?;
@@ -655,6 +666,7 @@ impl Test {
     fn holds(&self, get: &dyn Fn(&str) -> Option<Value>) -> bool {
         match self {
             Test::Is(name, want) => get(name).is_some_and(|v| v.truthy()) == *want,
+            Test::Text(name, want, text) => get(name).is_some_and(|v| v.text() == text.as_str()) == *want,
             Test::Cmp(name, cmp, n) => {
                 let v = get(name).map_or(0., |v| v.num());
                 match cmp {
@@ -1597,6 +1609,32 @@ fn parts(text: &str) -> Vec<Part> {
 }
 
 #[cfg(test)]
+mod shared_tests {
+    use super::{Cond, HashMap, Scope, Value, draw, shared};
+
+    #[test]
+    fn a_shared_value_reaches_any_scope_and_a_views_own_goes_over_it() {
+        let shared: shared::Values = HashMap::from([("caffeine_on", true.into()), ("monitor", true.into())]);
+        let scope = Scope::new("t").var("monitor", false);
+        let outer = [&shared];
+        let get = draw::lookup(&scope, &outer);
+        assert!(matches!(get("caffeine_on"), Some(Value::Bool(true))));
+        assert!(matches!(get("monitor"), Some(Value::Bool(false))));
+    }
+
+    #[test]
+    fn a_condition_compares_text() {
+        let scope = Scope::new("t").var("part", "explorer");
+        let get = draw::lookup(&scope, &[]);
+        let holds = |c: &str| Cond::parse(c).unwrap().holds(&get);
+        assert!(holds(r#"part == "explorer""#));
+        assert!(!holds(r#"part == "changes""#));
+        assert!(holds(r#"part != "changes""#));
+        assert!(holds(r#"missing != "changes""#));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{BTreeMap, Cond, HashMap, Part, Props, Spec, Value, builtin, compile, parts, style};
 
@@ -1956,7 +1994,7 @@ mod tests {
         ];
         let scope = super::Scope::new("m").var("many", false).var("clip", false).var("n", 2usize).list("kinds", kinds);
         assert_eq!(
-            shown(&t.menu("menu.m", scope)),
+            shown(&t.menu("menu.m", scope, &HashMap::new())),
             ["a::Open:Open", "-", "paste:Paste [x] (off)", "\"Pick\"", "new:Text .txt #0", "new:Rust .rs #1", "More>[\"x:X 2\"]",]
         );
     }

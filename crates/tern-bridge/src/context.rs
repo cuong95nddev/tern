@@ -11,7 +11,8 @@
 //! ([`Guard::resume_from`]).
 //!
 //! How full the window is comes from the status line's input (see
-//! [`crate::statusline`]), the latest one before each hook.
+//! [`crate::statusline`]), the latest one before each hook. Headless Claude
+//! (a chat) has no status line: [`Meter`] works it out from its output.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -81,6 +82,18 @@ impl Guard {
         self.percent
     }
 
+    /// The window is `percent` full.
+    pub fn reading(&mut self, percent: f32, policy: Policy) {
+        self.percent = percent;
+        if self.fresh && self.percent > 0. {
+            self.fresh = false;
+            self.born_over = self.over(policy);
+        }
+        if self.phase == Phase::Warned && !self.by_user && !self.over(policy) {
+            self.phase = Phase::Under;
+        }
+    }
+
     /// The user asks for a handoff, to step away; `busy`: the agent is in
     /// a turn. What to send the terminal: an idle agent is asked by a
     /// prompt, a busy one at its next hook.
@@ -112,21 +125,14 @@ impl Guard {
         let none = (None, Action::None);
         match ev.event.as_str() {
             crate::statusline::EVENT => {
-                self.percent = used_percent(&ev.raw);
-                if self.fresh && self.percent > 0. {
-                    self.fresh = false;
-                    self.born_over = self.over(policy);
-                }
-                if self.phase == Phase::Warned && !self.by_user && !self.over(policy) {
-                    self.phase = Phase::Under;
-                }
+                self.reading(used_percent(&ev.raw), policy);
                 none
             },
             "SessionStart" => {
                 let fresh = matches!(ev.raw.get("source").and_then(Value::as_str), Some("clear" | "startup"));
                 let phase = std::mem::take(&mut self.phase);
                 self.percent = 0.;
-                (self.fresh, self.born_over, self.by_user) = (fresh, false, false);
+                (self.fresh, self.born_over, self.by_user) = (fresh, false, self.by_user && !fresh);
                 match phase {
                     Phase::Written { handoff, clearing } if fresh => {
                         let context = continue_context(handoff.as_deref());
@@ -134,9 +140,12 @@ impl Guard {
                         let action = if clearing { Action::Prompt(CONTINUE_PROMPT.into()) } else { Action::None };
                         (Some(reply), action)
                     },
-                    // Compacted, resumed: it goes on where it is.
+                    // Compacted, resumed: it goes on where it is. A program
+                    // just starting has yet to take the clear on its way.
                     phase => {
+                        let starting = ev.raw.get("source").and_then(Value::as_str) == Some("resume");
                         self.phase = match phase {
+                            p @ Phase::Written { clearing: true, .. } if starting => p,
                             Phase::Written { .. } => Phase::Under,
                             p => p,
                         };
@@ -202,6 +211,56 @@ impl Guard {
     }
 }
 
+/// How full a window is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reading {
+    /// Percent of the window used, 0 to 100.
+    pub percent: f32,
+    /// The window's size, in tokens.
+    pub size: u64,
+}
+
+/// How full a headless conversation's window is, from the lines it writes:
+/// its last message's input against its model's window, which only a turn's
+/// `result` names. Nothing is known before the first one.
+#[derive(Debug, Clone, Default)]
+pub struct Meter {
+    /// The last message's input, in tokens.
+    used: Option<u64>,
+    model: Option<String>,
+    size: Option<u64>,
+}
+
+impl Meter {
+    /// Take in `line`, one the program wrote.
+    pub fn read(&mut self, line: &Value) {
+        match line.get("type").and_then(Value::as_str) {
+            Some("assistant") if line.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+                let tokens = |k: &str| line.pointer(&format!("/message/usage/{k}")).and_then(Value::as_u64).unwrap_or(0);
+                let used = tokens("input_tokens") + tokens("cache_creation_input_tokens") + tokens("cache_read_input_tokens");
+                if used > 0 {
+                    self.used = Some(used);
+                    self.model = line.pointer("/message/model").and_then(Value::as_str).map(str::to_owned);
+                }
+            },
+            Some("result") => {
+                let Some(models) = line.get("modelUsage").and_then(Value::as_object) else { return };
+                let window = |m: &Value| m.get("contextWindow").and_then(Value::as_u64).filter(|s| *s > 0);
+                let named = self.model.as_ref().and_then(|m| models.get(m)).and_then(window);
+                self.size = named.or_else(|| models.values().filter_map(window).max()).or(self.size);
+            },
+            Some("conversation_reset") => self.used = None,
+            Some("system") if line.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => self.used = None,
+            _ => {},
+        }
+    }
+
+    pub fn reading(&self) -> Option<Reading> {
+        let (used, size) = (self.used?, self.size?);
+        Some(Reading { percent: (used as f64 * 100. / size as f64).clamp(0., 100.) as f32, size })
+    }
+}
+
 /// What a fresh conversation is told of the handoff it goes on from.
 fn continue_context(handoff: Option<&str>) -> String {
     match handoff {
@@ -262,7 +321,7 @@ fn last_transcript_text(path: &Path) -> Option<String> {
 }
 
 /// The path in the last `Handoff: <path>` line of `message`.
-fn handoff_path(message: &str) -> Option<String> {
+pub fn handoff_path(message: &str) -> Option<String> {
     message.lines().rev().find_map(|l| {
         let l = l.trim().trim_start_matches(['*', '_', '-', ' ']);
         let rest = l.strip_prefix(HANDOFF_LINE)?;
@@ -284,6 +343,102 @@ mod tests {
     }
 
     const POLICY: Policy = Policy { limit: 50, auto_switch: true };
+
+    fn assistant(model: &str, tokens: u64) -> Value {
+        json!({"type": "assistant", "parent_tool_use_id": null, "message": {"model": model, "usage": {
+            "input_tokens": 2, "cache_creation_input_tokens": tokens - 2, "cache_read_input_tokens": 0, "output_tokens": 999
+        }}})
+    }
+
+    fn result(windows: Value) -> Value {
+        json!({"type": "result", "modelUsage": windows})
+    }
+
+    #[test]
+    fn a_meter_knows_nothing_before_a_turn_ends() {
+        let mut m = Meter::default();
+        m.read(&assistant("big", 1000));
+        assert_eq!(m.reading(), None);
+    }
+
+    #[test]
+    fn a_meter_reads_the_last_message_against_its_models_window() {
+        let mut m = Meter::default();
+        m.read(&assistant("big", 1000));
+        m.read(&result(json!({"small": {"contextWindow": 2000}, "big": {"contextWindow": 10000}})));
+        assert_eq!(m.reading(), Some(Reading { percent: 10., size: 10000 }));
+        // The window stays known, so a turn's messages read as they come.
+        m.read(&assistant("big", 5000));
+        assert_eq!(m.reading(), Some(Reading { percent: 50., size: 10000 }));
+    }
+
+    #[test]
+    fn a_meter_takes_the_largest_window_of_an_unnamed_model() {
+        let mut m = Meter::default();
+        m.read(&assistant("alias", 1000));
+        m.read(&result(json!({"a": {"contextWindow": 2000}, "b": {"contextWindow": 10000}})));
+        assert_eq!(m.reading().map(|r| r.size), Some(10000));
+    }
+
+    #[test]
+    fn a_meter_skips_subagents_and_empty_usage() {
+        let mut m = Meter::default();
+        m.read(&assistant("big", 1000));
+        m.read(&result(json!({"big": {"contextWindow": 10000}})));
+        let mut sub = assistant("big", 9000);
+        sub["parent_tool_use_id"] = json!("toolu_1");
+        m.read(&sub);
+        m.read(
+            &json!({"type": "assistant", "parent_tool_use_id": null, "message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}}),
+        );
+        assert_eq!(m.reading().map(|r| r.percent), Some(10.));
+    }
+
+    #[test]
+    fn a_meter_forgets_a_cleared_or_compacted_conversation() {
+        for line in [json!({"type": "conversation_reset"}), json!({"type": "system", "subtype": "compact_boundary"})] {
+            let mut m = Meter::default();
+            m.read(&assistant("big", 1000));
+            m.read(&result(json!({"big": {"contextWindow": 10000}})));
+            m.read(&line);
+            assert_eq!(m.reading(), None);
+            m.read(&assistant("big", 2000));
+            assert_eq!(m.reading().map(|r| r.percent), Some(20.));
+        }
+    }
+
+    /// A chat's Claude may start only when the user asks: its own start
+    /// comes after what they asked for.
+    #[test]
+    fn going_on_outlasts_the_program_starting() {
+        let mut g = Guard::default();
+        assert_eq!(g.resume_from(Some("h.md".into())), Action::Clear);
+        let started = ev(json!({"hook_event_name": "SessionStart", "source": "resume"}));
+        assert_eq!(g.on_event(&started, POLICY), (None, Action::None));
+        let cleared = ev(json!({"hook_event_name": "SessionStart", "source": "clear"}));
+        let (reply, action) = g.on_event(&cleared, POLICY);
+        assert!(reply.unwrap().to_string().contains("h.md"));
+        assert_eq!(action, Action::Prompt(CONTINUE_PROMPT.into()));
+    }
+
+    #[test]
+    fn the_users_handoff_outlasts_the_program_starting() {
+        let mut g = Guard::default();
+        g.request(false);
+        g.on_event(&ev(json!({"hook_event_name": "SessionStart", "source": "resume"})), POLICY);
+        let done = ev(json!({"hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "Handoff: h.md"}));
+        // It stops: they go on when they say.
+        assert_eq!(g.on_event(&done, POLICY), (None, Action::None));
+    }
+
+    #[test]
+    fn a_reading_counts_like_a_status_line() {
+        let mut g = Guard::default();
+        g.reading(60., POLICY);
+        assert_eq!(g.percent(), 60.);
+        let (reply, _) = g.on_event(&ev(json!({"hook_event_name": "Stop", "stop_hook_active": false})), POLICY);
+        assert_eq!(reply.unwrap().get("decision").unwrap(), "block");
+    }
 
     #[test]
     fn under_the_limit_says_nothing() {

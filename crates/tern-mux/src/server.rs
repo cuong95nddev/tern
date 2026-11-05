@@ -750,8 +750,12 @@ impl Server {
         match msg {
             ClientMsg::Hello { .. } => {},
             ClientMsg::ContextGuard { id, limit, auto_switch } => {
-                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
-                    s.policy = Policy { limit: limit.min(100), auto_switch };
+                let policy = Policy { limit: limit.min(100), auto_switch };
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
+                    s.policy = policy;
+                } else if let Some(chat) = st.chats.get(&id) {
+                    chat.set_policy(policy);
                 }
             },
             ClientMsg::Mute { id, muted } => {
@@ -763,16 +767,22 @@ impl Server {
                 }
             },
             ClientMsg::AskHandoff { id } => {
-                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
                     // Waiting on the user (a permission) counts as busy: typing
                     // would answer it.
                     let busy = matches!(s.host.status(), ActivityStatus::Working | ActivityStatus::Blocked);
                     type_after_turn(&s.host, s.guard.request(busy));
+                } else if let Some(chat) = st.chats.get(&id) {
+                    chat.ask_handoff();
                 }
             },
             ClientMsg::ResumeHandoff { id, path } => {
-                if let Some(s) = self.state.lock().unwrap().sessions.get_mut(&id) {
+                let mut st = self.state.lock().unwrap();
+                if let Some(s) = st.sessions.get_mut(&id) {
                     type_after_turn(&s.host, s.guard.resume_from(path));
+                } else if let Some(chat) = st.chats.get(&id) {
+                    chat.resume_handoff(path);
                 }
             },
             ClientMsg::Watch => self.watch(conn),
@@ -881,6 +891,9 @@ impl Server {
                 if let Some(chat) = chat {
                     log::info!("chat {id}: closed");
                     chat.kill();
+                    if let Some(t) = &chat.token {
+                        self.drop_token(t);
+                    }
                 }
             },
             #[cfg(unix)]
@@ -989,7 +1002,7 @@ impl Server {
             .map(|c| ChatInfo {
                 id: c.id,
                 cwd: c.meta.cwd.clone(),
-                session: c.meta.session.clone(),
+                session: c.session(),
                 account: c.meta.account.clone(),
                 attached: c.attached(),
                 exited: c.exited().is_some(),
@@ -1018,12 +1031,23 @@ impl Server {
         })
     }
 
-    fn spawn_chat(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, spec: ChatSpec) {
+    fn spawn_chat(self: &Arc<Self>, conn: &Arc<Conn>, req: u64, mut spec: ChatSpec) {
         if !self.wait_handoff(conn) {
             return;
         }
         let id = random_id();
-        match ChatHost::spawn(id, &spec, self.chat_notify()) {
+        // What Claude's version is asked with: a chat has no size.
+        let probe = SpawnConfig {
+            program: Some(spec.program.clone()),
+            args: spec.args.clone(),
+            cwd: Some(spec.cwd.clone()),
+            env: spec.env.clone(),
+            size: TermSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
+            scrollback: 0,
+        };
+        let hook = spec.args.iter().any(|a| a.contains(SETTINGS_PLACEHOLDER));
+        let token = self.hook_settings(&probe, &mut spec.args, hook);
+        match ChatHost::spawn(id, &spec, token.clone(), self.chat_notify()) {
             Ok(chat) => {
                 log::info!("chat {id}: started pid {}", chat.pid);
                 {
@@ -1033,7 +1057,12 @@ impl Server {
                 }
                 Self::attach_chat(conn, req, &chat);
             },
-            Err(e) => conn.send(ServerMsg::Error { req, message: e.to_string() }),
+            Err(e) => {
+                if let Some(t) = &token {
+                    self.drop_token(t);
+                }
+                conn.send(ServerMsg::Error { req, message: e.to_string() });
+            },
         }
     }
 
@@ -1089,23 +1118,14 @@ impl Server {
         !conn.dead.load(Ordering::Acquire)
     }
 
-    /// Start a session running `cfg`; its id, or why it didn't start.
-    fn start(
-        self: &Arc<Self>,
-        mut cfg: SpawnConfig,
-        hook: bool,
-        seed: Option<Snapshot>,
-        sizes: Vec<(Weak<Conn>, TermSize)>,
-        service: Option<ServiceSpec>,
-    ) -> Result<u64, String> {
-        let id = random_id();
-        // Its programs learn which session they run in (`tern --mcp` tells
-        // the daemon who asked for a service).
-        cfg.env.insert("TERN_SESSION_ID".into(), id.to_string());
+    /// With `hook`, a token for a Claude started as `probe` and the settings
+    /// file its hooks reach this daemon by. `args` get the file's path in
+    /// place of the placeholder, or lose the flag without one.
+    fn hook_settings(&self, probe: &SpawnConfig, args: &mut [String], hook: bool) -> Option<String> {
         let token = match (hook, &self.hooks) {
             (true, Some(hooks)) => {
                 let token = hooks.register();
-                let version = crate::claude_probe::version(&cfg, SETTINGS_PLACEHOLDER);
+                let version = crate::claude_probe::version(probe, SETTINGS_PLACEHOLDER);
                 match tern_bridge::write_claude_settings(
                     &self.run_dir,
                     &token,
@@ -1115,7 +1135,7 @@ impl Server {
                 ) {
                     Ok(path) => {
                         let quoted = shell_quote(&path.to_string_lossy());
-                        for a in &mut cfg.args {
+                        for a in args.iter_mut() {
                             *a = a.replace(SETTINGS_PLACEHOLDER, &quoted);
                         }
                         Some(token)
@@ -1130,10 +1150,28 @@ impl Server {
             _ => None,
         };
         if token.is_none() {
-            for a in &mut cfg.args {
+            for a in args.iter_mut() {
                 *a = a.replace(&format!(" --settings {SETTINGS_PLACEHOLDER}"), "").replace(SETTINGS_PLACEHOLDER, "");
             }
         }
+        token
+    }
+
+    /// Start a session running `cfg`; its id, or why it didn't start.
+    fn start(
+        self: &Arc<Self>,
+        mut cfg: SpawnConfig,
+        hook: bool,
+        seed: Option<Snapshot>,
+        sizes: Vec<(Weak<Conn>, TermSize)>,
+        service: Option<ServiceSpec>,
+    ) -> Result<u64, String> {
+        let id = random_id();
+        // Its programs learn which session they run in (`tern --mcp` tells
+        // the daemon who asked for a service).
+        cfg.env.insert("TERN_SESSION_ID".into(), id.to_string());
+        let probe = cfg.clone();
+        let token = self.hook_settings(&probe, &mut cfg.args, hook);
         let observer: Arc<dyn Observer> = self.clone();
         let host = match Host::spawn(id, &cfg, seed, observer) {
             Ok(h) => h,
@@ -1308,6 +1346,10 @@ impl Server {
 
     /// Hook `ev` came; the answer for Claude Code, if any.
     fn on_hook(&self, ev: HookEvent) -> Option<serde_json::Value> {
+        let chat = self.state.lock().unwrap().chats.values().find(|c| c.token.as_deref() == Some(ev.token.as_str())).cloned();
+        if let Some(chat) = chat {
+            return chat.on_hook(&ev);
+        }
         let body = serde_json::to_vec(&ev.raw).unwrap_or_default();
         let (host, reply) = {
             let mut st = self.state.lock().unwrap();
@@ -1508,6 +1550,7 @@ impl Server {
                 session: handed.meta.session,
                 account: handed.meta.account,
                 record: handed.meta.record,
+                token: handed.token,
             }));
             // Parked before it goes, so a failure below reads again.
             if let Some((_, parked)) = io {
@@ -1654,7 +1697,8 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
         };
         handed_chats.push((c, io));
     }
-    let tokens = handed.iter().filter_map(|(s, _)| s.token.clone()).collect();
+    let tokens =
+        handed.iter().filter_map(|(s, _)| s.token.clone()).chain(handed_chats.iter().filter_map(|(c, _)| c.token.clone())).collect();
     let hooks = match hook_listener {
         Some(l) if opts.hooks => Hooks::Adopt(l, tokens),
         _ => Hooks::Off,
@@ -1697,7 +1741,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
     let mut chat_readers = Vec::new();
     for (c, io) in handed_chats {
         let meta = crate::chat::ChatMeta { cwd: c.cwd, session: c.session, account: c.account, record: c.record };
-        let handed = crate::chat::Handed { meta, title: c.title, lines: c.lines, stderr: c.stderr, exited: c.exited, io };
+        let handed = crate::chat::Handed { meta, token: c.token, title: c.title, lines: c.lines, stderr: c.stderr, exited: c.exited, io };
         let (chat, parked) = ChatHost::adopt(c.id, c.pid, c.started, handed, server.chat_notify());
         chat_readers.extend(parked.map(|p| (chat.clone(), p)));
         server.state.lock().unwrap().chats.insert(c.id, chat);

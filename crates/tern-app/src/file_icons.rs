@@ -3,10 +3,15 @@
 //! component defaults.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::RwLock;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Theme;
+use gpui_kit::component::{Icon, Theme};
 use gpui_kit::*;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
@@ -83,16 +88,105 @@ gpui_kit::assets::icon_assets!(
 /// screenshot tool's icons and the caffeine cup.
 pub struct AppAssets;
 
+/// What the `icons` settings put in place of assets, by asset path.
+static OVERRIDES: RwLock<BTreeMap<String, Cow<'static, [u8]>>> = RwLock::new(BTreeMap::new());
+
+/// What the `file_icons` settings give a kind of file, by its key.
+static FILE_LOOKS: RwLock<BTreeMap<String, Look>> = RwLock::new(BTreeMap::new());
+
+/// An icon's asset path and a tint, each when the settings give one.
+type Look = (Option<SharedString>, Option<Hsla>);
+
+/// A kind of file's look in the `file_icons` settings.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileLook {
+    /// A bundled icon's name, or a `.svg` file as in `icons`.
+    pub icon: Option<String>,
+    /// `#rrggbb`, `#rrggbbaa` or a Tailwind name.
+    pub color: Option<String>,
+}
+
+/// The asset an `icons` key or a bundled name stands for: `folder` is
+/// `icons/folder.svg`, a key with a `/` (`agents/claude.svg`) is that path.
+fn asset_path(name: &str) -> String {
+    if name.contains('/') { name.to_owned() } else { format!("icons/{name}.svg") }
+}
+
+/// Replaces the assets `icons` names: each with another bundled icon, or the
+/// `.svg` file it names (absolute, `~/…`, or relative to `dir`), and sets the
+/// looks of `files`. What can't be read goes in `problems`. Gives the asset
+/// paths that now hold something else.
+pub fn set_overrides(
+    icons: &BTreeMap<String, String>,
+    files: &BTreeMap<String, FileLook>,
+    dir: &Path,
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    let read = |to: &str| {
+        if to.ends_with(".svg") {
+            let file = match (to.strip_prefix("~/"), crate::dirs::home()) {
+                (Some(rest), Some(home)) => home.join(rest),
+                _ => dir.join(to),
+            };
+            std::fs::read(&file).map(Cow::Owned).map_err(|e| format!("{}: {e}", file.display()))
+        } else {
+            base_load(&asset_path(to)).ok().flatten().ok_or_else(|| "no such icon".to_owned())
+        }
+    };
+    let mut out = BTreeMap::new();
+    for (key, to) in icons {
+        match read(to) {
+            Ok(b) => {
+                out.insert(asset_path(key), b);
+            },
+            Err(e) => problems.push(format!("icons.{key}: \"{to}\": {e}")),
+        }
+    }
+    let mut looks = BTreeMap::new();
+    for (n, (key, look)) in files.iter().enumerate() {
+        let icon = look.icon.as_ref().and_then(|to| match read(to) {
+            Ok(b) => {
+                let path = format!("icons/file-look-{n}.svg");
+                out.insert(path.clone(), b);
+                Some(SharedString::from(path))
+            },
+            Err(e) => {
+                problems.push(format!("file_icons.{key}.icon: \"{to}\": {e}"));
+                None
+            },
+        });
+        let color = look.color.as_ref().and_then(|c| {
+            let color = crate::style::parse_color(c);
+            if color.is_none() {
+                problems.push(format!("file_icons.{key}.color: can't read \"{c}\""));
+            }
+            color
+        });
+        looks.insert(key.to_ascii_lowercase(), (icon, color));
+    }
+    *FILE_LOOKS.write().unwrap_or_else(|e| e.into_inner()) = looks;
+    let mut old = OVERRIDES.write().unwrap_or_else(|e| e.into_inner());
+    let changed = old.iter().filter(|(k, v)| out.get(*k) != Some(*v)).map(|(k, _)| k);
+    let changed: Vec<String> = changed.chain(out.iter().filter(|(k, v)| old.get(*k) != Some(*v)).map(|(k, _)| k)).cloned().collect();
+    *old = out;
+    changed
+}
+
+/// `icon` and `color` with the first of `keys` the `file_icons` settings hold over them.
+fn looked(keys: &[&str], icon: IconName, color: Hsla) -> (Icon, Hsla) {
+    let looks = FILE_LOOKS.read().unwrap_or_else(|e| e.into_inner());
+    let (path, tint) = keys.iter().find_map(|k| looks.get(*k)).cloned().unwrap_or_default();
+    let icon = path.map_or_else(|| Icon::from(icon), |p| Icon::default().path(p));
+    (icon, tint.unwrap_or(color))
+}
+
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(bytes) = ExtraIcons.load(path)? {
-            return Ok(Some(bytes));
+        if let Some(bytes) = OVERRIDES.read().unwrap_or_else(|e| e.into_inner()).get(path) {
+            return Ok(Some(bytes.clone()));
         }
-        if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path))
-        {
-            return Ok(Some(Cow::Borrowed(bytes)));
-        }
-        gpui_kit::assets::Assets.load(path)
+        base_load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -107,7 +201,34 @@ impl AssetSource for AppAssets {
     }
 }
 
-pub fn dir_icon(name: &str, expanded: bool, theme: &Theme) -> (IconName, Hsla) {
+/// The asset bundled at `path`.
+fn base_load(path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+    if let Some(bytes) = ExtraIcons.load(path)? {
+        return Ok(Some(bytes));
+    }
+    if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path)) {
+        return Ok(Some(Cow::Borrowed(bytes)));
+    }
+    gpui_kit::assets::Assets.load(path)
+}
+
+/// Folder `name`'s icon and tint: the `file_icons` settings' (`name/`, else
+/// `/` for every folder) over the bundled ones.
+pub fn dir_icon(name: &str, expanded: bool, theme: &Theme) -> (Icon, Hsla) {
+    let (icon, color) = bundled_dir_icon(name, expanded, theme);
+    looked(&[&format!("{}/", name.to_ascii_lowercase()), "/"], icon, color)
+}
+
+/// File `name`'s icon and tint: the `file_icons` settings' (its whole name,
+/// else `.ext`) over the bundled ones.
+pub fn file_icon(name: &str, theme: &Theme) -> (Icon, Hsla) {
+    let (icon, color) = bundled_file_icon(name, theme);
+    let lower = name.to_ascii_lowercase();
+    let ext = lower.rfind('.').map_or("", |i| &lower[i..]);
+    looked(&[&lower, ext], icon, color)
+}
+
+fn bundled_dir_icon(name: &str, expanded: bool, theme: &Theme) -> (IconName, Hsla) {
     let icon = match name {
         ".git" => IconName::FolderGit2,
         "node_modules" | "target" | "dist" | "build" | "vendor" => IconName::FolderArchive,
@@ -123,7 +244,7 @@ pub fn dir_icon(name: &str, expanded: bool, theme: &Theme) -> (IconName, Hsla) {
     (icon, color)
 }
 
-pub fn file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
+fn bundled_file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
     let lower = name.to_ascii_lowercase();
     let muted = theme.muted_foreground;
     match lower.as_str() {
@@ -173,4 +294,31 @@ pub fn file_icon(name: &str, theme: &Theme) -> (IconName, Hsla) {
 
 fn orange() -> Hsla {
     rgb(0xe8834d).into()
+}
+
+#[cfg(test)]
+mod override_tests {
+    // Not `super::*`: gpui's `test` attribute would shadow the std one.
+    use super::{AppAssets, BTreeMap, FileLook, base_load, set_overrides};
+    use gpui_kit::AssetSource as _;
+
+    #[test]
+    fn an_icon_takes_another_ones_place_and_a_bad_one_is_a_problem() {
+        let dir = std::env::temp_dir();
+        let icons = BTreeMap::from([
+            ("bot".to_owned(), "folder".to_owned()),
+            ("cpu".to_owned(), "no-such-icon".to_owned()),
+            ("server".to_owned(), "no-such-file.svg".to_owned()),
+        ]);
+        let mut problems = vec![];
+        let files = BTreeMap::from([(".rs".to_owned(), FileLook { icon: Some("nope".into()), color: Some("nope".into()) })]);
+        let changed = set_overrides(&icons, &files, &dir, &mut problems);
+        assert_eq!(changed, ["icons/bot.svg"]);
+        let folder = base_load("icons/folder.svg").unwrap();
+        assert!(folder.is_some());
+        assert_eq!(AppAssets.load("icons/bot.svg").unwrap(), folder);
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        set_overrides(&BTreeMap::new(), &BTreeMap::new(), &dir, &mut vec![]);
+        assert_ne!(AppAssets.load("icons/bot.svg").unwrap(), folder);
+    }
 }

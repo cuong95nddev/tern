@@ -323,10 +323,13 @@ pub enum SavedTab {
     GitLog,
     /// A Claude chat: its conversation, the account it runs as (`None` is
     /// the default one), and its chat in the daemon.
+    /// `guard` and `handoff`: as a Claude tab's.
     Chat {
         session: String,
         account: Option<String>,
         mux: Option<u64>,
+        guard: Option<(u8, bool)>,
+        handoff: Option<String>,
     },
 }
 
@@ -460,7 +463,7 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                 let line = match tab {
                     SavedTab::Claude { name, session, mux, account, guard, handoff } => {
                         let mux = mux.map(|m| m.to_string()).unwrap_or_default();
-                        let guard = guard.map(|(limit, switch)| format!("{limit}{}", if switch { "s" } else { "" }));
+                        let guard = guard.map(encode_guard);
                         // The field after `mux` is a one-workspace build's folder.
                         let rest = match (account, guard, handoff) {
                             (None, None, None) => String::new(),
@@ -478,8 +481,13 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
                         format!("commit_diff\t{}\t{}\t{}\t{}", path(repo), field(hash), field(rel), opt(from))
                     },
                     SavedTab::GitLog => "git_log".to_owned(),
-                    SavedTab::Chat { session, account, mux } => {
-                        format!("chat\t{}\t{}\t{}", field(session), opt(account), mux.map(|m| m.to_string()).unwrap_or_default())
+                    SavedTab::Chat { session, account, mux, guard, handoff } => {
+                        let mux = mux.map(|m| m.to_string()).unwrap_or_default();
+                        let rest = match (guard, handoff) {
+                            (None, None) => String::new(),
+                            (guard, handoff) => format!("\t{}\t{}", guard.map(encode_guard).unwrap_or_default(), opt(handoff)),
+                        };
+                        format!("chat\t{}\t{}\t{mux}{rest}", field(session), opt(account))
                     },
                 };
                 out.push_str(&format!("\t\t{group}{line}\n"));
@@ -487,6 +495,16 @@ fn encode_session(windows: &[SavedWindow], panels: &SavedPanels) -> String {
         }
     }
     out
+}
+
+/// A tab's context limit and auto switch, as a field.
+fn encode_guard((limit, switch): (u8, bool)) -> String {
+    format!("{limit}{}", if switch { "s" } else { "" })
+}
+
+fn decode_guard(field: &str) -> Option<(u8, bool)> {
+    let (limit, switch) = field.strip_suffix('s').map_or((field, false), |l| (l, true));
+    Some((limit.parse().ok()?, switch))
 }
 
 fn decode_tab(line: &str) -> Option<SavedTab> {
@@ -500,10 +518,7 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
             let mux = next().and_then(|m| m.parse().ok());
             let _folder = next();
             let account = next();
-            let guard = next().and_then(|g| {
-                let (limit, switch) = g.strip_suffix('s').map_or((g.as_str(), false), |l| (l, true));
-                Some((limit.parse().ok()?, switch))
-            });
+            let guard = next().and_then(|g| decode_guard(&g));
             let handoff = next();
             SavedTab::Claude { session, name, mux, account, guard, handoff }
         },
@@ -516,7 +531,13 @@ fn decode_tab(line: &str) -> Option<SavedTab> {
         "scratch" => SavedTab::Scratch(next()?.into()),
         "commit_diff" => SavedTab::CommitDiff { repo: next()?.into(), hash: next()?, rel: next()?, from: next() },
         "git_log" => SavedTab::GitLog,
-        "chat" => SavedTab::Chat { session: next()?, account: next(), mux: next().and_then(|m| m.parse().ok()) },
+        "chat" => SavedTab::Chat {
+            session: next()?,
+            account: next(),
+            mux: next().and_then(|m| m.parse().ok()),
+            guard: next().and_then(|g| decode_guard(&g)),
+            handoff: next(),
+        },
         _ => return None,
     })
 }
@@ -791,8 +812,14 @@ mod tests {
                                 guard: Some((70, false)),
                                 handoff: Some("h.md".into()),
                             },
-                            SavedTab::Chat { session: "c-1".into(), account: None, mux: Some(9) },
-                            SavedTab::Chat { session: "c-2".into(), account: Some("account-2".into()), mux: None },
+                            SavedTab::Chat { session: "c-1".into(), account: None, mux: Some(9), guard: None, handoff: None },
+                            SavedTab::Chat {
+                                session: "c-2".into(),
+                                account: Some("account-2".into()),
+                                mux: None,
+                                guard: Some((60, true)),
+                                handoff: Some("docs/h.md".into()),
+                            },
                         ],
                         tab_groups: vec![Some(0), Some(0), None, Some(1), None, None, None, None, None, None, None, None, None],
                         groups: vec![
