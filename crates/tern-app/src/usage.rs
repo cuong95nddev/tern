@@ -123,8 +123,44 @@ pub struct Report {
     pub extra: Option<String>,
 }
 
+/// Where an agent's account quota comes from, for the usage monitor: one
+/// per agent that has `Capability::Usage` ([`usage_source`] is the table).
+/// Accounts are Claude's (see [`crate::accounts`]) until another agent has them.
+pub(crate) trait UsageSource: Send + Sync {
+    /// The agent it reads for.
+    fn agent(&self) -> &'static str;
+    /// Read account `account`'s usage once, blocking; `forced` when the
+    /// user asked for it now.
+    fn read(&self, account: &str, forced: bool) -> Outcome;
+}
+
+/// Claude's quota: the endpoint behind Claude Code's `/usage`.
+struct ClaudeUsage;
+
+impl UsageSource for ClaudeUsage {
+    fn agent(&self) -> &'static str {
+        tern_agent::CLAUDE
+    }
+
+    fn read(&self, account: &str, forced: bool) -> Outcome {
+        read(account, forced)
+    }
+}
+
+/// The agent whose accounts the usage monitor shows: accounts are Claude's
+/// (see [`crate::accounts`]).
+pub(crate) const ACCOUNT_AGENT: &str = tern_agent::CLAUDE;
+
+/// The usage source of agent `agent`, if Tern can read its quota.
+pub(crate) fn usage_source(agent: &str) -> Option<Box<dyn UsageSource>> {
+    match agent {
+        tern_agent::CLAUDE => Some(Box::new(ClaudeUsage)),
+        _ => None,
+    }
+}
+
 /// What a read found, from the service or from the cache.
-struct Outcome {
+pub(crate) struct Outcome {
     /// `None`: signed out, or nothing read yet.
     report: Option<Report>,
     error: Option<String>,
@@ -204,6 +240,8 @@ pub struct Usage(pub Entity<UsageStore>);
 impl Global for Usage {}
 
 pub struct UsageStore {
+    /// The agent its accounts' quota is read for (see [`ACCOUNT_AGENT`]).
+    agent: &'static str,
     accounts: HashMap<String, AccountUsage>,
     seen: Option<Instant>,
     _task: Task<()>,
@@ -255,7 +293,10 @@ pub fn store(cx: &mut App) -> Entity<UsageStore> {
 
 impl UsageStore {
     fn new(cx: &mut Context<Self>) -> Self {
+        let source: Option<std::sync::Arc<dyn UsageSource>> = usage_source(ACCOUNT_AGENT).map(Into::into);
+        let agent = source.as_ref().map_or(ACCOUNT_AGENT, |s| s.agent());
         let task = cx.spawn(async move |this, cx| {
+            let Some(source) = source else { return };
             loop {
                 let go = this.update(cx, |this, cx| {
                     let active: Vec<String> = accounts::store(cx).read(cx).active().iter().map(|a| a.id.clone()).collect();
@@ -283,7 +324,8 @@ impl UsageStore {
                 match go {
                     Ok(Some((id, forced))) => {
                         let account = id.clone();
-                        let outcome = cx.background_executor().spawn(async move { read(&account, forced) }).await;
+                        let source = source.clone();
+                        let outcome = cx.background_executor().spawn(async move { source.read(&account, forced) }).await;
                         if this.update(cx, |this, cx| this.take(&id, outcome, cx)).is_err() {
                             break;
                         }
@@ -294,7 +336,12 @@ impl UsageStore {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
         });
-        Self { accounts: HashMap::new(), seen: None, _task: task }
+        Self { agent, accounts: HashMap::new(), seen: None, _task: task }
+    }
+
+    /// The agent whose quota it shows: its cards carry that agent's logo.
+    pub fn agent(&self) -> tern_agent::AgentId {
+        tern_agent::AgentId::new(self.agent)
     }
 
     fn account(&mut self, id: &str) -> &mut AccountUsage {
@@ -707,7 +754,14 @@ pub fn ago(t: SystemTime, now: SystemTime) -> String {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{Cached, Limit, WEEK, countdown, parse, plan, timestamp};
+    use super::{Cached, Limit, WEEK, countdown, parse, plan, timestamp, usage_source};
+
+    #[test]
+    fn only_claude_has_a_usage_source() {
+        assert_eq!(usage_source(tern_agent::CLAUDE).map(|s| s.agent()), Some(tern_agent::CLAUDE));
+        assert!(usage_source("codex").is_none());
+        assert!(usage_source("opencode").is_none());
+    }
 
     const ANSWER: &str = r#"{
         "five_hour": {"utilization": 27.0, "resets_at": "2026-10-20T07:59:59.879107+00:00"},

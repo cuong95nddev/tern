@@ -59,6 +59,8 @@ pub struct ContextShown {
     pub usage: Option<ContextUse>,
     pub guard: ContextGuard,
     pub handoff: Handoff,
+    /// Its agent can keep a limit and hand off (see [`crate::agents::guard_shown`]).
+    pub guards: bool,
     /// Its daemon takes the user's handoffs.
     pub takes_handoffs: bool,
 }
@@ -78,11 +80,12 @@ impl ContextShown {
             .var("context_ring", percent.map(|p| p.to_string()).unwrap_or_default())
             .var("context_text", percent.map(|p| format!("{}%", p.round())).unwrap_or_default())
             .var("context_used", used)
-            .var("guarded", g.on)
-            .var("over", g.on && percent.is_some_and(|p| p >= f32::from(g.limit)))
+            .var("can_guard", self.guards)
+            .var("guarded", self.guards && g.on)
+            .var("over", self.guards && g.on && percent.is_some_and(|p| p >= f32::from(g.limit)))
             .var("limit", format!("{}%", g.limit))
             .var("auto_switch", g.auto_switch)
-            .var("can_hand_off", self.takes_handoffs)
+            .var("can_hand_off", self.guards && self.takes_handoffs)
             .var("handing_off", self.handoff == Handoff::Asked)
             .var("handoff_ready", matches!(self.handoff, Handoff::Written(_)))
             .var(
@@ -278,7 +281,7 @@ impl Render for UsageView {
             .var("note", note)
             .var("open", self.open)
             .var("context_open", self.context_open)
-            .slot("icon", crate::agents::agent_icon(&tern_agent::AgentId::new(tern_agent::CLAUDE), cx.theme()))
+            .slot("icon", crate::agents::agent_icon(&self.store.read(cx).agent(), cx.theme()))
             .list("limits", limits.unwrap_or_default());
         if let Some(c) = &self.context {
             scope = c.scope(scope);
@@ -439,7 +442,7 @@ impl Render for UsageCard {
                 .list("limits", limits)
                 .list("accounts", entries)
         });
-        let scope = scope.slot("icon", crate::agents::agent_icon(&tern_agent::AgentId::new(tern_agent::CLAUDE), cx.theme()));
+        let scope = scope.slot("icon", crate::agents::agent_icon(&self.store.read(cx).agent(), cx.theme()));
         let (bar, accounts, tab) = (self.bar.clone(), self.accounts.downgrade(), self.current.clone());
         // Closes the card and asks the workspace for an event.
         let act = move |ev: UsageEvent| {
@@ -618,11 +621,29 @@ mod tests {
             usage: None,
             guard: ContextGuard::default(),
             handoff: Handoff::Asked,
+            guards: true,
             takes_handoffs: true,
         };
         let scope = shown.scope(Scope::new("t"));
         assert_eq!(scope.text_var("agent").as_deref(), Some("Claude"));
         assert_eq!(scope.text_var("handoff_text").as_deref(), Some("Claude is writing a handoff…"));
         assert_eq!(scope.text_var("context_used").as_deref(), Some("Not known until Claude answers"));
+    }
+
+    #[test]
+    fn an_agent_that_cant_hand_off_shows_only_its_ring() {
+        let shown = ContextShown {
+            agent: "Codex".into(),
+            usage: None,
+            guard: ContextGuard { on: true, limit: 50, auto_switch: true },
+            handoff: Handoff::None,
+            guards: false,
+            takes_handoffs: true,
+        };
+        let scope = shown.scope(Scope::new("t"));
+        assert_eq!(scope.text_var("context").as_deref(), Some("true"));
+        for name in ["can_guard", "guarded", "over", "can_hand_off"] {
+            assert_eq!(scope.text_var(name).as_deref(), Some("false"), "{name}");
+        }
     }
 }

@@ -24,7 +24,7 @@ pub struct ClaudeDriver {
 
 impl ChatDriver for ClaudeDriver {
     fn agent(&self) -> &'static str {
-        "claude"
+        tern_agent::CLAUDE
     }
 
     fn caps(&self) -> ChatCaps {

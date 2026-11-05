@@ -79,7 +79,7 @@ pub trait ChatDriver: Send {
 /// The chat driver of agent `agent`, if it has one.
 pub fn chat_driver(agent: &str) -> Option<Box<dyn ChatDriver>> {
     match agent {
-        "claude" => Some(Box::new(ClaudeDriver::default())),
+        tern_agent::CLAUDE => Some(Box::new(ClaudeDriver::default())),
         _ => None,
     }
 }

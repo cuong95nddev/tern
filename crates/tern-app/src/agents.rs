@@ -363,12 +363,35 @@ pub fn agent_name(id: &AgentId) -> String {
     tern_agent::registry().get(id.as_str()).map_or_else(|| id.to_string(), |d| d.name.clone())
 }
 
+/// The context guard and its handoff are offered for agent `agent`: it
+/// reports how full its context is, can be told to write a handoff, and its
+/// transcript can be read for it. The ring alone needs only the first.
+pub fn guard_shown(agent: &str) -> bool {
+    use tern_agent::Capability::{Context, Steer, Transcript};
+    let registry = tern_agent::registry();
+    [Context, Steer, Transcript].into_iter().all(|c| registry.has(agent, c))
+}
+
 /// The shell line that starts agent `d` in a tab: its command, then its
 /// args, each quoted when the shell would split or expand it.
 pub fn launch_line(d: &tern_agent::Descriptor) -> String {
-    let plain = |a: &str| !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:@%+,".contains(c));
-    let args = d.args.iter().map(|a| if plain(a) { a.clone() } else { crate::workspace::shell_quote(a) });
-    std::iter::once(d.command.clone()).chain(args).collect::<Vec<_>>().join(" ")
+    std::iter::once(d.command.clone()).chain(d.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ")
+}
+
+/// `a` as one shell word: as it is when the shell would neither split nor
+/// expand it, else quoted.
+fn shell_word(a: &str) -> String {
+    let plain = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:@%+,".contains(c));
+    if plain { a.to_owned() } else { crate::workspace::shell_quote(a) }
+}
+
+/// The shell line that resumes `agent`'s conversation `session`: `start`
+/// (the line Tern starts the agent with, its command and Tern's and the
+/// user's arguments) in place of the command of its descriptor's resume
+/// argv, then the rest of that argv. `None` when the agent can't resume.
+pub fn resume_line(start: &str, agent: &AgentId, session: &str) -> Option<String> {
+    let argv = tern_agent::registry().get(agent.as_str())?.resume_argv(session)?;
+    Some(std::iter::once(start.to_owned()).chain(argv.iter().skip(1).map(|a| shell_word(a))).collect::<Vec<_>>().join(" "))
 }
 
 /// What menus and copy call agent `id` (`Claude`).
@@ -414,6 +437,25 @@ pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_resumes_with_its_descriptors_argv_after_the_start_line() {
+        let claude = tern_agent::AgentId::new(tern_agent::CLAUDE);
+        let start = "claude --foo --settings {tern-settings}";
+        assert_eq!(super::resume_line(start, &claude, "0f-1").as_deref(), Some("claude --foo --settings {tern-settings} --resume 0f-1"));
+        assert_eq!(
+            super::resume_line(start, &claude, "a b").as_deref(),
+            Some(format!("{start} --resume {}", crate::workspace::shell_quote("a b")).as_str())
+        );
+        assert_eq!(super::resume_line("gemini", &tern_agent::AgentId::new("gemini"), "x"), None);
+    }
+
+    #[test]
+    fn guard_is_offered_only_where_context_steer_and_transcript_exist() {
+        assert!(super::guard_shown(tern_agent::CLAUDE));
+        assert!(!super::guard_shown("codex"));
+        assert!(!super::guard_shown("no-such-agent"));
+    }
+
     // Not `super::*`: gpui's `test` attribute would shadow the std one.
 
     #[test]

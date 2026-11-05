@@ -2140,6 +2140,7 @@
         ]
       },
       {
+        "when": "can_guard",
         "element": "usage.card.section",
         "style": { "border_top_width": 1 },
         "children": [

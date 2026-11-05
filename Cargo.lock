@@ -6737,6 +6737,7 @@ dependencies = [
  "serde_json",
  "similar",
  "tempfile",
+ "tern-agent",
  "tern-bridge",
 ]
 

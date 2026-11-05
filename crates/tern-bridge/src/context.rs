@@ -13,6 +13,9 @@
 //! How full the window is comes from the status line's input (see
 //! [`crate::statusline`]), the latest one before each hook. Headless Claude
 //! (a chat) has no status line: [`Meter`] works it out from its output.
+//!
+//! Claude's steer: hook answers. Other agents' steer is added per agent
+//! (spec §2 Steer).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -298,7 +301,7 @@ fn last_message(raw: &Value) -> Option<String> {
 
 /// The text of the last assistant message in transcript `path`, read from
 /// its end.
-fn last_transcript_text(path: &Path) -> Option<String> {
+pub fn last_transcript_text(path: &Path) -> Option<String> {
     const TAIL: u64 = 512 * 1024;
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();

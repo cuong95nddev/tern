@@ -435,7 +435,7 @@ impl ChatView {
     fn load_history(&mut self, before: Option<u64>) {
         let record = record_path(&self.session).map(|p| tern_chat::read_record(&p)).unwrap_or_default();
         let mut t = Transcript::default();
-        if let Some(path) = saved_path(&self.account, &self.root, &self.session)
+        if let Some(path) = saved_path(self.driver.agent(), &self.account, &self.root, &self.session)
             && let Err(e) = self.driver.load(&mut t, &path, before, record)
         {
             log::warn!("chat: read {}: {e}", path.display());
@@ -460,7 +460,7 @@ impl ChatView {
 
     /// Start Claude in the daemon: resuming the conversation when Claude saved it.
     fn start(&mut self, cx: &mut Context<Self>) {
-        let resume = saved_path(&self.account, &self.root, &self.session).is_some();
+        let resume = saved_path(self.driver.agent(), &self.account, &self.root, &self.session).is_some();
         let line = self.driver.command(
             &crate::window_state::claude_args(),
             &self.session,
@@ -1798,9 +1798,9 @@ fn record_path(session: &str) -> Option<PathBuf> {
     safe.then(|| crate::dirs::data().join("chats").join(format!("{session}.jsonl")))
 }
 
-fn saved_path(account: &str, root: &std::path::Path, id: &str) -> Option<PathBuf> {
+fn saved_path(agent: &str, account: &str, root: &std::path::Path, id: &str) -> Option<PathBuf> {
     let config = accounts::claude_dir(account)?;
-    tern_chat::transcript_path(&config, root, id)
+    tern_chat::sessions::transcript_path(agent, &config, root, id)
 }
 
 impl Render for ChatView {

@@ -178,7 +178,7 @@ fn entries(cx: &mut App) -> Vec<Entry> {
                 workspace: workspace.clone(),
                 tab,
                 title,
-                agent: AgentId::new(tern_agent::CLAUDE),
+                agent: view.read(cx).agent(),
                 status,
                 view: AgentView::Chat(view),
             });

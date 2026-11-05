@@ -1151,7 +1151,7 @@ impl Workspace {
                 let line = registry.get(agent.as_str()).map_or_else(|| agent.to_string(), crate::agents::launch_line);
                 (crate::platform::shell_command_args(&line), crate::agents::agent_short_name(agent).into())
             },
-            TabKind::Agent(_) => {
+            TabKind::Agent(agent) => {
                 // Run through an interactive login shell so PATH from rc files applies.
                 // The daemon puts the hook settings file's path in place of
                 // the placeholder (or drops the flag without hooks).
@@ -1166,7 +1166,7 @@ impl Workspace {
                 let bg = resume.and_then(|id| claude_bg_job(&accounts::claude_dir(account)?.join("sessions"), id));
                 let claude = match (bg, resume) {
                     (Some(job), _) => format!("claude attach {}", shell_quote(&job)),
-                    (None, Some(id)) => format!("{claude} --resume {}", shell_quote(id)),
+                    (None, Some(id)) => crate::agents::resume_line(&claude, agent, id).unwrap_or(claude),
                     (None, None) => claude,
                 };
                 (crate::platform::shell_command_args(&claude), "claude".into())
@@ -2839,6 +2839,8 @@ impl Workspace {
         }) else {
             return;
         };
+        // Whose transcript the hook names, when Tern can read it.
+        let transcript_agent = tab.kind.agent().filter(|_| tab.kind.has(Capability::Transcript)).cloned();
         let status_line = ev.event == tern_bridge::statusline::EVENT;
         if status_line {
             let context = crate::agents::ContextUse::read(&ev.raw);
@@ -2875,8 +2877,10 @@ impl Workspace {
         if status_line {
             return;
         }
-        if let Some(path) = ev.raw.get("transcript_path").and_then(|p| p.as_str()).map(PathBuf::from) {
-            let read = Self::read_recent(ev.token.clone(), path, ev.cwd.clone(), cx);
+        if let Some(path) = ev.raw.get("transcript_path").and_then(|p| p.as_str()).map(PathBuf::from)
+            && let Some(agent) = transcript_agent
+        {
+            let read = Self::read_recent(agent, ev.token.clone(), path, ev.cwd.clone(), cx);
             if let Some(CenterTab::Term(t)) =
                 self.tabs.iter_mut().find(|t| matches!(t, CenterTab::Term(t) if t.token.as_deref() == Some(ev.token.as_str())))
             {
@@ -2897,11 +2901,11 @@ impl Workspace {
     /// its transcript at `path`, off the UI thread, once its hooks pause:
     /// a turn sends several at once, and Claude may not have written the
     /// latest lines yet.
-    fn read_recent(token: String, path: PathBuf, cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Task<()> {
+    fn read_recent(agent: AgentId, token: String, path: PathBuf, cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Task<()> {
         const SETTLE: Duration = Duration::from_millis(250);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SETTLE).await;
-            let read = cx.background_spawn(async move { tern_chat::read_recent(&path, cwd.as_deref()) }).await;
+            let read = cx.background_spawn(async move { tern_chat::sessions::read_recent(agent.as_str(), &path, cwd.as_deref()) }).await;
             let recent = match read {
                 Ok(r) => r,
                 Err(e) => {
@@ -5673,15 +5677,18 @@ impl Render for Workspace {
                 usage: t.context,
                 guard: t.guard,
                 handoff: t.handoff.clone(),
+                guards: t.kind.agent().is_some_and(|a| crate::agents::guard_shown(a.as_str())),
                 takes_handoffs: self.services.mux.takes_handoffs(),
             }),
-            Some(CenterTab::Chat { view, .. }) => {
+            Some(CenterTab::Chat { view, .. }) if tern_agent::registry().has(view.read(cx).agent().as_str(), Capability::Context) => {
                 let v = view.read(cx);
+                let agent = v.agent();
                 Some(crate::usage_view::ContextShown {
-                    agent: crate::agents::agent_short_name(&AgentId::new(tern_agent::CLAUDE)),
+                    agent: crate::agents::agent_short_name(&agent),
                     usage: v.context(),
                     guard: v.guard(),
                     handoff: v.handoff().clone(),
+                    guards: crate::agents::guard_shown(agent.as_str()),
                     // Before Claude runs there may be no daemon to tell: asking starts it.
                     takes_handoffs: v.chat_id().is_none() || self.services.mux.takes_chat_handoffs(),
                 })
