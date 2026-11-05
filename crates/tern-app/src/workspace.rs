@@ -628,6 +628,18 @@ pub(crate) fn shell_quote(s: &str) -> String {
     }
 }
 
+/// The agent a terminal tab shows: the one running in it (`detected`), else
+/// the one it was opened for, else Claude (an older tab with hooks).
+fn tab_agent(detected: Option<AgentId>, kind: &TabKind) -> AgentId {
+    detected.or_else(|| kind.agent().cloned()).unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE))
+}
+
+/// A tab of `kind` can show its conversation as a chat: its agent has one
+/// and a chat driver for it.
+fn chats(kind: &TabKind) -> bool {
+    kind.has(Capability::Chat) && kind.agent().is_some_and(|a| tern_chat::chat_driver(a.as_str()).is_some())
+}
+
 /// An agent tab whose program ended (`live`: while Tern watched, with exit
 /// `code`) goes on as a shell. An agent Tern launches with its integration
 /// (`integrated`) does when it ended on purpose (`/exit`, code 0); otherwise
@@ -1295,8 +1307,9 @@ impl Workspace {
                 // Finished or waiting out of sight: say so, titled by its task.
                 let muted = this.tabs.iter().any(|t| matches!(t, CenterTab::Chat { view: v, muted: true, .. } if v == view));
                 if !muted && (!window.is_window_active() || !this.tab_shown(view.entity_id())) {
-                    let task = tern_term::status::task_name(view.read(cx).title(), "Claude Chat");
-                    if let Some((title, body)) = tern_term::status::status_notification(status, "Claude", task.as_deref()) {
+                    let name = crate::agents::agent_short_name(&view.read(cx).agent());
+                    let task = tern_term::status::task_name(view.read(cx).title(), &format!("{name} Chat"));
+                    if let Some((title, body)) = tern_term::status::status_notification(status, &name, task.as_deref()) {
                         notify_system(&title, &body, cx);
                     }
                 }
@@ -1785,7 +1798,7 @@ impl Workspace {
     /// conversation the other way: `Some(to_chat)`.
     fn agent_view_switch(&self, ix: usize) -> Option<bool> {
         match self.tabs.get(ix)? {
-            CenterTab::Term(t) if t.kind.has(Capability::Chat) => Some(true),
+            CenterTab::Term(t) if chats(&t.kind) => Some(true),
             CenterTab::Chat { .. } => Some(false),
             _ => None,
         }
@@ -1796,11 +1809,14 @@ impl Workspace {
     /// program ends first, so two never write the conversation.
     fn switch_agent_view(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(to_chat) = self.agent_view_switch(ix) else { return };
-        let (status, session, account) = match &self.tabs[ix] {
-            CenterTab::Term(t) => (t.view.read(cx).status(), t.session.clone(), t.account.clone()),
+        let (agent, status, session, account) = match &self.tabs[ix] {
+            CenterTab::Term(t) => {
+                let Some(agent) = t.kind.agent().cloned() else { return };
+                (agent, t.view.read(cx).status(), t.session.clone(), t.account.clone())
+            },
             CenterTab::Chat { view, .. } => {
                 let v = view.read(cx);
-                (v.status(), Some(v.session().to_owned()).filter(|s| !s.is_empty()), v.account().to_owned())
+                (v.agent(), v.status(), Some(v.session().to_owned()).filter(|s| !s.is_empty()), v.account().to_owned())
             },
             _ => return,
         };
@@ -1828,10 +1844,16 @@ impl Workspace {
         }
         // Made in the old tab's pane, then put in its place.
         self.focused = self.pane_of(ix);
+        // A chat is only offered for an agent with a chat driver
+        // (`agent_view_switch`): the new tab is the last one.
+        let before = self.tabs.len();
         if to_chat {
-            self.add_chat(&AgentId::new(tern_agent::CLAUDE), &account, session, None, window, cx);
+            self.add_chat(&agent, &account, session, None, window, cx);
         } else {
-            self.add_term(TabKind::claude(), None, session, None, &account, window, cx);
+            self.add_term(TabKind::Agent(agent), None, session, None, &account, window, cx);
+        }
+        if self.tabs.len() == before {
+            return;
         }
         let Some(mut new) = self.tabs.pop() else { return };
         match &mut new {
@@ -2661,8 +2683,9 @@ impl Workspace {
     /// tab is named for, for its notifications.
     fn task_of(&self, view: &Entity<TerminalView>, cx: &App) -> (String, Option<String>) {
         let v = view.read(cx);
-        let agent = v.agent().map_or_else(|| "Claude".to_owned(), |a| crate::agents::agent_name(&a));
-        let rename = self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view == *view).and_then(|t| t.rename.clone());
+        let tab = self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view == *view);
+        let agent = crate::agents::agent_name(&tab_agent(v.agent(), tab.map_or(&TabKind::Shell, |t| &t.kind)));
+        let rename = tab.and_then(|t| t.rename.clone());
         let title = rename.map_or_else(|| v.title().to_string(), |r| r.to_string());
         let task = tern_term::status::task_name(&title, &agent);
         (agent, task)
@@ -2993,7 +3016,7 @@ impl Workspace {
                 match &self.tabs[i] {
                     CenterTab::Term(t) if t.kind.agent().is_some() || t.view.read(cx).agent().is_some() => {
                         let v = t.view.read(cx);
-                        let (now, agent) = (v.status(), v.agent().unwrap_or_else(|| AgentId::new(tern_agent::CLAUDE)));
+                        let (now, agent) = (v.status(), tab_agent(v.agent(), &t.kind));
                         let scope = crate::agents::recent_vars(row(crate::agents::display_name(&label, &agent)), &t.recent, cx);
                         Some((id, crate::agents::ring_vars(scope, v, t.rang, t.context, cx.theme()), now))
                     },
@@ -3054,8 +3077,9 @@ impl Workspace {
         }
     }
 
-    /// Open a tab running `agent`: `None` when the workspace shows none
-    /// after (Claude asks which account first when several are on).
+    /// Open a tab running `agent`, and the terminal tab shown after: the
+    /// new one, or, while Claude asks which account first (several are on),
+    /// the one shown before; `None` when no terminal tab shows.
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         self.add_tab(TabKind::Agent(agent), window, cx);
@@ -3164,7 +3188,7 @@ impl Workspace {
             CenterTab::Log { .. } => {
                 return Some(Icon::new(AssetIcon::GitCommitHorizontal).text_color(mono).small().flex_shrink_0().into_any_element());
             },
-            CenterTab::Chat { .. } => return Some(crate::agents::agent_icon(&AgentId::new(tern_agent::CLAUDE), theme)),
+            CenterTab::Chat { view, .. } => return Some(crate::agents::agent_icon(&view.read(cx).agent(), theme)),
         };
         let agent = t.view.read(cx).agent().or_else(|| t.kind.agent().cloned());
         Some(match agent {
@@ -5865,6 +5889,26 @@ mod tests {
         assert!(goes_on_as_shell(false, true, None));
         // Found ended after a restart: left as it is.
         assert!(!goes_on_as_shell(false, false, Some(127)));
+    }
+
+    #[test]
+    fn an_agent_tab_is_named_for_its_own_agent_before_it_is_detected() {
+        use super::{TabKind, tab_agent};
+        use tern_agent::AgentId;
+        let codex = TabKind::Agent(AgentId::new("codex"));
+        assert_eq!(tab_agent(None, &codex).as_str(), "codex");
+        // What runs in it wins: a shell that started Codex.
+        assert_eq!(tab_agent(Some(AgentId::new("codex")), &TabKind::Shell).as_str(), "codex");
+        assert_eq!(tab_agent(Some(AgentId::new("claude")), &codex).as_str(), "claude");
+        assert_eq!(tab_agent(None, &TabKind::Shell).as_str(), "claude");
+    }
+
+    #[test]
+    fn only_an_agent_with_a_chat_driver_switches_to_a_chat() {
+        use super::{TabKind, chats};
+        assert!(chats(&TabKind::claude()));
+        assert!(!chats(&TabKind::Agent(tern_agent::AgentId::new("codex"))));
+        assert!(!chats(&TabKind::Shell));
     }
 
     #[test]

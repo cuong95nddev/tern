@@ -392,10 +392,18 @@ pub fn start_line(d: &tern_agent::Descriptor, user: &str) -> String {
     line
 }
 
-/// `a` as one shell word: as it is when the shell would neither split nor
-/// expand it, else quoted.
+/// `a` as one shell word for the shell Tern runs lines in (see
+/// [`shell_word_for`]).
 fn shell_word(a: &str) -> String {
-    let plain = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:@%+,".contains(c));
+    shell_word_for(a, cfg!(windows))
+}
+
+/// `a` as one shell word: as it is when the shell would neither split nor
+/// expand it, else quoted. PowerShell (`windows`) also splats `@` and splits
+/// on `,`; zsh expands a leading `=`.
+fn shell_word_for(a: &str, windows: bool) -> String {
+    let safe = if windows { "_-./:" } else { "_-./=:@%+," };
+    let plain = !a.is_empty() && !a.starts_with('=') && a.chars().all(|c| c.is_ascii_alphanumeric() || safe.contains(c));
     if plain { a.to_owned() } else { crate::workspace::shell_quote(a) }
 }
 
@@ -451,6 +459,19 @@ pub fn asset_paths(prefix: &str) -> impl Iterator<Item = SharedString> + '_ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_words_are_quoted_for_the_shell_that_reads_them() {
+        use super::shell_word_for;
+        assert_eq!(shell_word_for("--x=1", false), "--x=1");
+        // zsh expands a leading `=` (`=cmd`): quoted everywhere.
+        assert_ne!(shell_word_for("=x", false), "=x");
+        // PowerShell splats `@a` and splits on `,`.
+        assert_eq!(shell_word_for("@a", false), "@a");
+        assert_ne!(shell_word_for("@a", true), "@a");
+        assert_ne!(shell_word_for("a,b", true), "a,b");
+        assert_eq!(shell_word_for("--resume", true), "--resume");
+    }
+
     #[test]
     fn claude_starts_with_the_descriptors_command_and_args() {
         let mut d = tern_agent::registry().get(tern_agent::CLAUDE).unwrap().clone();

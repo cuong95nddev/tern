@@ -355,9 +355,10 @@ impl Transcript {
         self.version += 1;
     }
 
-    /// Record the answer given to request `request_id`.
+    /// Record the answer given to request `request_id` (its latest entry,
+    /// as the fold's index of requests points at).
     pub fn set_answer(&mut self, request_id: &str, answer: Answer) {
-        let entry = self.entries.iter_mut().find(|e| match e {
+        let entry = self.entries.iter_mut().rev().find(|e| match e {
             Entry::Ask(a) => a.request_id == request_id,
             Entry::Elicit(e) => e.request_id == request_id,
             _ => false,
@@ -373,7 +374,7 @@ impl Transcript {
 
     /// Record the answer given to elicitation `request_id`.
     pub fn set_elicit_answer(&mut self, request_id: &str, answer: ElicitAnswer) {
-        let entry = self.entries.iter_mut().find(|e| matches!(e, Entry::Elicit(e) if e.request_id == request_id));
+        let entry = self.entries.iter_mut().rev().find(|e| matches!(e, Entry::Elicit(e) if e.request_id == request_id));
         if let Some(Entry::Elicit(e)) = entry {
             e.answer = Some(answer);
             self.version += 1;
@@ -422,5 +423,28 @@ impl Transcript {
                 _ => {},
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(id: &str) -> Entry {
+        Entry::Ask(Ask {
+            request_id: id.into(),
+            tool_name: "Bash".into(),
+            tool_use_id: None,
+            input: Value::Null,
+            suggestions: Value::Null,
+            answer: None,
+        })
+    }
+
+    #[test]
+    fn an_answer_goes_to_the_latest_request_of_its_id() {
+        let mut t = Transcript { entries: vec![ask("r"), ask("r")], ..Default::default() };
+        t.set_answer("r", Answer::Allow);
+        assert!(matches!(&t.entries[..], [Entry::Ask(Ask { answer: None, .. }), Entry::Ask(Ask { answer: Some(Answer::Allow), .. })]));
     }
 }
