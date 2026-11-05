@@ -30,6 +30,9 @@ What a new agent plugs into:
 - Window restore after a clean quit with a Codex tab wasn't exercised (`pkill` doesn't save the window).
 - A Codex chat refuses requests it has no look for (`item/permissions/requestApproval`, `item/tool/requestUserInput`, `item/tool/call`) with -32601.
 - A reloaded Codex chat doesn't show past MCP forms, and an interrupted command shows after its turn's end.
+- Any error response ends the turn in a Codex chat's UI and daemon: a refused `turn/steer` shows idle until `turn/completed`.
+- `read_context` may follow a sub-agent's `transcript_path`, so the ring could flip mid-turn (unverified).
+- `set_tab_agent` is deferred on every render while an agent without `Usage` is shown.
 - Claude's usage card has no Codex row; Codex's numbers show when a Codex tab or chat is shown. The user was told.
 
 ## Decisions to keep
