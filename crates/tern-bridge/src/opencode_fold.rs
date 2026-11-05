@@ -4,10 +4,16 @@
 //! the UI take them as they do theirs. A guard's answer goes back as a steer.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
 use crate::context::Reading;
+
+/// A preview file past this keeps only its end, [`PREVIEW_KEPT`].
+const PREVIEW_MAX: u64 = 1024 * 1024;
+const PREVIEW_KEPT: usize = 64 * 1024;
 
 /// The hook event name the plugin's posts come under.
 pub const EVENT: &str = "OpenCode";
@@ -71,14 +77,41 @@ pub struct OpenCodeFold {
     text: Option<String>,
     /// A steer kept the turn going: the next `Stop` says so.
     steered: bool,
+    /// What the sidebar reads (see `tern_chat::opencode::preview`).
+    preview: Option<PathBuf>,
 }
 
 impl OpenCodeFold {
+    /// With a sidebar preview kept at `path`.
+    pub fn with_preview(path: PathBuf) -> Self {
+        Self { preview: Some(path), ..Self::default() }
+    }
+
+    /// Add `line` to the preview. A failure costs the sidebar a line, so it
+    /// is let go.
+    fn note(&self, line: &Value) {
+        let Some(path) = &self.preview else { return };
+        let appended = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| {
+            writeln!(f, "{line}")?;
+            f.metadata()
+        });
+        if appended.is_ok_and(|m| m.len() > PREVIEW_MAX)
+            && let Ok(text) = std::fs::read(path)
+        {
+            let from = text.len().saturating_sub(PREVIEW_KEPT);
+            let start = text[from..].iter().position(|b| *b == b'\n').map_or(text.len(), |i| from + i + 1);
+            let _ = std::fs::write(path, &text[start..]);
+        }
+    }
+
     /// A hook payload `event` of the tab's conversation, with `fields`.
     fn payload(&self, event: &str, fields: Value) -> Value {
         let mut v = json!({ "hook_event_name": event, "session_id": self.root });
         if let Some(cwd) = &self.cwd {
             v["cwd"] = json!(cwd);
+        }
+        if let Some(path) = &self.preview {
+            v["transcript_path"] = json!(path);
         }
         if let (Some(o), Some(fields)) = (v.as_object_mut(), fields.as_object()) {
             o.extend(fields.clone());
@@ -148,12 +181,14 @@ impl OpenCodeFold {
                 let id = text_at(data, "/id");
                 let tool = self.tools.entry(id.to_owned()).or_default();
                 tool.1 = tool_input(&data["input"]);
-                let fields = json!({ "tool_name": tool_name(&tool.0), "tool_input": tool.1, "tool_use_id": id });
-                Some(self.payload("PreToolUse", fields))
+                let (name, input) = (tool_name(&tool.0).to_owned(), tool.1.clone());
+                self.note(&json!({ "tool": name, "input": input }));
+                Some(self.payload("PreToolUse", json!({ "tool_name": name, "tool_input": input, "tool_use_id": id })))
             },
             "session.tool.success" | "session.tool.failed" => {
                 let id = text_at(data, "/id");
                 let (name, input) = self.tools.remove(id).unwrap_or_default();
+                self.note(&json!({ "done": true }));
                 let event = if kind == "session.tool.success" { "PostToolUse" } else { "PostToolUseFailure" };
                 Some(self.payload(event, json!({ "tool_name": tool_name(&name), "tool_input": input, "tool_use_id": id })))
             },
@@ -161,6 +196,7 @@ impl OpenCodeFold {
             "permission.replied" | "form.replied" | "form.cancelled" => Some(self.payload(ANSWERED, json!({}))),
             "session.text.ended" => {
                 self.text = Some(text_at(data, "/text").to_owned());
+                self.note(&json!({ "text": self.text }));
                 None
             },
             "session.execution.succeeded" => {
@@ -256,6 +292,49 @@ mod tests {
             assert!(names.contains(&name), "{name}: {names:?}");
         }
         assert!(events.iter().all(|e| e["session_id"] == "ses_ternspike0000000000000006"), "{events:?}");
+    }
+
+    #[test]
+    fn the_preview_gets_texts_and_tools_and_payloads_name_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        let mut f = OpenCodeFold::with_preview(path.clone());
+        started(&mut f, "s");
+        f.on_event(&ev("session.text.ended", json!({"sessionID": "s", "text": "Looking."})));
+        f.on_event(&ev("session.tool.input.started", json!({"sessionID": "s", "id": "c", "name": "shell"})));
+        let pre = f.on_event(&ev("session.tool.called", json!({"sessionID": "s", "id": "c", "input": {"command": "ls"}})));
+        assert_eq!(pre[0]["transcript_path"], path.to_string_lossy().as_ref());
+        let lines: Vec<Value> = std::fs::read_to_string(&path).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines, [json!({"text": "Looking."}), json!({"tool": "Bash", "input": {"command": "ls"}})]);
+        f.on_event(&ev("session.tool.success", json!({"sessionID": "s", "id": "c"})));
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with("{\"done\":true}\n"));
+    }
+
+    #[test]
+    fn a_childs_text_stays_out_of_the_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        let mut f = OpenCodeFold::with_preview(path.clone());
+        started(&mut f, "r");
+        f.on_event(&child("session.text.ended", json!({"sessionID": "c", "text": "child"}), "r"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_preview_stays_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        let mut f = OpenCodeFold::with_preview(path.clone());
+        started(&mut f, "s");
+        let text = "x".repeat(100_000);
+        for _ in 0..12 {
+            f.on_event(&ev("session.text.ended", json!({"sessionID": "s", "text": text})));
+        }
+        f.on_event(&ev("session.text.ended", json!({"sessionID": "s", "text": "last"})));
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(kept.len() < 1_100_000, "{}", kept.len());
+        assert!(kept.lines().all(|l| serde_json::from_str::<Value>(l).is_ok()), "a line was cut");
+        assert!(kept.ends_with("{\"text\":\"last\"}\n"));
     }
 
     #[test]

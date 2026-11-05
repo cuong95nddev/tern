@@ -20,6 +20,7 @@ pub mod claude;
 pub mod codex;
 mod driver;
 mod model;
+pub mod opencode;
 mod recent;
 pub mod sessions;
 pub mod summary;

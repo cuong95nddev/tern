@@ -24,6 +24,7 @@ pub fn read_recent(agent: &str, path: &Path, cwd: Option<&Path>) -> io::Result<R
     match agent {
         tern_agent::CLAUDE => crate::recent::read_recent(path, cwd),
         tern_agent::CODEX => crate::codex::rollout::read_recent(path, cwd),
+        tern_agent::OPENCODE => crate::opencode::preview::read_recent(path, cwd),
         _ => Ok(Recent::default()),
     }
 }
@@ -33,6 +34,7 @@ pub fn last_text(agent: &str, path: &Path) -> Option<String> {
     match agent {
         tern_agent::CLAUDE => tern_bridge::context::last_transcript_text(path),
         tern_agent::CODEX => crate::codex::rollout::last_text(path),
+        tern_agent::OPENCODE => crate::opencode::preview::last_text(path),
         _ => None,
     }
 }
@@ -76,6 +78,15 @@ mod tests {
         assert_eq!(read_recent("codex", &path, None).unwrap().text.as_deref(), Some("Done."));
         assert_eq!(context_reading("codex", &path).map(|r| r.size), Some(258_400));
         assert!(context_reading("claude", &path).is_none());
+    }
+
+    #[test]
+    fn opencode_reads_its_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("preview.json");
+        std::fs::write(&path, "{\"text\":\"Done.\"}\n").unwrap();
+        assert_eq!(read_recent("opencode", &path, None).unwrap().text.as_deref(), Some("Done."));
+        assert_eq!(last_text("opencode", &path).as_deref(), Some("Done."));
     }
 
     #[test]

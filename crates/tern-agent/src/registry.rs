@@ -24,7 +24,7 @@ fn builtin_capabilities(id: &str) -> &'static [Capability] {
     match id {
         CLAUDE => &[Launch, Status, Session, Transcript, Context, Steer, Usage, Chat, Skills],
         CODEX => &[Launch, Status, Session, Transcript, Chat, Context, Steer, Usage, Skills],
-        OPENCODE => &[Launch],
+        OPENCODE => &[Launch, Status, Session, Transcript, Context, Steer, Skills],
         _ => &[],
     }
 }
@@ -217,6 +217,17 @@ mod tests {
         for id in ["gemini", "cursor", "grok", "pi"] {
             assert!(!r.has(id, Capability::Launch), "{id}");
         }
+    }
+
+    #[test]
+    fn opencode_has_what_its_plugin_gives() {
+        let r = Registry::builtin();
+        for c in
+            [Capability::Status, Capability::Session, Capability::Transcript, Capability::Context, Capability::Steer, Capability::Skills]
+        {
+            assert!(r.has("opencode", c), "{c:?}");
+        }
+        assert!(!r.has("opencode", Capability::Usage));
     }
 
     #[test]

@@ -516,8 +516,9 @@ fn type_after_turn(host: &Arc<Host>, agent: Option<&AgentId>, action: Action) {
 }
 
 /// What folds the events of a tab of `agent`, when it needs it.
-fn fold_for(agent: Option<&AgentId>) -> Option<OpenCodeFold> {
-    agent.filter(|a| a.is(tern_agent::OPENCODE)).map(|_| OpenCodeFold::default())
+fn fold_for(agent: Option<&AgentId>, run_dir: &Path, token: Option<&str>) -> Option<OpenCodeFold> {
+    agent.filter(|a| a.is(tern_agent::OPENCODE))?;
+    Some(OpenCodeFold::with_preview(opencode_hooks::opencode_preview_path(run_dir, token?)))
 }
 
 /// The guard of a tab of `agent`.
@@ -1303,7 +1304,7 @@ impl Server {
                     held: false,
                     hooks: VecDeque::new(),
                     guard: guard_for(agent.as_ref()),
-                    fold: fold_for(agent.as_ref()),
+                    fold: fold_for(agent.as_ref(), &self.run_dir, token.as_deref()),
                     agent,
                     claude_session: None,
                     policy: Policy::default(),
@@ -1890,6 +1891,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
             drivers.extend(driver);
             let hooks = s.hooks.into_iter().map(serde_bytes::ByteBuf::into_vec).collect();
             let agent = s.agent.as_deref().map(AgentId::new).or_else(|| s.token.as_ref().map(|_| AgentId::new(tern_agent::CLAUDE)));
+            let fold = fold_for(agent.as_ref(), &server.run_dir, s.token.as_deref());
             // A lane that knows nothing yet isn't handed over.
             if let Some(a) = agent.as_ref().filter(|_| host.lane().is_none()) {
                 host.set_agent(a.as_str());
@@ -1899,7 +1901,7 @@ fn adopt_sessions(dir: &Path, opts: &ServeOpts, stream: &UnixStream) -> io::Resu
                 Session {
                     host,
                     guard: guard_for(agent.as_ref()),
-                    fold: fold_for(agent.as_ref()),
+                    fold,
                     agent,
                     token: s.token,
                     owner: None,
