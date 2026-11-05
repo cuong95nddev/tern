@@ -828,7 +828,14 @@ mod tests {
     #[test]
     fn palette_offers_every_agent_and_a_chat_only_for_agents_with_chat() {
         let all = titles("");
-        for t in ["New Claude Tab", "New Claude Chat", "Switch Claude Tab: Terminal ⇄ Chat", "New Codex Tab", "New Codex Chat", "New OpenCode Tab"] {
+        for t in [
+            "New Claude Tab",
+            "New Claude Chat",
+            "Switch Claude Tab: Terminal ⇄ Chat",
+            "New Codex Tab",
+            "New Codex Chat",
+            "New OpenCode Tab",
+        ] {
             assert!(all.iter().any(|a| a == t), "{t}");
         }
         assert!(!all.iter().any(|a| a == "New OpenCode Chat"));

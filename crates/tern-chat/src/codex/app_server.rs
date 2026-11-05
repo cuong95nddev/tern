@@ -271,8 +271,13 @@ impl CodexDriver {
             },
             "mcpServer/elicitation/request" => {
                 let schema = params.get("requestedSchema");
-                let required: Vec<&str> =
-                    schema.and_then(|s| s.get("required")).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+                let required: Vec<&str> = schema
+                    .and_then(|s| s.get("required"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
                 let props = schema.and_then(|s| s.get("properties")).and_then(Value::as_object);
                 let fields = props.into_iter().flatten().map(|(n, p)| Field::parse(n, p, required.contains(&n.as_str()))).collect();
                 let url = (str_at(params, "/mode") == "url").then(|| str_at(params, "/url").to_owned()).filter(|u| !u.is_empty());
@@ -282,7 +287,9 @@ impl CodexDriver {
             },
             other => {
                 t.entries.push(Entry::Notice { text: format!("A request this chat can't answer: “{other}”"), error: false });
-                Some(json!({ "id": v["id"], "error": { "code": NO_METHOD, "message": format!("unsupported request {other}") } }).to_string())
+                Some(
+                    json!({ "id": v["id"], "error": { "code": NO_METHOD, "message": format!("unsupported request {other}") } }).to_string(),
+                )
             },
         }
     }
@@ -622,7 +629,11 @@ mod tests {
         for line in &lines[first + 1..] {
             d.fold_line(&mut t, line);
         }
-        let texts: Vec<_> = t.entries.iter().filter_map(|e| if let Entry::Text { text, streaming } = e { Some((text.as_str(), *streaming)) } else { None }).collect();
+        let texts: Vec<_> = t
+            .entries
+            .iter()
+            .filter_map(|e| if let Entry::Text { text, streaming } = e { Some((text.as_str(), *streaming)) } else { None })
+            .collect();
         assert_eq!(texts.last(), Some(&("Done.", false)));
         assert!(texts.iter().all(|(_, streaming)| !streaming));
     }
@@ -686,7 +697,8 @@ mod tests {
     #[test]
     fn a_turn_ends_with_how_it_ended() {
         let (_, t) = fed(2);
-        let ends: Vec<_> = t.entries.iter().filter_map(|e| if let Entry::TurnEnd(e) = e { Some((e.ms, e.interrupted)) } else { None }).collect();
+        let ends: Vec<_> =
+            t.entries.iter().filter_map(|e| if let Entry::TurnEnd(e) = e { Some((e.ms, e.interrupted)) } else { None }).collect();
         assert_eq!(ends, [(9038, false), (3828, true)]);
         assert!(!t.busy);
     }
@@ -857,7 +869,11 @@ mod tests {
 
     #[test]
     fn the_first_user_message_titles_the_chat() {
-        assert!(said(&recording()).contains(&Said::Title("Run ls. Then create b.txt containing hi with apply_patch. Then say Done.".chars().take(60).collect())));
+        assert!(
+            said(&recording()).contains(&Said::Title(
+                "Run ls. Then create b.txt containing hi with apply_patch. Then say Done.".chars().take(60).collect()
+            ))
+        );
     }
 
     #[test]

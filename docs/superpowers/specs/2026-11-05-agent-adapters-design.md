@@ -102,10 +102,11 @@ fully featured agent by data alone; herdr lets data add detection rules.
   (`tern-term/src/claude_status/`) keep passing unchanged in substance.
 - **Editing the user's global agent config.** Today Claude gets a private
   `--settings` file per tab and `~/.claude/settings.json` is never touched.
-  Keep that: integration for every agent goes through per-launch overlays
-  (flag, env var pointing at a Tern-owned dir), never by writing into
-  `~/.codex`, `~/.config/opencode`, etc. Orca's managed `CODEX_HOME` and
-  `OPENCODE_CONFIG_DIR` overlays are the model.
+  Keep that: integration for every agent goes through what one launch is
+  given (a flag, or an env var pointing at a Tern-owned dir), never by
+  writing into `~/.codex`, `~/.config/opencode`, etc. Codex takes it all in
+  `-c` flags; Orca's managed `OPENCODE_CONFIG_DIR` overlay is the model for
+  OpenCode.
 - Workarounds instead of root fixes: no "if agent == Claude" left behind in a
   feature after its capability exists; the old Claude-specific names and
   paths are renamed, not wrapped.
@@ -219,9 +220,10 @@ Sketch of the contracts (names are the builder's to refine):
   or a fresh session id, and the tab's hook endpoint/token, produce the argv
   and env, and any per-launch files to write (and remove on exit). Claude:
   today's `--settings {tern-settings}` file, `--session-id`/`--resume`,
-  account env. Codex: a Tern-owned `CODEX_HOME` overlay that
-  links the user's real `~/.codex` content and adds Tern's `hooks.json` (see
-  Orca `src/main/codex/configuration/homes/`). OpenCode: an
+  account env. Codex: `--no-daemon -c hooks={…}`, the hooks with their trust
+  hashes in one session-flags argument. No overlay home: conversations stay
+  in `~/.codex/sessions` and there is no config to mirror. Needs Codex 0.166;
+  an older one, or one Tern can't find, runs without hooks. OpenCode: an
   `OPENCODE_CONFIG_DIR` overlay with Tern's plugin
   (Orca `src/main/opencode/hook-service.ts`).
 - `HookLane`: turns one raw hook/plugin event into normalized `AgentEvent`s,
@@ -337,7 +339,7 @@ Each phase is shippable on its own and leaves main green.
    split with the Claude driver, capability traits with Claude as the only
    full adapter. Zero visible change for Claude users; other agents behave
    as today.
-2. **Codex.** Launch overlay + hooks, hook lane, sessions/rollouts, context
+2. **Codex.** Launch flags + hooks, hook lane, sessions/rollouts, context
    meter, usage from rollouts, steer, resume, recent preview; then the
    `app-server` chat driver.
 3. **OpenCode.** Config overlay + plugin, lane, sessions, context, steer,
@@ -358,13 +360,13 @@ Each phase is shippable on its own and leaves main green.
 
 - First-class targets are Claude, Codex, OpenCode; others stay basic.
 - Chat keeps native protocols per agent, not ACP-for-all.
-- No edits to users' global agent configs; per-launch overlays only.
+- No edits to users' global agent configs; only what a launch is given.
 - Descriptor format JSON under `~/.config/tern/agents/`.
 - Codex usage from rollout files, not Codex's backend API.
-- Claude accounts stay Claude-only. Codex/OpenCode get one Tern-owned
-  overlay home per agent (shared by its tabs, keyed by the user's real home),
-  not per account and not per tab; the account model stays inside Claude's
-  adapter.
+- Claude accounts stay Claude-only: the account model stays inside Claude's
+  adapter. Codex has no home of Tern's (see `Launch`); OpenCode gets one
+  Tern-owned overlay (shared by its tabs, keyed by the user's real home), not
+  per account and not per tab.
 - Steering and metering have two surfaces. Terminal tabs: the hook lane
   (Claude hook answers; others hook answer or idle paste). Chats: the chat
   driver owns both, as the daemon does today for Claude chats (guard text sent
@@ -384,21 +386,33 @@ Each phase is shippable on its own and leaves main green.
 
 ## Open items for the builder to verify
 
-- Whether Codex hook outputs can inject context / block `Stop` like Claude's
-  (decides if Codex `steer` uses hooks or the paste fallback).
 - Whether OpenCode's plugin API can inject a message into the session
   (`client.session.prompt` with `noReply`, per its SDK docs) for `steer`.
-- Whether `codex app-server` and `opencode acp` can resume a session the TUI
-  started (needed for the terminal ⇄ chat switch).
-- Codex hook trust: Codex asks to trust hooks in `config.toml`; Orca writes
-  trust entries in its managed home (`src/main/codex/trust/`).
+- Whether `opencode acp` can resume a session the TUI started (needed for the
+  terminal ⇄ chat switch).
+
+Settled for Codex (0.166.0, phase 2):
+
+- Its hooks answer as Claude's do: `additionalContext`, and `Stop` blocks with
+  `{"decision":"block","reason"}`, so `steer` uses hooks. `SessionStart` comes
+  with a conversation's first turn, not when it opens, so a cleared
+  conversation is prompted at once (`Guard::starting_at_first_turn`).
+- `codex app-server` resumes a conversation the TUI started, once the TUI has
+  ended. While it runs, `thread/resume` is refused (`-32600 … active writer`),
+  which a chat shows as a notice.
+- Hook trust needs no file: the hashes go in with the hooks, in `-c`.
+- A chat has no `/clear`: the guard goes on in a fresh `thread/start` in the
+  same server.
 
 ## Phase 1 done
 
 Phase 1 (registry, descriptors, one detector, `AgentStatus` and hook lanes,
 `TabKind::Agent`, per-agent actions and menus, the neutral chat model with
 the chat-driver table, and the sessions / usage tables, all filled by Claude)
-is on branch `agent-adapters`, commits `122a1e0..` (2026-11-05). Phase 2
-adds Codex's entries: its hook lane, chat driver (`codex app-server`),
-sessions and usage from rollouts; the daemon's chat follower is still
-Claude stream-json and is generalised then.
+is on `main`, commits `122a1e0..` (2026-11-05).
+
+## Phase 2 done
+
+Phase 2 added Codex's entries: its launch flags and hook lane, sessions,
+context and usage from rollouts, and its chat driver (`codex app-server`). The
+daemon follows a chat through its agent's `ChatFollow`.

@@ -1727,7 +1727,10 @@ when it ends) and reads its status from its screen:
 ```
 
 Tern's deeper integration (status from the agent's own events, its chat, the
-context ring and handoff, usage) is built in per agent: today Claude Code's.
+context ring and handoff, usage) is built in per agent: today Claude Code's
+and Codex's. Codex needs version 0.166 or later; an older one runs with its
+status read from its screen. Tern gives it its hooks on the command line (`-c`),
+so nothing is written to `~/.codex`, and its conversations stay there.
 
 ### For agents
 
