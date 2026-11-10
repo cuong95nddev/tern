@@ -9,5 +9,4 @@ Build disk use: run every check (fmt, clippy, tests, the pre-push CI checks) in
 the repo's own `target/`, never a separate `CARGO_TARGET_DIR` (one in the
 scratchpad rebuilds everything, gigabytes each time). The local `stable` must be
 CI's Rust: if `rustc --version` is older than CI's, `rustup update stable` first.
-Do not `cargo clean` before builds (it loses the cache); if `target/` grows past
-~40 GB, tell the user and suggest `cargo clean`.
+Do not `cargo clean` before builds (it loses the cache).
