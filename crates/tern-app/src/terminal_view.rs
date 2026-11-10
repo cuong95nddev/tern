@@ -332,6 +332,10 @@ pub struct TerminalView {
     /// A Claude tab's status from its hooks (the daemon tracks them): over
     /// its reports and its session file.
     hook_status: Option<tern_term::agent_status::AgentStatus>,
+    /// Whether its session got a hook token (known once `Ready`).
+    hooked: Option<bool>,
+    /// When the user last typed in it (keys or text input).
+    typed: Option<Instant>,
     /// The turn end last told as finished (see [`TerminalEvent::TurnFinished`]).
     announced_turn: Option<u64>,
     /// `Done` came as that told turn's work drained: not news.
@@ -545,6 +549,8 @@ impl TerminalView {
             reports_status: false,
             status_from_file: false,
             hook_status: None,
+            hooked: None,
+            typed: None,
             announced_turn: None,
             done_told: false,
             status_since: Instant::now(),
@@ -750,6 +756,53 @@ impl TerminalView {
         self.status
     }
 
+    /// Its agent's screen asks the user something, by the agent's screen
+    /// rules, whatever its status comes from (hooks or a session file tell
+    /// nothing of the questions an agent asks as it starts, such as whether
+    /// to trust the folder).
+    pub fn screen_asks(&self) -> bool {
+        let Some(agent) = self.agent.clone().or_else(|| self.hook_agent.as_deref().map(AgentId::new)) else { return false };
+        crate::agents::read_screen(&agent, &self.raw_title, &self.bottom_text(AGENT_SCREEN_LINES)) == Some(ActivityStatus::Blocked)
+    }
+
+    /// What the user typed into its agent's prompt and hasn't sent (see
+    /// `composer_draft`).
+    pub fn composer_draft(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        let term = s.term().lock();
+        let grid = term.grid();
+        let rows = grid.screen_lines() as i32;
+        let cursor = grid.cursor.point.line.0;
+        let row = |l: i32| {
+            let (mut text, mut typed) = (String::new(), String::new());
+            for c in grid[Line(l)].into_iter() {
+                let ch = if c.c == '\0' { ' ' } else { c.c };
+                text.push(ch);
+                typed.push(if c.flags.contains(Flags::DIM) { ' ' } else { ch });
+            }
+            crate::composer_draft::Row { text: text.trim_end().to_owned(), typed: typed.trim_end().to_owned() }
+        };
+        let upto: Vec<_> = ((cursor - 8).max(0)..=cursor).map(row).collect();
+        let below: Vec<_> = (cursor + 1..(cursor + 9).min(rows)).map(row).collect();
+        crate::composer_draft::draft(&upto, &below)
+    }
+
+    /// The user typed in it within `d`: what they type may be a draft that
+    /// pasted input would join.
+    pub fn typed_within(&self, d: Duration) -> bool {
+        self.typed.is_some_and(|t| t.elapsed() < d)
+    }
+
+    /// Its agent runs with Tern's hooks (known once its session is ready).
+    pub fn has_hooks(&self) -> bool {
+        self.hooked == Some(true)
+    }
+
+    /// Its program ended (and was not started again).
+    pub fn has_exited(&self) -> bool {
+        self.exited.is_some()
+    }
+
     /// When `status` last changed: how long a turn has been working.
     pub fn status_since(&self) -> Instant {
         self.status_since
@@ -789,15 +842,14 @@ impl TerminalView {
 
     /// Whether the program has settled for input: it turned on bracketed
     /// paste and has been quiet for `quiet`.
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn ready_for_paste(&self, quiet: Duration) -> bool {
         self.mode().contains(TermMode::BRACKETED_PASTE) && self.last_output.elapsed() >= quiet
     }
 
-    /// The visible screen's text, trailing blanks trimmed (control socket).
-    #[cfg(debug_assertions)]
-    pub fn debug_screen(&self) -> String {
-        let Some(s) = &self.session else { return String::new() };
+    /// The visible screen's lines, trailing blanks trimmed and the blank
+    /// lines under the last one dropped.
+    pub fn screen_lines(&self) -> Vec<String> {
+        let Some(s) = &self.session else { return Vec::new() };
         let term = s.term().lock();
         let grid = term.grid();
         let mut lines: Vec<String> = (0..grid.screen_lines() as i32)
@@ -806,7 +858,13 @@ impl TerminalView {
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
-        lines.join("\\n")
+        lines
+    }
+
+    /// The visible screen's text, one line per `\\n` (control socket).
+    #[cfg(debug_assertions)]
+    pub fn debug_screen(&self) -> String {
+        self.screen_lines().join("\\n")
     }
 
     /// Size, whether the program was told it has focus, and how it exited.
@@ -1002,6 +1060,7 @@ impl TerminalView {
                 OscSignal::ProgramStatusProbe | OscSignal::ColorSchemeReports(_) | OscSignal::ColorSchemeQuery | OscSignal::VersionQuery,
             ) => {},
             TermEvent::Ready { token, status, .. } => {
+                self.hooked = Some(token.is_some());
                 // Its hooks' status follows, as it is now: not news either.
                 self.hook_status = None;
                 self.announced_turn = None;
@@ -1280,6 +1339,7 @@ impl TerminalView {
         if (ks.modifiers.platform && !self.kitty_keys()) || self.marked_text.is_some() {
             return;
         }
+        self.typed = Some(Instant::now());
         // AltGr (Ctrl+Alt on Windows) or a dead key makes a character: let
         // it arrive as text input.
         if cfg!(windows) && ev.prefer_character_input {
@@ -2144,6 +2204,7 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.marked_text = None;
+        self.typed = Some(Instant::now());
         if !text.is_empty() {
             self.write_input(text.as_bytes().to_vec(), cx);
         }

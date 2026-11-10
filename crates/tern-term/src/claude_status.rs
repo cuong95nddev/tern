@@ -214,10 +214,21 @@ fn read_string<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
-fn is_ask_user_question(tool: Option<&str>) -> bool {
-    let Some(tool) = tool else { return false };
-    let bare: String = tool.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_lowercase();
-    bare == "askuserquestion" || bare == "requestuserinput"
+fn bare_tool(tool: Option<&str>) -> Option<String> {
+    tool.map(|t| t.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_lowercase())
+}
+
+/// The tool by which an agent asks the user a question and waits for the
+/// answer (Claude's `AskUserQuestion`, Codex's `request_user_input`).
+pub fn is_ask_user_question(tool: Option<&str>) -> bool {
+    bare_tool(tool).is_some_and(|b| b == "askuserquestion" || b == "requestuserinput")
+}
+
+/// The tool by which Codex asks the user a question without waiting: it
+/// returns at once (`{"accepted": true}`) and the turn goes on, sleeping,
+/// until the user answers on its screen.
+pub fn is_async_question(tool: Option<&str>) -> bool {
+    bare_tool(tool).is_some_and(|b| b == "requestuserinputasync")
 }
 
 fn is_compact_continuation(prompt: &str) -> bool {

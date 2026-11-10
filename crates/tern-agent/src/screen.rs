@@ -112,6 +112,9 @@ mod tests {
         assert_eq!(read("codex", "⠋ codex", ""), Some(Working));
         assert_eq!(read("codex", "codex", "• working (12s • esc to interrupt)"), Some(Working));
         assert_eq!(read("codex", "Action Required", ""), Some(Blocked));
+        // The questions it asks as it starts: an update, a folder's trust.
+        assert_eq!(read("codex", "codex", "› 1. update now\n  2. skip\n  enter continue · esc skip"), Some(Blocked));
+        assert_eq!(read("codex", "codex", "› 1. trust and continue\n  enter continue · esc back"), Some(Blocked));
         assert_eq!(read("codex", "codex", "› "), Some(Idle));
     }
 

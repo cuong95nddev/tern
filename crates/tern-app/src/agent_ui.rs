@@ -5,7 +5,7 @@
 //! which theme shows and what is wrong; `{"op": "set_theme", "name"}`
 //! chooses a theme; `{"op": "shot", "folder"}` saves a PNG of the window
 //! that shows `folder` (or a folder in it, or one it is in), as the window
-//! drew it last.
+//! drew it last. `task_*` requests (`tern --task`) go to `agent_tasks`.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,10 @@ pub fn answer(ask: u64, request: &str, cx: &mut App) {
                 })
                 .detach(),
             Err(e) => reply(ask, failed(&e), cx),
+        },
+        Some(op) if op.starts_with("task_") => {
+            let answer = crate::agent_tasks::answer(op, &request, cx);
+            reply(ask, answer, cx);
         },
         _ => reply(ask, failed("unknown request"), cx),
     }

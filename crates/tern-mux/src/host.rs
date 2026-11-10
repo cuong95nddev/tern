@@ -703,7 +703,9 @@ trait HostPty: EventedPty + OnResize + Send + 'static {
     fn pid(&self) -> u32;
     #[cfg(unix)]
     fn master(&self) -> &File;
-    /// How the program ended, once it did (only for `POLLED`).
+    /// How the program ended, once it did: what a `POLLED` program's end
+    /// is found by, and what a child's is checked by once it closed the
+    /// PTY (`None` where that can't be told).
     fn poll_exit(&mut self) -> Option<Option<i32>> {
         None
     }
@@ -728,6 +730,19 @@ impl HostPty for tty::Pty {
     #[cfg(unix)]
     fn master(&self) -> &File {
         self.file()
+    }
+
+    /// Reaps it once it ended. Its SIGCHLD usually tells first
+    /// (`next_child_event`); this is for when that was missed.
+    #[cfg(unix)]
+    fn poll_exit(&mut self) -> Option<Option<i32>> {
+        let mut st = 0;
+        // SAFETY: waitpid on our own child.
+        match unsafe { libc::waitpid(self.pid(), &mut st, libc::WNOHANG) } {
+            0 => None,
+            r if r < 0 => Some(None),
+            _ => Some(libc::WIFEXITED(st).then(|| libc::WEXITSTATUS(st))),
+        }
     }
 
     #[cfg(unix)]
@@ -869,6 +884,9 @@ struct Driver<P: HostPty> {
     jiggle: Option<(Instant, TermSize)>,
     /// When a polled program was last checked for its end.
     exit_checked: Instant,
+    /// The program closed the PTY: its end is checked for like a polled
+    /// program's, should its SIGCHLD not tell.
+    closed: bool,
     /// When to read Claude Code's session file again, while a turn it
     /// called done is held as working.
     claude_check: Option<Instant>,
@@ -919,6 +937,7 @@ impl<P: HostPty> Driver<P> {
             scheme: Scheme::of(&theme_palette().get()),
             jiggle: None,
             exit_checked: Instant::now(),
+            closed: false,
             claude_check: None,
             #[cfg(unix)]
             graphics,
@@ -964,7 +983,7 @@ impl<P: HostPty> Driver<P> {
         loop {
             let now = Instant::now();
             let sync_deadline = self.parser.lock().unwrap().sync_timeout().sync_timeout();
-            let exit_check = P::POLLED.then(|| self.exit_checked + EXIT_POLL);
+            let exit_check = (P::POLLED || self.closed).then(|| self.exit_checked + EXIT_POLL);
             let hooks_check = self.claude_hooks_check(now);
             let deadlines = [sync_deadline, self.jiggle.map(|j| j.0), exit_check, self.claude_check, hooks_check];
             let timeout = deadlines.into_iter().flatten().min().map(|d| d.saturating_duration_since(now));
@@ -1046,15 +1065,22 @@ impl<P: HostPty> Driver<P> {
                         if event.readable {
                             match self.read(&mut buf) {
                                 Ok(true) => {},
-                                // The program closed the PTY; its exit follows.
+                                // ConPTY: the program's end comes by its
+                                // child watcher.
+                                #[cfg(windows)]
                                 Ok(false) | Err(_) if !P::POLLED => {},
-                                // A polled program's end is only seen when
-                                // asked: ask now, and stop watching a closed
-                                // PTY (it reads as ready forever) until then.
+                                // The program closed the PTY; it ends now or
+                                // soon. Ask (a polled program's end is only
+                                // seen so, and a child's SIGCHLD can be
+                                // missed), and stop watching the closed PTY:
+                                // it reads as ready forever, which would spin
+                                // this loop until the end is seen.
                                 _ => {
                                     if let Some(code) = self.pty.poll_exit() {
                                         return Stop::Exited(code);
                                     }
+                                    self.closed = true;
+                                    self.exit_checked = Instant::now();
                                     interest.readable = false;
                                     if let Err(e) = self.pty.reregister(&self.poller, interest, PollMode::Level) {
                                         log::error!("host {}: poll reregistration failed: {e}", self.id);

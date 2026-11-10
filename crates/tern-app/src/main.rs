@@ -4,6 +4,7 @@
 mod accounts;
 mod agent_cli;
 mod agent_monitor;
+mod agent_tasks;
 mod agent_ui;
 mod agents;
 mod arrange;
@@ -11,6 +12,7 @@ mod caffeine;
 mod changes_review;
 mod changes_view;
 mod chat_view;
+mod composer_draft;
 #[cfg(debug_assertions)]
 mod control;
 mod diff_pane;
@@ -34,6 +36,7 @@ mod part_window;
 #[cfg(target_os = "macos")]
 mod permissions;
 mod platform;
+mod prompt_input;
 mod resources;
 mod resources_view;
 mod restart;
@@ -200,6 +203,7 @@ fn main() {
         cx.on_action(|_: &ToggleMenuBarIcon, cx| toggle_menu_bar_icon(cx));
         update::init(cx);
         agent_monitor::init(cx);
+        agent_tasks::init(cx);
         settings_window::init(cx);
         #[cfg(any(target_os = "macos", windows))]
         shot::init(cx);

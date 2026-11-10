@@ -248,6 +248,8 @@ struct TermTab {
     recent: tern_chat::Recent,
     /// That read, a moment after the last hook (a newer hook replaces it).
     recent_read: Option<Task<()>>,
+    /// A task another agent gave it (`tern --task`) and its answer.
+    task: crate::agent_tasks::Track,
     _subs: Vec<Subscription>,
 }
 
@@ -293,6 +295,13 @@ impl CenterTab {
             CenterTab::File { .. } | CenterTab::Diff(_) | CenterTab::Scratch { .. } | CenterTab::Log { .. } | CenterTab::Chat { .. } => {
                 None
             },
+        }
+    }
+
+    fn term_mut(&mut self) -> Option<&mut TermTab> {
+        match self {
+            CenterTab::Term(t) => Some(t),
+            _ => None,
         }
     }
 
@@ -1567,6 +1576,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let ix = self.push_term(kind, rename, session, mux, account, window, cx);
+        self.activate(ix, window, cx);
+    }
+
+    /// A terminal tab as [`Self::add_term`] adds it, not shown yet: its index.
+    #[allow(clippy::too_many_arguments)]
+    fn push_term(
+        &mut self,
+        kind: TabKind,
+        rename: Option<String>,
+        session: Option<String>,
+        mux: Option<u64>,
+        account: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
         // Known once the daemon answers (`TerminalEvent::Ready`).
         let token = None;
         let (cfg, title) = self.spawn_config(&kind, session.as_deref(), account, cx);
@@ -1603,10 +1628,10 @@ impl Workspace {
             handoff: Default::default(),
             recent: Default::default(),
             recent_read: None,
+            task: Default::default(),
             _subs: vec![sub],
         };
-        let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
-        self.activate(ix, window, cx);
+        self.push_tab(CenterTab::Term(Box::new(tab)))
     }
 
     /// The shells the agents in this workspace's terminals run commands in,
@@ -1683,6 +1708,7 @@ impl Workspace {
             handoff: Default::default(),
             recent: Default::default(),
             recent_read: None,
+            task: Default::default(),
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
@@ -2921,6 +2947,7 @@ impl Workspace {
         }) else {
             return;
         };
+        tab.task.on_hook(&ev);
         // Whose transcript the hook names, when Tern can read it.
         let agent = tab.kind.agent().cloned();
         let transcript_agent = agent.clone().filter(|_| tab.kind.has(Capability::Transcript));
@@ -3009,6 +3036,130 @@ impl Workspace {
                 }
             });
         })
+    }
+
+    /// A new tab of `agent` for a task another agent gives it
+    /// (`agent_tasks`), left behind the shown tab: its terminal, to hand the
+    /// task to once the agent takes input.
+    pub fn start_task(&mut self, agent: AgentId, by: Option<u64>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        let kind = TabKind::Agent(agent);
+        // A Claude tab runs as the first active account: no picker for a
+        // tab nobody opened by hand.
+        let account = match kind.is_claude() {
+            true => accounts::store(cx).read(cx).active().first().map_or_else(|| accounts::DEFAULT.to_owned(), |a| a.id.clone()),
+            false => accounts::DEFAULT.to_owned(),
+        };
+        let ix = self.push_term(kind, None, None, None, &account, window, cx);
+        self.sync_panes();
+        let CenterTab::Term(t) = &mut self.tabs[ix] else { unreachable!("push_term pushes a terminal") };
+        t.task.starting(by);
+        cx.emit(WorkspaceEvent::TabsChanged);
+        cx.notify();
+        t.view.clone()
+    }
+
+    /// The agent tab with task id `id` (its terminal's entity id).
+    fn task_tab(&self, id: u64) -> Option<&TermTab> {
+        self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view.entity_id().as_u64() == id)
+    }
+
+    /// Agent tab `id` and its task as `agent_tasks` tells it.
+    pub fn task_report(&self, id: u64, cx: &App) -> Option<crate::agent_tasks::Report> {
+        let t = self.task_tab(id)?;
+        Some(self.report_of(t, cx))
+    }
+
+    /// Every agent tab and its task, in tab order.
+    pub fn task_reports(&self, cx: &App) -> Vec<crate::agent_tasks::Report> {
+        self.tabs
+            .iter()
+            .filter_map(CenterTab::term)
+            .filter(|t| t.kind.agent().is_some() || t.view.read(cx).agent().is_some())
+            .map(|t| self.report_of(t, cx))
+            .collect()
+    }
+
+    fn report_of(&self, t: &TermTab, cx: &App) -> crate::agent_tasks::Report {
+        let v = t.view.read(cx);
+        let agent = v.agent().or_else(|| t.kind.agent().cloned());
+        let title = t.rename.as_ref().map_or_else(|| v.title().to_string(), ToString::to_string);
+        t.task.report(t.view.entity_id().as_u64(), agent, title, self.root.clone(), v)
+    }
+
+    /// Agent tab `id` is handed a new prompt now (see [`Self::start_task`]):
+    /// its terminal, or why not.
+    pub fn ask_task(&mut self, id: u64, by: Option<u64>, cx: &mut Context<Self>) -> Result<Entity<TerminalView>, String> {
+        let report = self.task_report(id, cx).ok_or_else(|| format!("no agent tab {id}"))?;
+        report.can_ask()?;
+        // A dialog it shows (one it asked as it started, say) would take the
+        // prompt's Enter as its answer: the user answers it.
+        if self.task_tab(id).is_some_and(|t| t.view.read(cx).screen_asks()) {
+            return Err(format!("agent tab {id} asks the user something in its tab"));
+        }
+        let tab = self.tabs.iter_mut().filter_map(CenterTab::term_mut).find(|t| t.view.entity_id().as_u64() == id);
+        let tab = tab.ok_or_else(|| format!("no agent tab {id}"))?;
+        tab.task.asked(Instant::now());
+        tab.task.gave(by);
+        Ok(tab.view.clone())
+    }
+
+    /// Close agent tab `id`, ending its agent, when a task opened it: an
+    /// agent closes the tabs it gave tasks to, not the user's.
+    pub fn close_task(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let ix = self.tabs.iter().position(|t| t.term().is_some_and(|t| t.view.entity_id().as_u64() == id));
+        let ix = ix.ok_or_else(|| format!("no agent tab {id}"))?;
+        if !self.tabs[ix].term().is_some_and(|t| t.task.opened()) {
+            return Err(format!("agent tab {id} wasn't opened for a task: only the user closes it"));
+        }
+        self.close_tab(ix, window, cx);
+        Ok(())
+    }
+
+    /// Change agent tab `id`'s task with `f`.
+    pub fn update_task(&mut self, id: u64, f: impl FnOnce(&mut crate::agent_tasks::Track), cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().filter_map(CenterTab::term_mut).find(|t| t.view.entity_id().as_u64() == id) {
+            f(&mut tab.task);
+            cx.notify();
+        }
+    }
+
+    /// The agent tab (its background session) that gave agent tab `id` its
+    /// task.
+    pub fn task_giver(&self, id: u64) -> Option<u64> {
+        self.task_tab(id).and_then(|t| t.task.giver())
+    }
+
+    /// Agent tab `id` asks a question without waiting (Codex's
+    /// `request_user_input_async`).
+    pub fn task_asks_async(&self, id: u64) -> bool {
+        self.task_tab(id).is_some_and(|t| t.task.asks_async())
+    }
+
+    /// Agent tab `id`'s terminal.
+    pub fn task_view(&self, id: u64) -> Option<Entity<TerminalView>> {
+        self.task_tab(id).map(|t| t.view.clone())
+    }
+
+    /// The tasks with news for the agent tab that gave them (each with that
+    /// tab's background session).
+    pub fn task_news(&self, cx: &App) -> Vec<(crate::agent_tasks::Report, u64)> {
+        self.tabs
+            .iter()
+            .filter_map(CenterTab::term)
+            // Only a task with a giver has someone to tell: no screen read
+            // for the others, each second.
+            .filter(|t| t.task.giver().is_some())
+            .filter_map(|t| {
+                let report = self.report_of(t, cx);
+                let by = t.task.to_tell(&report)?;
+                Some((report, by))
+            })
+            .collect()
+    }
+
+    /// The terminal of the tab running background session `mux`.
+    pub fn session_view(&self, mux: u64, cx: &App) -> Option<Entity<TerminalView>> {
+        self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view.read(cx).mux_id() == Some(mux)).map(|t| t.view.clone())
     }
 
     /// The terminal tabs, in tab order: where a screenshot can go, and the

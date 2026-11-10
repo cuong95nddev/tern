@@ -12,7 +12,8 @@
       { "bottom_contains": "press enter to confirm or esc to cancel" },
       { "bottom_contains": "allow command?" },
       { "bottom_contains": "enter to submit answer" },
-      { "bottom_contains": "[y/n]" }
+      { "bottom_contains": "[y/n]" },
+      { "bottom_contains": "enter continue · esc" }
     ],
     "working": [
       { "title_any_char": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" },

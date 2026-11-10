@@ -488,6 +488,14 @@ const UI_SKIPS: [&str; 9] = [
     "SessionEnd",
 ];
 
+/// Hook `ev` says the agent asks the user something: a tool to approve, or
+/// a question (its question tool is about to run).
+fn asks_user(ev: &HookEvent) -> bool {
+    let tool = ev.tool_name.as_deref();
+    let question = || tern_term::claude_status::is_ask_user_question(tool) || tern_term::claude_status::is_async_question(tool);
+    ev.event == "PermissionRequest" || (ev.event == "PreToolUse" && question())
+}
+
 /// What `agent` is told to start a fresh conversation with.
 fn clear_command(agent: Option<&AgentId>) -> &'static str {
     match agent {
@@ -1475,6 +1483,10 @@ impl Server {
             let (reply, action) = s.guard.on_event(&ev, s.policy);
             type_after_turn(&s.host, s.agent.as_ref(), action);
             match s.owner.as_ref().and_then(Weak::upgrade) {
+                // What the agent asks, for a task's giver to read
+                // (`tern --task read`): live only, never queued (a stale one
+                // would read as asked still).
+                Some(conn) if asks_user(&ev) => conn.send(ServerMsg::Hook { token: ev.token.clone(), body }),
                 // The UI has the status from the daemon: it wants only the
                 // events it reads files, the session and the handoff from.
                 _ if UI_SKIPS.contains(&ev.event.as_str()) => {},
