@@ -417,7 +417,7 @@ pub const ELEMENTS: &[Element] = &[
     },
     simple!(
         "title_bar.controls",
-        "The window's own minimize, maximize and close buttons: `visible: 0` leaves them out, for a template to draw its own"
+        "The window's own minimize, maximize and close buttons (on macOS, its traffic lights): `visible: 0` leaves them out, for a template to draw its own"
     ),
     Element {
         name: "editor",

@@ -687,6 +687,8 @@ struct MacWindowState {
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
     pre_fullscreen_traffic_light_frames: Option<TrafficLightFrames>,
+    // The app draws its own window buttons: the standard ones stay hidden.
+    traffic_lights_hidden: bool,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
@@ -716,6 +718,9 @@ struct MacWindowState {
 
 impl MacWindowState {
     fn move_traffic_light(&mut self) {
+        // AppKit can recreate the standard buttons (around full screen), so
+        // they are hidden again on each layout pass.
+        self.apply_traffic_lights_hidden();
         if let Some(traffic_light_position) = self.traffic_light_position {
             if self.is_fullscreen() && !self.is_exiting_fullscreen {
                 self.restore_traffic_light();
@@ -771,6 +776,17 @@ impl MacWindowState {
                 buttons.close.updateTrackingAreas();
                 buttons.minimize.updateTrackingAreas();
                 buttons.zoom.updateTrackingAreas();
+            }
+        }
+    }
+
+    fn apply_traffic_lights_hidden(&self) {
+        let Some(buttons) = self.traffic_light_buttons() else {
+            return;
+        };
+        for button in [&buttons.close, &buttons.minimize, &buttons.zoom] {
+            if button.isHidden() != self.traffic_lights_hidden {
+                button.setHidden(self.traffic_lights_hidden);
             }
         }
     }
@@ -1127,6 +1143,7 @@ impl MacWindow {
                     .and_then(|titlebar| titlebar.traffic_light_position),
                 traffic_light_frames: None,
                 pre_fullscreen_traffic_light_frames: None,
+                traffic_lights_hidden: false,
                 transparent_titlebar: titlebar
                     .as_ref()
                     .is_none_or(|titlebar| titlebar.appears_transparent),
@@ -1627,6 +1644,14 @@ impl PlatformWindow for MacWindow {
         let mut state = self.0.lock();
         state.traffic_light_position = Some(position);
         state.move_traffic_light();
+    }
+
+    fn set_traffic_lights_hidden(&self, hidden: bool) {
+        let mut state = self.0.lock();
+        if state.traffic_lights_hidden != hidden {
+            state.traffic_lights_hidden = hidden;
+            state.apply_traffic_lights_hidden();
+        }
     }
 
     fn scale_factor(&self) -> f32 {

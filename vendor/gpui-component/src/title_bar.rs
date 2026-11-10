@@ -336,6 +336,11 @@ impl RenderOnce for TitleBar {
         let is_macos = cfg!(target_os = "macos");
 
         let state = window.use_state(cx, |_, _| TitleBarState { should_move: false });
+        // Without its controls the app draws its own window buttons: the
+        // traffic lights go, and so does the room kept for them.
+        #[cfg(target_os = "macos")]
+        window.set_traffic_lights_hidden(!self.controls);
+        let left_padding = if is_macos && !self.controls { px(12.) } else { TITLE_BAR_LEFT_PADDING };
 
         div().flex_shrink_0().child(
             div()
@@ -345,7 +350,7 @@ impl RenderOnce for TitleBar {
                 .items_center()
                 .justify_between()
                 .h(TITLE_BAR_HEIGHT)
-                .pl(TITLE_BAR_LEFT_PADDING)
+                .pl(left_padding)
                 .border_b_1()
                 .border_color(cx.theme().title_bar_border)
                 .bg(default_title_bar_background(

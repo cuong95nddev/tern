@@ -120,3 +120,13 @@ declares it (passing it on to the crates under it). Tern turns it on so an
 agent can see the window as it was last drawn (`tern --shot`),
 without screen recording permission and even when the
 window is covered. The code is unchanged.
+
+## gpui-pre 0.3.9, gpui-pre-macos 0.3.9 and gpui-component 0.7.3: hiding the traffic lights
+
+`Window::set_traffic_lights_hidden` (`PlatformWindow::set_traffic_lights_hidden`,
+macOS only) hides the standard close, minimize and zoom buttons; the macOS window
+hides them again on each layout pass, as AppKit can recreate them. gpui-component's
+`TitleBar` without its `controls` hides them and drops the 80px kept for them on
+the left, so a window that draws its own buttons has none of the system's. Tern
+draws its own where a template puts `window_close`, `window_minimize` and
+`window_maximize` once `title_bar.controls` is hidden.

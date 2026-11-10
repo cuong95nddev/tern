@@ -1477,7 +1477,8 @@ The buttons, by name: `caffeine` (opens `menu.caffeine`), `settings`,
 `agent_monitor`, `screenshots`, `update`, `edit_done`, `title_bar_border`,
 `new_tab_menu` and `pane_layout_menu` (the focused pane's), `window_minimize`,
 `window_maximize` and `window_close`. With `\"title_bar.controls\": {{ \"visible\": 0 }}`
-in `elements`, the window's own three are left out. Menus read the values too.
+in `elements`, the window's own three are left out (on macOS, its traffic lights),
+so a template can put these buttons anywhere. Menus read the values too.
 
 ```json
 {{ \"button\": \"caffeine\", \"size\": \"small\", \"icon\": \"{{caffeine_icon}}\", \"selected\": \"caffeine_on\", \"tooltip\": \"{{caffeine_tooltip}}\" }}
