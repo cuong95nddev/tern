@@ -30,15 +30,21 @@ use crate::dock::OnChange;
 use crate::style::{self, Props, Val};
 
 mod actor;
+mod css;
 mod draw;
+mod html;
+mod markup;
 mod menu;
 mod motion;
 mod motion_spec;
 mod picture;
 mod play;
 mod shared;
+mod unmarkup;
 
 pub use actor::ActorSpec;
+pub use css::Media;
+pub use markup::{Markup, Source as MarkupSource, compile as compile_markup};
 pub use motion::RawAnimations;
 pub use play::set_motion;
 
@@ -272,6 +278,13 @@ pub fn builtin() -> BTreeMap<String, Spec> {
 /// The built-in templates as written, for the reference folder.
 pub fn builtin_text() -> &'static str {
     BUILTIN
+}
+
+/// The built-in templates as HTML and the CSS that styles them, for the
+/// reference folder: a starting point to copy.
+pub fn builtin_markup() -> (String, String) {
+    let all: serde_json::Map<String, serde_json::Value> = serde_json::from_str(BUILTIN).expect("built-in templates");
+    unmarkup::render(&all).expect("built-in templates as HTML")
 }
 
 /// A value a template reads: in text, in conditions.

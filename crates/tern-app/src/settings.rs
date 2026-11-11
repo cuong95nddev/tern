@@ -77,6 +77,13 @@ pub struct SettingsFile {
     pub animations: crate::template::RawAnimations,
     /// Small figures that move over a template's `actor` stage, by name.
     pub actors: BTreeMap<String, crate::template::ActorSpec>,
+    /// HTML files of templates (`["ui/agents.html"]`, relative to this
+    /// folder): each `<template name="…">` is a template over the built-in
+    /// ones, the stylesheets in `css` style them. See `README.md`.
+    pub html: Vec<String>,
+    /// CSS files for the templates in `html`, and the `--name` tokens and
+    /// `@keyframes` they define.
+    pub css: Vec<String>,
     /// Icons to replace everywhere, by name (`folder`, `agents/claude.svg`):
     /// with another bundled icon's name, or a `.svg` file (absolute, `~/…`,
     /// or relative to this folder). An icon already drawn changes at the
@@ -338,6 +345,9 @@ struct TernTheme {
     /// Its `animations` and `actors`, under the settings' ones.
     animations: crate::template::RawAnimations,
     actors: BTreeMap<String, crate::template::ActorSpec>,
+    /// Its `html` and `css` files, before the settings' ones.
+    html: Vec<String>,
+    css: Vec<String>,
     /// Its `icons`, `file_icons` and `texts`, under the settings' ones.
     icons: BTreeMap<String, String>,
     file_icons: BTreeMap<String, crate::file_icons::FileLook>,
@@ -579,7 +589,9 @@ fn load(cx: &mut App) {
     };
 
     cx.global_mut::<Loader>().theme_elements = theme.elements.clone();
-    let over = overrides(&theme, &settings, &mut problems);
+    let reduce_motion = settings.ui.reduce_motion.unwrap_or_else(system_reduces_motion);
+    let markup = load_markup(dir, &theme, &settings, reduce_motion, &mut problems);
+    let over = overrides(&theme, &settings, &markup.tokens, &mut problems);
     let ui = match ui_config(&theme.ui, &settings, &over, &mut problems) {
         Ok(ui) => ui,
         Err(e) => {
@@ -634,19 +646,22 @@ fn load(cx: &mut App) {
     cx.set_global(looks);
     let mut specs = crate::template::builtin();
     specs.extend(theme.templates.clone());
+    specs.extend(markup.templates.clone());
     specs.extend(settings.templates.clone());
     let mut animations = theme.animations.clone();
+    animations.extend(markup.animations.clone());
     animations.extend(settings.animations.clone());
     let mut actors = theme.actors.clone();
     actors.extend(settings.actors.clone());
     let defs = crate::template::Defs { animations: Some(&animations), actors: Some(&actors) };
+    let template_problems = problems.len();
     let templates = crate::template::compile_with(&specs, &defs, &style::Props::new(&over, &colors, dir), &mut problems);
-    crate::template::set_motion(
-        settings.ui.reduce_motion.unwrap_or_else(system_reduces_motion),
-        settings.ui.decorations.unwrap_or(true),
-        cx,
-    );
+    crate::template::set_motion(reduce_motion, settings.ui.decorations.unwrap_or(true), cx);
     templates.check_actions(cx.all_action_names(), &mut problems);
+    // What the markup made reads with its file, line and column.
+    for p in &mut problems[template_problems..] {
+        *p = markup.locate(p);
+    }
     cx.set_global(templates);
     let mut icons = theme.icons.clone();
     icons.extend(settings.icons.clone());
@@ -969,10 +984,16 @@ fn ui_from_terminal(t: &TerminalColors) -> Option<(serde_json::Map<String, serde
 
 /// `tokens` and `elements` as the style resolver takes them. A value that is
 /// neither a number nor a string is reported and left out.
-fn overrides<'a>(theme: &'a TernTheme, s: &'a SettingsFile, problems: &mut Vec<String>) -> Overrides<'a> {
+fn overrides<'a>(
+    theme: &'a TernTheme,
+    s: &'a SettingsFile,
+    css_tokens: &'a BTreeMap<String, serde_json::Value>,
+    problems: &mut Vec<String>,
+) -> Overrides<'a> {
     let mut over = Overrides::default();
     // The theme's first, so the settings' go over them.
-    for (tokens, elements) in [(&theme.tokens, &theme.elements), (&s.tokens, &s.elements)] {
+    static NONE: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+    for (tokens, elements) in [(&theme.tokens, &theme.elements), (css_tokens, &NONE), (&s.tokens, &s.elements)] {
         for (name, v) in tokens {
             match style::raw(v) {
                 Some(raw) => _ = over.tokens.insert(name.as_str(), raw),
@@ -989,6 +1010,33 @@ fn overrides<'a>(theme: &'a TernTheme, s: &'a SettingsFile, problems: &mut Vec<S
         }
     }
     over
+}
+
+/// Reads the HTML and CSS files the theme and the settings name (the theme's
+/// first) into templates, tokens and keyframes.
+fn load_markup(
+    dir: &Path,
+    theme: &TernTheme,
+    s: &SettingsFile,
+    reduce_motion: bool,
+    problems: &mut Vec<String>,
+) -> crate::template::Markup {
+    let mut read = |names: Vec<&String>| -> Vec<crate::template::MarkupSource> {
+        let mut out = vec![];
+        for name in names {
+            match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => out.push(crate::template::MarkupSource { file: name.clone(), text }),
+                Err(e) => problems.push(format!("{name}: can't read it: {e}")),
+            }
+        }
+        out
+    };
+    let html = read(theme.html.iter().chain(&s.html).collect());
+    let css = read(theme.css.iter().chain(&s.css).collect());
+    if html.is_empty() && css.is_empty() {
+        return crate::template::Markup::default();
+    }
+    crate::template::compile_markup(&html, &css, crate::template::Media { reduce_motion }, problems)
 }
 
 /// The terminal's font family and size: the settings', else the theme's
@@ -1105,6 +1153,14 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             Some(t) => serde_json::from_value(t).map_err(|e| format!("actors: {e}"))?,
             None => BTreeMap::new(),
         };
+        let html = match take("html") {
+            Some(t) => serde_json::from_value(t).map_err(|e| format!("html: {e}"))?,
+            None => vec![],
+        };
+        let css = match take("css") {
+            Some(t) => serde_json::from_value(t).map_err(|e| format!("css: {e}"))?,
+            None => vec![],
+        };
         let icons = match take("icons") {
             Some(i) => serde_json::from_value(i).map_err(|e| format!("icons: {e}"))?,
             None => BTreeMap::new(),
@@ -1125,7 +1181,10 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             t.entry("mode").or_insert_with(|| if dark { "dark" } else { "light" }.into());
         }
         let ui: ThemeConfig = serde_json::from_value(theme.take()).map_err(|e| e.to_string())?;
-        out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates, animations, actors, icons, file_icons, texts }));
+        out.push((
+            ui.name.clone(),
+            TernTheme { ui, terminal, tokens, elements, templates, animations, actors, html, css, icons, file_icons, texts },
+        ));
     }
     Ok(out)
 }
@@ -1144,6 +1203,9 @@ fn write_reference_files(dir: &Path, cx: &App) -> std::io::Result<()> {
     write_if_changed(&dir.join(SCHEMA), &serde_json::to_string_pretty(&schema).unwrap_or_default())?;
     write_if_changed(&dir.join(REFERENCE).join(ELEMENTS_DOC), &elements_doc())?;
     write_if_changed(&dir.join(REFERENCE).join("templates.json"), crate::template::builtin_text())?;
+    let (html, css) = crate::template::builtin_markup();
+    write_if_changed(&dir.join(REFERENCE).join("templates.html"), &html)?;
+    write_if_changed(&dir.join(REFERENCE).join("templates.css"), &css)?;
     write_if_changed(&dir.join(REFERENCE).join("language-servers.json"), tern_lsp::builtin_text())?;
     write_if_changed(&dir.join(REFERENCE).join("actions.md"), &actions_doc(cx))?;
     write_if_changed(&dir.join(README), &readme(dir))?;
@@ -1780,6 +1842,115 @@ figure take no mouse event but a click on the figure itself.
 - `\"ui\": {{\"decorations\": false}}` hides every actor. A missing file, an
   unknown look or a bad point is a problem in the status bar; the rest draws.
 
+### Templates in HTML and CSS
+
+A theme or `{SETTINGS}` can write templates as HTML with a CSS stylesheet
+instead of JSON: `\"html\": [\"ui/agents.html\"]` and `\"css\": [\"ui/theme.css\"]`
+(paths relative to this folder; saving one reloads like any config file).
+They become the same templates, so docks, slots, frames, `{{name}}` holes,
+conditions, themes and motion work the same. It is a syntax, not a browser:
+what the template engine has no place for is a problem in the status bar with
+its file, line and column (`ui/agents.html:12:5: …`), never silently dropped.
+`reference/templates.html` and `reference/templates.css` are the built-in
+templates written this way, to copy from.
+
+A theme's `templates` are over the built-in ones, its HTML over those, and
+`{SETTINGS}`'s `templates` over all of them. Every stylesheet applies to every
+HTML file (theme's first, then `{SETTINGS}`'s; a `<style>` in an HTML file
+last); a `<template>` of a name given twice is a problem.
+
+Each top-level `<template name=\"agents.tab\">…</template>` holds one element,
+the template's root. Elements:
+
+| HTML | Template node |
+|---|---|
+| `<div>`, `<span>`, `<section>`, `<header>`, `<footer>`, `<main>`, `<nav>`, `<aside>`, `<article>`, `<ul>`, `<ol>`, `<li>`, `<p>`, `<h1>`–`<h6>` | a box. An element with only text is a `text` node; text beside elements is a text node of its own |
+| `<img src=\"images/x.png\"/>` | `image` |
+| `<icon name=\"folder-open\"/>` | `icon` (`{{name}}` for one the code gives) |
+| `<button name=\"close\" icon=\"x\" variant=\"ghost\" size=\"xsmall\" tooltip=\"…\" action=\"workspace::X\" selected disabled=\"busy\" loading>label</button>` | `button` (the label is its text, or `label=\"…\"` when it has child elements) |
+| `<switch name=\"x\" selected=\"on\" disabled tooltip=\"…\"/>` | `switch` |
+| `<slot name=\"icon\"/>` | `slot` |
+| `<use template=\"pane.body\" element=\"agents.tab\"/>` | `use` |
+| `<actor name=\"rabbit\"/>` | `actor` |
+| `<ring value=\"{{pct}}\"/>` | `ring` |
+| `<each list=\"items\"><div>…</div><after>…</after></each>` | `each` with the first element as its `item`; what is in `<after>` is `children` |
+| `<separator/>`, `<menu-item action=\"file_tree::NewFile\" label=\"…\" icon=\"…\">` | menu entries; `<menu-item label=\"Sub\">` with children is a submenu |
+
+`class` and `id` pick CSS rules. `selected`, `disabled`, `loading` and the `data-*` flags
+below are on with no value (or `\"true\"`), off with `\"false\"`, or a condition.
+Attributes of template behavior: `data-when`, `data-frame`, `data-element`,
+`data-part`, `data-kind`, `data-dock` with `data-accepts` and `data-zones`
+(names separated by spaces), `data-strip`, `data-empty`, `data-split`,
+`data-size`, `data-min`, `data-max`, `data-part-size`, `data-fixed`,
+`data-handle`, `data-drag`, `data-float`, `data-window`, `data-attach`,
+`data-group`, `data-grouped`, `data-overlay`, `data-border-under`,
+`data-layout=\"fit\"`, and `data-on-click`, `data-on-hover`, `data-on-appear`
+(an animation: `data-on-click=\"pop 0.3s\"`). The `style=\"…\"` attribute is not
+supported; give the element a class.
+
+CSS:
+
+- Selectors: type, `.class`, `#id`, `[attr]`, `[attr=value]`, descendant and
+  child (`>`) combinators, `:not(.x)`, with the specificity and source order of
+  CSS. Pseudo-classes are on the last part of a selector and become the
+  template's conditions: `:hover` is `hover`, `:active` is `active`, `:focus` is
+  `focused`, `:checked` is `selected`, and `:state(a && !b)` is any condition
+  of the template (`:state(hover:stab)`, `:state(tabs > 1)`). `:hover:not(:active)`
+  is `hover && !active`. The rules of one condition make one `states` entry.
+  `!important`, sibling combinators, pseudo-elements and other pseudo-classes are problems.
+- Box properties: `display: flex|none`, `flex-direction` (`row`, `column`),
+  `flex-wrap: wrap` (with `row`: `layout: wrap`), `align-items`,
+  `justify-content`, `flex-grow`, `flex-shrink`, `width`/`height` (both
+  `100%` is `fill`; other `%` is a problem), `min-*`, `max-*`, `padding`,
+  `margin` (one to four values; `-inline` and `-block` are `padding_x`/`_y`),
+  `gap`, `position: absolute` with `top`, `right`, `bottom`, `left` (a number
+  of px, rem, or `{{name}}`), `z-index`, `overflow: hidden` (`clip`), `white-space:
+  nowrap` (`nowrap`) or `normal` (`wrap`), `text-overflow: ellipsis` (`truncate`).
+- Look: `background` and `background-color`, `background-image: url(…)`,
+  `background-size`, `color`, `border` (width, `solid`, color) and
+  `border-width`, `border-color`, `border-<side>-width`, `border-radius`
+  (and per corner), `box-shadow` (`none`, `sm`, `md`, `lg`, `xl`, or a CSS
+  shadow whose blur picks the size), `opacity`, `font-family` (one name),
+  `font-size`, `font-weight`, `font-style`, `line-height`, `text-transform`,
+  `-webkit-line-clamp`. A style property CSS has no name for is
+  `-tern-<name>` (`-tern-track`, `-tern-spin`, `-tern-visible`,
+  `-tern-background-image-opacity`); `-tern-element: \"pane_tab_bar.tab_active\"`
+  takes an element's properties (in a rule or a state).
+- Values: `12px`, `0.5rem` (zero needs no unit), `auto`, `#rrggbb`,
+  `#rrggbbaa`, `rgb()`/`rgba()`, `transparent`, `{{name}}` (a value the code gives),
+  `var(--name)` (a token or theme value: `.` is written `--` and `_` is `-`, so
+  `$row_height` is `var(--row-height)`, `$agents.tab.gap` is
+  `var(--agents--tab--gap)`, `$muted.foreground` is `var(--muted--foreground)`),
+  or a string, which is read as written (`\"$primary/15\"`). Units `s`, `ms`
+  and `deg` are for motion. `cursor`, `float`, `grid`, `calc()`, `color-mix()` and
+  `hsl()` are problems.
+- Tokens: `:root {{ --row-height: 28px; --text-muted: #8b8d93 }}` defines
+  `tokens` (over the theme's own `tokens`, under `{SETTINGS}`'s).
+- Motion: `@keyframes pulse {{ from {{ opacity: 1 }} 50% {{ opacity: 0.5; transform:
+  scale(1.1) }} }}` is an entry of `animations` (a stop takes the properties
+  above, and `transform` with `translate()`, `translateX()`, `translateY()`,
+  `scale(n)`, `rotate(Ndeg)`); `animation: pulse 1.2s infinite ease-in-out`
+  and `transition: background-color 0.15s ease-out, opacity 0.2s` are the
+  shorthands of `animation` and `transition` (a list with commas;
+  `-tern-animation-play: hover` makes the animation play only while that holds).
+  `transform` outside `@keyframes` is a problem. `@media (prefers-reduced-motion:
+  reduce)` (or `no-preference`) holds rules for when `ui.reduce_motion` (or the
+  system's setting) is on (or off). Other at-rules are problems.
+
+```html
+<template name=\"agents.tab\">
+  <div class=\"tab\" data-frame=\"tab\" data-element=\"agents.tab\" data-group=\"stab\">
+    <slot name=\"icon\"/>
+    <span class=\"label\">{{label}}</span>
+  </div>
+</template>
+```
+```css
+.tab {{ flex-direction: row; align-items: center; transition: background-color 0.18s ease-out }}
+.tab:hover:not(:active) {{ background: var(--agents--tab--hover-background) }}
+.label {{ flex-grow: 1; white-space: nowrap; text-overflow: ellipsis }}
+```
+
 ### Background images
 
 `window`, `agents`, `workspace`, `explorer`, `changes`, `scratches`, `shells`, `vertical_tabs`,
@@ -2009,7 +2180,8 @@ mod tests {
         let mut problems = vec![];
         let mut theme = Theme::default();
         for t in pixel_then_plain() {
-            let over = overrides(&t, &s, &mut problems);
+            let none = std::collections::BTreeMap::new();
+            let over = overrides(&t, &s, &none, &mut problems);
             theme.apply_config(&Rc::new(ui_config(&t.ui, &s, &over, &mut problems).unwrap()));
         }
         assert!(problems.is_empty(), "{problems:?}");

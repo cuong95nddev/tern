@@ -1276,6 +1276,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "cssparser"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11119743ad110e8c1bdccd930d7f5c30c99e5fc76a7b63ec9807e84eef0c5f59"
+dependencies = [
+ "cssparser-macros",
+ "dtoa-short",
+ "itoa",
+ "phf 0.14.0",
+ "smallvec",
+]
+
+[[package]]
+name = "cssparser-macros"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
+dependencies = [
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1538,6 +1561,21 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
+name = "dtoa-short"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
+dependencies = [
+ "dtoa",
+]
 
 [[package]]
 name = "dunce"
@@ -4885,8 +4923,19 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_macros",
+ "phf_macros 0.13.1",
  "phf_shared 0.13.1",
+ "serde",
+]
+
+[[package]]
+name = "phf"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "010378780309880b08997fae13be7834dba947d36393bd372f2b1556deb2a2f6"
+dependencies = [
+ "phf_macros 0.14.0",
+ "phf_shared 0.14.0",
  "serde",
 ]
 
@@ -4921,6 +4970,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf_generator"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb62e0959d5a1bebc965f4d15d9e2b7cea002b6b0f5ba8cde6cc26738467100"
+dependencies = [
+ "fastrand",
+ "phf_shared 0.14.0",
+]
+
+[[package]]
 name = "phf_macros"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4928,6 +4987,19 @@ checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
 dependencies = [
  "phf_generator 0.13.1",
  "phf_shared 0.13.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fa8d0ca26d424d27630da600c6624696e7dec8bf7b3b492b383c5dc49e5e085"
+dependencies = [
+ "phf_generator 0.14.0",
+ "phf_shared 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4947,6 +5019,15 @@ name = "phf_shared"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
 ]
@@ -6667,6 +6748,7 @@ version = "0.11.0"
 dependencies = [
  "ab_glyph",
  "block2 0.6.2",
+ "cssparser",
  "data-url",
  "dunce",
  "embed-resource",
