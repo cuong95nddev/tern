@@ -32,8 +32,6 @@
                 "fill": true,
                 "fixed": true,
                 "size": "$agents.start_width",
-                "min": 160,
-                "max": 480,
                 "children": [
                   { "part": "agents", "when": "agents" }
                 ]
@@ -53,8 +51,8 @@
                     "fixed": true,
                     "size": "$usage.start_height",
                     "children": [
-                      { "part": "usage", "when": "usage", "min": 32 },
-                      { "part": "system", "when": "system", "min": 32 }
+                      { "part": "usage", "when": "usage" },
+                      { "part": "system", "when": "system" }
                     ]
                   }
                 ]
@@ -69,14 +67,12 @@
                 "fill": true,
                 "fixed": true,
                 "size": "$changes.start_width",
-                "min": 180,
-                "max": 700,
                 "children": [
                   { "part": "explorer", "when": "explorer", "attach": false },
-                  { "part": "changes", "when": "changes", "attach": false, "fixed": true, "size": "$changes.start_height", "min": 90, "max": 900 },
-                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height", "min": 90, "max": 800 },
-                  { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height", "min": 90, "max": 800 },
-                  { "part": "services", "when": "services", "fixed": true, "size": "$services.start_height", "min": 90, "max": 800 }
+                  { "part": "changes", "when": "changes", "attach": false, "fixed": true, "size": "$changes.start_height" },
+                  { "part": "scratches", "when": "scratches", "fixed": true, "size": "$scratches.start_height" },
+                  { "part": "shells", "when": "shells", "fixed": true, "size": "$shells.start_height" },
+                  { "part": "services", "when": "services", "fixed": true, "size": "$services.start_height" }
                 ]
               }
             ]
@@ -391,7 +387,7 @@
             "fill": true,
             "split": "row",
             "children": [
-              { "slot": "vertical_tabs", "fixed": true, "size": "$vertical_tabs.start_width", "min": 140, "max": 480 },
+              { "slot": "vertical_tabs", "fixed": true, "size": "$vertical_tabs.start_width" },
               { "use": "pane.body" }
             ]
           },
@@ -1702,7 +1698,7 @@
               { "slot": "list" }
             ]
           },
-          { "fixed": true, "fill": true, "size": "$git_log.details.start_width", "min": 220, "max": 900, "children": [{ "use": "git_log.details" }] }
+          { "fixed": true, "fill": true, "size": "$git_log.details.start_width", "children": [{ "use": "git_log.details" }] }
         ]
       }
     ]
@@ -2272,7 +2268,12 @@
             "children": [{ "grow": 1, "truncate": true, "text": "{updated}" }, { "when": "plan", "shrink": 0, "text": "{plan}" }]
           },
           { "when": "email", "element": "usage.card.detail", "truncate": true, "text": "{email}" },
-          { "when": "error", "element": "usage.card.error", "wrap": true, "text": "{error}" }
+          { "when": "error", "element": "usage.card.error", "wrap": true, "text": "{error}" },
+          {
+            "when": "sign_in",
+            "layout": "row",
+            "children": [{ "button": "sign_in", "size": "small", "icon": "log-in", "label": "Sign In…", "tooltip": "Sign this account in again in a new tab" }]
+          }
         ]
       },
       { "each": "limits", "item": { "use": "usage.card.limit" } },
@@ -2341,6 +2342,7 @@
           { "when": "removable", "button": "remove", "size": "xsmall", "icon": "trash", "tooltip": "Remove Account…" }
         ]
       },
+      { "when": "sign_in", "button": "account_sign_in", "size": "xsmall", "icon": "log-in", "tooltip": "Sign In…" },
       { "switch": "enable", "element": "usage.card.switch", "tooltip": "{switch_tip}", "selected": "active", "disabled": "last" }
     ]
   },
@@ -3035,8 +3037,6 @@
             "fixed": true,
             "fill": true,
             "size": "$changes_review.side.start_width",
-            "min": 220,
-            "max": 900,
             "children": [
               { "when": "empty", "use": "changes.empty" },
               { "slot": "list" },

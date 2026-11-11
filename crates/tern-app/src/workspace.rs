@@ -5114,7 +5114,9 @@ impl Workspace {
                         let body = self.render_layout(c, &path, cx);
                         let line = (k > 0).then_some(on);
                         let (left, top) = if *axis == Axis::Horizontal { (line, None) } else { (None, line) };
-                        resizable_panel().child(template::split_cell(format!("panes-{path}"), left, top, on, body, cx))
+                        // Any size, down to nothing.
+                        let cell = template::split_cell(format!("panes-{path}"), left, top, on, body, cx);
+                        resizable_panel().size_range(px(0.)..Pixels::MAX).child(template::clipped(cell))
                     })
                     .collect();
                 group.with_handle_appearance(template::no_line()).children(panels).into_any_element()

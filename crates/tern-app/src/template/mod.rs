@@ -29,13 +29,22 @@ use crate::arrange::{Arrangement, Dir, DockInfo, Size, Tree};
 use crate::dock::OnChange;
 use crate::style::{self, Props, Val};
 
+mod actor;
 mod draw;
 mod menu;
+mod motion;
+mod motion_spec;
+mod picture;
+mod play;
 mod shared;
 
-pub use draw::{Framed, Frames, MenuHandler, MenuItems, menu, no_line, on_event, render, render_part, render_plain, split_cell};
+pub use actor::ActorSpec;
+pub use motion::RawAnimations;
+pub use play::set_motion;
+
+pub use draw::{Framed, Frames, MenuHandler, MenuItems, clipped, menu, no_line, on_event, render, render_part, render_plain, split_cell};
 #[allow(unused_imports)] // `Frames` is named by `render`'s callers only through inference.
-pub use shared::{publish as publish_shared, set_texts, text};
+pub use shared::{check_docks, dock_values, forget_docks, publish as publish_shared, set_texts, text};
 
 /// The built-in templates.
 const BUILTIN: &str = include_str!("../templates.json");
@@ -61,6 +70,29 @@ pub struct Spec {
     /// An icon by name (`"plus"`, `"columns-2"`: the bundled Lucide names),
     /// or `"{name}"` for one the code gives. On a `button`: its icon.
     pub icon: Option<String>,
+    /// A picture: a PNG, SVG or GIF (an animated GIF plays by itself), by path
+    /// relative to the config folder (or absolute, or `~/…`). Give the box a
+    /// `width` and `height` in its `style`; the picture is fitted in it.
+    pub image: Option<String>,
+    /// An actor from `actors`, moving over this box's parent (its stage).
+    /// Hidden while `ui.decorations` is false.
+    pub actor: Option<String>,
+    /// Runs keyframes from `animations` on this box: a name and timing, as
+    /// the shorthand `"pulse 1.2s infinite ease-in-out"` or an object
+    /// (`name`, `duration`, `delay`, `iteration`, `direction`, `easing`,
+    /// `fill`, `play`), or a list of them.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub animation: Option<serde_json::Value>,
+    /// Properties that ease to their new value when a state starts or stops
+    /// holding or a `"{name}"` changes: `"background 0.15s ease-out, opacity
+    /// 0.2s"`, `"all 0.2s"`, or objects (`property`, `duration`, `delay`,
+    /// `easing`).
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub transition: Option<serde_json::Value>,
+    /// Runs a keyframe set once on an event (`appear`, `click`, `hover`):
+    /// `{"click": "pop 0.3s"}`; a value is an `animation`'s.
+    #[schemars(with = "BTreeMap<String, serde_json::Value>")]
+    pub on: BTreeMap<String, serde_json::Value>,
     /// A ring `"{name}"` percent full (0 to 100): an arc clockwise from the
     /// top over its track, which is dashed while the value is empty. Its
     /// `text` colors the arc, `track` the track, `stroke_width` both;
@@ -400,6 +432,8 @@ pub struct Templates {
     docks: HashMap<String, Vec<DockInfo>>,
     /// Every part, by name: its kind and its node.
     parts: BTreeMap<&'static str, (String, Node)>,
+    /// The actors, by name.
+    actors: BTreeMap<String, Arc<actor::ActorDef>>,
     /// Which compile this is: a new one means the settings changed.
     generation: u64,
 }
@@ -539,6 +573,10 @@ enum What {
     Each(SharedString, Arc<Node>),
     /// An icon's name.
     Icon(Vec<Part>),
+    /// A picture's file.
+    Image(std::path::PathBuf),
+    /// An actor's name.
+    Actor(SharedString),
     /// How full a ring is, in percent.
     Ring(Vec<Part>),
     Button(Arc<ButtonNode>),
@@ -783,6 +821,10 @@ pub struct Node {
     window: Option<Cond>,
     /// Whether a part takes parts dropped onto it; None is always.
     attach: Option<Cond>,
+    /// What it does over time.
+    motion: Option<Arc<motion::NodeMotion>>,
+    /// It or a node below it moves or is an actor.
+    moving_below: bool,
     children: Vec<Node>,
 }
 
@@ -871,9 +913,26 @@ impl Default for PaneDock {
 
 /// Reads `specs` (the built-in templates with the theme's and the
 /// settings' over them) with `props`; what's wrong goes to `problems`.
+#[cfg(test)]
 pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec<String>) -> Templates {
+    compile_with(specs, &Defs::default(), props, problems)
+}
+
+/// What templates may name besides each other: keyframe sets and actors.
+#[derive(Default)]
+pub struct Defs<'a> {
+    pub animations: Option<&'a RawAnimations>,
+    pub actors: Option<&'a BTreeMap<String, ActorSpec>>,
+}
+
+/// [`compile`] with the `animations` and `actors` the templates name.
+pub fn compile_with(specs: &BTreeMap<String, Spec>, defs: &Defs, props: &Props, problems: &mut Vec<String>) -> Templates {
     let start = problems.len();
-    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![], element: None };
+    let empty = (RawAnimations::new(), BTreeMap::new());
+    let animations = motion_spec::compile_animations(defs.animations.unwrap_or(&empty.0), props, problems);
+    let actors = actor::compile(defs.actors.unwrap_or(&empty.1), &props.path(""), problems);
+    let actor_names = actors.keys().cloned().collect();
+    let mut c = Compiler { specs, props, problems, done: HashMap::new(), stack: vec![], element: None, animations, actor_names };
     for name in specs.keys() {
         c.template(name);
     }
@@ -911,7 +970,7 @@ pub fn compile(specs: &BTreeMap<String, Spec>, props: &Props, problems: &mut Vec
     });
     static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Templates { nodes, docks, parts, generation }
+    Templates { nodes, docks, parts, actors, generation }
 }
 
 /// The templates `spec` uses, below it too.
@@ -993,6 +1052,10 @@ struct Compiler<'a, 'b> {
     stack: Vec<String>,
     /// What `$element` names: the element given where the template being read is used.
     element: Option<&'static str>,
+    /// The keyframe sets `animation` may name.
+    animations: HashMap<String, Arc<motion::Keyframes>>,
+    /// The actors `actor` may name.
+    actor_names: BTreeSet<String>,
 }
 
 impl Compiler<'_, '_> {
@@ -1213,6 +1276,10 @@ impl Compiler<'_, '_> {
                 fixed: panel.fixed.or(node.panel.fixed),
             };
             node.frame = s.frame.clone().map(Into::into).or(node.frame);
+            if let Some(m) = self.motion(s, at) {
+                node.motion = Some(m);
+                node.moving_below = true;
+            }
             node.kind = s.kind.clone().or(node.kind);
             node.handle |= s.handle;
             if s.drag.is_some() {
@@ -1286,13 +1353,17 @@ impl Compiler<'_, '_> {
             s.each.is_some(),
             s.use_.is_some(),
             icon,
+            s.image.is_some(),
+            s.actor.is_some(),
             s.ring.is_some(),
             s.button.is_some() || s.action.is_some(),
             switch,
             s.separator,
         ];
         if kinds.iter().filter(|k| **k).count() > 1 {
-            self.problems.push(format!("{at}: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator"));
+            self.problems.push(format!(
+                "{at}: a node is one of slot, part, text, each, use, icon, image, actor, ring, button, switch and separator"
+            ));
         }
         if switch {
             for (field, set) in [
@@ -1356,6 +1427,18 @@ impl Compiler<'_, '_> {
             What::Separator
         } else if let Some(name) = &s.icon {
             What::Icon(self.icon(name, &format!("{at}.icon")))
+        } else if let Some(image) = &s.image {
+            let path = self.props.path(image);
+            if !path.is_file() {
+                self.problems.push(format!("{at}.image: no file {}", path.display()));
+            }
+            What::Image(path)
+        } else if let Some(name) = &s.actor {
+            if !self.actor_names.contains(name) {
+                let known: Vec<&str> = self.actor_names.iter().map(String::as_str).collect();
+                self.problems.push(format!("{at}.actor: no actor \"{name}\" (there are: {})", known.join(", ")));
+            }
+            What::Actor(name.clone().into())
         } else if let Some(ring) = &s.ring {
             What::Ring(parts(ring))
         } else if let Some(list) = &s.each {
@@ -1400,6 +1483,14 @@ impl Compiler<'_, '_> {
         // Later children paint over earlier ones; `z` reorders them.
         children.sort_by_key(|c| c.z);
         let pane_dock = self.pane_dock(s, at);
+        let motion = self.motion(s, at);
+        if motion.is_some() && matches!(what, What::Button(_)) {
+            self.problems.push(format!("{at}: a button or switch doesn't take animation, transition or on"));
+        }
+        let moving_below = motion.is_some()
+            || matches!(what, What::Actor(_))
+            || children.iter().any(|c| c.moving_below)
+            || matches!(&what, What::Each(_, item) if item.moving_below);
         let dock = if pane_dock.is_some() { None } else { self.dock(s, at, split, &children) };
         let label = if submenu { s.label.as_deref().map(parts) } else { None };
         Node {
@@ -1437,6 +1528,8 @@ impl Compiler<'_, '_> {
             window: self.flag(&s.window, &format!("{at}.window")),
             attach: self.flag(&s.attach, &format!("{at}.attach")),
             kind: s.kind.clone(),
+            motion,
+            moving_below,
             children,
         }
     }
@@ -1806,6 +1899,128 @@ mod tests {
         (t, problems)
     }
 
+    fn compiled_with(json: &str, animations: &str, actors: &str) -> (super::Templates, Vec<String>) {
+        let over = style::Overrides::default();
+        let theme = gpui_kit::component::ThemeColor::default();
+        let dir = std::env::temp_dir().join(format!("tern-motion-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), b"x").unwrap();
+        let props = Props::new(&over, &theme, &dir);
+        let specs: BTreeMap<String, Spec> = serde_json::from_str(json).unwrap();
+        let animations: super::RawAnimations = serde_json::from_str(animations).unwrap();
+        let actors: BTreeMap<String, super::ActorSpec> = serde_json::from_str(actors).unwrap();
+        let defs = super::Defs { animations: Some(&animations), actors: Some(&actors) };
+        let mut problems = vec![];
+        let t = super::compile_with(&specs, &defs, &props, &mut problems);
+        (t, problems)
+    }
+
+    const PULSE: &str = r#"{"pulse": {"0%": {"opacity": 1, "scale": 1}, "50%, 80%": {"opacity": 0.5, "scale": 1.1, "translate_x": 3},
+        "to": {"opacity": 1}}}"#;
+
+    #[test]
+    fn animations_transitions_and_events_compile() {
+        let (t, problems) = compiled_with(
+            r##"{"w": {"children": [
+                {"text": "a", "animation": "pulse 1.2s infinite ease-in-out 0.5s alternate both"},
+                {"text": "b", "animation": {"name": "pulse", "duration": 2, "iteration": 3, "easing": "steps(4)", "play": "hover"}},
+                {"text": "c", "animation": ["pulse 1s", {"name": "pulse", "delay": 1}]},
+                {"text": "d", "transition": "background 0.15s ease-out, opacity 200ms 50ms", "states": {"hover": {"background": "#fff"}}},
+                {"text": "e", "transition": [{"property": "all", "duration": 0.3}], "on": {"click": "pulse 0.3s", "hover": "pulse", "appear": "pulse"}}
+            ]}}"##,
+            PULSE,
+            "{}",
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let kids = &t.nodes["w"].children;
+        let m = |i: usize| kids[i].motion.clone().unwrap();
+        let a = &m(0).anims[0];
+        assert_eq!((a.duration, a.delay, a.iterations), (1.2, 0.5, f64::INFINITY));
+        assert_eq!(a.direction, super::motion::Direction::Alternate);
+        assert_eq!(a.fill, super::motion::Fill::Both);
+        assert_eq!(a.easing, super::motion::Easing::parse("ease-in-out").unwrap());
+        let b = &m(1).anims[0];
+        assert_eq!((b.duration, b.iterations, b.easing), (2., 3., super::motion::Easing::Steps(4)));
+        assert!(b.play.is_some() && m(1).tracks_hover());
+        assert_eq!(m(2).anims.len(), 2);
+        let d = m(3);
+        assert_eq!(d.trans.len(), 2);
+        assert_eq!((d.trans[0].prop, d.trans[0].duration), (Some("background"), 0.15));
+        assert_eq!((d.trans[1].prop, d.trans[1].duration, d.trans[1].delay), (Some("opacity"), 0.2, 0.05));
+        let e = m(4);
+        assert_eq!((e.click.len(), e.hover.len(), e.appear.len(), e.trans[0].prop), (1, 1, 1, None));
+        assert!(t.nodes["w"].moving_below && !kids[0].children.iter().any(|c| c.moving_below));
+        // The keyframes: "50%, 80%" is two stops; the transform keys are channels.
+        let kf = &a.kf;
+        let base = |_: super::motion::Chan| None;
+        let at = kf.sample(0.5, &base);
+        assert_eq!(at.get(&super::motion::Chan::Tx), Some(&crate::style::Val::Num(3.)));
+        assert_eq!(at.get(&super::motion::Chan::Scale), Some(&crate::style::Val::Num(1.1)));
+        assert_eq!(kf.sample(0.8, &base).get(&super::motion::Chan::Tx), Some(&crate::style::Val::Num(3.)));
+    }
+
+    #[test]
+    fn motion_mistakes_are_reported() {
+        let (t, problems) = compiled_with(
+            r#"{"w": {"children": [
+                {"text": "a", "animation": "nope 1s"},
+                {"text": "b", "animation": "1s"},
+                {"text": "c", "animation": {"name": "pulse", "duration": -1, "direction": "sideways", "fill": "x", "easing": "bouncy", "speed": 3}},
+                {"text": "d", "transition": "colour 1s"},
+                {"text": "e", "transition": "opacity 1s wobble"},
+                {"text": "f", "on": {"tap": "pulse"}},
+                {"button": "g", "animation": "pulse 1s"},
+                {"text": "h", "animation": {"name": "pulse", "play": "a &&"}}
+            ]}}"#,
+            r#"{"pulse": {"0%": {"opacity": 1, "wobble": 2}, "sideways": {"opacity": 1}, "50%": {"translate_x": "far"}}, "empty": {}}"#,
+            "{}",
+        );
+        for want in [
+            "animations.pulse: \"sideways\" is not from, to or a percent",
+            "animations.pulse.0%: no property \"wobble\"",
+            "animations.pulse.50%.translate_x: a number",
+            "animations.empty: no keyframes",
+            "templates.w.children.0.animation: no animation \"nope\" (there are: empty, pulse)",
+            "templates.w.children.1.animation: an animation needs a name",
+            "templates.w.children.2.animation.duration: seconds",
+            "templates.w.children.2.animation.direction: one of normal",
+            "templates.w.children.2.animation.fill: one of none",
+            "templates.w.children.2.animation.easing: \"bouncy\" is not an easing",
+            "templates.w.children.2.animation.speed: an animation takes name",
+            "templates.w.children.3.transition: no property \"colour\"",
+            "templates.w.children.4.transition: \"wobble\" is not an easing",
+            "templates.w.children.5.on.tap: an event is one of appear, click, hover",
+            "templates.w.children.6: a button or switch doesn't take animation, transition or on",
+            "templates.w.children.7.animation.play",
+        ] {
+            assert!(problems.iter().any(|p| p.contains(want)), "{want}\n{problems:#?}");
+        }
+        // What could be read still draws.
+        assert!(t.nodes["w"].children[2].motion.is_some());
+    }
+
+    #[test]
+    fn images_and_actors_compile() {
+        let (t, problems) = compiled_with(
+            r#"{"w": {"children": [
+                {"image": "a.png", "style": {"width": 10, "height": 10}},
+                {"image": "gone.png"},
+                {"actor": "bunny"},
+                {"actor": "ghost"},
+                {"image": "a.png", "actor": "bunny"}
+            ]}}"#,
+            "{}",
+            r#"{"bunny": {"looks": {"sit": {"image": "a.png"}}}}"#,
+        );
+        assert!(matches!(t.nodes["w"].children[0].what, super::What::Image(_)));
+        assert!(matches!(&t.nodes["w"].children[2].what, super::What::Actor(n) if n.as_ref() == "bunny"));
+        assert!(t.nodes["w"].moving_below);
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        assert!(problems[0].starts_with("templates.w.children.1.image: no file "));
+        assert!(problems[1].contains("templates.w.children.3.actor: no actor \"ghost\" (there are: bunny)"));
+        assert!(problems[2].contains("a node is one of"));
+    }
+
     #[test]
     fn the_center_dock_holds_the_panes() {
         let (t, problems) = compiled(
@@ -2010,7 +2225,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
+                "templates.s.children.1: a node is one of slot, part, text, each, use, icon, image, actor, ring, button, switch and separator",
                 "templates.s.children.1.icon: a switch doesn't take it",
             ]
         );
@@ -2032,7 +2247,7 @@ mod tests {
             problems,
             [
                 "templates.menu.m.children.0.label: only a button or a submenu takes it",
-                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, ring, button, switch and separator",
+                "templates.menu.m.children.1: a node is one of slot, part, text, each, use, icon, image, actor, ring, button, switch and separator",
             ]
         );
         let mut problems = vec![];

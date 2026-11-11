@@ -69,6 +69,14 @@ pub struct SettingsFile {
     /// The window's parts as trees of boxes, by name, over the built-in ones
     /// (see `reference/templates.md` and `reference/templates.json`).
     pub templates: BTreeMap<String, crate::template::Spec>,
+    /// Keyframe sets a box runs with `animation` (or `on`), by name:
+    /// `{"pulse": {"0%": {"opacity": 1}, "50%": {"opacity": 0.6}, "100%": {"opacity": 1}}}`.
+    /// A stop's properties are any box property (colors, lengths, `opacity`)
+    /// and `translate_x`, `translate_y` (pixels), `scale`, `rotate` (degrees).
+    #[schemars(with = "BTreeMap<String, BTreeMap<String, BTreeMap<String, serde_json::Value>>>")]
+    pub animations: crate::template::RawAnimations,
+    /// Small figures that move over a template's `actor` stage, by name.
+    pub actors: BTreeMap<String, crate::template::ActorSpec>,
     /// Icons to replace everywhere, by name (`folder`, `agents/claude.svg`):
     /// with another bundled icon's name, or a `.svg` file (absolute, `~/…`,
     /// or relative to this folder). An icon already drawn changes at the
@@ -188,6 +196,11 @@ pub struct UiSettings {
     pub font_family: Option<String>,
     /// Base UI font size (default 16); every UI text size scales with it.
     pub font_size: Option<f32>,
+    /// Whether the actors a theme or `templates` place are shown (default true).
+    pub decorations: Option<bool>,
+    /// Jump animations to their end and stop the endless ones (default: the
+    /// system's Reduce Motion setting on macOS, else false).
+    pub reduce_motion: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -322,6 +335,9 @@ struct TernTheme {
     elements: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Its `templates`, under the settings' ones.
     templates: BTreeMap<String, crate::template::Spec>,
+    /// Its `animations` and `actors`, under the settings' ones.
+    animations: crate::template::RawAnimations,
+    actors: BTreeMap<String, crate::template::ActorSpec>,
     /// Its `icons`, `file_icons` and `texts`, under the settings' ones.
     icons: BTreeMap<String, String>,
     file_icons: BTreeMap<String, crate::file_icons::FileLook>,
@@ -619,7 +635,17 @@ fn load(cx: &mut App) {
     let mut specs = crate::template::builtin();
     specs.extend(theme.templates.clone());
     specs.extend(settings.templates.clone());
-    let templates = crate::template::compile(&specs, &style::Props::new(&over, &colors, dir), &mut problems);
+    let mut animations = theme.animations.clone();
+    animations.extend(settings.animations.clone());
+    let mut actors = theme.actors.clone();
+    actors.extend(settings.actors.clone());
+    let defs = crate::template::Defs { animations: Some(&animations), actors: Some(&actors) };
+    let templates = crate::template::compile_with(&specs, &defs, &style::Props::new(&over, &colors, dir), &mut problems);
+    crate::template::set_motion(
+        settings.ui.reduce_motion.unwrap_or_else(system_reduces_motion),
+        settings.ui.decorations.unwrap_or(true),
+        cx,
+    );
     templates.check_actions(cx.all_action_names(), &mut problems);
     cx.set_global(templates);
     let mut icons = theme.icons.clone();
@@ -658,6 +684,24 @@ fn load(cx: &mut App) {
 
     set_error((!problems.is_empty()).then(|| problems.join("; ")), cx);
     cx.refresh_windows();
+}
+
+/// Whether the system asks for less motion (macOS: Reduce Motion).
+#[cfg(target_os = "macos")]
+fn system_reduces_motion() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    let Some(class) = AnyClass::get(c"NSWorkspace") else { return false };
+    // SAFETY: `sharedWorkspace` and `accessibilityDisplayShouldReduceMotion` take no arguments and give an object and a BOOL.
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class, sharedWorkspace];
+        !workspace.is_null() && msg_send![workspace, accessibilityDisplayShouldReduceMotion]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reduces_motion() -> bool {
+    false
 }
 
 /// The theme colors parts of the window are filled with, at `opacity` of
@@ -1053,6 +1097,14 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             Some(t) => serde_json::from_value(t).map_err(|e| format!("templates: {e}"))?,
             None => BTreeMap::new(),
         };
+        let animations = match take("animations") {
+            Some(t) => serde_json::from_value(t).map_err(|e| format!("animations: {e}"))?,
+            None => BTreeMap::new(),
+        };
+        let actors = match take("actors") {
+            Some(t) => serde_json::from_value(t).map_err(|e| format!("actors: {e}"))?,
+            None => BTreeMap::new(),
+        };
         let icons = match take("icons") {
             Some(i) => serde_json::from_value(i).map_err(|e| format!("icons: {e}"))?,
             None => BTreeMap::new(),
@@ -1073,7 +1125,7 @@ fn parse_theme_set(text: &str) -> Result<Vec<(SharedString, TernTheme)>, String>
             t.entry("mode").or_insert_with(|| if dark { "dark" } else { "light" }.into());
         }
         let ui: ThemeConfig = serde_json::from_value(theme.take()).map_err(|e| e.to_string())?;
-        out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates, icons, file_icons, texts }));
+        out.push((ui.name.clone(), TernTheme { ui, terminal, tokens, elements, templates, animations, actors, icons, file_icons, texts }));
     }
     Ok(out)
 }
@@ -1484,6 +1536,16 @@ so a template can put these buttons anywhere. Menus read the values too.
 {{ \"button\": \"caffeine\", \"size\": \"small\", \"icon\": \"{{caffeine_icon}}\", \"selected\": \"caffeine_on\", \"tooltip\": \"{{caffeine_tooltip}}\" }}
 ```
 
+Each dock of the `workspace` template that shows gives where it is, in pixels
+from the window's top left corner: `dock_<name>_left`, `_right`, `_top`,
+`_bottom`, `_width` and `_height` (`dock_start_right`); a hidden dock gives
+none. So a part of `window` or `title_bar` lines up with a dock, and follows it
+as it is resized:
+
+```json
+{{ \"when\": \"dock_start_width\", \"position\": {{ \"top\": 0, \"left\": 0 }}, \"style\": {{ \"width\": \"{{dock_start_right}}\", \"height\": \"$title_bar.height\", \"background\": \"$sidebar.background\" }} }}
+```
+
 A button with an `action` goes anywhere too, and acts on the focused pane or
 the workspace: `workspace::ToggleExplorer` (with `\"selected\": \"explorer_on\"`),
 `workspace::SplitRight`, `workspace::ClosePane`, `workspace::NewShellTab`,
@@ -1617,6 +1679,106 @@ back to its defaults.
 A `workspace` template copied from an older build that has `\"use\":
 \"workspace.left\"` must be updated: that template is gone, the docks replaced
 it. Copy the new `workspace` from `reference/templates.json`.
+
+### Motion
+
+Any box can move and change as an HTML element does with CSS. `animations`
+(in `{SETTINGS}` or a theme) names keyframe sets; a box runs one with
+`\"animation\"`:
+
+```json
+\"animations\": {{
+  \"pulse\": {{ \"0%\": {{ \"opacity\": 1, \"scale\": 1 }}, \"50%\": {{ \"opacity\": 0.6, \"scale\": 1.08 }}, \"100%\": {{ \"opacity\": 1, \"scale\": 1 }} }}
+}}
+{{ \"when\": \"working\", \"icon\": \"bot\", \"animation\": \"pulse 1.2s infinite ease-in-out\" }}
+```
+
+- A stop is `from`, `to`, a percent (`\"40%\"`, or `\"20%, 60%\"`). Its properties are any
+  box property that is a color, a length or a number (`background`, `text`,
+  `border`, `width`, `padding_left`, `radius`, `opacity`, …) and the transform
+  channels `translate_x`, `translate_y` (pixels), `scale`, `rotate` (degrees).
+  A property a set leaves out at 0% or 100% starts or ends at the box's own.
+- `animation` is a shorthand (`\"name 1.2s 0.5s infinite alternate both ease-in-out\"`:
+  the first time is the duration, the second the delay), an object
+  (`name`, `duration` seconds, `delay`, `iteration` a count or `\"infinite\"`,
+  `direction` `normal`/`reverse`/`alternate`/`alternate-reverse`, `easing`,
+  `fill` `none`/`forwards`/`backwards`/`both`, `play`: a condition, the
+  animation runs only while it holds and waits otherwise; `hover` is the pointer
+  over the box), or a list of them. The duration is 1 s unless given. An
+  easing is `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out`,
+  `steps(N)` or `cubic-bezier(a,b,c,d)`, applied over each run of the set.
+- It starts when the box first shows: when its `when` starts to hold, as an
+  element entering the page does.
+- `\"transition\"` eases a property to its new value when a `states` entry
+  starts or stops to hold (`hover` too) or a `\"{{name}}\"` changes, instead of
+  jumping: `\"background 0.15s ease-out, opacity 0.2s\"`, `\"all 0.2s\"`, or objects
+  (`property`, `duration`, `delay`, `easing`). Default 0.2 s.
+- `\"on\": {{\"click\": \"pop 0.3s\", \"hover\": \"…\", \"appear\": \"…\"}}` runs a
+  keyframe set once on that event; a value is an `animation`'s. A box with a
+  `frame` takes `click` as well; `hover` needs no frame.
+- What moves where: every box takes the properties and `translate_x/y`
+  (the box moves without moving what is around it). `scale` resizes a box
+  around its middle when it has a `width` and `height`; an icon scales and
+  rotates itself; a box, text and a ring don't rotate (gpui can't turn them).
+  Buttons, switches and a bare slot take no motion.
+- One clock serves all windows; a box that moves asks for a frame after each
+  one, and nothing asks while nothing moves. `ui.reduce_motion: true` (or
+  macOS's Reduce Motion setting) jumps animations to their end and stops the
+  endless ones. What a box is doing is kept per window, so redraws don't
+  restart it; it starts again when the theme or settings change.
+
+### Pictures and actors
+
+`\"image\": \"images/grass.png\"` draws a PNG, SVG or GIF (an animated GIF plays
+by itself) fitted in the box (give it a `width` and `height` in `style`); a
+path is absolute, `~/…` or relative to this folder.
+
+`actors` (in `{SETTINGS}` or a theme) are small figures that move over a
+stage: the box an `\"actor\": \"rabbit\"` leaf is in (give that box `position`
+edges to size it, e.g. all four 0 to cover its parent). A stage and its
+figure take no mouse event but a click on the figure itself.
+
+```json
+\"actors\": {{ \"rabbit\": {{
+  \"size\": [40, 40],
+  \"looks\": {{
+    \"sit\": {{ \"image\": \"images/rabbit-sit.gif\" }},
+    \"run\": {{ \"sprite\": \"images/rabbit-run.png\", \"frames\": 6, \"fps\": 12 }}
+  }},
+  \"faces\": \"right\",
+  \"moves\": [
+    {{ \"do\": \"rest\", \"look\": \"sit\", \"at\": [0.1, 1], \"for\": [20, 60] }},
+    {{ \"do\": \"wander\", \"look\": \"run\", \"rest_look\": \"sit\", \"speed\": 120, \"pause\": [2, 6], \"times\": [2, 5] }},
+    {{ \"do\": \"visit\", \"look\": \"run\", \"path\": \"across\", \"speed\": 220 }}
+  ],
+  \"order\": \"random\",
+  \"click\": {{ \"do\": \"flee\", \"look\": \"run\", \"speed\": 400, \"then\": \"rest\" }}
+}} }}
+```
+
+- `looks` are what it shows: `image` (PNG, SVG, GIF) or `sprite` (a PNG sheet
+  of `frames` equal frames side by side, at `fps`; `\"loop\": false` plays it
+  once). A look is drawn mirrored when the figure moves against the way it
+  `faces` (`left` or `right`); an SVG isn't mirrored.
+- `moves` run one after another, forever (`order`: `list` or `random`):
+  `rest` stays at `at` for `for` seconds (a number or `[min, max]`);
+  `wander` runs to random points, pausing `pause` seconds, `times` times;
+  `patrol` runs `from` to `to` and back, `times` times; `visit` leaves its
+  place along `path` (`\"across\"`: out one side of the stage and in from the
+  other; or a list of points) and comes back; `hop` jumps on an arc to `to`,
+  `height` pixels high. Points are `[x, y]` in the stage: 0 to 1 is a
+  fraction of it, more (or `\"40px\"`, `\"50%\"`) pixels; `y` is where the feet
+  are. `speed` is pixels per second. `look` shows while it moves, `rest_look`
+  while it stands (default the first look). Walking to a place uses the look
+  of the first moving move.
+- `click` is what a click on the figure does: any move, or `flee` (a `wander`
+  once, away from the pointer), then `then`: `rest` (back to its place, then
+  its moves go on from the first `rest`) or `continue`. A click while it
+  reacts starts the reaction again.
+- A stage that changes size keeps the figure's place in it. After a sleep
+  or a long gap the moves missed aren't replayed: it goes on from the next one.
+- `\"ui\": {{\"decorations\": false}}` hides every actor. A missing file, an
+  unknown look or a bad point is a problem in the status bar; the rest draws.
 
 ### Background images
 

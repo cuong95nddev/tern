@@ -1526,8 +1526,8 @@ pub const ELEMENTS: &[Element] = &[
             ("shadow", Text, "lg"),
             ("width", Len, "300"),
             ("height", Len, "400"),
-            ("min_width", Len, "120"),
-            ("min_height", Len, "80"),
+            ("min_width", Len, "0"),
+            ("min_height", Len, "0"),
             ("grip", Len, "6"),
         ]],
     },
@@ -2218,6 +2218,11 @@ impl<'a> Props<'a> {
     }
 
     /// `raw` as a size; `None` when it is unset.
+    /// `p` as a file: `~/…`, absolute, or relative to the config folder.
+    pub fn path(&self, p: &str) -> PathBuf {
+        self.resolver().path(p)
+    }
+
     pub fn len(&self, raw: &serde_json::Value, at: &str, problems: &mut Vec<String>) -> Option<AbsoluteLength> {
         let Some(text) = self::raw(raw) else {
             problems.push(format!("{at}: a size is a number or a string"));
@@ -2420,6 +2425,11 @@ impl El {
             [c.r, c.g, c.b, c.a].map(|v| (v * 255.).round() as u8)
         };
         !OVER_CONTENT.contains(&self.name) && rgba(c) == rgba(base)
+    }
+
+    /// The value of `prop`, when it has one.
+    pub fn val(&self, prop: &'static str) -> Option<Val> {
+        self.get(prop).cloned()
     }
 
     /// Whether `prop` has a value (a default or the user's).

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use gpui_kit::base::PANEL_MIN_SIZE;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizablePanel;
@@ -16,6 +15,8 @@ use std::sync::Arc;
 
 use super::fill_parts as fill;
 use super::menu::Entry;
+use super::motion::{Chan, NodeMotion, Transform};
+use super::play::Motion;
 use super::{Align, ButtonNode, ButtonSize, Cond, DockNode, Edge, Justify, Layout, Node, Panel, Scope, Templates, Value, Variant, What};
 use crate::arrange::{self, Shown, Size};
 use crate::dock::{ActiveDrag, Change, DraggedPart, FloatResize, Floats, LayoutLock, OnChange, PinnedParts};
@@ -65,7 +66,15 @@ pub fn render(name: &str, scope: Scope, frames: &mut Frames, cx: &App) -> AnyEle
     };
     let mut scope = scope;
     let shared = super::shared::values(cx);
-    let mut d = Drawer { frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
+    let mut d = Drawer {
+        frames,
+        cx,
+        rem: cx.theme_rem(),
+        lines: Lines::default(),
+        win: super::shared::window_key(cx),
+        motion: super::play::current(cx),
+        moved: Moved::default(),
+    };
     let root = d.node(&node, &mut scope, &[&shared]).unwrap_or_else(|| div().into_any_element());
     if scope.arrangement.is_none() {
         return root;
@@ -86,7 +95,15 @@ pub fn render_part(name: &str, scope: Scope, cx: &App) -> AnyElement {
     let mut scope = scope;
     let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
     let shared = super::shared::values(cx);
-    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
+    let mut d = Drawer {
+        frames: &mut frames,
+        cx,
+        rem: cx.theme_rem(),
+        lines: Lines::default(),
+        win: super::shared::window_key(cx),
+        motion: super::play::current(cx),
+        moved: Moved::default(),
+    };
     d.part_body(name, &mut scope, &[&shared])
 }
 
@@ -161,7 +178,15 @@ fn fill_menu(entries: &[Entry], mut menu: PopupMenu, items: &MenuItems, window: 
 fn content_of(n: &Node, content: &super::menu::Content, cx: &App) -> AnyElement {
     let mut scope = Scope { vars: content.vars.clone(), index: content.index, ..Default::default() };
     let mut frames = |_: &str, _: Option<usize>, f: Framed| f.into_any_element();
-    let mut d = Drawer { frames: &mut frames, cx, rem: cx.theme_rem(), lines: Lines::default() };
+    let mut d = Drawer {
+        frames: &mut frames,
+        cx,
+        rem: cx.theme_rem(),
+        lines: Lines::default(),
+        win: super::shared::window_key(cx),
+        motion: super::play::current(cx),
+        moved: Moved::default(),
+    };
     let (look, hovers) = d.look(n, &scope, &[]);
     let kids: Vec<AnyElement> = n.children.iter().filter_map(|c| d.node(c, &mut scope, &[])).collect();
     let place = place(n, &lookup(&scope, &[]));
@@ -185,6 +210,22 @@ struct Drawer<'a, 'f> {
     rem: Pixels,
     /// The lines the split drawing a dock asks of the parts at its sides.
     lines: Lines,
+    /// The window being drawn, for the keys of what moves.
+    win: u64,
+    motion: Option<Motion>,
+    /// What the node being drawn does over time, for `boxed` to apply.
+    moved: Moved,
+}
+
+/// What a node's motion made of it at this frame.
+#[derive(Default)]
+struct Moved {
+    xf: Transform,
+    running: bool,
+    /// The key and motion of a box that wants to know where the pointer is.
+    hover: Option<(String, Arc<NodeMotion>)>,
+    /// The key and motion of a box that runs animations when clicked.
+    click: Option<(String, Arc<NodeMotion>)>,
 }
 
 /// The lines a split wants along a node's left and top sides: for each,
@@ -209,6 +250,16 @@ impl Lines {
     }
 }
 
+/// What a property is while nothing sets it, for a transition to start from:
+/// a color is see-through, a number 1 (`opacity`).
+fn unset(prop: &'static str) -> Option<Val> {
+    match style::box_prop(prop)?.1 {
+        style::Kind::Color => Some(Val::Color(hsla(0., 0., 0., 0.))),
+        style::Kind::Num if prop == "opacity" => Some(Val::Num(1.)),
+        _ => None,
+    }
+}
+
 /// The values a node sees: its scope's, then those of the scopes around it.
 pub(super) fn lookup<'s>(scope: &'s Scope, outer: &'s [&'s HashMap<&'static str, Value>]) -> impl Fn(&str) -> Option<Value> + 's {
     move |name: &str| match name {
@@ -226,6 +277,12 @@ impl Drawer<'_, '_> {
 
     fn node(&mut self, n: &Node, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<AnyElement> {
         if !self.holds(&n.when, scope, outer) {
+            // What moves in it starts again when it shows.
+            if n.moving_below
+                && let Some(m) = &self.motion
+            {
+                super::play::forget(m, self.win, &scope.id, &n.path);
+            }
             return None;
         }
         if self.dock_hidden(n, scope, outer) {
@@ -240,6 +297,8 @@ impl Drawer<'_, '_> {
     /// `n`, its `when` aside (a split's panel hides rather than goes).
     fn draw(&mut self, n: &Node, scope: &mut Scope, outer: &[&HashMap<&'static str, Value>]) -> Option<AnyElement> {
         let (look, hovers) = self.look(n, scope, outer);
+        // What the node's motion made of it; its children draw over `self.moved`.
+        let moved = std::mem::take(&mut self.moved);
         let mut kids: Vec<AnyElement> = vec![];
         match &n.what {
             What::Slot(name) | What::Part(name) => {
@@ -253,18 +312,33 @@ impl Drawer<'_, '_> {
                 let text = super::shared::text(fill(parts, &lookup(scope, outer)).to_string(), self.cx);
                 kids.push(look.label(text).into_any_element());
             },
+            What::Image(path) => {
+                kids.push(img(path.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element());
+            },
+            What::Actor(name) => {
+                let motion = self.motion.as_ref().filter(|m| m.decorations)?;
+                let def = self.cx.try_global::<Templates>()?.actors.get(name.as_ref())?.clone();
+                return Some(super::play::actor(motion, &def, super::play::key(self.win, &scope.id, &n.path, scope.index)));
+            },
             What::Icon(parts) => {
                 let name = fill(parts, &lookup(scope, outer));
                 if name.is_empty() {
                     return None;
                 }
-                let icon = look.apply(Icon::default().path(super::icon_path(&name)));
+                let mut icon = look.apply(Icon::default().path(super::icon_path(&name)));
+                // Scale and rotation move the icon itself; the box takes the rest.
+                let xf = moved.xf;
+                if xf.scale != 1. || xf.rotate != 0. {
+                    let t = Transformation::scale(size(xf.scale, xf.scale)).with_rotation(radians(xf.rotate.to_radians()));
+                    icon = icon.transform(t);
+                }
                 if n.is_bare_icon() {
                     return Some(icon.into_any_element());
                 }
                 kids.push(icon.into_any_element());
                 // The box takes the place; the icon keeps the look.
                 let place = place(n, &lookup(scope, outer));
+                self.moved = moved;
                 return Some(self.boxed(n, &style::el_with("", Default::default(), self.cx), hovers, kids, place, scope.index, None));
             },
             What::Ring(parts) => {
@@ -286,6 +360,10 @@ impl Drawer<'_, '_> {
             What::Separator => return None,
         }
         if let Some(d) = &n.dock {
+            // Where it is laid out, for the templates that line up with it (`dock_<name>_right`).
+            let name = d.name.clone();
+            let at = canvas(move |b, window, cx| super::shared::dock_laid_out(name, b, window, cx), |_, _, _, _| {});
+            kids.push(at.absolute().inset_0().into_any_element());
             let lines = std::mem::take(&mut self.lines);
             match self.dock_tree(d, scope, outer) {
                 Some(t) => kids.push(self.tree(d, &t, lines, scope, outer)),
@@ -319,6 +397,7 @@ impl Drawer<'_, '_> {
         }
         let drag = if n.handle { self.dragged_part(n, scope, outer) } else { None };
         let place = place(n, &lookup(scope, outer));
+        self.moved = moved;
         Some(self.boxed(n, &look, hovers, kids, place, scope.index, drag))
     }
 
@@ -791,7 +870,7 @@ impl Drawer<'_, '_> {
             let locked = c.dock.is_some() && self.locked();
             let panel = self.panel(self.range(&c.panel), fixed, size, locked).visible(shown);
             group = group.child(match body {
-                Some(b) => panel.child(b),
+                Some(b) => panel.child(clipped(b)),
                 None => panel,
             });
         }
@@ -826,13 +905,11 @@ impl Drawer<'_, '_> {
         panel
     }
 
-    /// The range `p` keeps its panel in; without one, the split's own.
+    /// The range `p` keeps its panel in: any size, down to nothing, unless
+    /// the template gives a `min` or a `max`.
     fn range(&self, p: &Panel) -> Range<Pixels> {
-        if p.min.is_none() && p.max.is_none() {
-            return PANEL_MIN_SIZE..Pixels::MAX;
-        }
         let px = |l: Option<AbsoluteLength>| l.map(|l| l.to_pixels(self.rem));
-        px(p.min).unwrap_or(px_(20.))..px(p.max).unwrap_or(px_(100_000.))
+        px(p.min).unwrap_or(px_(0.))..px(p.max).unwrap_or(Pixels::MAX)
     }
 
     /// The range `t`, shown in a dock, keeps along a split in `dir`: a part's
@@ -939,7 +1016,7 @@ impl Drawer<'_, '_> {
         };
         let fixed_by_kept: Vec<bool> = cells.iter().map(|c| c.1).collect();
         for (range, fixed, size, body) in cells {
-            group = group.child(self.panel(range, fixed, size, false).child(body));
+            group = group.child(self.panel(range, fixed, size, false).child(clipped(body)));
         }
         group = group.with_handle_appearance(no_line());
         if let Some(on_change) = scope.on_change.clone() {
@@ -962,7 +1039,7 @@ impl Drawer<'_, '_> {
         let mut group = div().flex().size_full();
         group = if row { group.flex_row() } else { group.flex_col() };
         for (_, fixed, size, body) in cells {
-            let mut cell = div().flex().relative().size_full().min_w_0().min_h_0();
+            let mut cell = div().flex().relative().size_full().min_w_0().min_h_0().overflow_hidden();
             cell = match size.filter(|_| fixed) {
                 Some(size) => cell.flex_none().flex_basis(size),
                 None => cell.flex_1(),
@@ -1005,8 +1082,19 @@ impl Drawer<'_, '_> {
 
     /// The node's look: its element and style, with the states that hold;
     /// and the looks it takes under the pointer, by group (`""`: its own).
-    fn look(&self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> (style::El, Vec<(SharedString, style::El)>) {
+    fn look(&mut self, n: &Node, scope: &Scope, outer: &[&HashMap<&'static str, Value>]) -> (style::El, Vec<(SharedString, style::El)>) {
+        self.moved = Moved::default();
         let get = lookup(scope, outer);
+        let motion = n.motion.clone().zip(self.motion.clone());
+        let key = motion.as_ref().map(|_| super::play::key(self.win, &scope.id, &n.path, scope.index));
+        // A box with transitions or hover animations tracks the pointer itself, so
+        // its `hover` states are conditions it can ease between.
+        let tracked = motion.as_ref().is_some_and(|(m, _)| m.tracks_hover());
+        let over = match (&motion, &key) {
+            (Some((_, mo)), Some(k)) if tracked => mo.reg().hover(k),
+            _ => false,
+        };
+        let plain_hover = |s: &super::State| tracked && s.hover.as_deref() == Some("");
         let holds = |c: &Option<Cond>| c.as_ref().is_none_or(|c| c.holds(&get));
         let filled = |holes: &super::Holes, m: &mut HashMap<&'static str, Val>| {
             for (prop, kind, var) in holes {
@@ -1015,7 +1103,8 @@ impl Drawer<'_, '_> {
                 }
             }
         };
-        let on: Vec<&super::State> = n.states.iter().filter(|s| s.hover.is_none() && holds(&s.when)).collect();
+        let on: Vec<&super::State> =
+            n.states.iter().filter(|s| (s.hover.is_none() || (plain_hover(s) && over)) && holds(&s.when)).collect();
         let inline = if on.is_empty() && n.holes.is_empty() {
             n.style.clone()
         } else {
@@ -1027,10 +1116,46 @@ impl Drawer<'_, '_> {
             }
             Arc::new(m)
         };
+        let inline = match (&motion, &key) {
+            (Some((m, mo)), Some(key)) => {
+                let base_el = style::el_with(n.element, n.style.clone(), self.cx);
+                let mut target: HashMap<&'static str, Val> = (*inline).clone();
+                // A property a state set goes back to what the box has without it.
+                for s in &n.states {
+                    for k in s.props.keys() {
+                        if !target.contains_key(k)
+                            && let Some(v) = base_el.val(k).or_else(|| unset(k))
+                        {
+                            target.insert(*k, v);
+                        }
+                    }
+                }
+                let play = |c: &Cond| c.holds(&|name: &str| if name == "hover" { Some(Value::Bool(over)) } else { get(name) });
+                let base = |c: Chan| match c {
+                    Chan::Prop(p) => target.get(p).cloned().or_else(|| base_el.val(p)).or_else(|| (p == "opacity").then_some(Val::Num(1.))),
+                    Chan::Scale => Some(Val::Num(1.)),
+                    Chan::Tx | Chan::Ty | Chan::Rotate => Some(Val::Num(0.)),
+                };
+                let frame = mo.reg().frame(key, m, mo.now(), mo.reduce, &target, &play, &base);
+                for (c, v) in &frame.chans {
+                    if let Chan::Prop(p) = c {
+                        target.insert(p, v.clone());
+                    }
+                }
+                self.moved = Moved {
+                    xf: Transform::of(&frame.chans),
+                    running: frame.running,
+                    hover: tracked.then(|| (key.clone(), m.clone())),
+                    click: (!m.click.is_empty()).then(|| (key.clone(), m.clone())),
+                };
+                Arc::new(target)
+            },
+            _ => inline,
+        };
         // One look per hover group (gpui takes one): states that hold for
         // the same group merge, the later ones over the earlier.
         let mut merged: Vec<(SharedString, HashMap<&'static str, Val>)> = vec![];
-        for st in n.states.iter().filter(|s| s.hover.is_some() && holds(&s.when)) {
+        for st in n.states.iter().filter(|s| s.hover.is_some() && !plain_hover(s) && holds(&s.when)) {
             let group = st.hover.clone().unwrap_or_default();
             let at = match merged.iter().position(|(g, _)| *g == group) {
                 Some(i) => i,
@@ -1058,6 +1183,11 @@ impl Drawer<'_, '_> {
         index: Option<usize>,
         drag: Option<DraggedPart>,
     ) -> AnyElement {
+        let moved = std::mem::take(&mut self.moved);
+        let xf = moved.xf;
+        // A translation moves the box without moving what is around it.
+        let shift = |l: Option<AbsoluteLength>, by: f32| l.map(|l| AbsoluteLength::from(px(f32::from(l.to_pixels(self.rem)) + by)));
+        let place = place.map(|[t, r, b, l]| [shift(t, xf.ty), shift(r, -xf.tx), shift(b, -xf.ty), shift(l, xf.tx)]);
         let mut d = div().flex();
         d = match n.layout {
             Layout::Column => d.flex_col(),
@@ -1112,7 +1242,15 @@ impl Drawer<'_, '_> {
                 }
                 d
             },
-            None => d.relative(),
+            None => {
+                let mut d = d.relative();
+                if xf.tx != 0. || xf.ty != 0. {
+                    let st = d.style();
+                    st.inset.left = Some(Length::Definite(px(xf.tx).into()));
+                    st.inset.top = Some(Length::Definite(px(xf.ty).into()));
+                }
+                d
+            },
         };
         if n.clip || n.truncate {
             d = d.overflow_hidden();
@@ -1129,6 +1267,19 @@ impl Drawer<'_, '_> {
             d.style().min_size.width = Some(Length::Auto);
         }
         d = look.apply(d);
+        // Scaling a box resizes it around its middle, when it has a size of its own.
+        if (xf.scale - 1.).abs() > 1e-3
+            && let (Some(w), Some(h)) = (look.px_opt("width"), look.px_opt("height"))
+        {
+            let (grow_w, grow_h) = (w * (xf.scale - 1.), h * (xf.scale - 1.));
+            let st = d.style();
+            st.size.width = Some(Length::Definite((w + grow_w).into()));
+            st.size.height = Some(Length::Definite((h + grow_h).into()));
+            st.margin.left = Some(Length::Definite((-grow_w / 2.).into()));
+            st.margin.right = Some(Length::Definite((-grow_w / 2.).into()));
+            st.margin.top = Some(Length::Definite((-grow_h / 2.).into()));
+            st.margin.bottom = Some(Length::Definite((-grow_h / 2.).into()));
+        }
         if let Some(g) = &n.group {
             d = d.group(g.clone());
         }
@@ -1163,7 +1314,25 @@ impl Drawer<'_, '_> {
         } else {
             kids
         };
-        let d = d.children(look.backdrop()).children(under).children(kids);
+        let mut kids = kids;
+        if let Some(motion) = &self.motion {
+            if moved.running {
+                kids.push(super::play::frame_request());
+            }
+            if let Some((key, m)) = moved.hover {
+                kids.push(super::play::hover_probe(key, m, motion.clone()));
+            }
+        }
+        let mut d = d.children(look.backdrop()).children(under).children(kids);
+        if let (Some((key, m)), Some(motion)) = (moved.click, &self.motion) {
+            let motion = motion.clone();
+            d = d.on_mouse_down(MouseButton::Left, move |_, window, _| {
+                for a in &m.click {
+                    motion.reg().trigger(&key, a);
+                }
+                window.refresh();
+            });
+        }
         let e = match (drag, &n.frame) {
             // gpui doesn't say what is dragged: the drag's start keeps it for the docks.
             (Some(p), _) => {
@@ -1277,6 +1446,7 @@ impl Node {
             && !self.clip
             && self.frame.is_none()
             && self.group.is_none()
+            && self.motion.is_none()
             && self.states.iter().all(|s| s.hover.is_none())
     }
 
@@ -1296,6 +1466,7 @@ impl Node {
             && !self.nowrap
             && !self.wrap
             && !self.clip
+            && self.motion.is_none()
             && self.frame.is_none()
             && self.align.is_none()
             && self.justify.is_none()
@@ -1372,6 +1543,12 @@ fn ring_at(turn: f32, full: Option<f32>, arc: Hsla, track: Hsla, width: Pixels) 
         },
     )
     .size_full()
+}
+
+/// `body` cut to its panel: a panel can be dragged down to nothing, and
+/// what doesn't fit must not spill onto its neighbors.
+pub fn clipped(body: AnyElement) -> AnyElement {
+    div().flex().size_full().min_w_0().min_h_0().overflow_hidden().child(body).into_any_element()
 }
 
 /// `body` in template `split.cell`, which draws a line on its left and on

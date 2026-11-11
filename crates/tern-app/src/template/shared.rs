@@ -4,7 +4,7 @@
 //! main window publishes them as it draws, since some can only be read with
 //! a `&mut App`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use gpui_kit::component::button::Button;
@@ -43,6 +43,11 @@ pub fn text(text: String, cx: &App) -> String {
     cx.try_global::<Texts>().and_then(|t| t.0.get(&text).cloned()).unwrap_or(text)
 }
 
+/// Tells the windows apart: the workspace of the window being drawn.
+pub(super) fn window_key(cx: &App) -> u64 {
+    cx.try_global::<Shared>().and_then(|s| s.ws.as_ref()).map_or(0, |w| w.entity_id().as_u64())
+}
+
 /// The values last published.
 pub(super) fn values(cx: &App) -> Arc<Values> {
     cx.try_global::<Shared>().map(|s| s.values.clone()).unwrap_or_default()
@@ -71,6 +76,75 @@ pub fn publish(parts: impl IntoIterator<Item = (&'static str, Value)>, ws: Optio
     }
     v.extend(parts);
     cx.set_global(Shared { values: Arc::new(v), ws });
+}
+
+/// The bounds of a dock, by its name.
+type Docks = HashMap<SharedString, Bounds<Pixels>>;
+
+/// Where each window's docks were laid out: in its last frame (`seen`), and
+/// as its templates were last given them (`shown`).
+#[derive(Default)]
+struct DockBounds(HashMap<WindowId, (Docks, Docks)>);
+
+impl Global for DockBounds {}
+
+/// Notes where dock `name` was laid out in `window` this frame.
+pub(super) fn dock_laid_out(name: SharedString, bounds: Bounds<Pixels>, window: &Window, cx: &mut App) {
+    let id = window.window_handle().window_id();
+    cx.default_global::<DockBounds>().0.entry(id).or_default().0.insert(name, bounds);
+}
+
+/// The values that place `window`'s docks as its last frame laid them out:
+/// `dock_<name>_left`, `_right`, `_top`, `_bottom`, `_width` and `_height`,
+/// in pixels from the window's top left corner. A dock not drawn has none.
+pub fn dock_values(window: &Window, cx: &mut App) -> Vec<(&'static str, Value)> {
+    let id = window.window_handle().window_id();
+    let (seen, shown) = cx.default_global::<DockBounds>().0.entry(id).or_default();
+    *shown = std::mem::take(seen);
+    let mut out = vec![];
+    for (name, b) in shown.iter() {
+        for (side, v) in [
+            ("left", b.left()),
+            ("right", b.right()),
+            ("top", b.top()),
+            ("bottom", b.bottom()),
+            ("width", b.size.width),
+            ("height", b.size.height),
+        ] {
+            out.push((intern(format!("dock_{name}_{side}")), f64::from(f32::from(v)).into()));
+        }
+    }
+    out
+}
+
+/// Once `window` is laid out: draws it again when its docks are not where
+/// its templates were told they are (one moved, came or went).
+pub fn check_docks(window: &mut Window, cx: &mut App) {
+    let id = window.window_handle().window_id();
+    let moved = cx.try_global::<DockBounds>().and_then(|d| d.0.get(&id)).is_some_and(|(seen, shown)| seen != shown);
+    if moved {
+        window.refresh();
+    }
+}
+
+/// Forgets the docks of a window that closed.
+pub fn forget_docks(id: WindowId, cx: &mut App) {
+    if cx.has_global::<DockBounds>() {
+        cx.global_mut::<DockBounds>().0.remove(&id);
+    }
+}
+
+/// `name` as a `&'static str`, leaked once: the value names of the docks the
+/// templates have, a handful.
+fn intern(name: String) -> &'static str {
+    static NAMES: std::sync::Mutex<BTreeSet<&'static str>> = std::sync::Mutex::new(BTreeSet::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(n) = names.get(name.as_str()) {
+        return n;
+    }
+    let n: &'static str = Box::leak(name.into_boxed_str());
+    names.insert(n);
+    n
 }
 
 /// Attaches what shared button `name` does, or gives `b` back when it is

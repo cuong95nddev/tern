@@ -622,6 +622,7 @@ impl MainWindow {
             false
         });
         cx.on_release(|this: &mut Self, cx| {
+            template::forget_docks(this.handle.window_id(), cx);
             let end = this.ends_terminals;
             for slot in &this.slots {
                 slot.ws.update(cx, |w, cx| {
@@ -1326,6 +1327,7 @@ impl Render for MainWindow {
         let mut parts = ws.as_ref().map(|ws| ws.read(cx).shared_values(cx)).unwrap_or_default();
         parts.push(("window_title", self.title.clone().into()));
         parts.push(("window_maximized", window.is_maximized().into()));
+        parts.extend(template::dock_values(window, cx));
         template::publish_shared(parts, ws.as_ref().map(|ws| ws.downgrade()), cx);
         let title_bar = self.render_title_bar(ws.as_ref(), cx);
         let scope = template::Scope::new("window").var("workspace", ws.is_some()).slot("title_bar", title_bar);
@@ -1368,6 +1370,8 @@ impl Render for MainWindow {
                 }
             }))
             .child(body)
+            // After the workspace is laid out: once more when its docks moved.
+            .child(canvas(|_, window, cx| template::check_docks(window, cx), |_, _, _, _| {}).absolute().size_0())
     }
 }
 
