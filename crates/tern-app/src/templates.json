@@ -597,7 +597,7 @@
     "clip": true,
     "states": {
       "active": { "element": "pane_tab_bar.tab_active" },
-      "wrap": { "border_left_width": 0 },
+      "wrap && !active": { "border_left_width": 0 },
       "hover && !active": { "text": "$pane_tab_bar.tab.hover_text" }
     },
     "children": [
@@ -657,7 +657,7 @@
     "layout": "row",
     "align": "center",
     "clip": true,
-    "states": { "wrap": { "border_left_width": 0 } },
+    "states": { "wrap && !active": { "border_left_width": 0 } },
     "children": [
       {
         "layout": "row",
