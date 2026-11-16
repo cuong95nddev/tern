@@ -171,7 +171,7 @@ tern --web [--bind <address>] [--port <port>] [--new-token]
 Settings live in `~/.config/tern` (macOS, Linux; `XDG_CONFIG_HOME` if set) or `%APPDATA%\Tern` (Windows). Saving a file
 there applies it at once; if it can't be read, Tern keeps what it applied last and says why in the status bar.
 
-- `settings.json`: the theme (`"Tern Dark"`, `"Tern Light"` or one of yours), the UI, editor and terminal fonts, UI
+- `settings.json`: the theme (`"Codex Dark"`, `"Codex Light"` or one of yours; left out, the one for the system's appearance), the UI, editor and terminal fonts, UI
   colors over the theme's by key, terminal colors, and the look of each part of the window. Every element (a panel, its
   rows, a bar) has its own properties (height, paddings, font size, colors, a background image); by default they point
   at shared tokens like `$row_height`, so change a token to restyle every element that uses it, or one element's

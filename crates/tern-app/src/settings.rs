@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::highlighter::HighlightTheme;
-use gpui_kit::component::{ActiveTheme, Theme, ThemeColor, ThemeConfig, ThemeConfigColors, ThemeRegistry, try_parse_color};
+use gpui_kit::component::{ActiveTheme, Theme, ThemeColor, ThemeConfig, ThemeConfigColors, try_parse_color};
 use gpui_kit::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -31,8 +31,8 @@ const README: &str = "README.md";
 const THEMES: &str = "themes";
 const REFERENCE: &str = "reference";
 const ELEMENTS_DOC: &str = "elements.md";
-pub const DEFAULT_THEME: &str = "Tern Dark";
-const LIGHT_THEME: &str = "Tern Light";
+pub const DEFAULT_THEME: &str = "Codex Dark";
+const LIGHT_THEME: &str = "Codex Light";
 
 /// `settings.json`. Every key is optional; a missing one keeps Tern's default.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -41,9 +41,10 @@ pub struct SettingsFile {
     /// The schema this file follows (`./settings.schema.json`).
     #[serde(rename = "$schema")]
     pub schema: Option<String>,
-    /// The theme: "Tern Dark", "Tern Light", or the `name` of a theme in a
+    /// The theme: "Codex Dark", "Codex Light", or the `name` of a theme in a
     /// `themes/*.json` file; or `{"light": …, "dark": …}`, one for each of
-    /// the system's light and dark appearance, following it as it changes.
+    /// the system's light and dark appearance, following it as it changes
+    /// (the default: Codex Light and Codex Dark).
     pub theme: Option<ThemeSetting>,
     /// The window's own text: panels, tabs, menus, dialogs.
     pub ui: UiSettings,
@@ -569,20 +570,21 @@ fn load(cx: &mut App) {
         },
     };
 
-    let mut themes = builtin_themes(cx);
+    let mut themes = builtin_themes();
     for (name, theme) in user_themes(&dir.join(THEMES), &mut problems) {
         themes.retain(|(n, _)| *n != name);
         themes.push((name, theme));
     }
+    let follow = |light: &str, dark: &str, cx: &mut App| -> (SharedString, Option<bool>) {
+        // The system's appearance, not the one last forced on the app.
+        cx.set_window_appearance(None);
+        let system_dark = is_dark(cx.window_appearance());
+        (if system_dark { dark } else { light }.to_owned().into(), Some(system_dark))
+    };
     let (current, follows_system): (SharedString, _) = match &settings.theme {
-        None => (DEFAULT_THEME.into(), None),
+        None => follow(LIGHT_THEME, DEFAULT_THEME, cx),
         Some(ThemeSetting::One(name)) => (name.clone().into(), None),
-        Some(ThemeSetting::Pair(ThemePair { light, dark })) => {
-            // The system's appearance, not the one last forced on the app.
-            cx.set_window_appearance(None);
-            let system_dark = is_dark(cx.window_appearance());
-            (if system_dark { dark } else { light }.clone().into(), Some(system_dark))
-        },
+        Some(ThemeSetting::Pair(ThemePair { light, dark })) => follow(light, dark, cx),
     };
     let l = cx.global_mut::<Loader>();
     l.themes = themes.iter().map(|(name, t)| ThemeChoice { name: name.clone(), dark: t.ui.mode.is_dark() }).collect();
@@ -760,45 +762,13 @@ fn set_error(error: Option<String>, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Built-in theme sets kept as files, in the `themes/*.json` format.
-/// "Cute" is webfreak's Cute theme for VS Code (CC0).
-const BUILTIN_SETS: [&str; 1] = [include_str!("themes/cute.json")];
+/// Built-in theme sets kept as files, in the `themes/*.json` format:
+/// "Codex Dark" and "Codex Light", after the Codex app.
+const BUILTIN_SETS: [&str; 1] = [include_str!("themes/codex.json")];
 
-/// "Tern Dark" and "Tern Light": the component's default themes with
-/// Tern's terminal palettes, and a gray selected row where theirs is blue;
-/// then the themes in `BUILTIN_SETS`.
-fn builtin_themes(cx: &App) -> Vec<(SharedString, TernTheme)> {
-    let registry = ThemeRegistry::global(cx);
-    let named = |config: &Rc<ThemeConfig>, name: &str, selected: (&str, &str)| {
-        let mut c = (**config).clone();
-        c.name = name.into();
-        c.is_default = false;
-        c.colors.list_active = Some(selected.0.into());
-        c.colors.list_active_border = Some(selected.1.into());
-        c
-    };
-    let mut themes = vec![
-        (
-            DEFAULT_THEME.into(),
-            TernTheme {
-                ui: named(registry.default_dark_theme(), DEFAULT_THEME, ("#ffffff1a", "#404040")),
-                terminal: colors_of(&Palette::default()),
-                ..Default::default()
-            },
-        ),
-        (
-            LIGHT_THEME.into(),
-            TernTheme {
-                ui: named(registry.default_light_theme(), LIGHT_THEME, ("#0000000f", "#d4d4d4")),
-                terminal: light_terminal(),
-                ..Default::default()
-            },
-        ),
-    ];
-    for set in BUILTIN_SETS {
-        themes.extend(parse_theme_set(set).expect("built-in theme set"));
-    }
-    themes
+/// The themes Tern comes with: those in `BUILTIN_SETS`.
+fn builtin_themes() -> Vec<(SharedString, TernTheme)> {
+    BUILTIN_SETS.into_iter().flat_map(|set| parse_theme_set(set).expect("built-in theme set")).collect()
 }
 
 /// A light palette (One Light's ANSI colors) on the light theme's white.
@@ -1221,9 +1191,9 @@ fn write_reference_files(dir: &Path, cx: &App) -> std::io::Result<()> {
     write_if_changed(&dir.join(README), &readme(dir))?;
     let settings = dir.join(SETTINGS);
     if !settings.exists() {
-        std::fs::write(&settings, format!("{{\n  \"$schema\": \"./{SCHEMA}\",\n  \"theme\": \"{DEFAULT_THEME}\"\n}}\n"))?;
+        std::fs::write(&settings, format!("{{\n  \"$schema\": \"./{SCHEMA}\"\n}}\n"))?;
     }
-    for (name, theme) in builtin_themes(cx) {
+    for (name, theme) in builtin_themes() {
         let mut ui = serde_json::to_value(&theme.ui).unwrap_or_default();
         if let Some(obj) = ui.as_object_mut() {
             obj.insert("name".into(), format!("My {name}").into());
@@ -1374,7 +1344,8 @@ Every key is optional. `{SCHEMA}` lists them all with their meaning.
 }}
 ```
 
-- `theme`: \"{DEFAULT_THEME}\", \"{LIGHT_THEME}\", or the `name` of a theme in `themes/`.
+- `theme`: \"{DEFAULT_THEME}\", \"{LIGHT_THEME}\", or the `name` of a theme in `themes/`
+  (left out: \"{LIGHT_THEME}\" or \"{DEFAULT_THEME}\" as the system's appearance is).
   Tern's theme picker (Cmd-K Cmd-T, Ctrl-Shift-K Ctrl-Shift-T on Windows and
   Linux) writes this key and leaves the rest of the file as it is.
 - `colors`: UI colors over the theme's, by theme key. The keys are the
@@ -2032,7 +2003,7 @@ the background is. A terminal theme from elsewhere becomes a whole theme so:
 {{ \"name\": \"Ink\", \"terminal\": {{ \"background\": \"#101018\", \"foreground\": \"#e0e0f0\", \"blue\": \"#5080ff\" }} }}
 ```
 
-`\"theme\": {{ \"light\": \"Tern Light\", \"dark\": \"Ink\" }}` in `{SETTINGS}` shows the one
+`\"theme\": {{ \"light\": \"{LIGHT_THEME}\", \"dark\": \"Ink\" }}` in `{SETTINGS}` shows the one
 for the system's light or dark appearance, and switches when the system does.
 Choosing a theme in the theme picker sets one theme in its place.
 
@@ -2232,10 +2203,10 @@ mod tests {
 
     #[test]
     fn choosing_a_theme_keeps_the_rest_of_the_file() {
-        let old = r#"{"$schema": "./settings.schema.json", "theme": "Tern Dark", "ui": {"font_size": 15}, "colors": {}}"#;
-        let new = with_value(Some(old), &["theme"], Some("Tern Light".into())).unwrap();
+        let old = r#"{"$schema": "./settings.schema.json", "theme": "Codex Dark", "ui": {"font_size": 15}, "colors": {}}"#;
+        let new = with_value(Some(old), &["theme"], Some("Codex Light".into())).unwrap();
         let v: serde_json::Value = serde_json::from_str(&new).unwrap();
-        assert_eq!(v["theme"], "Tern Light");
+        assert_eq!(v["theme"], "Codex Light");
         assert_eq!(v["ui"]["font_size"], 15);
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["$schema", "theme", "ui", "colors"]);
@@ -2248,7 +2219,7 @@ mod tests {
 
     #[test]
     fn setting_a_nested_value_makes_and_keeps_its_objects() {
-        let old = r#"{"theme": "Tern Dark", "terminal": {"font_family": "Menlo"}}"#;
+        let old = r#"{"theme": "Codex Dark", "terminal": {"font_family": "Menlo"}}"#;
         let new = with_value(Some(old), &["terminal", "font_size"], Some(14.into())).unwrap();
         let v: serde_json::Value = serde_json::from_str(&new).unwrap();
         assert_eq!(v["terminal"]["font_size"], 14);
@@ -2350,11 +2321,11 @@ mod tests {
 
     #[test]
     fn a_theme_is_one_name_or_a_light_and_dark_pair() {
-        let s: SettingsFile = serde_json::from_str(r#"{"theme": "Tern Dark"}"#).unwrap();
-        assert!(matches!(s.theme, Some(ThemeSetting::One(n)) if n == "Tern Dark"));
-        let s: SettingsFile = serde_json::from_str(r#"{"theme": {"light": "Tern Light", "dark": "Ink"}}"#).unwrap();
-        assert!(matches!(s.theme, Some(ThemeSetting::Pair(ThemePair { light, dark })) if light == "Tern Light" && dark == "Ink"));
-        assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": {"light": "Tern Light"}}"#).is_err());
+        let s: SettingsFile = serde_json::from_str(r#"{"theme": "Codex Dark"}"#).unwrap();
+        assert!(matches!(s.theme, Some(ThemeSetting::One(n)) if n == "Codex Dark"));
+        let s: SettingsFile = serde_json::from_str(r#"{"theme": {"light": "Codex Light", "dark": "Ink"}}"#).unwrap();
+        assert!(matches!(s.theme, Some(ThemeSetting::Pair(ThemePair { light, dark })) if light == "Codex Light" && dark == "Ink"));
+        assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": {"light": "Codex Light"}}"#).is_err());
         assert!(serde_json::from_str::<SettingsFile>(r#"{"theme": {"light": "a", "dark": "b", "dim": "c"}}"#).is_err());
     }
 }

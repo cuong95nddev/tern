@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn parses_the_window_commands() {
         assert_eq!(parse("--theme", &[]), Ok(Command::Theme { name: None }));
-        assert_eq!(parse("--theme", &args("Tern Dark")), Ok(Command::Theme { name: Some("Tern Dark".into()) }));
+        assert_eq!(parse("--theme", &args("Codex Dark")), Ok(Command::Theme { name: Some("Codex Dark".into()) }));
         assert_eq!(parse("--shot", &[]), Ok(Command::Shot));
         assert_eq!(parse("--skill", &[]), Ok(Command::Guide));
         assert_eq!(parse("--agents", &[]), Ok(Command::Agents));
@@ -1194,15 +1194,15 @@ mod tests {
     #[test]
     fn describes_the_window_status() {
         let a = json!({
-            "theme": "Tern Dark",
-            "themes": [{ "name": "Tern Dark", "dark": true }, { "name": "Tern Light", "dark": false }],
+            "theme": "Codex Dark",
+            "themes": [{ "name": "Codex Dark", "dark": true }, { "name": "Codex Light", "dark": false }],
             "problems": null,
             "settings": "/c/settings.json",
             "themes_dir": "/c/themes",
         });
         assert_eq!(
             describe_status(&a),
-            "Theme: Tern Dark\nThemes: Tern Dark (dark), Tern Light (light)\nNo problems.\nSettings: /c/settings.json\nThemes folder: /c/themes"
+            "Theme: Codex Dark\nThemes: Codex Dark (dark), Codex Light (light)\nNo problems.\nSettings: /c/settings.json\nThemes folder: /c/themes"
         );
         let a = json!({ "theme": "Mine", "themes": [], "problems": "themes/mine.json: expected `,`" });
         assert!(describe_status(&a).contains("Problems (the rest applies): themes/mine.json: expected `,`"));
