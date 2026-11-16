@@ -38,7 +38,13 @@ pub fn daemon_with(idle: Duration, max_queued: usize, max_queued_session: usize)
     };
     let d = dir.clone();
     let thread = std::thread::spawn(move || serve(&d, opts));
-    wait_until("socket", || paths::socket_path(&dir).exists());
+    // Windows binds the socket's file before it listens: a client in
+    // between is refused. Up once one connects.
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
+    wait_until("socket", || UnixStream::connect(paths::socket_path(&dir)).is_ok());
     Daemon { _tmp: tmp, dir, thread: Some(thread) }
 }
 
