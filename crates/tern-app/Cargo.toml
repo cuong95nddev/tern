@@ -1,6 +1,6 @@
 [package]
 name = "tern-app"
-version = "0.12.2"
+version = "0.12.3"
 edition.workspace = true
 
 [build-dependencies]
@@ -49,7 +49,7 @@ tern-agent = { path = "../tern-agent" }
 tern-chat = { path = "../tern-chat" }
 tern-fs = { version = "0.1.0", path = "../tern-fs" }
 tern-lsp = { path = "../tern-lsp" }
-tern-menubar = { version = "0.12.2", path = "../tern-menubar" }
+tern-menubar = { version = "0.12.3", path = "../tern-menubar" }
 tern-mux = { path = "../tern-mux" }
 tern-term = { version = "0.1.0", path = "../tern-term" }
 tern-web = { path = "../tern-web" }
