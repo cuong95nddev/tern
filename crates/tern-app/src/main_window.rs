@@ -44,7 +44,6 @@ impl Global for Registry {}
 /// Live windows, dropping entries for closed ones.
 /// Every workspace with its window: the frontmost window first, and in
 /// each window its shown workspace first.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
 pub fn workspaces(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
     let mut wins = windows(cx);
     if let Some(stack) = cx.window_stack() {
@@ -1696,10 +1695,6 @@ if you trust what the repository runs.",
 /// (default: the active window, else the first).
 #[cfg(debug_assertions)]
 pub fn control(line: &str, cx: &mut App) -> String {
-    #[cfg(any(target_os = "macos", windows))]
-    if let Some(out) = crate::shot::control(line, cx) {
-        return out;
-    }
     let all = windows(cx);
     if line.trim() == "windows" {
         let list: Vec<String> = all

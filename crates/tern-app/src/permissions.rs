@@ -1,6 +1,6 @@
 //! What macOS lets Tern do: post notifications (an agent finished or needs
-//! input) and record the screen (the screenshot tool). Settings ▸ Permissions
-//! shows each, asks for it, or opens System Settings at it.
+//! input). Settings ▸ Permissions shows it, asks for it, or opens System
+//! Settings at it.
 //!
 //! macOS keys notification permission to the app bundle, so outside one
 //! (`cargo run`) there is nothing to ask: the framework would abort.
@@ -13,12 +13,6 @@ use objc2::runtime::Bool;
 use objc2_foundation::{NSBundle, NSError};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting, UNNotificationSettings, UNUserNotificationCenter,
-};
-
-/// The screenshot tool's Screen Recording access.
-pub use crate::shot::grab::{
-    has_permission as screen_recording, open_permission_settings as open_screen_recording_settings,
-    request_permission as ask_screen_recording,
 };
 
 /// How long to wait for the notification center's answer.

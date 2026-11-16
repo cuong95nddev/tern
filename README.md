@@ -32,7 +32,6 @@ Tern runs Claude Code, OpenCode, Codex or any other CLI agent next to the code i
   Python, Swift): go to definition, implementations and super method, and "is implemented by" / "implements"
   icons in the gutter (see [Language servers](#language-servers))
 - **Session restore**: windows, workspaces and tabs come back on launch, on the display where you left them
-- **Screenshots for agents**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> (<kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows) anywhere freezes the screen; pick a region, mark it up (boxes, arrows, text, numbered markers, mosaic), collect a few, add a prompt and send them all to an agent tab (or a new Claude Code, Codex or OpenCode tab). On macOS it needs Screen Recording access. Not on Linux yet.
 - **Background sessions**: terminals keep running after you quit, and reattach on the next launch
 - **Themes and settings** in plain files: colors, fonts and sizes, applied as you save, easy for an agent to edit
 - **Automatic updates**: Tern checks for new releases and installs them in place, keeping your session (macOS; on Windows once the installer is code-signed)
@@ -99,7 +98,6 @@ Tooltips show each platform's keys.
 | <kbd>F12</kbd> / <kbd>⌘</kbd>-click | Go to definition (in a file tab) |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>B</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd>-click | Go to implementation(s) |
 | <kbd>⌘</kbd><kbd>U</kbd> | Go to super method (or the supertypes of a type) |
-| <kbd>⌘</kbd><kbd>⇧</kbd><kbd>2</kbd> | Capture a screenshot for an agent (works from any app; <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>2</kbd> on Windows, also **File ▸ Capture Screenshot**) |
 | <kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd> / <kbd>⌘</kbd><kbd>⌥</kbd><kbd>→</kbd> | Previous / next workspace |
 | <kbd>⌘</kbd><kbd>K</kbd> <kbd>⌘</kbd><kbd>T</kbd> | Pick a theme |
 | <kbd>⌘</kbd><kbd>,</kbd> | Open `settings.json` |

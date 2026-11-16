@@ -19,11 +19,9 @@ flume = "0.12.0"
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["window-capture"] }
 gpui-kit = { version = "=0.7.3", features = ["tree-sitter-rust", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-python", "tree-sitter-go", "tree-sitter-bash", "tree-sitter-yaml", "tree-sitter-css", "tree-sitter-html", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-swift", "tree-sitter-diff"] }
 futures = "0.3"
-global-hotkey = "0.8"
 # Display and idle holds behind the title bar's cup; `bin` would pull in a CLI.
 keepawake = { version = "0.6.1", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif"] }
-ab_glyph = "0.2"
 tiny-skia = "0.11"
 libc = "0.2.190"
 lsp-types = "0.97"

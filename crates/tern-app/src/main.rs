@@ -46,9 +46,6 @@ mod services_view;
 mod settings;
 mod settings_window;
 mod shells_view;
-#[cfg(any(target_os = "macos", windows))]
-mod shot;
-mod shot_icons;
 mod style;
 mod symbols;
 mod system;
@@ -206,8 +203,6 @@ fn main() {
         agent_monitor::init(cx);
         agent_tasks::init(cx);
         settings_window::init(cx);
-        #[cfg(any(target_os = "macos", windows))]
-        shot::init(cx);
         // Reached only when no window has focus.
         cx.on_action(|_: &OpenFolder, cx| main_window::prompt_open_folder(cx));
         cx.on_action(|_: &main_window::NewWindow, cx| main_window::open_window(Content::Welcome, None, cx));

@@ -1458,7 +1458,7 @@ change while one does (`\"states\": {{\"focused\": {{\"border\": \"$accent\"}}}}
 or split into panels you resize (`\"split\": \"row\"`, with `size`, `min`, `max`,
 `fixed` on the panels). Leaves are text (`\"text\": \"{{title}}\"`), another
 template (`\"use\"`), an icon (`\"icon\": \"folder-open\"`, a Lucide
-name Tern bundles, or a screenshot tool's `shot-*`; one it doesn't bundle is a problem), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
+name Tern bundles; one it doesn't bundle is a problem), a button (`\"button\"`, with `icon`, `label`, `tooltip`, `variant`, `size`,
 `selected`, `disabled`, `loading`), or a piece Tern draws (`\"slot\"`). A list
 the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 `each` come after its entries.
@@ -1554,15 +1554,6 @@ the code gives is drawn with `\"each\"` and `\"item\"`; the `children` of an
 | `menu.chat_model` | `loaded`, `agent_short` (the chat's agent); list `models` (`label`, `detail`, `on`) | |
 | `menu.part` | `part`, `floating`, `popped`, `can_float`, `can_window` | |
 | `part_window` | | `part` |
-| `shot_overlay` | `selection`, `size`, `hint_top`, `label_top`, `label_left`, `toolbar`, `bar_top`, `bar_right`, `style_bar`, `style_top`, `text`, `text_top`, `text_left`, `text_width` | `picture`, `scene`, `input` |
-| `shot_overlay.toolbar` | `can_undo`, `can_redo`, `undo_key`, `redo_key`, `copy_key`, `save_key`; list `tools` (`icon`, `tooltip`, `selected`) | |
-| `shot_overlay.style_bar` | lists `sizes` (`dot`, `selected`), `colors` (`color`, `selected`) | |
-| `shot.size`, `shot.color` | an entry of `sizes`, `colors` | |
-| `shot_editor` | `pages`, `selection`, `floating`, `tool`, `text`, `text_top`, `text_left`, `can_undo`, `can_redo`, `undo_key`, `redo_key`, `copy_key`, `cut_key`, `paste_key`, `save_key`, `close_key`, `new_key`; lists `tools`, `sizes`, `colors`, `pages` | `scene`, `input` |
-| `shot_editor.toolbar`, `shot_editor.tabs` | as `shot_editor` | |
-| `shot_editor.tab` | `name`, `active` | |
-| `shot_tray` | `count`, `target`, `sending`, `error`, `capture_key`, `send_key`; list `shots` | `prompt`, `fit` |
-| `shot_tray.shot` | | `thumb` |
 
 `\"element\"` on a `\"use\"` gives the used template's root that element, and
 `$element` inside it names it (`\"$element.count_gap\"`): the three panel
@@ -1594,12 +1585,12 @@ A slot you leave out is not drawn. Mistakes show in the status bar.
 
 Some values and buttons belong to the app, so every template has them, in any
 bar or panel. The values: `caffeine_icon`, `caffeine_tooltip`, `caffeine_on`,
-`settings_key`, `open_key`, `monitor`, `can_shot`, `shots`, `update`, `installing`,
+`settings_key`, `open_key`, `monitor`, `update`, `installing`,
 `editing_layout`, `title_bar_border`, `window_title`, `window_maximized`,
 `background_status`, `settings_error`, and `explorer_on`, `changes_on`, `scratches_on`,
 `shells_on`, `services_on`, `system_on`, `usage_on`, `agents_on` (that panel shows).
 The buttons, by name: `caffeine` (opens `menu.caffeine`), `settings`,
-`agent_monitor`, `screenshots`, `update`, `edit_done`, `title_bar_border`,
+`agent_monitor`, `update`, `edit_done`, `title_bar_border`,
 `new_tab_menu` and `pane_layout_menu` (the focused pane's), `window_minimize`,
 `window_maximize` and `window_close`. With `\"title_bar.controls\": {{ \"visible\": 0 }}`
 in `elements`, the window's own three are left out (on macOS, its traffic lights),

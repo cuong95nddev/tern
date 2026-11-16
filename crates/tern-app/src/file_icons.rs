@@ -194,7 +194,6 @@ impl AssetSource for AppAssets {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
         paths.extend(crate::agents::asset_paths(path));
-        paths.extend(crate::shot_icons::asset_paths(path));
         paths.extend(crate::caffeine::asset_paths(path));
         paths.sort();
         paths.dedup();
@@ -207,7 +206,7 @@ fn base_load(path: &str) -> Result<Option<Cow<'static, [u8]>>> {
     if let Some(bytes) = ExtraIcons.load(path)? {
         return Ok(Some(bytes));
     }
-    if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::shot_icons::asset(path)).or_else(|| crate::caffeine::asset(path)) {
+    if let Some(bytes) = crate::agents::asset(path).or_else(|| crate::caffeine::asset(path)) {
         return Ok(Some(Cow::Borrowed(bytes)));
     }
     gpui_kit::assets::Assets.load(path)

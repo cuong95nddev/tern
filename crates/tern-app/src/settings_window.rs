@@ -300,12 +300,11 @@ struct Remote {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Granted {
     notifications: permissions::Notifications,
-    screen_recording: bool,
 }
 
 #[cfg(target_os = "macos")]
 fn look_up_permissions() -> Granted {
-    Granted { notifications: permissions::notifications(), screen_recording: permissions::screen_recording() }
+    Granted { notifications: permissions::notifications() }
 }
 
 /// Whether the server runs and who has access.
@@ -752,7 +751,7 @@ impl SettingsView {
     fn permission_rows(&self) -> Vec<Row> {
         use permissions::Notifications as N;
         let Some(g) = self.granted else {
-            return vec![Row::new("Notifications", "Looking…"), Row::new("Screen Recording", "Looking…")];
+            return vec![Row::new("Notifications", "Looking…")];
         };
         let mut notifications = Row::new(
             "Notifications",
@@ -785,21 +784,7 @@ impl SettingsView {
             N::Denied | N::Hidden => notifications.action("Open System Settings", |_, _, _| permissions::open_notification_settings()),
             N::Unavailable => notifications,
         };
-        let screen = Row::new(
-            "Screen Recording",
-            "For the screenshot tool: other apps' windows show in screenshots. A change takes effect when Tern restarts.",
-        )
-        .value(if g.screen_recording { "Allowed" } else { "Off" });
-        let screen = if g.screen_recording {
-            screen.action("Open System Settings", |_, _, _| permissions::open_screen_recording_settings())
-        } else {
-            // macOS lists Tern there once it has asked.
-            screen.action("Allow…", |_, _, _| {
-                permissions::ask_screen_recording();
-                permissions::open_screen_recording_settings();
-            })
-        };
-        vec![notifications, screen]
+        vec![notifications]
     }
 
     fn remote_rows(&self) -> Vec<Row> {

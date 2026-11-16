@@ -67,9 +67,6 @@ pub fn publish(parts: impl IntoIterator<Item = (&'static str, Value)>, ws: Optio
         ("monitor", crate::agent_monitor::window(cx).is_some().into()),
         ("title_bar_border", window_state::title_bar_border().into()),
     ]);
-    // Screenshots are on macOS and Windows.
-    #[cfg(any(target_os = "macos", windows))]
-    v.extend([("can_shot", true.into()), ("shots", crate::shot::panel_open(cx).into())]);
     if let Some((release, installing)) = crate::update::offered(cx) {
         let label = if installing { "Installing update…".to_owned() } else { format!("Update to {}", release.version) };
         v.extend([("update", label.into()), ("installing", installing.into())]);
@@ -167,8 +164,6 @@ pub(super) fn button(name: &str, b: Button, cx: &App) -> Result<AnyElement, Butt
         "caffeine" => b.dropdown_menu(crate::caffeine::menu).into_any_element(),
         "settings" => b.on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)).into_any_element(),
         "agent_monitor" => b.on_click(|_, _, cx| crate::agent_monitor::toggle(cx)).into_any_element(),
-        #[cfg(any(target_os = "macos", windows))]
-        "screenshots" => b.on_click(|_, _, cx| crate::shot::toggle_panel(cx)).into_any_element(),
         "edit_done" => b.on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleEditLayout), cx)).into_any_element(),
         "title_bar_border" => b
             .on_click(|_, _, cx| {

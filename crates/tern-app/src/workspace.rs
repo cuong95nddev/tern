@@ -549,14 +549,11 @@ pub struct Workspace {
     _subs: Vec<Subscription>,
 }
 
-/// A terminal tab, as the screenshot tray and the agent monitor list it.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
+/// A terminal tab, as the agent monitor lists it.
 pub struct TermTabInfo {
     pub id: EntityId,
     pub title: String,
     pub agent: Option<AgentId>,
-    /// The workspace's active tab.
-    pub active: bool,
     pub view: Entity<TerminalView>,
 }
 
@@ -3241,8 +3238,7 @@ impl Workspace {
         self.tabs.iter().filter_map(CenterTab::term).find(|t| t.view.read(cx).mux_id() == Some(mux)).map(|t| t.view.clone())
     }
 
-    /// The terminal tabs, in tab order: where a screenshot can go, and the
-    /// agents the monitor lists.
+    /// The terminal tabs, in tab order: the agents the monitor lists.
     pub fn term_tabs(&self, cx: &App) -> Vec<TermTabInfo> {
         self.tabs
             .iter()
@@ -3253,7 +3249,6 @@ impl Workspace {
                     id: t.view.entity_id(),
                     title: self.tab_info(i, cx).0,
                     agent: t.view.read(cx).agent().or_else(|| t.kind.agent().cloned()),
-                    active: i == self.active,
                     view: t.view.clone(),
                 })
             })
@@ -3360,7 +3355,6 @@ impl Workspace {
     /// Open a tab running `agent`, and the terminal tab shown after: the
     /// new one, or, while Claude asks which account first (several are on),
     /// the one shown before; `None` when no terminal tab shows.
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] // for the screenshot tray
     pub fn new_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         self.add_tab(TabKind::Agent(agent), window, cx);
         Some(self.tabs.get(self.active)?.term()?.view.clone())

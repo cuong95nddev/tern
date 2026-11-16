@@ -1,5 +1,5 @@
-//! Grips that resize a small window of its own (the agent monitor, the
-//! screenshot tray) by its right and bottom edges. These windows have no
+//! Grips that resize a small window of its own (the agent monitor) by its
+//! right and bottom edges. These windows have no
 //! system frame, and gpui starts a system resize only on Linux.
 
 use std::cell::Cell;
