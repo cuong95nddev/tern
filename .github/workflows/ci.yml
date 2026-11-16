@@ -32,8 +32,9 @@ jobs:
       - name: No encoded or hidden PowerShell
         if: runner.os == 'Linux'
         run: |
-          # Not third-party browser code (crates/tern-web/assets/vendor).
-          if grep -rniE --exclude-dir=vendor '"-e(c|n|nc|ncodedcommand)?"|"hidden"|FromBase64String' crates packaging scripts; then
+          # Not third-party browser code (crates/tern-web/assets/vendor), nor
+          # the templates' CSS parser, whose `overflow: hidden` runs no shell.
+          if grep -rniE --exclude-dir=vendor --exclude-dir=template '"-e(c|n|nc|ncodedcommand)?"|"hidden"|FromBase64String' crates packaging scripts; then
             echo "::error::encoded or hidden PowerShell: antivirus software flags it (see platform::shell_command_args)"
             exit 1
           fi
