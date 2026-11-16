@@ -96,6 +96,11 @@ pub fn set_claude_accounts_dir(dir: PathBuf) {
     let _ = ACCOUNTS_DIR.set(dir);
 }
 
+/// Where the Claude accounts Tern added live, once set.
+pub fn claude_accounts_dir() -> Option<&'static Path> {
+    ACCOUNTS_DIR.get().map(PathBuf::as_path)
+}
+
 /// The folder (of [`claude_sessions_dirs`]) with Claude Code process
 /// `pid`'s file.
 pub fn claude_sessions_dir_of(pid: u32) -> Option<PathBuf> {

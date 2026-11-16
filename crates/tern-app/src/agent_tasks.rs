@@ -70,14 +70,19 @@ pub enum Asks {
     Question { detail: String },
 }
 
-/// What a tool call's input says, short: its command when it has one.
+/// What a tool call's input says, short: its command when it has one, and
+/// why (Codex's `justification`, Claude's `description`).
 fn tool_detail(input: Option<&Value>) -> String {
     let Some(input) = input else { return String::new() };
-    let text = match input.get("command") {
+    let mut text = match input.get("command") {
         Some(Value::String(c)) => c.clone(),
         Some(Value::Array(parts)) => parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
         _ => input.to_string(),
     };
+    let why = ["justification", "description"].iter().find_map(|k| input.get(*k).and_then(Value::as_str));
+    if let Some(why) = why.filter(|w| !w.trim().is_empty() && input.get("command").is_some()) {
+        text = format!("{text} (why: {})", why.trim());
+    }
     if text.chars().count() > ASK_DETAIL { text.chars().take(ASK_DETAIL).collect::<String>() + "…" } else { text }
 }
 
@@ -166,6 +171,11 @@ impl Track {
     /// The agent tab that gave it its task.
     pub fn giver(&self) -> Option<u64> {
         self.by
+    }
+
+    /// It has no news now (it works): what comes next is news again.
+    pub fn quiet(&mut self) {
+        self.told = None;
     }
 
     /// Its giver was told `news`.
@@ -439,6 +449,10 @@ fn id_of(request: &Value) -> Result<u64, String> {
     request.get("id").and_then(Value::as_u64).ok_or_else(|| "`id` is required".to_owned())
 }
 
+/// The agent tab (its background session) that asks: the daemon sets it
+/// from the process at the other end of the socket, not from what the
+/// request says of itself (`tern_mux` `stamp_caller`), so a task's giver
+/// can't be claimed by another agent.
 fn by_of(request: &Value) -> Option<u64> {
     request.get("by").and_then(Value::as_u64)
 }
@@ -454,10 +468,17 @@ fn related(a: &Path, b: &Path) -> bool {
 }
 
 /// Where the agent asking runs: the workspace with its tab (`by`, its
-/// background session), else one whose folder is its folder's.
+/// background session), else one whose folder is its folder's. With
+/// `exact` (a task in a worktree of its own): the workspace of that very
+/// folder.
 fn home(request: &Value, cx: &mut App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
     let all = main_window::workspaces(cx);
     let folder = request.get("folder").and_then(Value::as_str).map(PathBuf::from);
+    if request.get("exact").and_then(Value::as_bool) == Some(true) {
+        let folder = folder?;
+        let folder = dunce::canonicalize(&folder).unwrap_or(folder);
+        return all.into_iter().find(|(_, ws)| ws.read(cx).root() == folder);
+    }
     let mine = by_of(request).and_then(|by| all.iter().find(|(_, ws)| ws.read(cx).mux_ids(cx).contains(&Some(by))).cloned());
     mine.or_else(|| {
         let folder = folder?;
@@ -519,12 +540,12 @@ fn answer_keys(text: &str, option: Option<u64>) -> Result<Vec<Step>, String> {
     }
 }
 
-/// Answer the question agent tab `id` asks, by the keys the user would
-/// press, while it still asks it. Only the agent that gave it the task
-/// answers, and only a question: an approval (to run a command, to edit a
-/// file), what it asks as it starts (whether to trust the folder) and what
-/// its hooks didn't name are the user's alone, as Orca leaves them to a
-/// person; an agent can't approve its own work through another.
+/// Answer what agent tab `id` asks, by the keys the user would press, while
+/// it still asks it. Only the agent that gave it the task answers (the
+/// daemon vouches for who asks, see `by_of`): a question, by an option or
+/// text, or an approval (to run a command, to edit a file), by its choice's
+/// number only. What it asks as it starts (whether to trust the folder) and
+/// what its hooks didn't name are the user's alone.
 fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
     let id = id_of(request)?;
     let text = request.get("answer").and_then(Value::as_str).unwrap_or_default();
@@ -534,12 +555,30 @@ fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
     let Some(asking) = report.asks.as_ref().filter(|_| report.state == State::Blocked) else {
         return Err(format!("agent tab {id} asks nothing now (it is {})", report.state.name()));
     };
-    if !matches!(asking, Asking::Hooked(Asks::Question { .. })) {
-        return Err("only the user answers this, in its tab: an approval, or what it asks as it starts".into());
-    }
+    let approval = match asking {
+        Asking::Hooked(Asks::Question { .. }) => false,
+        Asking::Hooked(Asks::Approval { .. }) => true,
+        Asking::Startup | Asking::Unknown => {
+            return Err("only the user answers this, in its tab: what it asks as it starts, or what its hooks didn't name".into());
+        },
+    };
     let giver = ws.read(cx).task_giver(id);
     if giver.is_none() || giver != by_of(request) {
-        return Err(format!("only the agent that gave task {id} answers its questions"));
+        return Err(format!("only the agent that gave task {id} answers what it asks"));
+    }
+    // An approval is one of the choices its screen numbers (yes, yes and
+    // don't ask again, no), never text that could land elsewhere.
+    if approval && option.is_none() {
+        return Err("an approval is answered by its choice's number: --option N (see its screen)".into());
+    }
+    // One approval at a time: a choice that allows more from then on is
+    // the user's.
+    if approval
+        && let Some(n) = option
+        && let Some(view) = ws.read(cx).task_view(id)
+        && lasting_choice(&view.read(cx).screen_lines(), n)
+    {
+        return Err(format!("option {n} allows more than this once (don't ask again): only the user chooses it, in its tab"));
     }
     let mut steps = answer_keys(text, option)?;
     // Codex shows a question asked without waiting among its queued inputs:
@@ -551,6 +590,19 @@ fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
     ws.update(cx, |ws, cx| ws.update_task(id, Track::answered, cx));
     cx.spawn(async move |cx| run(&view, steps, cx).await).detach();
     Ok(json!({ "id": id, "answered": true }))
+}
+
+/// Whether choice `n` on an approval's `screen` allows more than this once
+/// ("Yes, and don't ask again for ...", "always allow").
+fn lasting_choice(screen: &[String], n: u64) -> bool {
+    let mark = format!("{n}.");
+    screen.iter().any(|line| {
+        let t = line.trim_start().trim_start_matches(['›', '❯', '>', ' ']);
+        t.starts_with(&mark) && {
+            let l = t.to_lowercase().replace('’', "'");
+            l.contains("don't ask again") || l.contains("always")
+        }
+    })
 }
 
 /// Close agent tab `id`, which a task opened, ending its agent: only the
@@ -641,8 +693,10 @@ fn takes_wake(giver: &TerminalView) -> bool {
 /// line would run) or is gone hears nothing.
 fn tell_givers(cx: &mut App) {
     let all = main_window::workspaces(cx);
-    let news: Vec<(Entity<Workspace>, Report, u64)> =
-        all.iter().flat_map(|(_, ws)| ws.read(cx).task_news(cx).into_iter().map(move |(r, by)| (ws.clone(), r, by))).collect();
+    let news: Vec<(Entity<Workspace>, Report, u64)> = all
+        .iter()
+        .flat_map(|(_, ws)| ws.update(cx, |ws, cx| ws.task_news(cx)).into_iter().map(move |(r, by)| (ws.clone(), r, by)))
+        .collect();
     if news.is_empty() {
         return;
     }
@@ -682,7 +736,7 @@ mod tests {
     use serde_json::json;
     use tern_bridge::HookEvent;
 
-    use super::{Asks, Report, State, Track, answer_keys, wake_line};
+    use super::{Asks, Report, State, Track, answer_keys, lasting_choice, wake_line};
     use crate::prompt_input::Step;
     use crate::terminal_view::ActivityStatus::{self, Blocked, Done, Working};
 
@@ -750,6 +804,11 @@ mod tests {
             "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": { "command": "curl -sI https://example.com" },
         })));
         assert_eq!(t.asks, Some(Asks::Approval { tool: "Bash".into(), detail: "curl -sI https://example.com".into() }));
+        t.on_hook(&hook(json!({
+            "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+            "tool_input": { "command": "uv run x", "justification": "Download Pillow?" },
+        })));
+        assert_eq!(t.asks, Some(Asks::Approval { tool: "Bash".into(), detail: "uv run x (why: Download Pillow?)".into() }));
         t.on_hook(&hook(json!({ "hook_event_name": "PostToolUse", "tool_name": "Bash" })));
         assert_eq!(t.asks, None);
         t.on_hook(&hook(json!({ "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": { "q": 1 } })));
@@ -778,6 +837,22 @@ mod tests {
         // Newer Claude Code also asks leave for it.
         t.on_hook(&hook(json!({ "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion", "tool_input": input })));
         assert_eq!(t.asks, asked);
+    }
+
+    #[test]
+    fn an_agent_never_picks_an_approvals_lasting_choice() {
+        let codex: Vec<String> = [
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again for commands that start with `curl -sI` (p)",
+            "  3. No, and tell Codex what to do differently (esc)",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(!lasting_choice(&codex, 1));
+        assert!(lasting_choice(&codex, 2));
+        assert!(!lasting_choice(&codex, 3));
+        let claude: Vec<String> = ["❯ 1. Yes", "  2. Yes, and don’t ask again for uv commands in /w", "  3. No"].map(String::from).to_vec();
+        assert!(lasting_choice(&claude, 2));
     }
 
     #[test]

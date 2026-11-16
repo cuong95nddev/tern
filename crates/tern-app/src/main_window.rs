@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::{ActiveTheme, WindowExt as _};
 use gpui_kit::*;
@@ -96,6 +97,26 @@ pub fn reveal(handle: AnyWindowHandle, ws: &Entity<Workspace>, cx: &mut App) {
         window.activate_window();
     });
     cx.activate(true);
+}
+
+/// `scope` with the state of `tabs` that most wants the user (`dot`,
+/// `dot_color`) and how many wait for them, as `needs` ("2 need you").
+fn status_vars(
+    scope: template::Scope,
+    tabs: &[(EntityId, template::Scope, ActivityStatus)],
+    needs: &'static str,
+    cx: &App,
+) -> template::Scope {
+    let mut scope = scope;
+    let top = tabs.iter().map(|(_, _, s)| *s).max_by_key(|s| crate::agents::priority(*s));
+    if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
+        scope = scope.var("dot", true).var("dot_color", crate::agents::status_color(s, cx.theme()));
+    }
+    let count = tabs.iter().filter(|(_, _, s)| *s == ActivityStatus::Blocked).count();
+    if count > 0 {
+        scope = scope.var(needs, crate::agents::needs_label(count));
+    }
+    scope
 }
 
 fn windows(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<MainWindow>)> {
@@ -458,6 +479,68 @@ pub fn open_folder(root: PathBuf, cx: &mut App) {
     }
 }
 
+/// Show worktree `root` (just made by `tern --worktree`) as a folder,
+/// under its repository's, without taking the user from what they look at:
+/// in the window of agent tab `by` (who made it), else of its repository,
+/// else the active one; a new window when none is open.
+pub fn open_worktree(root: PathBuf, by: Option<u64>, cx: &mut App) {
+    let root = dunce::canonicalize(&root).unwrap_or(root);
+    refresh_worktrees(cx);
+    let all = windows(cx);
+    if all.iter().any(|(_, m)| m.read(cx).slots.iter().any(|s| s.ws.read(cx).root() == root)) {
+        return;
+    }
+    let main = tern_fs::worktree::linked(&root).map(|(main, _)| main);
+    let holds =
+        |m: &Entity<MainWindow>, cx: &App, f: &dyn Fn(&Workspace, &App) -> bool| m.read(cx).slots.iter().any(|s| f(s.ws.read(cx), cx));
+    let target = all
+        .iter()
+        .find(|(_, m)| by.is_some() && holds(m, cx, &|ws, cx| ws.mux_ids(cx).contains(&by)))
+        .or_else(|| all.iter().find(|(_, m)| main.as_deref().is_some_and(|main| holds(m, cx, &|ws, _| ws.root() == main))))
+        .or_else(|| cx.active_window().and_then(|a| all.iter().find(|(h, _)| *h == a)))
+        .or_else(|| all.first())
+        .cloned();
+    match target {
+        Some((handle, m)) => {
+            let _ = handle.update(cx, |_, window, cx| {
+                m.update(cx, |m, cx| {
+                    m.add_folder(root.clone(), window, cx);
+                    m.offer_setup(root, window, cx);
+                })
+            });
+        },
+        None => open_folder(root, cx),
+    }
+}
+
+/// Read again, in every window, which worktrees each repository's folder
+/// has (one was made or removed): their cards come and go.
+pub fn refresh_worktrees(cx: &mut App) {
+    for (_, ws) in workspaces(cx) {
+        ws.update(cx, |w, cx| w.refresh_worktrees(cx));
+    }
+}
+
+/// Close the workspace of folder `root` wherever it shows (its terminals
+/// end): whether one did. Not while programs run in it, unless `force`.
+pub fn close_folder(root: &Path, force: bool, cx: &mut App) -> Result<bool, String> {
+    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    for (handle, m) in windows(cx) {
+        let Some(ix) = m.read(cx).slots.iter().position(|s| s.ws.read(cx).root() == root) else { continue };
+        let jobs = m.read(cx).slots[ix].ws.read(cx).running(cx);
+        if !jobs.is_empty() && !force {
+            return Err(format!(
+                "{} is open in Tern with programs running in it ({}): end them, or --force ends them too",
+                root.display(),
+                jobs.join("; ")
+            ));
+        }
+        handle.update(cx, |_, window, cx| m.update(cx, |m, cx| m.close(ix, window, cx))).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Ask for a folder and open it as a workspace.
 pub fn prompt_open_folder(cx: &mut App) {
     let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
@@ -564,6 +647,11 @@ pub struct MainWindow {
     /// The agents panel's next redraw for its times: in a second (while an
     /// agent works) or in half a minute.
     _tick: Option<(bool, Task<()>)>,
+    /// Enter in the New Worktree dialog's name field.
+    _worktree_input: Option<Subscription>,
+    /// The repositories whose groups (worktrees) the agents panel folds,
+    /// by their main checkout's workspace.
+    folded_groups: HashSet<EntityId>,
 }
 
 impl MainWindow {
@@ -653,6 +741,8 @@ impl MainWindow {
             _subs: vec![bounds_sub, activation_sub, appearance_sub, focus_lost_sub],
             _save_placement: Task::ready(()),
             _tick: None,
+            _worktree_input: None,
+            folded_groups: HashSet::new(),
         }
     }
 
@@ -691,9 +781,32 @@ impl MainWindow {
                 return;
             }
         }
+        let at = self.place_for(&root, cx);
         let services = cx.global::<AppServices>().0.clone();
         let ws = cx.new(|cx| Workspace::new(window_state::SavedWorkspace::fresh(root), services, window, cx));
-        self.insert(ws, None, window, cx);
+        self.insert(ws, at, window, cx);
+    }
+
+    /// Open `root` as a new workspace here, in its place (see
+    /// [`Self::place_for`]), leaving the shown one shown.
+    fn add_folder(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self.place_for(&root, cx).unwrap_or(self.slots.len());
+        let services = cx.global::<AppServices>().0.clone();
+        let ws = cx.new(|cx| Workspace::new(window_state::SavedWorkspace::fresh(root), services, window, cx));
+        let shown = self.active_ws().cloned();
+        self.insert(ws, Some(at), window, cx);
+        if let Some(ix) = shown.and_then(|ws| self.position(ws.entity_id())) {
+            self.activate(ix, window, cx);
+        }
+    }
+
+    /// Where a workspace for `root` goes when `root` is a git worktree of a
+    /// repository open here: after that repository's, and its worktrees'.
+    fn place_for(&self, root: &Path, cx: &App) -> Option<usize> {
+        let (main, _) = tern_fs::worktree::linked(root)?;
+        let first = self.slots.iter().position(|s| s.ws.read(cx).root() == main)?;
+        let rest = self.slots[first + 1..].iter().take_while(|s| s.ws.read(cx).worktree().is_some_and(|(m, _)| m == main)).count();
+        Some(first + 1 + rest)
     }
 
     fn insert(&mut self, ws: Entity<Workspace>, at: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -869,48 +982,163 @@ impl MainWindow {
         enum Entry {
             Folder(usize),
             Tab(usize, EntityId),
+            /// The header of a repository's group: its main checkout's
+            /// workspace.
+            Group(usize),
+            /// A worktree of a group's repository that isn't open: its place
+            /// in `closed`.
+            Closed(usize),
         }
         let shortcut = |k| crate::platform::shortcut(k).to_string();
         let close_key = shortcut("⌘⇧W");
+        // Every row and card, numbered in one run (nested lists included):
+        // a frame's index is its place here.
         let mut entries = vec![];
         let mut items = vec![];
         // What each agent's ring says, in words.
         let mut tips: HashMap<EntityId, SharedString> = HashMap::new();
         let mut active_row = 0;
         let mut working = false;
-        for (i, slot) in self.slots.iter().enumerate() {
-            let ws = slot.ws.read(cx);
-            let open = !self.collapsed.contains(&slot.ws.entity_id());
-            if i == self.active {
-                active_row = entries.len();
+        let mut closed: Vec<PathBuf> = vec![];
+        // A repository with worktrees (open in this window, or Tern's in its
+        // `.worktrees`) shows as a group:
+        // a header, then a card for its main checkout and one for each
+        // worktree, its agents inside it (no indenting: the card groups).
+        let roots: Vec<PathBuf> = self.slots.iter().map(|s| s.ws.read(cx).root().to_owned()).collect();
+        let main_of: Vec<Option<usize>> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let (main, _) = s.ws.read(cx).worktree()?;
+                roots.iter().position(|r| r == main).filter(|j| *j != i)
+            })
+            .collect();
+        for i in 0..self.slots.len() {
+            if main_of[i].is_some() {
+                continue;
             }
-            let tabs = ws.sidebar_tabs(i == self.active, cx);
-            let top = tabs.iter().map(|(_, _, s)| *s).max_by_key(|s| crate::agents::priority(*s));
-            working |= tabs.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
-            entries.push(Entry::Folder(i));
-            let mut folder = template::Scope::new(format!("side-ws-{}", slot.ws.entity_id().as_u64()))
-                .var("folder", true)
-                .var("name", ws.name())
-                .var("active", i == self.active)
-                .var("open", open)
-                .var("buttons", true)
-                .var("close_key", close_key.clone());
-            if let Some(s) = top.filter(|s| *s != ActivityStatus::None) {
-                folder = folder.var("dot", true).var("dot_color", crate::agents::status_color(s, cx.theme()));
+            let members: Vec<usize> = (0..self.slots.len()).filter(|k| main_of[*k] == Some(i)).collect();
+            // Tern's worktrees of it that aren't open: a card each too.
+            let unopened: Vec<(PathBuf, Option<String>)> =
+                self.slots[i].ws.read(cx).tern_worktrees().iter().filter(|(p, _)| !roots.contains(p)).cloned().collect();
+            let top_row = items.len();
+            if i == self.active || members.contains(&self.active) {
+                active_row = top_row;
             }
-            let needs = tabs.iter().filter(|(_, _, s)| *s == ActivityStatus::Blocked).count();
-            if needs > 0 {
-                folder = folder.var("needs", crate::agents::needs_label(needs));
-            }
-            items.push(folder);
-            if open {
-                for (id, scope, _) in tabs {
-                    if let Some(tip) = scope.text_var("tip") {
-                        tips.insert(id, tip);
-                    }
-                    entries.push(Entry::Tab(i, id));
-                    items.push(scope);
+            if members.is_empty() && unopened.is_empty() {
+                // A folder as it always shows: its row, then its agents.
+                let ws = self.slots[i].ws.read(cx);
+                let open = !self.collapsed.contains(&self.slots[i].ws.entity_id());
+                let tabs = ws.sidebar_tabs(i == self.active, cx);
+                working |= tabs.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
+                let mut folder = template::Scope::new(format!("side-ws-{}", self.slots[i].ws.entity_id().as_u64()))
+                    .var("folder", true)
+                    .var("name", ws.name())
+                    .var("active", i == self.active)
+                    .var("open", open)
+                    .var("buttons", true)
+                    .var("close_key", close_key.clone());
+                // A worktree whose repository isn't open here.
+                if ws.worktree().is_some() {
+                    folder = folder.var("worktree", true);
                 }
+                folder = status_vars(folder, &tabs, "needs", cx);
+                entries.push(Entry::Folder(i));
+                items.push(folder.at(entries.len() - 1));
+                if open {
+                    for (id, scope, _) in tabs {
+                        if let Some(tip) = scope.text_var("tip") {
+                            tips.insert(id, tip);
+                        }
+                        entries.push(Entry::Tab(i, id));
+                        items.push(scope.at(entries.len() - 1));
+                    }
+                }
+                continue;
+            }
+            // The group's header: the repository, folding all of it.
+            let main_ws = self.slots[i].ws.clone();
+            let open = !self.folded_groups.contains(&main_ws.entity_id());
+            let all: Vec<(EntityId, template::Scope, ActivityStatus)> =
+                std::iter::once(i).chain(members.iter().copied()).flat_map(|k| self.slots[k].ws.read(cx).sidebar_tabs(false, cx)).collect();
+            let count = members.len() + unopened.len();
+            let header = template::Scope::new(format!("side-group-{}", main_ws.entity_id().as_u64()))
+                .var("group", true)
+                .var("name", main_ws.read(cx).name())
+                .var("open", open)
+                .var("count", format!("{count} worktree{}", if count == 1 { "" } else { "s" }));
+            let header = status_vars(header, &all, "needs", cx);
+            entries.push(Entry::Group(i));
+            items.push(header.at(entries.len() - 1));
+            if !open {
+                working |= all.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
+                continue;
+            }
+            // The main checkout first, then every worktree by name, open or not.
+            enum Card {
+                Open(usize),
+                Unopened(PathBuf, Option<String>),
+            }
+            let mut order: Vec<(String, Card)> = members
+                .iter()
+                .map(|k| (self.slots[*k].ws.read(cx).name(), Card::Open(*k)))
+                .chain(
+                    unopened
+                        .into_iter()
+                        .map(|(p, b)| (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), Card::Unopened(p, b))),
+                )
+                .collect();
+            order.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, card) in std::iter::once((String::new(), Card::Open(i))).chain(order) {
+                let k = match card {
+                    Card::Open(k) => k,
+                    // Not open: its name and branch, nothing running; a
+                    // click opens it.
+                    Card::Unopened(path, branch) => {
+                        let card = template::Scope::new(format!("side-closed-{}", path.display()))
+                            .var("card", true)
+                            .var("closed", true)
+                            .var("buttons", true)
+                            .var("close_key", close_key.clone())
+                            .var("name", name)
+                            .var("branch", branch.unwrap_or_else(|| "detached".to_owned()));
+                        entries.push(Entry::Closed(closed.len()));
+                        closed.push(path);
+                        items.push(card.numbered("tabs", vec![]).at(entries.len() - 1));
+                        continue;
+                    },
+                };
+                let slot = &self.slots[k];
+                let ws = slot.ws.read(cx);
+                let tabs = ws.sidebar_tabs(k == self.active, cx);
+                working |= tabs.iter().any(|(_, _, s)| *s == ActivityStatus::Working);
+                let branch = tern_fs::worktree::branch_of(ws.root());
+                let mut card = template::Scope::new(format!("side-card-{}", slot.ws.entity_id().as_u64()))
+                    .var("card", true)
+                    .var("card_active", k == self.active)
+                    .var("buttons", true)
+                    .var("close_key", close_key.clone());
+                card = if k == i {
+                    // The main checkout: named by its branch, marked as the main one.
+                    card.var("name", branch.unwrap_or_else(|| ws.name())).var("main", true)
+                } else {
+                    card.var("name", ws.name()).var("branch", branch.unwrap_or_else(|| "detached".to_owned()))
+                };
+                card = status_vars(card, &tabs, "card_needs", cx);
+                entries.push(Entry::Folder(k));
+                let card_ix = entries.len() - 1;
+                let mut rows = vec![];
+                if !self.collapsed.contains(&slot.ws.entity_id()) {
+                    for (id, scope, _) in tabs {
+                        if let Some(tip) = scope.text_var("tip") {
+                            tips.insert(id, tip);
+                        }
+                        entries.push(Entry::Tab(k, id));
+                        rows.push(scope.at(entries.len() - 1));
+                    }
+                }
+                items.push(card.numbered("tabs", rows).at(card_ix));
             }
         }
         if self.revealed.replace(self.active) != Some(self.active) {
@@ -954,7 +1182,7 @@ impl MainWindow {
             },
             cx,
         );
-        let scope = template::Scope::new("agents").slot("header", header).list("items", items);
+        let scope = template::Scope::new("agents").slot("header", header).numbered("items", items);
         let me = cx.entity().downgrade();
         let workspaces: Vec<Entity<Workspace>> = self.slots.iter().map(|s| s.ws.clone()).collect();
         let drag: Vec<DraggedWorkspace> =
@@ -995,6 +1223,54 @@ impl MainWindow {
                         })
                         .into_any_element()
                 },
+                ("folder", Framed::Box(d), Some(Entry::Closed(c))) => {
+                    let path = closed.get(c).cloned();
+                    d.id(("agents-closed", c))
+                        .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                            if let Some(path) = path.clone() {
+                                this.open_folder(path, window, cx);
+                            }
+                        }))
+                        .into_any_element()
+                },
+                ("close", Framed::Button(b), Some(Entry::Closed(c))) => {
+                    let path = closed.get(c).cloned();
+                    b.on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(path) = path.clone() {
+                            this.ask_remove_worktree(path, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+                },
+                ("group", Framed::Box(d), Some(Entry::Group(i))) if i < drag.len() => {
+                    let menu_me = me.clone();
+                    d.id(("agents-group", i))
+                        .on_click(on_main(&me, move |this, _: &ClickEvent, _, cx| {
+                            if let Some(id) = this.slots.get(i).map(|s| s.ws.entity_id())
+                                && !this.folded_groups.remove(&id)
+                            {
+                                this.folded_groups.insert(id);
+                            }
+                            cx.notify();
+                        }))
+                        .context_menu(move |menu, window, cx| {
+                            let Some(this) = menu_me.upgrade() else { return menu };
+                            let this = this.read(cx);
+                            let Some(slot) = this.slots.get(i) else { return menu };
+                            let (root, single) = (slot.ws.read(cx).root().to_owned(), this.slots.len() < 2);
+                            Self::tab_menu(menu, &menu_me, i, root, single, window, cx)
+                        })
+                        .into_any_element()
+                },
+                ("new_worktree", Framed::Button(b), Some(Entry::Group(i))) => b
+                    .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(root) = this.slots.get(i).map(|s| s.ws.read(cx).root().to_owned()) {
+                            this.ask_new_worktree(root, window, cx);
+                        }
+                    }))
+                    .into_any_element(),
                 ("toggle", Framed::Box(d), Some(Entry::Folder(i))) => d
                     .id(("agents-toggle", i))
                     .on_click(on_main(&me, move |this, _: &ClickEvent, _, cx| {
@@ -1016,7 +1292,7 @@ impl MainWindow {
                     .on_click(on_main(&me, move |this, _: &ClickEvent, window, cx| {
                         // Don't let the folder's own click activate it.
                         cx.stop_propagation();
-                        this.request_close(i, window, cx);
+                        this.request_close_folder(i, window, cx);
                     }))
                     .into_any_element(),
                 ("tab", Framed::Box(d), Some(Entry::Tab(i, id))) => {
@@ -1082,6 +1358,9 @@ impl MainWindow {
                 .push(template::Scope::default().var("label", if names.is_empty() { "Empty Window".to_owned() } else { names.join(", ") }));
             others.push(handle);
         }
+        // Worktrees: of a folder in a git repository, and of one.
+        let worktree = tern_fs::worktree::linked(&root).is_some();
+        let git = worktree || tern_fs::git::repo_for(&root).is_some();
         let me = me.clone();
         let items: template::MenuItems = Rc::new(move |name, entry| {
             type Handler = Box<dyn Fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>)>;
@@ -1101,6 +1380,14 @@ impl MainWindow {
                     let root = root.clone();
                     return Some(Rc::new(move |_, _, cx| cx.reveal_path(&root)));
                 },
+                "new_worktree" => {
+                    let root = root.clone();
+                    Box::new(move |this, window, cx| this.ask_new_worktree(root.clone(), window, cx))
+                },
+                "remove_worktree" => {
+                    let root = root.clone();
+                    Box::new(move |this, window, cx| this.ask_remove_worktree(root.clone(), window, cx))
+                },
                 _ => return None,
             };
             let me = me.clone();
@@ -1108,9 +1395,195 @@ impl MainWindow {
                 let _ = me.update(cx, |this, cx| f(this, window, cx));
             }))
         });
-        let scope =
-            template::Scope::new("workspace-menu").var("single", single).var("reveal", crate::platform::REVEAL).list("windows", labels);
+        let scope = template::Scope::new("workspace-menu")
+            .var("single", single)
+            .var("reveal", crate::platform::REVEAL)
+            .var("git", git)
+            .var("worktree", worktree)
+            .list("windows", labels);
         template::menu("menu.workspace_tab", scope, menu, items, window, cx)
+    }
+
+    /// Ask for the name of a new worktree of the repository `root` is in
+    /// (template `dialog.worktree`), then make it and show it.
+    fn ask_new_worktree(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("a name, or none for a made-up one"));
+        let made = Rc::new(move |this: &mut Self, name: String, window: &mut Window, cx: &mut Context<Self>| {
+            this._worktree_input = None;
+            window.close_dialog(cx);
+            this.make_worktree(root.clone(), name, window, cx);
+        });
+        let on_enter = made.clone();
+        self._worktree_input = Some(cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                on_enter(this, input.read(cx).value().to_string(), window, cx);
+            }
+        }));
+        let me = cx.entity().downgrade();
+        let first = Cell::new(true);
+        let note = format!("Made in {}/NAME in the repository, on a new branch tern/NAME.", tern_fs::worktree::DIR);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.focus_handle(cx).focus(window, cx);
+            }
+            let field = input.clone();
+            let footer = template::render(
+                "dialog.worktree.footer",
+                template::Scope::new("worktree"),
+                &mut |n, _, f| match (n, f) {
+                    ("cancel", Framed::Button(b)) => b.on_click(|_, window, cx| window.close_dialog(cx)).into_any_element(),
+                    ("ok", Framed::Button(b)) => {
+                        let (input, me, made) = (input.clone(), me.clone(), made.clone());
+                        b.on_click(move |_, window, cx| {
+                            let name = input.read(cx).value().to_string();
+                            let _ = me.update(cx, |this, cx| made(this, name, window, cx));
+                        })
+                        .into_any_element()
+                    },
+                    (_, f) => f.into_any_element(),
+                },
+                cx,
+            );
+            let note = note.clone();
+            dialog.w(crate::style::dialog_width(false, cx)).title("New Worktree").footer(footer).content(move |c, _, cx| {
+                let scope = template::Scope::new("worktree").slot("field", Input::new(&field)).var("note", note.clone());
+                c.child(template::render_plain("dialog.worktree", scope, cx))
+            })
+        });
+    }
+
+    /// Make a worktree named `name` of the repository `root` is in, away
+    /// from the window (git checks out every file), then show it here.
+    fn make_worktree(&mut self, root: PathBuf, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = name.trim().to_owned();
+        let task =
+            cx.background_spawn(async move { crate::worktrees::make(&root, (!name.is_empty()).then_some(name.as_str()), None, None) });
+        cx.spawn_in(window, async move |this, cx| {
+            let made = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match made {
+                Ok(m) => {
+                    refresh_worktrees(cx);
+                    this.open_folder(m.path.clone(), window, cx);
+                    this.offer_setup(m.path, window, cx);
+                },
+                Err(e) => window.push_notification(format!("Could not make the worktree: {e}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Run the setup the repository of new worktree `root` names, as its
+    /// service: at once when the user approved the repository's scripts as
+    /// they are, else after asking them (see `worktrees`).
+    fn offer_setup(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::worktrees::{SETUP_FILE, Scripts, approve, approved, run_setup, scripts_of};
+        let Some((main, _)) = tern_fs::worktree::linked(&root) else { return };
+        let scripts = match scripts_of(&main) {
+            Ok(Some(scripts)) => scripts,
+            Ok(None) => return,
+            Err(e) => return window.push_notification(format!("The worktree's scripts are not run: {e}"), cx),
+        };
+        let run = move |scripts: Scripts, window: &mut Window, cx: &mut App| {
+            if let Some(command) = &scripts.setup
+                && let Err(e) = run_setup(&root, command)
+            {
+                window.push_notification(format!("Could not start the worktree's setup: {e}"), cx);
+            }
+        };
+        if approved(&scripts) {
+            return run(scripts, window, cx);
+        }
+        let detail = format!(
+            "{}\n\nFrom the repository's {SETUP_FILE}. Tern runs its setup in each new worktree as its service \"setup\", \
+and its archive in a worktree before removing it, from now on without asking, until that file changes. Run them only \
+if you trust what the repository runs.",
+            scripts.describe()
+        );
+        let answer =
+            window.prompt(PromptLevel::Warning, "Run this repository's worktree scripts?", Some(&detail), &["Run", "Don't Run"], cx);
+        cx.spawn_in(window, async move |_, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let _ = cx.update(|window, cx| match approve(&scripts) {
+                Ok(()) => run(scripts, window, cx),
+                Err(e) => window.push_notification(format!("Could not keep the approval: {e}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// The × of workspace `ix` in the agents panel: a worktree's removes
+    /// it, after the user confirms what that loses (`ask_remove_worktree`);
+    /// any other folder's closes it.
+    fn request_close_folder(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = self.slots.get(ix).map(|s| s.ws.clone()) else { return };
+        if ws.read(cx).worktree().is_some() {
+            let root = ws.read(cx).root().to_owned();
+            return self.ask_remove_worktree(root, window, cx);
+        }
+        self.request_close(ix, window, cx);
+    }
+
+    /// Ask whether to remove worktree `root` (saying what that loses), then
+    /// close its folder and remove it.
+    fn ask_remove_worktree(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // What it has that removing loses, read away from the window.
+        let found = cx.background_spawn({
+            let root = root.clone();
+            async move {
+                let (main, w) = crate::worktrees::find(&root, &root.to_string_lossy())?;
+                let changes = if w.prunable { vec![] } else { tern_fs::worktree::changes(&w.path)? };
+                Ok::<_, String>((main, w, changes))
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (main, w, changes) = match found.await {
+                Ok(found) => found,
+                Err(e) => {
+                    let _ = this.update_in(cx, |_, window, cx| window.push_notification(e, cx));
+                    return;
+                },
+            };
+            let Ok(answer) = this.update_in(cx, |this, window, cx| {
+                let jobs: Vec<String> =
+                    this.slots.iter().filter(|s| s.ws.read(cx).root() == w.path).flat_map(|s| s.ws.read(cx).running(cx)).collect();
+                let mut detail = vec!["Its folder is deleted.".to_owned()];
+                if let Some(b) = &w.branch {
+                    detail.push(format!("Branch {b} goes too if it is merged; else it is kept."));
+                }
+                match changes.len() {
+                    0 => {},
+                    1 => detail.push("Its uncommitted change is lost.".into()),
+                    n => detail.push(format!("Its {n} uncommitted changes are lost.")),
+                }
+                if !jobs.is_empty() {
+                    detail.push(format!("Still running there, ended: {}.", jobs.join(", ")));
+                }
+                let name = w.path.file_name().map_or_else(|| w.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                window.prompt(PromptLevel::Warning, &format!("Remove worktree {name}?"), Some(&detail.join(" ")), &["Remove", "Cancel"], cx)
+            }) else {
+                return;
+            };
+            if answer.await != Ok(0) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(ix) = this.slots.iter().position(|s| s.ws.read(cx).root() == w.path) {
+                    this.close(ix, window, cx);
+                }
+            });
+            let force = !changes.is_empty();
+            let removed = cx.background_spawn(async move { crate::worktrees::remove(&main, &w, force) }).await;
+            let _ = this.update_in(cx, |_, window, cx| {
+                refresh_worktrees(cx);
+                match removed {
+                    Ok(done) => window.push_notification(done, cx),
+                    Err(e) => window.push_notification(format!("Could not remove the worktree: {e}"), cx),
+                }
+            });
+        })
+        .detach();
     }
 
     /// The page of a window with no workspace (`welcome`).

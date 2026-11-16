@@ -125,6 +125,13 @@ pub struct AgentsSettings {
     /// shell: `{ "codex": "--search" }`. Claude's are kept with its Flags
     /// menu, so this has no effect on it; a chat doesn't take them.
     pub args: Option<std::collections::BTreeMap<String, String>>,
+    /// The context limit every agent tab starts with, in percent of its
+    /// context window (5 to 100; none or 0: off). A tab can still set its
+    /// own from the ring beside its usage bar.
+    pub context_limit: Option<u8>,
+    /// Over that limit, the agent writes a handoff and goes on in a fresh
+    /// conversation by itself (default true); else it only stops.
+    pub context_auto_switch: Option<bool>,
 }
 
 /// What the agents panel shows under each agent, as the settings make it.
@@ -136,6 +143,8 @@ pub struct AgentsConfig {
     pub default: Option<String>,
     /// `agents.args`: an agent's id to the arguments of its tabs.
     pub args: std::collections::BTreeMap<String, String>,
+    /// The context guard a new agent tab starts with.
+    pub guard: crate::agents::ContextGuard,
 }
 
 impl Global for AgentsConfig {}
@@ -155,6 +164,7 @@ pub fn agents_config(s: &AgentsSettings) -> AgentsConfig {
         show_tool: s.show_tool.unwrap_or(true),
         default: s.default.clone(),
         args: s.args.clone().unwrap_or_default(),
+        guard: crate::agents::ContextGuard::from_setting(s.context_limit, s.context_auto_switch),
     }
 }
 
@@ -1575,7 +1585,8 @@ does by name), both with `icon`, `selected` (a check) and `disabled`; `\"text\"`
 (a line that can't be clicked), a box with a `label` and `children` (a
 submenu), `each` and `use` (another menu's entries). A `button` with
 `children` draws them as its item. A `button` with an `action` runs it when
-clicked, in any template.
+clicked, in any template; one with `\"menu\": \"file\"` opens menu template
+`menu.file` under it instead, a menu of your own (a menu bar is a row of them).
 
 A slot you leave out is not drawn. Mistakes show in the status bar.
 
@@ -1867,7 +1878,7 @@ the template's root. Elements:
 | `<div>`, `<span>`, `<section>`, `<header>`, `<footer>`, `<main>`, `<nav>`, `<aside>`, `<article>`, `<ul>`, `<ol>`, `<li>`, `<p>`, `<h1>`–`<h6>` | a box. An element with only text is a `text` node; text beside elements is a text node of its own |
 | `<img src=\"images/x.png\"/>` | `image` |
 | `<icon name=\"folder-open\"/>` | `icon` (`{{name}}` for one the code gives) |
-| `<button name=\"close\" icon=\"x\" variant=\"ghost\" size=\"xsmall\" tooltip=\"…\" action=\"workspace::X\" selected disabled=\"busy\" loading>label</button>` | `button` (the label is its text, or `label=\"…\"` when it has child elements) |
+| `<button name=\"close\" icon=\"x\" variant=\"ghost\" size=\"xsmall\" tooltip=\"…\" action=\"workspace::X\" menu=\"file\" selected disabled=\"busy\" loading>label</button>` | `button` (the label is its text, or `label=\"…\"` when it has child elements) |
 | `<switch name=\"x\" selected=\"on\" disabled tooltip=\"…\"/>` | `switch` |
 | `<slot name=\"icon\"/>` | `slot` |
 | `<use template=\"pane.body\" element=\"agents.tab\"/>` | `use` |

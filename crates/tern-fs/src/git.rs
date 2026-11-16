@@ -53,8 +53,11 @@ pub const STATUS_LIMIT: usize = 10_000;
 const MAX_SCAN_DEPTH: usize = 4;
 const MAX_SCAN_DIRS: usize = 20_000;
 /// Heavy build / dependency dirs: not searched for repos, and changes
-/// inside them are not watched.
-pub const SKIP_DIRS: &[&str] = &["node_modules", "target", ".venv", "venv", "__pycache__", "vendor", "dist", "build", ".build", "Pods"];
+/// inside them are not watched. And `.worktrees`, where Tern keeps a
+/// repository's git worktrees (`worktree::DIR`): each one is a folder of
+/// its own, not part of the repository's.
+pub const SKIP_DIRS: &[&str] =
+    &["node_modules", "target", ".venv", "venv", "__pycache__", "vendor", "dist", "build", ".build", "Pods", crate::worktree::DIR];
 
 /// Git repositories relevant to `root`: the repo containing `root` (if any)
 /// plus repos nested below it (up to [`MAX_SCAN_DEPTH`] levels; heavy build
@@ -108,7 +111,8 @@ pub fn owner<'a>(repos: &'a [PathBuf], path: &Path) -> Option<&'a Path> {
 /// half-done state (and may re-run clean filters without caching), so wait
 /// for the lock to go away: the watcher reports that.
 pub fn index_locked(repo: &Path) -> bool {
-    repo.join(".git").join("index.lock").exists()
+    // A linked worktree's index is in its own git dir, not `repo/.git`.
+    crate::worktree::git_dirs(repo).is_some_and(|(own, _)| own.join("index.lock").exists())
 }
 
 /// True if git ignores every one of `paths` (all inside `repo`), as one

@@ -820,6 +820,7 @@ impl Compiler<'_> {
             "size" if tag == "button" => set("size", text.into()),
             "tooltip" if by_tag(&["button", "switch", "menu-item"]) => set("tooltip", text.into()),
             "action" if by_tag(&["button", "menu-item"]) => set("action", text.into()),
+            "menu" if tag == "button" => set("menu", text.into()),
             "label" if by_tag(&["button", "menu-item"]) => set("label", text.into()),
             "selected" | "disabled" | "loading" if by_tag(&["button", "switch", "menu-item"]) => set(a.name.as_str(), flag(&a.value)),
             "data-when" | "data-frame" | "data-element" | "data-part" | "data-kind" | "data-dock" | "data-strip" | "data-group"
@@ -1336,7 +1337,7 @@ mod tests {
                  <span>Hello {name}</span>
                  <img src="images/x.png"/>
                  <icon name="folder-open"/>
-                 <button name="close" icon="x" variant="ghost" size="xsmall" tooltip="Close" action="workspace::X" selected disabled="busy">Label</button>
+                 <button name="close" icon="x" variant="ghost" size="xsmall" tooltip="Close" action="workspace::X" menu="file" selected disabled="busy">Label</button>
                  <switch name="sw" selected="on"/>
                  <slot name="icon"/>
                  <use template="pane.body" element="agents.tab"/>
@@ -1357,7 +1358,7 @@ mod tests {
                   {"image": "images/x.png"},
                   {"icon": "folder-open"},
                   {"button": "close", "icon": "x", "variant": "ghost", "size": "xsmall", "tooltip": "Close", "action": "workspace::X",
-                   "selected": true, "disabled": "busy", "label": "Label"},
+                   "menu": "file", "selected": true, "disabled": "busy", "label": "Label"},
                   {"switch": "sw", "selected": "on"},
                   {"slot": "icon"},
                   {"use": "pane.body", "element": "agents.tab"},

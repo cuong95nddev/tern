@@ -6736,7 +6736,6 @@ dependencies = [
 name = "tern-agent"
 version = "0.1.0"
 dependencies = [
- "log",
  "serde",
  "serde_json",
  "tempfile",
@@ -6829,6 +6828,7 @@ dependencies = [
 name = "tern-fs"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "ignore",
  "log",
  "notify",
@@ -6897,6 +6897,7 @@ dependencies = [
  "tern-chat",
  "tern-term",
  "uds_windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

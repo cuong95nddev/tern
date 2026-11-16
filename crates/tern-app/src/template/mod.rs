@@ -119,6 +119,9 @@ pub struct Spec {
     /// a menu item that dispatches it and shows its key, or on a `button`
     /// what clicking it does.
     pub action: Option<String>,
+    /// On a `button`: the menu template it opens under it when clicked,
+    /// `menu.<name>`, its entries doing their `action`s.
+    pub menu: Option<String>,
     /// In a menu: a line between entries.
     pub separator: bool,
     /// What a button says under the pointer; `{name}` puts in a value.
@@ -429,6 +432,21 @@ impl Scope {
         self
     }
 
+    /// This entry's place, for a list given with [`Self::numbered`]: what
+    /// the code hears as a frame's index (and `index` in conditions).
+    pub fn at(mut self, index: usize) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// List `name`'s entries as they are numbered ([`Self::at`]), not by
+    /// their place in it: lists nested in one another's entries can then
+    /// number theirs all in one run, which the code tells apart.
+    pub fn numbered(mut self, name: &'static str, items: Vec<Scope>) -> Self {
+        self.lists.insert(name, items);
+        self
+    }
+
     /// List `name`'s entries, for `each`.
     pub fn list(mut self, name: &'static str, items: Vec<Scope>) -> Self {
         let items = items.into_iter().enumerate().map(|(i, s)| Scope { index: Some(i), ..s }).collect();
@@ -512,25 +530,32 @@ impl Templates {
         self.parts.iter().filter(|(_, (_, n))| n.window.as_ref().is_some_and(|c| !c.holds(&get))).map(|(name, _)| *name).collect()
     }
 
-    /// Says which actions the templates name that `known` doesn't have.
+    /// Says which actions the templates name that `known` doesn't have,
+    /// and which menus a button opens that no template is.
     pub fn check_actions(&self, known: &[&str], problems: &mut Vec<String>) {
-        fn walk(n: &Node, known: &[&str], problems: &mut Vec<String>) {
-            if let What::Button(b) = &n.what
-                && let Some(a) = &b.action
-                && !known.contains(&a.as_ref())
-            {
-                problems.push(format!("{}.action: no action \"{a}\"", n.path));
+        fn walk(n: &Node, known: &[&str], nodes: &HashMap<String, Arc<Node>>, problems: &mut Vec<String>) {
+            if let What::Button(b) = &n.what {
+                if let Some(a) = &b.action
+                    && !known.contains(&a.as_ref())
+                {
+                    problems.push(format!("{}.action: no action \"{a}\"", n.path));
+                }
+                if let Some(m) = &b.menu
+                    && !nodes.contains_key(&format!("menu.{m}"))
+                {
+                    problems.push(format!("{}.menu: no template \"menu.{m}\"", n.path));
+                }
             }
             if let What::Each(_, item) = &n.what {
-                walk(item, known, problems);
+                walk(item, known, nodes, problems);
             }
-            n.children.iter().for_each(|c| walk(c, known, problems));
+            n.children.iter().for_each(|c| walk(c, known, nodes, problems));
         }
         let start = problems.len();
         let mut names: Vec<&String> = self.nodes.keys().collect();
         names.sort();
         for name in names {
-            walk(&self.nodes[name], known, problems);
+            walk(&self.nodes[name], known, &self.nodes, problems);
         }
         // A template another uses names its actions there too.
         let mut said = BTreeSet::new();
@@ -603,6 +628,8 @@ struct ButtonNode {
     frame: SharedString,
     /// The action it dispatches, by name.
     action: Option<SharedString>,
+    /// The menu template it opens (`menu.<name>`), by its name.
+    menu: Option<SharedString>,
     icon: Option<Vec<Part>>,
     label: Option<Vec<Part>>,
     tooltip: Option<Vec<Part>>,
@@ -1234,6 +1261,7 @@ impl Compiler<'_, '_> {
         ButtonNode {
             frame: frame.to_owned().into(),
             action: s.action.clone().map(Into::into),
+            menu: s.menu.clone().map(Into::into),
             icon: s.icon.as_deref().map(|i| self.icon(i, &format!("{at}.icon"))),
             label: s.label.as_deref().map(parts),
             tooltip: s.tooltip.as_deref().map(parts),
@@ -2266,6 +2294,20 @@ mod tests {
         let mut problems = vec![];
         t.check_actions(&["a::Open"], &mut problems);
         assert_eq!(problems, ["templates.menu.m.children.2.action: no action \"a::Gone\""]);
+    }
+
+    #[test]
+    fn a_button_opening_a_menu_names_one_that_is() {
+        let (t, problems) = compiled(
+            r#"{"bar": { "children": [
+                { "button": "file", "menu": "m", "label": "File" },
+                { "button": "edit", "menu": "gone", "label": "Edit" }
+            ]}, "menu.m": { "children": [{ "action": "a::Open", "label": "Open" }] }}"#,
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let mut problems = vec![];
+        t.check_actions(&["a::Open"], &mut problems);
+        assert_eq!(problems, ["templates.bar.children.1.menu: no template \"menu.gone\""]);
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub enum UsageEvent {
     UseHere(String),
     /// A new Claude tab running as this account.
     NewTab(String),
+    /// A tab that signs this account in (`claude auth login`).
+    SignIn(String),
     /// Ask for a name and add an account.
     Add,
     /// Ask for this account's new name.
@@ -279,12 +281,29 @@ fn note(u: &AccountUsage) -> &'static str {
     }
 }
 
-/// `5h 27% · W 8%`: an account's limits in a line.
+/// `5h 27% · W 8%`: an account's limits in a line. A limit that started
+/// over since it was read has no number (`W –`), and numbers the last read
+/// failed to renew say so.
 pub fn summary(u: &AccountUsage) -> String {
     match &u.report {
-        Some(r) => r.limits.iter().map(|l| format!("{} {}%", l.short, l.used.round())).collect::<Vec<_>>().join(" · "),
+        Some(r) => limits_line(r, u.error.is_some(), SystemTime::now()),
         None => note(u).to_owned(),
     }
+}
+
+fn limits_line(r: &usage::Report, failed: bool, now: SystemTime) -> String {
+    let mut parts: Vec<String> = r
+        .limits
+        .iter()
+        .map(|l| match l.resets_at {
+            Some(t) if t <= now => format!("{} –", l.short),
+            _ => format!("{} {}%", l.short, l.used.round()),
+        })
+        .collect();
+    if failed {
+        parts.push("Out of date".into());
+    }
+    parts.join(" · ")
 }
 
 impl Render for UsageView {
@@ -487,6 +506,7 @@ impl Render for UsageCard {
                         .var("name", name.as_str())
                         .var("detail", detail)
                         .var("shown", a.id == account)
+                        .var("sign_in", s.get(&a.id).needs_sign_in())
                         .var("active", a.active)
                         .var("last", a.active && offered <= 1)
                         .var("removable", a.id != accounts::DEFAULT)
@@ -516,6 +536,7 @@ impl Render for UsageCard {
                     report.and_then(|r| r.email.clone()).or_else(|| accounts::email(&account)).filter(|e| *e != title).unwrap_or_default(),
                 )
                 .var("error", error)
+                .var("sign_in", u.needs_sign_in())
                 .var("extra", report.and_then(|r| r.extra.clone()).unwrap_or_default())
                 .var("reading", u.reading)
                 .var("has_accounts", true)
@@ -563,6 +584,8 @@ impl Render for UsageCard {
                             None => d.into_any_element(),
                         }
                     },
+                    ("sign_in", Framed::Button(b), _) => b.on_click(act(UsageEvent::SignIn(account.clone()))).into_any_element(),
+                    ("account_sign_in", Framed::Button(b), Some(a)) => b.on_click(act(UsageEvent::SignIn(a.id.clone()))).into_any_element(),
                     ("new_tab", Framed::Button(b), Some(a)) => b.on_click(act(UsageEvent::NewTab(a.id.clone()))).into_any_element(),
                     ("rename", Framed::Button(b), Some(a)) => b.on_click(act(UsageEvent::Rename(a.id.clone()))).into_any_element(),
                     ("remove", Framed::Button(b), Some(a)) => b.on_click(act(UsageEvent::Remove(a.id.clone()))).into_any_element(),
@@ -701,6 +724,22 @@ mod tests {
         assert_eq!(super::own_usage(tab("claude").as_ref()), None);
         assert_eq!(super::own_usage(tab("gemini").as_ref()), None);
         assert_eq!(super::own_usage(None), None);
+    }
+
+    #[test]
+    fn a_limit_that_started_over_has_no_number() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let limit = |short: &str, used: f32, resets: u64| crate::usage::Limit {
+            name: short.into(),
+            short: short.into(),
+            used,
+            resets_at: Some(UNIX_EPOCH + Duration::from_secs(resets)),
+            length: Duration::from_secs(3600),
+        };
+        let r = crate::usage::Report { limits: vec![limit("5h", 12., 2_000_000), limit("W", 63., 500_000)], ..Default::default() };
+        assert_eq!(super::limits_line(&r, false, now), "5h 12% · W –");
+        assert_eq!(super::limits_line(&r, true, now), "5h 12% · W – · Out of date");
     }
 
     use super::ContextShown;

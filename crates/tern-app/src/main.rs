@@ -68,6 +68,7 @@ mod window_state;
 #[cfg(windows)]
 mod winhttp;
 mod workspace;
+mod worktrees;
 
 use std::path::PathBuf;
 

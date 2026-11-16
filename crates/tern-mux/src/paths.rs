@@ -210,6 +210,58 @@ pub fn peer_uid_ok(s: &UnixStream) -> bool {
     r == 0 && cred.uid == unsafe { libc::getuid() }
 }
 
+/// The process at the other end of `s` (as it connected): who asks.
+#[cfg(target_os = "macos")]
+pub fn peer_pid(s: &UnixStream) -> Option<u32> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: LOCAL_PEERPID writes the peer's pid of a connected Unix socket.
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut len) };
+    (r == 0 && pid > 0).then_some(pid as u32)
+}
+
+/// The process at the other end of `s` (as it connected): who asks.
+#[cfg(target_os = "linux")]
+pub fn peer_pid(s: &UnixStream) -> Option<u32> {
+    // SAFETY: ucred is plain data; SO_PEERCRED fills it for a connected Unix socket.
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len) };
+    (r == 0 && cred.pid > 0).then_some(cred.pid as u32)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+pub fn peer_pid(_: &UnixStream) -> Option<u32> {
+    None
+}
+
+/// The process at the other end of `s` (as it connected): who asks.
+#[cfg(windows)]
+pub fn peer_pid(s: &UnixStream) -> Option<u32> {
+    use std::os::windows::io::AsRawSocket;
+
+    use windows_sys::Win32::Networking::WinSock::WSAIoctl;
+    // afunix.h: _WSAIOR(IOC_VENDOR, 256).
+    const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
+    let mut pid: u32 = 0;
+    let mut got: u32 = 0;
+    // SAFETY: the ioctl writes the peer's pid, a ULONG, into `pid`.
+    let r = unsafe {
+        WSAIoctl(
+            s.as_raw_socket() as _,
+            SIO_AF_UNIX_GETPEERPID,
+            std::ptr::null(),
+            0,
+            (&raw mut pid).cast(),
+            std::mem::size_of::<u32>() as u32,
+            &mut got,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    (r == 0 && pid > 0).then_some(pid)
+}
+
 /// Whether the process at the other end of `s` runs as us. Windows' AF_UNIX
 /// has no peer credentials; the socket's folder keeps other users out.
 #[cfg(windows)]

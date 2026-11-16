@@ -84,14 +84,36 @@ impl ContextGuard {
     pub const MIN: u8 = 5;
     pub const MAX: u8 = 100;
 
-    /// From a saved tab's (limit, auto switch), on when there is one.
-    pub fn from_saved(saved: Option<(u8, bool)>) -> Self {
-        saved.map_or_else(Self::default, |(limit, auto_switch)| Self { on: true, limit: limit.clamp(Self::MIN, Self::MAX), auto_switch })
+    /// As `agents.context_limit` and `agents.context_auto_switch` set it:
+    /// off for no limit or 0.
+    pub fn from_setting(limit: Option<u8>, auto_switch: Option<bool>) -> Self {
+        let off = Self::default();
+        let auto_switch = auto_switch.unwrap_or(off.auto_switch);
+        match limit.filter(|&l| l > 0) {
+            Some(limit) => Self { on: true, limit: limit.clamp(Self::MIN, Self::MAX), auto_switch },
+            None => Self { auto_switch, ..off },
+        }
     }
 
-    /// What a saved tab keeps of it.
+    /// The guard a new agent tab starts with: the settings'.
+    pub fn new_tab(cx: &gpui::App) -> Self {
+        cx.try_global::<crate::settings::AgentsConfig>().map_or_else(Self::default, |c| c.guard)
+    }
+
+    /// From a saved tab's (limit, auto switch): a limit of 0 is one turned
+    /// off; none (a tab saved before the setting) starts as `new` does.
+    pub fn from_saved(saved: Option<(u8, bool)>, new: Self) -> Self {
+        match saved {
+            None => new,
+            Some((0, auto_switch)) => Self { on: false, limit: new.limit, auto_switch },
+            Some((limit, auto_switch)) => Self { on: true, limit: limit.clamp(Self::MIN, Self::MAX), auto_switch },
+        }
+    }
+
+    /// What a saved tab keeps of it: a limit of 0 when off, so the tab
+    /// stays off whatever the settings say.
     pub fn saved(&self) -> Option<(u8, bool)> {
-        self.on.then_some((self.limit, self.auto_switch))
+        Some((if self.on { self.limit } else { 0 }, self.auto_switch))
     }
 
     /// The limit the daemon is told: 0 when off.
@@ -627,11 +649,18 @@ mod tests {
     fn context_guard_reads_and_saves() {
         use super::ContextGuard;
         let g = ContextGuard::default();
-        assert_eq!((g.sent_limit(), g.saved()), (0, Option::None));
+        assert_eq!((g.sent_limit(), g.saved()), (0, Some((0, true))));
         let on = ContextGuard { on: true, ..g };
         assert_eq!((on.sent_limit(), on.saved()), (50, Some((50, true))));
-        assert_eq!(ContextGuard::from_saved(on.saved()), on);
-        assert_eq!(ContextGuard::from_saved(Option::None), g);
+        assert_eq!(ContextGuard::from_saved(on.saved(), g), on);
+        // A tab turned off stays off when the settings turn guards on.
+        assert_eq!(ContextGuard::from_saved(g.saved(), on), g);
+        // One saved before the setting starts as a new tab.
+        assert_eq!(ContextGuard::from_saved(Option::None, on), on);
+        assert_eq!(ContextGuard::from_setting(Some(70), Some(false)), ContextGuard { on: true, limit: 70, auto_switch: false });
+        assert_eq!(ContextGuard::from_setting(Some(2), None), ContextGuard { on: true, limit: 5, auto_switch: true });
+        assert_eq!(ContextGuard::from_setting(Some(0), None), g);
+        assert_eq!(ContextGuard::from_setting(None, None), g);
         assert_eq!(
             (ContextGuard::typed(" 60 "), ContextGuard::typed("3"), ContextGuard::typed("101")),
             (Some(60), Option::None, Option::None)

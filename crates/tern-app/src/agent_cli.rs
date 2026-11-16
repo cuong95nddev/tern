@@ -4,7 +4,8 @@
 //! they outlive the agent; `tern --theme` and `tern --shot` change and check
 //! how Tern looks (asking the window, see `agent_ui`); `tern --task` gives
 //! a task to another agent in a new tab and waits for its answer
-//! (`agent_tasks`).
+//! (`agent_tasks`); `tern --worktree` makes, lists and removes git
+//! worktrees in the one place Tern keeps them (`worktrees`).
 //!
 //! Each one does its work and exits: nothing stays running beside an agent,
 //! which on Windows would keep `tern.exe` from being replaced by an update.
@@ -60,8 +61,10 @@ is wrong in those files.
 
 To have another coding agent (codex, claude, opencode, ... as --agents lists them) do a task and get its answer back, \
 give it the task with Tern: it runs in a new tab beside yours, where the user can watch it and answer it.
-  {tern} --task start AGENT [--wait] [--timeout S] TASK   start AGENT in a new tab and give it TASK (\"-\": read it \
-from stdin). Prints the task's ID; --wait also waits for the answer.
+  {tern} --task start AGENT [--wait] [--timeout S] [--worktree[=NAME]] TASK   start AGENT in a new tab and give it \
+TASK (\"-\": read it from stdin). Prints the task's ID; --wait also waits for the answer. --worktree runs it in a new git \
+worktree of its own (see below; named after the task unless NAME), in its own folder in Tern. AGENT can be several \
+(codex,claude): each does the task, in a worktree of its own with --worktree, to compare their work.
   {tern} --task wait ID [--timeout S]   wait until it is done, then print its answer: the last message of its turn. \
 Waits S seconds at most (default {DEFAULT_TASK_WAIT}; 0: no limit), then says it still works.
   {tern} --task read ID                 where it stands, and its answer once done
@@ -74,9 +77,23 @@ more from it
 Write a task that stands alone: the agent sees only it. Its answer is its last message, so ask it to end with what you \
 need back. You need not wait for a task: when it is done, asks something or ends, Tern tells you with a message in \
 your conversation (\"[Tern] Task ID ...\"), so you can go on with other work or end your turn. \"blocked\" means it \
-asks something in its tab (`--task read` says what): answer a question with `--task answer` when the answer follows \
-from what the user asked of you; an approval, or what it asks as it starts, only the user answers, in its tab: tell \
-them."
+asks something in its tab (`--task read` says what): answer a question, or an approval (by its choice's number), with \
+`--task answer` when it follows from what the user asked of you; else, and for what it asks as it starts, tell the \
+user, who answers in its tab.
+
+When the user asks for a git worktree, or for work on a branch apart from their checkout, make it with Tern, not with \
+`git worktree add`: Tern keeps a repository's worktrees in its {dir}/NAME (which git ignores), copies in the files \
+the repository's .worktreeinclude names (.env, ...), and shows each in its sidebar under its repository.
+  {tern} --worktree create [NAME] [--branch B] [--base REF]   make a worktree of your repository on a new branch \
+tern/NAME (or B, made when it isn't there) from REF (default HEAD), open it in Tern, and print its folder. Work in that \
+folder (cd there, or give it to your tools).
+  {tern} --worktree ls                  your repository's worktrees, with their branches and uncommitted changes
+  {tern} --worktree rm NAME [--force]   close it in Tern and remove it; its branch is deleted only when merged into \
+another. One with uncommitted changes stays unless --force, which loses them. Remove only worktrees you made or the \
+user asked you to.
+  {tern} --worktree prune               remove the worktrees Tern made whose branch was worked on and is merged, with \
+nothing uncommitted and nothing running in them",
+        dir = tern_fs::worktree::DIR,
     )
 }
 
@@ -91,7 +108,7 @@ pub fn guide() -> String {
 pub fn run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (flag, rest) = args.split_first()?;
-    if !matches!(flag.as_str(), "--service" | "--theme" | "--shot" | "--skill" | "--agents" | "--task") {
+    if !matches!(flag.as_str(), "--service" | "--theme" | "--shot" | "--skill" | "--agents" | "--task" | "--worktree") {
         return None;
     }
     let ctx = Context {
@@ -127,13 +144,17 @@ enum Command {
     Theme { name: Option<String> },
     Shot,
     Agents,
-    TaskStart { agent: String, prompt: String, wait: Option<u64> },
+    TaskStart { agent: String, prompt: String, wait: Option<u64>, worktree: Option<Option<String>> },
     TaskWait { id: u64, timeout: u64 },
     TaskRead { id: u64 },
     TaskSend { id: u64, prompt: String, wait: Option<u64> },
     TaskList { all: bool },
     TaskClose { id: u64 },
     TaskAnswer { id: u64, text: String, option: Option<u64> },
+    WorktreeCreate { name: Option<String>, branch: Option<String>, base: Option<String> },
+    WorktreeList,
+    WorktreeRemove { name: String, force: bool },
+    WorktreePrune,
 }
 
 fn parse(flag: &str, args: &[String]) -> Result<Command, String> {
@@ -142,6 +163,7 @@ fn parse(flag: &str, args: &[String]) -> Result<Command, String> {
         "--shot" => Ok(Command::Shot),
         "--agents" => Ok(Command::Agents),
         "--task" => parse_task(args),
+        "--worktree" => parse_worktree(args),
         "--theme" => match args {
             [] => Ok(Command::Theme { name: None }),
             names => Ok(Command::Theme { name: Some(names.join(" ")) }),
@@ -208,6 +230,15 @@ fn parse_service(args: &[String]) -> Result<Command, String> {
     }
 }
 
+/// What `--task start` and `--task send` are given before their text.
+struct TaskOptions {
+    /// How long to wait for the answer, when waiting.
+    wait: Option<u64>,
+    /// In a new worktree, named or not (`start` only).
+    worktree: Option<Option<String>>,
+    text: String,
+}
+
 fn parse_task(args: &[String]) -> Result<Command, String> {
     const USAGE: &str = "usage: tern --task start|wait|read|send|answer|ls|close (tern --skill tells more)";
     let (verb, rest) = args.split_first().ok_or(USAGE)?;
@@ -216,12 +247,20 @@ fn parse_task(args: &[String]) -> Result<Command, String> {
         let id = s.parse::<u64>().map_err(|_| format!("not a task ID: {s}"))?;
         Ok((id, &rest[1..]))
     };
-    // `--wait` and `--timeout S` before the text; `wait` is how long to
-    // wait, when waiting.
-    let options = |mut rest: &[String]| -> Result<(Option<u64>, String), String> {
-        let (mut wait, mut timeout) = (false, None);
+    // `--wait`, `--timeout S` and (for `start`) `--worktree[=NAME]` before
+    // the text; `wait` is how long to wait, when waiting.
+    let options = |mut rest: &[String], start: bool| -> Result<TaskOptions, String> {
+        let (mut wait, mut timeout, mut worktree) = (false, None, None);
         loop {
             match rest {
+                [flag, tail @ ..] if start && flag == "--worktree" => {
+                    worktree = Some(None);
+                    rest = tail;
+                },
+                [flag, tail @ ..] if start && flag.starts_with("--worktree=") => {
+                    worktree = Some(Some(flag["--worktree=".len()..].to_owned()));
+                    rest = tail;
+                },
                 [flag, tail @ ..] if flag == "--wait" => {
                     wait = true;
                     rest = tail;
@@ -242,17 +281,17 @@ fn parse_task(args: &[String]) -> Result<Command, String> {
         if text.trim().is_empty() {
             return Err("a task to give is required".into());
         }
-        Ok((wait, text))
+        Ok(TaskOptions { wait, worktree, text })
     };
     match verb.as_str() {
         "start" => {
             let (agent, rest) = rest.split_first().ok_or("an agent is required (tern --agents lists them)")?;
-            let (wait, prompt) = options(rest)?;
-            Ok(Command::TaskStart { agent: agent.clone(), prompt, wait })
+            let TaskOptions { wait, worktree, text: prompt } = options(rest, true)?;
+            Ok(Command::TaskStart { agent: agent.clone(), prompt, wait, worktree })
         },
         "send" => {
             let (id, rest) = id_of(rest.first())?;
-            let (wait, prompt) = options(rest)?;
+            let TaskOptions { wait, text: prompt, .. } = options(rest, false)?;
             Ok(Command::TaskSend { id, prompt, wait })
         },
         "wait" => {
@@ -296,6 +335,54 @@ fn parse_task(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn parse_worktree(args: &[String]) -> Result<Command, String> {
+    const USAGE: &str = "usage: tern --worktree create|ls|rm|prune (tern --skill tells more)";
+    let (verb, mut rest) = args.split_first().ok_or(USAGE)?;
+    match verb.as_str() {
+        "create" => {
+            let (mut name, mut branch, mut base) = (None, None, None);
+            loop {
+                match rest {
+                    [flag, b, tail @ ..] if flag == "--branch" => {
+                        branch = Some(b.clone());
+                        rest = tail;
+                    },
+                    [flag, r, tail @ ..] if flag == "--base" => {
+                        base = Some(r.clone());
+                        rest = tail;
+                    },
+                    [flag, ..] if flag.starts_with("--") => return Err(format!("no option {flag} ({USAGE})")),
+                    [n, tail @ ..] if name.is_none() => {
+                        name = Some(n.clone());
+                        rest = tail;
+                    },
+                    [] => break,
+                    _ => return Err(USAGE.into()),
+                }
+            }
+            Ok(Command::WorktreeCreate { name, branch, base })
+        },
+        "ls" => match rest {
+            [] => Ok(Command::WorktreeList),
+            _ => Err(USAGE.into()),
+        },
+        "prune" => match rest {
+            [] => Ok(Command::WorktreePrune),
+            _ => Err(USAGE.into()),
+        },
+        "rm" => match rest {
+            [name] => Ok(Command::WorktreeRemove { name: name.clone(), force: false }),
+            [a, b] if a == "--force" || b == "--force" => {
+                let name = if a == "--force" { b } else { a };
+                Ok(Command::WorktreeRemove { name: name.clone(), force: true })
+            },
+            [] => Err("a worktree's name is required (tern --worktree ls lists them)".into()),
+            _ => Err(USAGE.into()),
+        },
+        _ => Err(USAGE.into()),
+    }
+}
+
 fn call(ctx: &Context, command: &Command) -> Result<String, String> {
     match command {
         Command::Guide => Ok(guide()),
@@ -318,6 +405,13 @@ fn call(ctx: &Context, command: &Command) -> Result<String, String> {
         | Command::TaskList { .. }
         | Command::TaskClose { .. }
         | Command::TaskAnswer { .. } => task_call(ctx, command),
+        Command::WorktreeCreate { name, branch, base } => {
+            let made = make_worktree(ctx, name.as_deref(), branch.as_deref(), base.as_deref())?;
+            Ok(format!("{}\nWork in that folder: cd there, or give it to your tools.", describe_made(&made)))
+        },
+        Command::WorktreeList => list_worktrees(ctx),
+        Command::WorktreeRemove { name, force } => remove_worktree(ctx, name, *force),
+        Command::WorktreePrune => prune_worktrees(ctx),
         _ => services_call(ctx, command),
     }
 }
@@ -334,18 +428,59 @@ fn task_text(prompt: &str) -> Result<String, String> {
 
 fn task_call(ctx: &Context, command: &Command) -> Result<String, String> {
     match command {
-        Command::TaskStart { agent, prompt, wait } => {
+        Command::TaskStart { agent, prompt, wait, worktree } => {
             let prompt = task_text(prompt)?;
-            let a = ask_ui(json!({ "op": "task_start", "agent": agent, "prompt": prompt, "folder": ctx.cwd, "by": ctx.by }))?;
-            let id = a.get("id").and_then(Value::as_u64).ok_or("no task ID in Tern's answer")?;
-            let started = format!(
-                "Started {} in a new tab beside yours (task {id}); the user can watch it there.",
-                a.get("name").and_then(Value::as_str).unwrap_or(agent)
-            );
-            match wait {
-                Some(timeout) => wait_task(id, *timeout, ctx.by).map(|out| format!("{started}\n\n{out}")),
-                None => Ok(format!("{started}\n`tern --task wait {id}` waits for its answer.")),
+            // `codex,claude`: the same task to each (a worktree each, with
+            // --worktree), to compare or pick from.
+            let agents: Vec<&str> = agent.split(',').map(str::trim).filter(|a| !a.is_empty()).collect();
+            if agents.len() > 1 && wait.is_some() {
+                return Err("--wait waits for one agent: give the task to several without it; Tern tells you as each is done".into());
             }
+            if agents.len() > 1 || worktree.is_some() {
+                // Every agent known before any worktree is made for one.
+                let (registry, _) = tern_agent::Registry::load(Some(&crate::dirs::config().join("agents")));
+                if let Some(bad) = agents.iter().find(|a| registry.get(a).is_none()) {
+                    let known: Vec<&str> = registry.all().map(|d| d.id.as_str()).collect();
+                    return Err(format!("no agent {bad} (Tern knows: {})", known.join(", ")));
+                }
+            }
+            let mut out = vec![];
+            for agent in &agents {
+                // In a new worktree: its own folder in Tern, the tab there,
+                // named as asked or from the task, and for which agent.
+                let made = match worktree {
+                    Some(name) => {
+                        let wanted = name.clone().or_else(|| crate::worktrees::name_from(&prompt));
+                        let wanted = match (wanted, agents.len() > 1) {
+                            (Some(n), true) => Some(format!("{n}-{agent}")),
+                            (n, _) => n,
+                        };
+                        let name = match (wanted, name) {
+                            // A name given is that name; one made up is one not taken.
+                            (Some(n), Some(_)) => Some(n),
+                            (Some(n), None) => Some(crate::worktrees::free_name(&ctx.cwd, &n)?),
+                            (None, _) => None,
+                        };
+                        Some(make_worktree(ctx, name.as_deref(), None, None)?)
+                    },
+                    None => None,
+                };
+                let (folder, exact) = made.as_ref().map_or((&ctx.cwd, false), |m| (&m.path, true));
+                let a = ask_ui(json!({
+                    "op": "task_start", "agent": agent, "prompt": prompt, "folder": folder, "exact": exact, "by": ctx.by,
+                }))?;
+                let id = a.get("id").and_then(Value::as_u64).ok_or("no task ID in Tern's answer")?;
+                let name = a.get("name").and_then(Value::as_str).unwrap_or(agent);
+                let started = match &made {
+                    Some(m) => format!("{}\nStarted {name} there in a new tab (task {id}); the user can watch it there.", describe_made(m)),
+                    None => format!("Started {name} in a new tab beside yours (task {id}); the user can watch it there."),
+                };
+                out.push(match wait {
+                    Some(timeout) => wait_task(id, *timeout, ctx.by).map(|answer| format!("{started}\n\n{answer}"))?,
+                    None => format!("{started}\n`tern --task wait {id}` waits for its answer."),
+                });
+            }
+            Ok(out.join("\n\n"))
         },
         Command::TaskSend { id, prompt, wait } => {
             let prompt = task_text(prompt)?;
@@ -383,6 +518,165 @@ fn task_call(ctx: &Context, command: &Command) -> Result<String, String> {
     }
 }
 
+/// Make a worktree of the caller's repository and show it in Tern, under
+/// its repository (when Tern runs: the worktree is made either way).
+fn make_worktree(ctx: &Context, name: Option<&str>, branch: Option<&str>, base: Option<&str>) -> Result<crate::worktrees::Made, String> {
+    let made = crate::worktrees::make(&ctx.cwd, name, branch, base)?;
+    if let Err(e) = ask_ui(json!({ "op": "worktree_open", "path": made.path, "by": ctx.by })) {
+        log::warn!("worktree {} not opened in Tern: {e}", made.path.display());
+    }
+    Ok(made)
+}
+
+/// A worktree just made, for reading.
+fn describe_made(m: &crate::worktrees::Made) -> String {
+    use crate::worktrees::{SETUP_FILE, approved, scripts_of};
+    let mut out = format!("Made worktree {} on branch {}, of {}.", m.path.display(), m.branch, m.main.display());
+    if !m.copied.is_empty() {
+        let files: Vec<String> = m.copied.iter().map(|p| p.display().to_string()).collect();
+        out.push_str(&format!("\nCopied from the main checkout (.worktreeinclude): {}.", files.join(", ")));
+    }
+    match scripts_of(&m.main) {
+        Ok(Some(scripts)) if scripts.setup.is_none() => {},
+        Ok(Some(scripts)) if approved(&scripts) => out.push_str(&format!(
+            "\nIts setup ({SETUP_FILE}: {}) runs in Tern as its service `setup`: `tern --service logs setup` from that folder \
+shows how it goes.",
+            scripts.setup.unwrap_or_default()
+        )),
+        Ok(Some(scripts)) => out.push_str(&format!(
+            "\nThe repository names a setup for it ({SETUP_FILE}: {}), which runs once the user approves it: Tern asks \
+them in its window. Tell the user; don't run it yourself.",
+            scripts.setup.unwrap_or_default()
+        )),
+        Ok(None) => {},
+        Err(e) => out.push_str(&format!("\nIts setup is not run: {e}")),
+    }
+    out
+}
+
+/// The caller's repository's worktrees, one a line: folder, branch, what
+/// it has.
+fn list_worktrees(ctx: &Context) -> Result<String, String> {
+    use tern_fs::worktree;
+    let main = worktree::main_root(&ctx.cwd)?;
+    let here = tern_fs::git::repo_for(&ctx.cwd);
+    let lines: Vec<String> = worktree::list(&main)?
+        .into_iter()
+        .map(|w| {
+            let branch = w.branch.clone().unwrap_or_else(|| format!("(detached at {})", w.head.get(..8).unwrap_or(&w.head)));
+            let mut notes = vec![];
+            if w.main {
+                notes.push("main checkout".to_owned());
+            }
+            if w.prunable {
+                notes.push("its folder is gone".to_owned());
+            } else {
+                match worktree::changes(&w.path) {
+                    Ok(c) if c.is_empty() => {},
+                    Ok(c) => notes.push(format!("{} uncommitted changes", c.len())),
+                    Err(_) => notes.push("status unknown".to_owned()),
+                }
+            }
+            if w.locked {
+                notes.push("locked".to_owned());
+            }
+            if here.as_ref() == Some(&w.path) {
+                notes.push("you are here".to_owned());
+            }
+            format!("{}\t{branch}\t{}", w.path.display(), notes.join(", "))
+        })
+        .collect();
+    Ok(lines.join("\n"))
+}
+
+/// Remove the caller's repository's worktree `name`: closed in Tern first
+/// (its terminals end), its branch deleted when merged.
+fn remove_worktree(ctx: &Context, name: &str, force: bool) -> Result<String, String> {
+    use tern_fs::worktree;
+    let (main, w) = crate::worktrees::find(&ctx.cwd, name)?;
+    if w.main {
+        return Err(format!("{} is the repository's main checkout, not a worktree to remove", w.path.display()));
+    }
+    if tern_fs::git::repo_for(&ctx.cwd).is_some_and(|top| top == w.path) {
+        return Err(format!("you run in {}: remove it from another folder", w.path.display()));
+    }
+    if !w.prunable && !force {
+        let changes = worktree::changes(&w.path)?;
+        if !changes.is_empty() {
+            let shown: Vec<&str> = changes.iter().take(10).map(String::as_str).collect();
+            let more = if changes.len() > 10 { format!("\n... and {} more", changes.len() - 10) } else { String::new() };
+            return Err(format!(
+                "{} has uncommitted changes; commit them, or --force removes it and loses them:\n{}{more}",
+                w.path.display(),
+                shown.join("\n")
+            ));
+        }
+    }
+    match ask_ui(json!({ "op": "worktree_close", "path": w.path, "force": force })) {
+        Ok(_) => {},
+        // No window: nothing shows it.
+        Err(e) if e == NOT_RUNNING || e == NOT_OPEN => {},
+        Err(e) => return Err(e),
+    }
+    let done = crate::worktrees::remove(&main, &w, force);
+    // Its card goes, removed or not (a failed removal may have done part).
+    let _ = ask_ui(json!({ "op": "worktrees_changed" }));
+    done
+}
+
+/// Remove the caller's repository's worktrees that are done with: those
+/// Tern made (in its `.worktrees`) whose branch was worked on and is merged
+/// into the main checkout's, with nothing uncommitted and nothing running in
+/// Tern; and forget those whose folders are gone. What it did, a line each.
+fn prune_worktrees(ctx: &Context) -> Result<String, String> {
+    use tern_fs::worktree;
+    let main = worktree::main_root(&ctx.cwd)?;
+    let here = tern_fs::git::repo_for(&ctx.cwd);
+    let place = main.join(worktree::DIR);
+    let mut out = vec![];
+    for w in worktree::list(&main)? {
+        if w.main || !w.path.starts_with(&place) || w.prunable {
+            continue;
+        }
+        let name = w.path.file_name().map_or_else(|| w.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let Some(branch) = &w.branch else { continue };
+        let keep = if w.locked {
+            Some("locked".to_owned())
+        } else if here.as_ref() == Some(&w.path) {
+            Some("you run in it".to_owned())
+        } else if !worktree::worked_on(&main, branch) {
+            Some("nothing done on its branch yet".to_owned())
+        } else if !worktree::merged(&main, branch) {
+            Some(format!("{branch} is not merged"))
+        } else {
+            match worktree::changes(&w.path) {
+                Ok(c) if c.is_empty() => None,
+                Ok(c) => Some(format!("{} uncommitted changes", c.len())),
+                Err(e) => Some(e),
+            }
+        };
+        if let Some(why) = keep {
+            out.push(format!("kept {name}: {why}"));
+            continue;
+        }
+        match ask_ui(json!({ "op": "worktree_close", "path": w.path, "force": false })) {
+            Ok(_) => {},
+            Err(e) if e == NOT_RUNNING || e == NOT_OPEN => {},
+            Err(e) => {
+                out.push(format!("kept {name}: {e}"));
+                continue;
+            },
+        }
+        out.push(match crate::worktrees::remove(&main, &w, false) {
+            Ok(done) => done,
+            Err(e) => format!("kept {name}: {e}"),
+        });
+    }
+    worktree::prune(&main)?;
+    let _ = ask_ui(json!({ "op": "worktrees_changed" }));
+    Ok(if out.is_empty() { "No worktrees of Tern's in this repository.".into() } else { out.join("\n") })
+}
+
 /// Ask how task `id` stands until it isn't working, `timeout` seconds at
 /// most (0: no limit), for agent tab `by`.
 fn wait_task(id: u64, timeout: u64, by: Option<u64>) -> Result<String, String> {
@@ -409,11 +703,20 @@ fn describe_asks(asks: Option<&Value>, id: u64) -> String {
         "question" => format!("it asks: {}.", s("detail")),
         _ => "it asks something or waits for an approval (see its screen).".into(),
     };
-    if s("kind") == "question" {
-        return format!(
-            " {what} If the answer follows from what the user asked of you, answer with `tern --task answer {id} --option N` \
+    match s("kind") {
+        "question" => {
+            return format!(
+                " {what} If the answer follows from what the user asked of you, answer with `tern --task answer {id} --option N` \
 or `tern --task answer {id} TEXT`; else ask the user."
-        );
+            );
+        },
+        "approval" => {
+            return format!(
+                " {what} If what the user asked of you covers it, choose on its screen with `tern --task answer {id} --option N`; \
+else tell the user, who answers it in its tab."
+            );
+        },
+        _ => {},
     }
     format!(" {what} Only the user answers this, in its tab: tell them, then wait again.")
 }
@@ -485,10 +788,16 @@ fn sandboxed(e: &io::Error) -> String {
     format!("can't reach Tern: your sandbox blocked the connection ({e}). Run the command again with escalated permissions.")
 }
 
+/// [`ask_ui`]'s error when Tern isn't running.
+const NOT_RUNNING: &str = "Tern isn't running.";
+/// [`ask_ui`]'s error when Tern's daemon runs without the app (the
+/// daemon's own words, `tern_mux` `server`).
+const NOT_OPEN: &str = "Tern isn't open: no window to ask";
+
 /// Ask the Tern window `request` (see `agent_ui`): its answer, or why not.
 fn ask_ui(request: Value) -> Result<Value, String> {
     let mut s = Services::connect(&tern_mux::paths::mux_dir(), false).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => "Tern isn't running.".to_owned(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => NOT_RUNNING.to_owned(),
         io::ErrorKind::PermissionDenied => sandboxed(&e),
         _ => format!("can't reach Tern: {e}"),
     })?;
@@ -602,6 +911,12 @@ fn start(s: &mut Services, spec: ServiceSpec) -> Result<String, String> {
     let text = s.text(id, 30).map_err(|e| e.to_string())?.unwrap_or_default();
     let head = if info.exited { "It ended already." } else { "Started; the user sees it in Tern's Services panel." };
     Ok(format!("{head}\n\n{}\n\nOutput so far:\n{text}", describe(&info, &ports)))
+}
+
+/// Start `spec` as a service (a worktree's setup), not waiting on it.
+pub fn run_service(spec: ServiceSpec) -> Result<(), String> {
+    let mut s = Services::connect(&tern_mux::paths::mux_dir(), true).map_err(|e| e.to_string())?;
+    s.run(spawn_config(&spec), spec).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Stop service `id` and start `spec` again (the Services panel's Restart).
@@ -760,12 +1075,16 @@ mod tests {
     #[test]
     fn parses_the_task_commands() {
         let task = |line: &str| parse("--task", &args(line));
-        let start = |prompt: &str, wait| Command::TaskStart { agent: "codex".into(), prompt: prompt.into(), wait };
+        let start = |prompt: &str, wait| Command::TaskStart { agent: "codex".into(), prompt: prompt.into(), wait, worktree: None };
         assert_eq!(task("start codex review the diff"), Ok(start("review the diff", None)));
         assert_eq!(task("start codex --wait review"), Ok(start("review", Some(DEFAULT_TASK_WAIT))));
         assert_eq!(task("start codex --timeout 0 review"), Ok(start("review", Some(0))));
         assert_eq!(task("start codex --wait --timeout 30 -- --wait is text"), Ok(start("--wait is text", Some(30))));
         assert_eq!(task("start codex -"), Ok(start("-", None)));
+        let in_worktree = |worktree| Command::TaskStart { agent: "codex".into(), prompt: "fix".into(), wait: None, worktree };
+        assert_eq!(task("start codex --worktree fix"), Ok(in_worktree(Some(None))));
+        assert_eq!(task("start codex --worktree=login fix"), Ok(in_worktree(Some(Some("login".into())))));
+        assert!(task("send 7 --worktree fix").is_ok_and(|c| matches!(c, Command::TaskSend { prompt, .. } if prompt == "--worktree fix")));
         assert!(task("start codex").unwrap_err().contains("task"));
         assert!(task("start").unwrap_err().contains("agent"));
         assert!(task("start codex --timeout x y").unwrap_err().contains("seconds"));
@@ -808,7 +1127,8 @@ mod tests {
             describe_task(&a, None).unwrap()
         };
         let approval = asks("approval");
-        assert!(approval.contains("asks to run Bash: curl x.") && approval.contains("Only the user answers this"), "{approval}");
+        assert!(approval.contains("asks to run Bash: curl x.") && approval.contains("--option N"), "{approval}");
+        assert!(!approval.contains("TEXT"), "an approval takes no text: {approval}");
         let question = asks("question");
         assert!(question.contains("it asks: curl x.") && question.contains("--option N"), "{question}");
         assert!(asks("startup").contains("Only the user answers this"));
@@ -816,6 +1136,29 @@ mod tests {
         assert!(failed.ends_with("never reached it: The agent didn't start in time"), "{failed}");
         let line = task_line(&json!({ "id": 7, "name": "Codex", "state": "done", "title": "codex", "folder": "/w/app" }));
         assert_eq!(line, "7\tCodex\tdone\tcodex\t/w/app");
+    }
+
+    #[test]
+    fn parses_the_worktree_commands() {
+        let wt = |line: &str| parse("--worktree", &args(line));
+        let create = |name: Option<&str>, branch: Option<&str>, base: Option<&str>| Command::WorktreeCreate {
+            name: name.map(str::to_owned),
+            branch: branch.map(str::to_owned),
+            base: base.map(str::to_owned),
+        };
+        assert_eq!(wt("create"), Ok(create(None, None, None)));
+        assert_eq!(wt("create login"), Ok(create(Some("login"), None, None)));
+        assert_eq!(wt("create login --base main"), Ok(create(Some("login"), None, Some("main"))));
+        assert_eq!(wt("create --branch feat/x"), Ok(create(None, Some("feat/x"), None)));
+        assert!(wt("create --nope").unwrap_err().contains("no option --nope"));
+        assert!(wt("create a b").unwrap_err().starts_with("usage"));
+        assert_eq!(wt("ls"), Ok(Command::WorktreeList));
+        assert_eq!(wt("prune"), Ok(Command::WorktreePrune));
+        assert_eq!(wt("rm login"), Ok(Command::WorktreeRemove { name: "login".into(), force: false }));
+        assert_eq!(wt("rm --force login"), Ok(Command::WorktreeRemove { name: "login".into(), force: true }));
+        assert_eq!(wt("rm login --force"), Ok(Command::WorktreeRemove { name: "login".into(), force: true }));
+        assert!(wt("rm").unwrap_err().contains("name is required"));
+        assert!(wt("").unwrap_err().starts_with("usage"));
     }
 
     #[test]
@@ -833,9 +1176,17 @@ mod tests {
     #[test]
     fn the_guide_names_the_command_it_is_given() {
         let guide = guide_for("'/A pp/tern'");
-        for command in
-            ["--service run NAME", "--service ls", "--service logs NAME", "--theme NAME", "--shot", "--task start AGENT", "--task wait ID"]
-        {
+        for command in [
+            "--service run NAME",
+            "--service ls",
+            "--service logs NAME",
+            "--theme NAME",
+            "--shot",
+            "--task start AGENT",
+            "--task wait ID",
+            "--worktree create",
+            "--worktree rm NAME",
+        ] {
             assert!(guide.contains(&format!("'/A pp/tern' {command}")), "{command}");
         }
     }

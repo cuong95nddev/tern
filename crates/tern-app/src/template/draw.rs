@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizablePanel;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, h_resizable, resizable_panel, v_resizable};
@@ -458,6 +458,16 @@ impl Drawer<'_, '_> {
         }
         if let Some(action) = b.action.as_ref().and_then(|a| self.cx.build_action(a, None).ok()) {
             button = button.on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
+        }
+        if let Some(name) = &b.menu {
+            // Its entries dispatch their actions; no button in it needs the code.
+            let name = format!("menu.{name}");
+            return button
+                .dropdown_menu(move |popup, window, cx| {
+                    let none: MenuItems = Rc::new(|_, _| None);
+                    menu(&name, Scope::new(name.clone()), popup, none, window, cx)
+                })
+                .into_any_element();
         }
         match super::shared::button(&b.frame, button, self.cx) {
             Ok(e) => e,

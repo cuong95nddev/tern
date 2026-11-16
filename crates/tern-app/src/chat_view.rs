@@ -291,7 +291,7 @@ impl ChatView {
             _events: None,
             _ticker: None,
             context: None,
-            guard: ContextGuard::default(),
+            guard: ContextGuard::new_tab(cx),
             handoff: Handoff::default(),
             waiting_for_start: None,
             trusted,

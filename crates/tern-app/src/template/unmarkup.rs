@@ -237,6 +237,7 @@ impl Writer {
             named("action", "action", &mut attrs, &mut take)?;
         }
         if tag == "button" {
+            named("menu", "menu", &mut attrs, &mut take)?;
             named("variant", "variant", &mut attrs, &mut take)?;
             named("size", "size", &mut attrs, &mut take)?;
         }

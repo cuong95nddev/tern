@@ -17,4 +17,5 @@ objc2-foundation = "0.3.2"
 trash = "5"
 
 [dev-dependencies]
+dunce = "1"
 tempfile = "3.27.0"

@@ -6,6 +6,11 @@
 //! chooses a theme; `{"op": "shot", "folder"}` saves a PNG of the window
 //! that shows `folder` (or a folder in it, or one it is in), as the window
 //! drew it last. `task_*` requests (`tern --task`) go to `agent_tasks`.
+//! `{"op": "worktree_open", "path", "by"}` shows a worktree `tern
+//! --worktree` made as a folder, under its repository's;
+//! `{"op": "worktree_close", "path", "force"}` closes it before it is
+//! removed; `{"op": "worktrees_changed"}` reads every repository's
+//! worktrees again once one is gone.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -37,6 +42,32 @@ pub fn answer(ask: u64, request: &str, cx: &mut App) {
                 })
                 .detach(),
             Err(e) => reply(ask, failed(&e), cx),
+        },
+        Some("worktree_open") => {
+            let answer = match str_arg("path") {
+                Some(path) => {
+                    let by = request.get("by").and_then(Value::as_u64);
+                    main_window::open_worktree(PathBuf::from(path), by, cx);
+                    json!({ "opened": true })
+                },
+                None => failed("`path` is required"),
+            };
+            reply(ask, answer, cx);
+        },
+        Some("worktrees_changed") => {
+            main_window::refresh_worktrees(cx);
+            reply(ask, json!({ "refreshed": true }), cx);
+        },
+        Some("worktree_close") => {
+            let force = request.get("force").and_then(Value::as_bool).unwrap_or(false);
+            let answer = match str_arg("path") {
+                Some(path) => match main_window::close_folder(Path::new(&path), force, cx) {
+                    Ok(closed) => json!({ "closed": closed }),
+                    Err(e) => failed(&e),
+                },
+                None => failed("`path` is required"),
+            };
+            reply(ask, answer, cx);
         },
         Some(op) if op.starts_with("task_") => {
             let answer = crate::agent_tasks::answer(op, &request, cx);

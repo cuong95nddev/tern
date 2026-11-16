@@ -39,10 +39,20 @@ impl FsWatcher {
             }
         })?;
         watcher.watch(root, RecursiveMode::Recursive)?;
+        // A linked worktree's git dirs are outside it, in its repository's
+        // `.git`: watched too, or its status would go stale on commit and
+        // checkout. Not watchable: only the status lags, the tree is fine.
+        let outside = worktree_git_dirs(root);
+        for (dir, mode, _) in &outside {
+            if let Err(e) = watcher.watch(dir, *mode) {
+                log::warn!("can't watch {}: {e}", dir.display());
+            }
+        }
+        let outside: Vec<(PathBuf, PathBuf)> = outside.into_iter().map(|(dir, _, repo)| (dir, repo)).collect();
         let root = root.to_owned();
         thread::Builder::new()
             .name("fs-debounce".into())
-            .spawn(move || debounce_loop(&root, rx, debounce, on_batch))
+            .spawn(move || debounce_loop(&root, &outside, rx, debounce, on_batch))
             .expect("spawn fs-debounce");
         Ok(Self { _watcher: watcher })
     }
@@ -51,7 +61,38 @@ impl FsWatcher {
 /// A burst is cut into batches at most this many debounce windows long.
 const MAX_WAIT_FACTOR: u32 = 10;
 
-fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duration, on_batch: impl Fn(ChangeBatch)) {
+/// When `root` is in a linked worktree: the git dirs that hold its status
+/// (its own, with HEAD and index; the common one's `refs/`), how to watch
+/// each, and the worktree's root they belong to.
+fn worktree_git_dirs(root: &Path) -> Vec<(PathBuf, RecursiveMode, PathBuf)> {
+    let Some(top) = crate::git::repo_for(root) else { return vec![] };
+    match crate::worktree::git_dirs(&top) {
+        Some((own, common)) if own != common => {
+            vec![(own, RecursiveMode::NonRecursive, top.clone()), (common.join("refs"), RecursiveMode::Recursive, top)]
+        },
+        _ => vec![],
+    }
+}
+
+/// For a path in one of a worktree's `outside` git dirs (see
+/// [`worktree_git_dirs`]): the worktree's root and the part after the git
+/// dir (`HEAD`, `refs/heads/main`).
+fn outside_git<'a>(outside: &'a [(PathBuf, PathBuf)], p: &Path) -> Option<(&'a Path, PathBuf)> {
+    outside.iter().find_map(|(dir, repo)| {
+        let rel = p.strip_prefix(dir).ok()?;
+        // `refs/` is watched, and named, from the common dir.
+        let rel = if dir.ends_with("refs") { Path::new("refs").join(rel) } else { rel.to_path_buf() };
+        Some((repo.as_path(), rel))
+    })
+}
+
+fn debounce_loop(
+    root: &Path,
+    outside: &[(PathBuf, PathBuf)],
+    rx: mpsc::Receiver<notify::Event>,
+    window: Duration,
+    on_batch: impl Fn(ChangeBatch),
+) {
     loop {
         // Block for the first event.
         let Ok(first) = rx.recv() else { return };
@@ -73,7 +114,12 @@ fn debounce_loop(root: &Path, rx: mpsc::Receiver<notify::Event>, window: Duratio
                 kept = true;
             }
             for p in ev.paths {
-                if let Some((repo, rel)) = git_internal(&p) {
+                if let Some((repo, rel)) = outside_git(outside, &p) {
+                    if is_git_status_file(&rel) {
+                        git_repos.insert(repo.to_path_buf());
+                        kept = true;
+                    }
+                } else if let Some((repo, rel)) = git_internal(&p) {
                     if is_git_status_file(rel) {
                         git_repos.insert(repo.to_path_buf());
                         kept = true;
@@ -183,5 +229,13 @@ mod tests {
         assert!(is_git_status_file(Path::new("index.lock")));
         assert!(is_git_status_file(Path::new("config")));
         assert!(!is_git_status_file(Path::new("objects/ab/cd")));
+    }
+
+    #[test]
+    fn a_worktrees_outside_git_dirs_belong_to_it() {
+        let outside = [(PathBuf::from("/r/.git/worktrees/w"), PathBuf::from("/w")), (PathBuf::from("/r/.git/refs"), PathBuf::from("/w"))];
+        assert_eq!(outside_git(&outside, Path::new("/r/.git/worktrees/w/HEAD")), Some((Path::new("/w"), PathBuf::from("HEAD"))));
+        assert_eq!(outside_git(&outside, Path::new("/r/.git/refs/heads/main")), Some((Path::new("/w"), PathBuf::from("refs/heads/main"))));
+        assert_eq!(outside_git(&outside, Path::new("/r/src/a.rs")), None);
     }
 }

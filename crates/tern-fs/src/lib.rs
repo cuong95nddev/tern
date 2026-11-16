@@ -9,6 +9,7 @@ pub mod ops;
 pub mod search;
 pub mod tree;
 pub mod watch;
+pub mod worktree;
 
 pub use git::GitStatus;
 pub use tree::{Entry, FileTree, Row};

@@ -161,7 +161,7 @@ impl UsageSource for CodexUsage {
     fn read(&self, _: &str, _: bool) -> Outcome {
         let now = SystemTime::now();
         let report = tern_chat::codex::rollout::latest_rate_limits(&tern_chat::codex::rollout::codex_home()).and_then(|l| codex_report(&l));
-        Outcome { read_at: report.as_ref().map(|_| now), report, error: None, next_at: now + AGENT_READ_EVERY }
+        Outcome { read_at: report.as_ref().map(|_| now), report, error: None, next_at: now + AGENT_READ_EVERY, rejected: false }
     }
 }
 
@@ -217,6 +217,8 @@ pub(crate) struct Outcome {
     read_at: Option<SystemTime>,
     /// When anyone may ask the service again.
     next_at: SystemTime,
+    /// The service rejected the sign-in: signing in again fixes it.
+    rejected: bool,
 }
 
 /// The last answer, kept on disk so neither a restart nor another Tern
@@ -236,9 +238,22 @@ struct Cached {
     error: Option<String>,
     /// Sign-in rejections in a row.
     rejections: u32,
+    /// The rejected sign-in (see [`fingerprint`]): another one, from signing
+    /// in again, is asked at once.
+    #[serde(default)]
+    rejected_token: Option<String>,
 }
 
 impl Cached {
+    /// Whether this answer is of the account now signed in as `email`
+    /// (either unknown: it may be).
+    fn is_of(&self, email: Option<&str>) -> bool {
+        match (self.email.as_deref(), email) {
+            (Some(saved), Some(now)) => saved.eq_ignore_ascii_case(now),
+            _ => true,
+        }
+    }
+
     fn outcome(&self) -> Outcome {
         let report =
             self.body.as_deref().and_then(|b| parse(b).ok()).map(|r| Report { plan: self.plan.clone(), email: self.email.clone(), ..r });
@@ -247,6 +262,7 @@ impl Cached {
             report,
             error: self.error.clone(),
             next_at: UNIX_EPOCH + Duration::from_secs(self.next_at),
+            rejected: self.rejections > 0,
         }
     }
 }
@@ -265,8 +281,12 @@ pub fn forget_cached(account: &str) {
     }
 }
 
+/// Account `account`'s last answer, unless it was another person's: the
+/// account signed in again as someone else, or a Tern that took another
+/// account's folder for this one saved it.
 fn load(account: &str) -> Option<Cached> {
-    serde_json::from_slice(&std::fs::read(cache_path(account)).ok()?).ok()
+    let c: Cached = serde_json::from_slice(&std::fs::read(cache_path(account)).ok()?).ok()?;
+    c.is_of(accounts::email(account).as_deref()).then_some(c)
 }
 
 fn save(account: &str, c: &Cached) {
@@ -310,6 +330,8 @@ pub struct AccountUsage {
     /// The service (or the cache) answered once: without numbers or an
     /// error, the account isn't signed in.
     pub checked: bool,
+    /// The service rejected its sign-in.
+    pub rejected: bool,
     due: Instant,
     /// A click asked for this read.
     forced: bool,
@@ -319,7 +341,17 @@ pub struct AccountUsage {
 impl AccountUsage {
     /// An agent's, nothing read yet.
     fn blank() -> Self {
-        Self { report: None, error: None, updated: None, reading: false, checked: false, due: Instant::now(), forced: false, manual: None }
+        Self {
+            report: None,
+            error: None,
+            updated: None,
+            reading: false,
+            checked: false,
+            rejected: false,
+            due: Instant::now(),
+            forced: false,
+            manual: None,
+        }
     }
 
     /// The last answer at once, from the cache; the first read asks the
@@ -330,6 +362,7 @@ impl AccountUsage {
             report: cached.as_ref().and_then(|c| c.report.clone()),
             error: cached.as_ref().and_then(|c| c.error.clone()),
             checked: cached.is_some(),
+            rejected: cached.as_ref().is_some_and(|c| c.rejected),
             updated: cached.and_then(|c| c.read_at),
             reading: false,
             due: Instant::now(),
@@ -491,7 +524,14 @@ impl UsageStore {
         a.report = o.report;
         a.error = o.error;
         a.updated = o.read_at;
-        let wait = o.next_at.duration_since(SystemTime::now()).unwrap_or_default();
+        a.rejected = o.rejected;
+        let mut wait = o.next_at.duration_since(SystemTime::now()).unwrap_or_default();
+        // A rejected sign-in waits long to ask the service again, but
+        // signing in again (here or in another Tab) is seen sooner: `read`
+        // asks at once when the sign-in changed.
+        if o.rejected {
+            wait = wait.min(REFRESH);
+        }
         // Not before the next tick: a cache another Tern keeps stale must
         // not make this one spin.
         a.due = Instant::now() + wait.max(MANUAL_SPACING);
@@ -500,6 +540,12 @@ impl UsageStore {
 }
 
 impl AccountUsage {
+    /// Signing in (again) is what it needs: it never did, or the service
+    /// rejected its sign-in.
+    pub fn needs_sign_in(&self) -> bool {
+        self.rejected || (self.checked && !self.reading && self.report.is_none() && self.error.is_none())
+    }
+
     fn should_read(&self, now: Instant) -> bool {
         !self.reading && now >= self.due
     }
@@ -515,7 +561,9 @@ fn read(account: &str, forced: bool) -> Outcome {
     let next_at = UNIX_EPOCH + Duration::from_secs(cached.next_at);
     let fresh = UNIX_EPOCH + Duration::from_secs(cached.read_at) + FORCED_FRESH > now;
     let waiting = cached.error.is_some() && next_at > now;
-    if if forced { fresh || waiting } else { next_at > now } {
+    // Signed in again since the service rejected the sign-in: ask now.
+    let renewed = cached.rejections > 0 && token_fingerprint(account) != cached.rejected_token;
+    if !renewed && if forced { fresh || waiting } else { next_at > now } {
         return cached.outcome();
     }
     let mut c = cached;
@@ -534,8 +582,9 @@ fn read(account: &str, forced: bool) -> Outcome {
             c.error = Some("Rate limited by Claude; trying again later".into());
             RATE_LIMITED
         },
-        Ask::Rejected => {
+        Ask::Rejected { token } => {
             c.rejections += 1;
+            c.rejected_token = Some(token);
             c.error = Some("Claude rejected the sign-in; run Claude Code to renew it".into());
             (REFRESH * 2u32.saturating_pow(c.rejections - 1)).min(REJECTED_LIMIT)
         },
@@ -561,7 +610,10 @@ enum Ask {
     RateLimited,
     /// The service refused the sign-in (it expired; Claude Code renews it
     /// when it runs).
-    Rejected,
+    /// `token`: the sign-in's [`fingerprint`].
+    Rejected {
+        token: String,
+    },
     Failed(String),
 }
 
@@ -584,7 +636,7 @@ fn ask(account: &str) -> Ask {
             },
             Err(e) => Ask::Failed(e),
         },
-        401 | 403 => Ask::Rejected,
+        401 | 403 => Ask::Rejected { token: fingerprint(&token) },
         429 => Ask::RateLimited,
         s => Ask::Failed(format!("Claude answered {s}")),
     }
@@ -602,6 +654,18 @@ struct OAuth {
     access_token: Option<String>,
     subscription_type: Option<String>,
     rate_limit_tier: Option<String>,
+}
+
+/// A sign-in's token, told apart without keeping it.
+fn fingerprint(token: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(token.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The [`fingerprint`] of account `account`'s sign-in now, if it has one.
+fn token_fingerprint(account: &str) -> Option<String> {
+    let token = credentials(account)?.claude_ai_oauth?.access_token.filter(|t| !t.is_empty())?;
+    Some(fingerprint(&token))
 }
 
 /// Account `account`'s Claude Code sign-in: its keychain item on a Mac,
@@ -929,6 +993,29 @@ mod tests {
         // Signed out, or an answer it can't read: no numbers.
         assert!(Cached { body: Some("<html>".into()), ..c }.outcome().report.is_none());
         assert!(Cached::default().outcome().read_at.is_none());
+    }
+
+    #[test]
+    fn a_rejected_sign_in_is_kept_with_its_token() {
+        // A cache from before the token was kept still reads.
+        let old: Cached =
+            serde_json::from_str(r#"{"read_at":1,"next_at":2,"body":null,"plan":null,"email":null,"error":"x","rejections":3}"#).unwrap();
+        assert_eq!(old.rejected_token, None);
+        assert!(old.outcome().rejected);
+        assert!(!Cached::default().outcome().rejected);
+        use super::fingerprint;
+        assert_eq!(fingerprint("abc"), fingerprint("abc"));
+        assert_ne!(fingerprint("abc"), fingerprint("abd"));
+        assert_eq!(fingerprint("abc").len(), 16);
+    }
+
+    #[test]
+    fn cached_answer_of_another_person_is_not_kept() {
+        let c = Cached { email: Some("a@x.com".into()), ..Cached::default() };
+        assert!(c.is_of(Some("A@x.com")));
+        assert!(!c.is_of(Some("b@x.com")));
+        assert!(c.is_of(None));
+        assert!(Cached::default().is_of(Some("b@x.com")));
     }
 
     #[test]

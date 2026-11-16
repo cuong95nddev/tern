@@ -328,6 +328,10 @@ pub struct SettingsView {
     /// The fields changed and not saved yet.
     args_edited: HashSet<AgentId>,
     _arg_subs: Vec<Subscription>,
+    /// The field for `agents.context_limit`, made when the page shows.
+    limit_field: Option<Entity<InputState>>,
+    /// What is wrong with the limit typed there, until it is fixed.
+    limit_problem: Option<String>,
     #[cfg(target_os = "macos")]
     granted: Option<Granted>,
     /// What the desktop does behind the window, as last set.
@@ -365,6 +369,8 @@ impl SettingsView {
             agents: None,
             looking_for_agents: false,
             arg_fields: HashMap::new(),
+            limit_field: None,
+            limit_problem: None,
             args_edited: HashSet::new(),
             _arg_subs: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -393,6 +399,8 @@ impl SettingsView {
             // Anew from what is saved: the Flags menu or the file may have changed it.
             self.arg_fields.clear();
             self._arg_subs.clear();
+            self.limit_field = None;
+            self.limit_problem = None;
         }
         self.section = section;
         cx.notify();
@@ -441,6 +449,43 @@ impl SettingsView {
             }));
             self.arg_fields.insert(id, field);
         }
+        if self.limit_field.is_none() {
+            let value = self.get(&["agents", "context_limit"], cx).and_then(|v| v.as_u64()).filter(|&l| l > 0);
+            let value = value.map(|l| l.to_string()).unwrap_or_default();
+            let field = cx.new(|cx| InputState::new(window, cx).default_value(value).placeholder("Off"));
+            self._arg_subs.push(cx.subscribe_in(&field, window, |this, field, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } | InputEvent::Blur = ev {
+                    let typed = field.read(cx).value().trim().to_owned();
+                    this.save_limit(&typed, field, window, cx);
+                }
+            }));
+            self.limit_field = Some(field);
+        }
+    }
+
+    /// Keep the limit typed as `typed` in `agents.context_limit`: none when
+    /// the field is empty; a number out of bounds becomes the nearest one.
+    fn save_limit(&mut self, typed: &str, field: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::agents::ContextGuard;
+        let limit = match (typed.is_empty(), ContextGuard::nearest(typed)) {
+            (true, _) => None,
+            (false, Some(limit)) => Some(limit),
+            (false, None) => {
+                self.limit_problem = Some(format!("Not a number: type {} to {}, or nothing.", ContextGuard::MIN, ContextGuard::MAX));
+                cx.notify();
+                return;
+            },
+        };
+        self.limit_problem = None;
+        if limit.map(|l| l.to_string()).as_deref() != Some(typed) && !typed.is_empty() {
+            let shown = limit.map(|l| l.to_string()).unwrap_or_default();
+            field.update(cx, |input, cx| input.set_value(shown, window, cx));
+        }
+        let saved = self.get(&["agents", "context_limit"], cx).and_then(|v| v.as_u64());
+        if saved != limit.map(u64::from) {
+            settings::set_value(&["agents", "context_limit"], limit.map(Into::into), cx);
+        }
+        cx.notify();
     }
 
     /// The agents, those installed first, and the plain terminal a new tab can open instead.
@@ -653,6 +698,7 @@ impl SettingsView {
             },
             Section::Agents => {
                 let (tool, toggle_tool) = self.flag(&["agents", "show_tool"], true, cx);
+                let (switch, toggle_switch) = self.flag(&["agents", "context_auto_switch"], true, cx);
                 let mut rows = self.agent_rows(cx);
                 rows.extend([
                     Row {
@@ -664,6 +710,16 @@ impl SettingsView {
                     },
                     Row::new("Tool call", "The tool the agent called after that reply (\"Running cargo test\").")
                         .switch(tool, move |v, w, cx| toggle_tool(v, w, cx)),
+                    Row {
+                        field: self.limit_field.clone(),
+                        problem: self.limit_problem.clone(),
+                        ..Row::new(
+                            "Context limit",
+                            "The limit every new agent tab starts with, in percent of its context window (5 to 100); empty is off. A tab can set its own from the ring beside its usage bar.",
+                        )
+                    },
+                    Row::new("Auto switch", "Over that limit, the agent writes a handoff and goes on in a fresh conversation; off, it only stops.")
+                        .switch(switch, move |v, w, cx| toggle_switch(v, w, cx)),
                 ]);
                 rows
             },

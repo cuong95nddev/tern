@@ -384,9 +384,9 @@ impl Rules {
             ignore.extend(read(d.join(".ignore")));
             if in_repo {
                 git.extend(read(d.join(".gitignore")));
-                let dot_git = d.join(".git");
-                if dot_git.exists() {
-                    exclude = git_dir(&dot_git).and_then(|g| read(g.join("info").join("exclude")));
+                if d.join(".git").exists() {
+                    // A worktree's `info/` is the repository's, in its common dir.
+                    exclude = crate::worktree::git_dirs(d).and_then(|(_, g)| read(g.join("info").join("exclude")));
                     in_repo = false;
                 }
             }
@@ -405,20 +405,6 @@ impl Rules {
             }
         }
         false
-    }
-}
-
-/// The git dir a `.git` entry stands for: itself, or the one a worktree's
-/// `.git` file names, through to the repo's common dir that holds `info/`.
-fn git_dir(dot_git: &Path) -> Option<PathBuf> {
-    if dot_git.is_dir() {
-        return Some(dot_git.to_path_buf());
-    }
-    let text = std::fs::read_to_string(dot_git).ok()?;
-    let dir = dot_git.parent()?.join(text.strip_prefix("gitdir:")?.trim());
-    match std::fs::read_to_string(dir.join("commondir")) {
-        Ok(common) => Some(dir.join(common.trim())),
-        Err(_) => Some(dir),
     }
 }
 

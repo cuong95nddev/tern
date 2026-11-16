@@ -905,6 +905,7 @@ impl Server {
             ClientMsg::SpawnChat { req, spec } => self.spawn_chat(conn, req, spec),
             ClientMsg::PaletteChanged => Self::palette_changed(&self.state.lock().unwrap()),
             ClientMsg::AskUi { req, request } => {
+                let request = self.stamp_caller(conn, request);
                 let mut st = self.state.lock().unwrap();
                 let Some(ui) = st.uis.iter().rev().filter_map(Weak::upgrade).find(|c| !c.dead.load(Ordering::Acquire)) else {
                     conn.send(ServerMsg::Error { req, message: "Tern isn't open: no window to ask".into() });
@@ -1461,6 +1462,24 @@ impl Server {
         tern_bridge::remove_claude_settings(&self.run_dir, token);
         codex_hooks::remove_codex_hook_file(&self.run_dir, token);
         opencode_hooks::remove_opencode_hook_file(&self.run_dir, token);
+    }
+
+    /// `request` (a JSON object) as the UI gets it: its `by`, the session
+    /// that asks, is the one whose program the process at the other end of
+    /// `conn` runs under, whatever the request says of itself (an agent's
+    /// own `TERN_SESSION_ID` could be any session's). `null` when it runs
+    /// in none.
+    fn stamp_caller(&self, conn: &Conn, request: String) -> String {
+        let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_str::<serde_json::Value>(&request) else { return request };
+        let line = paths::peer_pid(&conn.stream).map(tern_term::procs::ancestors).unwrap_or_default();
+        let by = {
+            let st = self.state.lock().unwrap();
+            let live: HashMap<u32, u64> =
+                st.sessions.iter().filter(|(_, s)| s.host.exited().is_none()).map(|(id, s)| (s.host.pid(), *id)).collect();
+            line.iter().find_map(|pid| live.get(pid).copied())
+        };
+        obj.insert("by".into(), by.map_or(serde_json::Value::Null, serde_json::Value::from));
+        serde_json::Value::Object(obj).to_string()
     }
 
     /// Hook `ev` came; the answer for Claude Code, if any.

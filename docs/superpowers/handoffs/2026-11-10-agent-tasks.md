@@ -37,9 +37,11 @@ with Shift+Left first).
   held while the giver shows a dialog or has a draft (`composer_draft.rs`, port of
   Orca's detectTerminalComposerDraft, simplified) typed within 10 min; never into a
   shell; not while the giver polls (`read_at` 3 s); done only after 1.5 s quiet.
-- Answering: only questions (PreToolUse AskUserQuestion/request_user_input), only
-  by the giving tab (`by` = TERN_SESSION_ID). Approvals, startup and unknown
-  dialogs are the user's alone (Orca). Security review demanded this hard gate.
+- Answering: questions (option or text) and, since the user asked for it, approvals
+  (`--option N` only), only by the giving tab. `by` is vouched for by the daemon
+  (`stamp_caller` in tern-mux server.rs: the socket peer's pid, walked up to a
+  session's program), not taken from TERN_SESSION_ID. Startup and unknown dialogs
+  stay the user's.
 - Sandbox: Codex's sandbox blocks the socket → error says "run again with
   escalated permissions" (Orca's guide).
 - Daemon fix `tern-mux/src/host.rs`: after PTY EOF, `poll_exit` (waitpid) and

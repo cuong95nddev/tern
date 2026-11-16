@@ -838,8 +838,10 @@
         "item": {
           "shrink": 0,
           "children": [
+            { "when": "group", "use": "agents.group" },
+            { "when": "card", "use": "agents.card" },
             { "when": "folder", "use": "agents.folder" },
-            { "when": "!folder", "use": "agents.tab" }
+            { "when": "!folder && !group && !card", "use": "agents.tab" }
           ]
         },
         "children": [{ "frame": "end", "grow": 1, "style": { "min_height": 40 } }]
@@ -858,7 +860,8 @@
       "hover && !active": { "background": "$agents.folder.hover_background" }
     },
     "children": [
-      { "icon": "folder-open", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
+      { "when": "!worktree", "icon": "folder-open", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
+      { "when": "worktree", "icon": "git-branch", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
       { "truncate": true, "text": "{name}" },
       {
         "frame": "toggle",
@@ -885,12 +888,14 @@
             "children": [
               { "button": "new_tab", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Tab" },
               {
+                "when": "!worktree",
                 "button": "close",
                 "element": "agents.button",
                 "size": "xsmall",
                 "icon": "close",
                 "tooltip": "Close Workspace ({close_key})"
-              }
+              },
+              { "when": "worktree", "button": "close", "element": "agents.button", "size": "xsmall", "icon": "close", "tooltip": "Remove Worktree…" }
             ]
           },
           {
@@ -917,6 +922,116 @@
           }
         ]
       }
+    ]
+  },
+  "agents.group": {
+    "frame": "group",
+    "group": "sgroup",
+    "element": "agents.group",
+    "layout": "row",
+    "align": "center",
+    "shrink": 0,
+    "states": { "hover": { "background": "$agents.folder.hover_background" } },
+    "children": [
+      { "when": "open", "icon": "chevron-down", "style": { "width": 12, "height": 12, "text": "$agents.folder.icon_text" } },
+      { "when": "!open", "icon": "chevron-right", "style": { "width": 12, "height": 12, "text": "$agents.folder.icon_text" } },
+      { "icon": "folder-open", "style": { "width": 14, "height": 14, "text": "$agents.folder.icon_text" } },
+      { "shrink": 1, "truncate": true, "text": "{name}" },
+      { "element": "agents.group.count", "shrink": 1000, "truncate": true, "text": "{count}" },
+      { "grow": 1 },
+      {
+        "when": "needs",
+        "element": "agents.folder.needs",
+        "shrink": 0,
+        "style": { "padding_right": "$agents.status.padding_x" },
+        "states": { "hover:sgroup": { "opacity": 0 } },
+        "text": "{needs}"
+      },
+      {
+        "position": { "top": 0, "right": 0, "bottom": 0 },
+        "layout": "row",
+        "align": "center",
+        "style": { "padding_right": 4, "opacity": 0 },
+        "states": { "hover:sgroup": { "opacity": 1 } },
+        "children": [{ "button": "new_worktree", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Worktree…" }]
+      }
+    ]
+  },
+  "agents.card": {
+    "element": "agents.card",
+    "group": "scard",
+    "shrink": 0,
+    "states": {
+      "card_active": { "background": "$agents.card.active_background", "border": "$agents.card.active_border" },
+      "hover && !card_active": { "border": "$agents.card.hover_border" }
+    },
+    "children": [
+      {
+        "frame": "folder",
+        "group": "sfolder",
+        "element": "agents.card.head",
+        "layout": "row",
+        "align": "center",
+        "shrink": 0,
+        "states": { "closed": { "text": "$agents.card.branch.text", "font_weight": "$agents.card.head.closed_weight" } },
+        "children": [
+          {
+            "align": "center",
+            "justify": "center",
+            "shrink": 0,
+            "style": { "width": 14, "height": 14 },
+            "children": [
+              {
+                "when": "dot",
+                "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "background": "{dot_color}" }
+              },
+              {
+                "when": "!dot",
+                "style": { "width": "$agents.folder.dot_size", "height": "$agents.folder.dot_size", "radius": 9999, "border_width": 1, "border": "$agents.folder.icon_text" }
+              }
+            ]
+          },
+          { "truncate": true, "text": "{name}" },
+          { "when": "main", "element": "agents.card.badge", "shrink": 0, "text": "main" },
+          { "grow": 1 },
+          {
+            "layout": "row",
+            "align": "center",
+            "shrink": 0,
+            "children": [
+              {
+                "layout": "row",
+                "align": "center",
+                "style": { "opacity": 0 },
+                "states": { "hover:sfolder": { "opacity": 1 } },
+                "children": [
+                  { "when": "!closed", "button": "new_tab", "element": "agents.button", "size": "xsmall", "icon": "plus", "tooltip": "New Tab" },
+                  {
+                    "when": "main",
+                    "button": "close",
+                    "element": "agents.button",
+                    "size": "xsmall",
+                    "icon": "close",
+                    "tooltip": "Close Workspace ({close_key})"
+                  },
+                  { "when": "!main", "button": "close", "element": "agents.button", "size": "xsmall", "icon": "close", "tooltip": "Remove Worktree…" }
+                ]
+              },
+              {
+                "when": "card_needs",
+                "position": { "top": 0, "right": 0, "bottom": 0 },
+                "layout": "row",
+                "align": "center",
+                "style": { "padding_right": "$agents.status.padding_x" },
+                "states": { "hover:sfolder": { "opacity": 0 } },
+                "children": [{ "element": "agents.folder.needs", "text": "{card_needs}" }]
+              }
+            ]
+          }
+        ]
+      },
+      { "when": "branch", "element": "agents.card.branch", "truncate": true, "text": "{branch}" },
+      { "each": "tabs", "item": { "use": "agents.tab" } }
     ]
   },
   "agents.tab": {
@@ -3087,6 +3202,19 @@
       { "button": "ok", "variant": "primary", "label": "OK" }
     ]
   },
+  "dialog.worktree": {
+    "element": "dialog.body",
+    "children": [{ "slot": "field" }, { "element": "dialog.note", "text": "{note}" }]
+  },
+  "dialog.worktree.footer": {
+    "element": "dialog.footer",
+    "layout": "row",
+    "justify": "end",
+    "children": [
+      { "button": "cancel", "variant": "secondary", "label": "Cancel" },
+      { "button": "ok", "variant": "primary", "label": "Create" }
+    ]
+  },
   "dialog.claude_args": {
     "element": "dialog.body",
     "children": [{ "slot": "field" }, { "element": "dialog.note", "text": "Passed to every new Claude tab, in shell syntax." }]
@@ -3187,7 +3315,10 @@
       { "each": "windows", "item": { "button": "move_to_window", "label": "Move to Window: {label}" } },
       { "separator": true },
       { "button": "copy_path", "label": "Copy Path" },
-      { "button": "reveal", "label": "{reveal}" }
+      { "button": "reveal", "label": "{reveal}" },
+      { "when": "git", "separator": true },
+      { "when": "git", "button": "new_worktree", "label": "New Worktree…" },
+      { "when": "worktree", "button": "remove_worktree", "label": "Remove Worktree…" }
     ]
   },
   "menu.new_tab": {

@@ -250,6 +250,9 @@ struct TermTab {
     recent_read: Option<Task<()>>,
     /// A task another agent gave it (`tern --task`) and its answer.
     task: crate::agent_tasks::Track,
+    /// Runs `claude auth login` for its account (see `sign_in_account`):
+    /// its usage is read again when it ends.
+    signs_in: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -450,6 +453,12 @@ pub struct Services {
 
 pub struct Workspace {
     root: PathBuf,
+    /// When the folder is a git worktree: its repository's main checkout
+    /// and the branch it has checked out (kept up as git changes).
+    worktree: Option<(PathBuf, Option<String>)>,
+    /// When the folder is a repository's main checkout: the worktrees Tern
+    /// made of it (in its `.worktrees`), each with its branch, open or not.
+    tern_worktrees: Vec<(PathBuf, Option<String>)>,
     /// Definitions in the workspace's files, for go to definition in file tabs.
     symbols: Arc<crate::symbols::Index>,
     /// The language servers of file tabs.
@@ -753,6 +762,15 @@ impl Workspace {
             FileTreeEvent::Moved { from, to } => this.file_moved(from, to, window, cx),
             FileTreeEvent::Deleted(paths) => this.files_deleted(paths, window, cx),
             FileTreeEvent::Changed(batch) => {
+                // A checkout in a worktree changes the branch it shows.
+                if !batch.git_repos.is_empty() || batch.rescan {
+                    if this.worktree.is_some() {
+                        this.worktree = tern_fs::worktree::linked(&this.root);
+                    } else {
+                        this.tern_worktrees = tern_worktrees_of(&this.root);
+                    }
+                    cx.notify();
+                }
                 this.changes.update(cx, |c, cx| c.files_changed(batch, cx));
                 this.files_changed(batch, window, cx);
             },
@@ -808,6 +826,7 @@ impl Workspace {
         let usage_sub = cx.subscribe_in(&usage, window, |this, _, ev: &UsageEvent, window, cx| match ev {
             UsageEvent::UseHere(id) => this.switch_account(id, window, cx),
             UsageEvent::NewTab(id) => this.new_claude_tab_as(id, window, cx),
+            UsageEvent::SignIn(id) => this.sign_in_account(id, window, cx),
             UsageEvent::Add => this.add_account(window, cx),
             UsageEvent::Rename(id) => this.rename_account(id.clone(), window, cx),
             UsageEvent::Remove(id) => this.confirm_remove_account(id.clone(), window, cx),
@@ -828,6 +847,8 @@ impl Workspace {
             }
         });
         let mut this = Self {
+            worktree: tern_fs::worktree::linked(&root),
+            tern_worktrees: tern_worktrees_of(&root),
             symbols: crate::symbols::Index::new(root.clone()),
             lsp,
             lsp_failed: HashSet::new(),
@@ -914,7 +935,7 @@ impl Workspace {
                     let kind = if tern_agent::registry().get(agent.as_str()).is_some() { TabKind::Agent(agent) } else { TabKind::Shell };
                     this.add_term(kind, name, session, mux, &account, window, cx);
                     if let Some(CenterTab::Term(t)) = this.tabs.get_mut(before) {
-                        t.guard = crate::agents::ContextGuard::from_saved(guard);
+                        t.guard = crate::agents::ContextGuard::from_saved(guard, crate::agents::ContextGuard::new_tab(cx));
                         t.handoff = handoff.map_or_else(Default::default, crate::agents::Handoff::Written);
                     }
                 },
@@ -923,8 +944,9 @@ impl Workspace {
                     let account = account.unwrap_or_else(|| accounts::DEFAULT.into());
                     this.add_chat(&agent, &account, Some(session), mux, window, cx);
                     if let Some(CenterTab::Chat { view, .. }) = this.tabs.get(before) {
+                        let new = crate::agents::ContextGuard::new_tab(cx);
                         view.update(cx, |v, _| {
-                            v.set_guard(crate::agents::ContextGuard::from_saved(guard));
+                            v.set_guard(crate::agents::ContextGuard::from_saved(guard, new));
                             v.set_handoff(handoff.map_or_else(Default::default, crate::agents::Handoff::Written));
                         });
                     }
@@ -1378,6 +1400,43 @@ impl Workspace {
         self.add_term(TabKind::claude(), None, None, None, account, window, cx);
     }
 
+    /// A tab that signs account `account` in: Claude Code's `auth login`, run
+    /// with the account's folder. Its usage is read again when it ends.
+    fn sign_in_account(&mut self, account: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let account = if accounts::listed(account, cx) { account.to_owned() } else { accounts::DEFAULT.to_owned() };
+        let registry = tern_agent::registry();
+        let Some(claude) = registry.get(tern_agent::CLAUDE) else { return };
+        let (mut cfg, _) = self.spawn_config(&TabKind::Shell, None, &account, cx);
+        cfg.args = crate::platform::shell_command_args(&format!("{} auth login", claude.command));
+        let title = format!("Sign In · {}", accounts::store(cx).read(cx).name(&account));
+        let (config, connector) = (self.services.terminal.clone(), self.services.mux.clone());
+        let view = cx.new(|cx| TerminalView::new(cfg, false, None, title.clone(), config, connector, cx));
+        let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
+        let tab = TermTab {
+            view,
+            rename: Some(title.into()),
+            kind: TabKind::Shell,
+            token: None,
+            session: None,
+            account,
+            resuming: false,
+            notified: None,
+            rang: false,
+            muted: false,
+            follows: None,
+            context: None,
+            guard: Default::default(),
+            handoff: Default::default(),
+            recent: Default::default(),
+            recent_read: None,
+            task: Default::default(),
+            signs_in: true,
+            _subs: vec![sub],
+        };
+        let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
+        self.activate(ix, window, cx);
+    }
+
     /// Ask for an active account but `except`, titled `title` with `note`
     /// under the list: click one, or type its number; `then` gets it.
     fn pick_account(
@@ -1624,11 +1683,12 @@ impl Workspace {
             muted: false,
             follows: None,
             context: None,
-            guard: Default::default(),
+            guard: crate::agents::ContextGuard::new_tab(cx),
             handoff: Default::default(),
             recent: Default::default(),
             recent_read: None,
             task: Default::default(),
+            signs_in: false,
             _subs: vec![sub],
         };
         self.push_tab(CenterTab::Term(Box::new(tab)))
@@ -1709,6 +1769,7 @@ impl Workspace {
             recent: Default::default(),
             recent_read: None,
             task: Default::default(),
+            signs_in: false,
             _subs: vec![sub],
         };
         let ix = self.push_tab(CenterTab::Term(Box::new(tab)));
@@ -2815,6 +2876,13 @@ impl Workspace {
                 }
             },
             TerminalEvent::Exited { code, quick, live } => {
+                // Signed in (or gave up): read its usage again.
+                if let Some(t) = self.term_tab_mut(view)
+                    && std::mem::take(&mut t.signs_in)
+                {
+                    let account = t.account.clone();
+                    crate::usage::store(cx).update(cx, |s, cx| s.refresh(&account, cx));
+                }
                 // The agent ended (see `goes_on_as_shell`): the tab goes on
                 // as a shell, as if the agent had been started from one.
                 if let Some(t) = self.term_tab_mut(view)
@@ -3142,19 +3210,30 @@ impl Workspace {
 
     /// The tasks with news for the agent tab that gave them (each with that
     /// tab's background session).
-    pub fn task_news(&self, cx: &App) -> Vec<(crate::agent_tasks::Report, u64)> {
-        self.tabs
+    /// A task back at work has no news: what it asks or ends with next is
+    /// news again, even when it is blocked once more.
+    pub fn task_news(&mut self, cx: &App) -> Vec<(crate::agent_tasks::Report, u64)> {
+        let reports: Vec<_> = self
+            .tabs
             .iter()
             .filter_map(CenterTab::term)
             // Only a task with a giver has someone to tell: no screen read
             // for the others, each second.
             .filter(|t| t.task.giver().is_some())
-            .filter_map(|t| {
-                let report = self.report_of(t, cx);
-                let by = t.task.to_tell(&report)?;
-                Some((report, by))
-            })
-            .collect()
+            .map(|t| self.report_of(t, cx))
+            .collect();
+        let mut news = Vec::new();
+        for report in reports {
+            let Some(tab) = self.tabs.iter_mut().filter_map(CenterTab::term_mut).find(|t| t.view.entity_id().as_u64() == report.id) else {
+                continue;
+            };
+            if report.news().is_none() {
+                tab.task.quiet();
+            } else if let Some(by) = tab.task.to_tell(&report) {
+                news.push((report, by));
+            }
+        }
+        news
     }
 
     /// The terminal of the tab running background session `mux`.
@@ -5815,6 +5894,43 @@ impl Workspace {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// When the folder is a git worktree: its repository's main checkout,
+    /// and the branch it has checked out.
+    pub fn worktree(&self) -> Option<(&Path, Option<&str>)> {
+        self.worktree.as_ref().map(|(main, branch)| (main.as_path(), branch.as_deref()))
+    }
+
+    /// When the folder is a repository's main checkout: the worktrees Tern
+    /// made of it, each with its branch, by folder name.
+    pub fn tern_worktrees(&self) -> &[(PathBuf, Option<String>)] {
+        &self.tern_worktrees
+    }
+
+    /// Read [`Self::tern_worktrees`] again (one was made or removed).
+    pub fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        if self.worktree.is_none() {
+            self.tern_worktrees = tern_worktrees_of(&self.root);
+            cx.notify();
+        }
+    }
+}
+
+/// The worktrees in `root`'s `.worktrees` that git says are `root`'s, with
+/// their branches, by folder name: a few small files read, no git run.
+fn tern_worktrees_of(root: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let Ok(dir) = std::fs::read_dir(root.join(tern_fs::worktree::DIR)) else { return vec![] };
+    let mut out: Vec<(PathBuf, Option<String>)> = dir
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let (main, branch) = tern_fs::worktree::linked(&p)?;
+            let same = |a: &Path, b: &Path| dunce::canonicalize(a).ok() == dunce::canonicalize(b).ok();
+            same(&main, root).then_some((dunce::canonicalize(&p).unwrap_or(p), branch))
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Ask before closing `what` while `jobs` run in it; `then` closes it.

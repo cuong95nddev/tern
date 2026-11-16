@@ -111,7 +111,10 @@ fn an_agent_asks_the_ui() {
         let tern_mux::client::UiRequest::Ask { .. } = rx.recv().unwrap() else { panic!("not an ask") };
         drop(answering);
     });
-    assert_eq!(agent.ask_ui(r#"{"op":"status"}"#.into()).unwrap(), r#"{"got":{"op":"status"}}"#);
+    // Who asks is the daemon's to say: this test runs in no session, so
+    // the session it claims is dropped.
+    let answer: serde_json::Value = serde_json::from_str(&agent.ask_ui(r#"{"op":"status","by":7}"#.into()).unwrap()).unwrap();
+    assert_eq!(answer, serde_json::json!({ "got": { "op": "status", "by": null } }));
     let asking = std::thread::spawn(move || agent.ask_ui("{}".into()));
     answerer.join().unwrap();
     drop(ui);

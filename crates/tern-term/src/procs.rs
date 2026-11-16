@@ -491,6 +491,56 @@ impl ProcessTree {
     }
 }
 
+/// How many parents [`ancestors`] goes up at most.
+const MAX_ANCESTORS: usize = 64;
+
+/// `pid`, then its parent, its parent's parent and so on: the processes it
+/// runs under, nearest first.
+#[cfg(unix)]
+pub fn ancestors(pid: u32) -> Vec<u32> {
+    let mut out = vec![pid];
+    while out.len() < MAX_ANCESTORS
+        && let Some(p) = parent(*out.last().unwrap_or(&pid)).filter(|&p| p != 0 && !out.contains(&p))
+    {
+        out.push(p);
+    }
+    out
+}
+
+#[cfg(windows)]
+pub fn ancestors(pid: u32) -> Vec<u32> {
+    let parents: std::collections::HashMap<u32, u32> = win::snapshot().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+    let mut out = vec![pid];
+    while out.len() < MAX_ANCESTORS
+        && let Some(&p) = parents.get(out.last().unwrap_or(&pid)).filter(|&&p| p != 0 && !out.contains(&p))
+    {
+        out.push(p);
+    }
+    out
+}
+
+/// `pid`'s parent process.
+#[cfg(target_os = "macos")]
+fn parent(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo fills `info`, of the size given, for PROC_PIDTBSDINFO.
+    let got = unsafe { libc::proc_pidinfo(pid as libc::pid_t, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (got == size).then_some(info.pbi_ppid)
+}
+
+#[cfg(target_os = "linux")]
+fn parent(pid: u32) -> Option<u32> {
+    // `pid (comm) state ppid ...`; comm may hold spaces.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn parent(_pid: u32) -> Option<u32> {
+    None
+}
+
 /// Programs whose first non-flag argument names the real program.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_interpreter(exe: &str) -> bool {
@@ -591,7 +641,7 @@ mod win {
     }
 
     /// Every process: `(pid, parent pid, executable file name)`.
-    fn snapshot() -> Vec<(u32, u32, String)> {
+    pub(super) fn snapshot() -> Vec<(u32, u32, String)> {
         let mut out = Vec::new();
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -654,7 +704,22 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{attached_job, is_interpreter, script_arg, shell_command};
+    use super::{ancestors, attached_job, is_interpreter, script_arg, shell_command};
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn a_process_runs_under_its_parent() {
+        let child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sleep" })
+            .args(if cfg!(windows) { &["/c", "ping -n 3 127.0.0.1 >NUL"][..] } else { &["2"][..] })
+            .spawn()
+            .unwrap();
+        let line = ancestors(child.id());
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(line.first(), Some(&child.id()));
+        assert_eq!(line.get(1), Some(&std::process::id()), "{line:?}");
+    }
 
     fn argv(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()

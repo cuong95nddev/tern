@@ -60,8 +60,16 @@ fn system_locale() -> Option<String> {
     None
 }
 
+/// Whether `CLAUDE_CONFIG_DIR` = `value` is Tern's own, set for a Claude
+/// tab of an account Tern added (a folder in `accounts`): a Tern started
+/// from such a tab must not take that account for the default one.
+pub fn is_added_account_dir(value: &Path, accounts: Option<&Path>) -> bool {
+    accounts.is_some_and(|a| value.parent() == Some(a))
+}
+
 /// Make Tern's own environment the one its terminals should inherit: drop
-/// other terminals' variables and, when started from Finder or the Dock
+/// other terminals' variables, and a `CLAUDE_CONFIG_DIR` of an account Tern
+/// added (see [`is_added_account_dir`]), and, when started from Finder or the Dock
 /// (launchd sets no locale), use a UTF-8 locale so non-ASCII input and
 /// output work.
 ///
@@ -71,6 +79,10 @@ pub unsafe fn prepare_process_env() {
     let foreign: Vec<_> = std::env::vars_os().filter_map(|(k, _)| k.to_str().filter(|k| is_foreign(k)).map(str::to_owned)).collect();
     for key in foreign {
         unsafe { std::env::remove_var(key) };
+    }
+    let accounts = crate::status::claude_accounts_dir();
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| is_added_account_dir(Path::new(&v), accounts)) {
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
     }
     let unset = |k: &str| std::env::var_os(k).is_none_or(|v| v.is_empty());
     // Windows programs don't read a locale from the environment.
@@ -121,5 +133,15 @@ mod tests {
         // The user's own Claude Code settings stay.
         assert!(!is_foreign("CLAUDE_CODE_USE_BEDROCK"));
         assert!(!is_foreign("CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn added_account_config_dir_is_tern_own() {
+        let accounts = Path::new("/data/claude-accounts");
+        assert!(is_added_account_dir(&accounts.join("account-3"), Some(accounts)));
+        // The user's own folder stays, and so does any with no accounts set.
+        assert!(!is_added_account_dir(Path::new("/home/u/.claude-work"), Some(accounts)));
+        assert!(!is_added_account_dir(accounts, Some(accounts)));
+        assert!(!is_added_account_dir(&accounts.join("account-3"), None));
     }
 }

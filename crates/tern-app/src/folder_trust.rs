@@ -7,8 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Whether Claude, running as `account`, may start in `folder`.
+/// Whether Claude, running as `account`, may start in `folder`: a git
+/// worktree as its repository's main checkout may, made from it, the same
+/// files, wherever it is kept.
 pub fn trusted(account: &str, folder: &Path) -> bool {
+    trusted_here(account, folder) || tern_fs::worktree::linked(folder).is_some_and(|(main, _)| trusted_here(account, &main))
+}
+
+fn trusted_here(account: &str, folder: &Path) -> bool {
     let said = crate::accounts::claude_json(account).iter().any(|p| {
         let config = std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok());
         config.is_some_and(|c| claude_trusts(&c, folder))

@@ -58,6 +58,7 @@ gpui_kit::assets::icon_assets!(
         GitCommitHorizontal,
         LayoutGrid,
         ListChecks,
+        LogIn,
         PanelTop,
         MessageCircleQuestionMark,
         MessageSquareText,
