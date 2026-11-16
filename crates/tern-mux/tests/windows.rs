@@ -22,6 +22,14 @@ fn screen(s: &RemoteSession) -> String {
         .join("\n")
 }
 
+/// All its text, the scrollback's too, its rows joined as they wrap: what
+/// it printed, wherever that is now.
+fn printed(s: &RemoteSession) -> String {
+    let term = s.term().lock();
+    let g = term.grid();
+    (-(g.history_size() as i32)..g.screen_lines() as i32).map(|l| g[Line(l)].into_iter().map(|c| c.c).collect::<String>()).collect()
+}
+
 #[test]
 fn spawn_detach_reattach() {
     let d = daemon(Duration::from_secs(60));
@@ -81,7 +89,13 @@ fn hook_settings_are_substituted() {
         _ => None,
     });
     assert!(token.is_some());
-    wait_until("settings json", || screen(&s).contains("hooks"));
+    // The settings end with two commands naming the test's program and the
+    // settings file, Windows paths that may push its `hooks` off the screen.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !printed(&s).contains("\"hooks\"") {
+        assert!(std::time::Instant::now() < deadline, "no settings json printed:\n{}", printed(&s));
+        std::thread::sleep(Duration::from_millis(10));
+    }
     s.close();
 }
 
