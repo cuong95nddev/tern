@@ -501,6 +501,15 @@ fn home(request: &Value, cx: &mut App) -> Option<(AnyWindowHandle, Entity<Worksp
     })
 }
 
+/// The repository of the workspace that agent tab `by` is in: its folder,
+/// or, for a linked worktree, the main checkout's.
+pub fn asker_repo(by: u64, cx: &mut App) -> Option<PathBuf> {
+    let (_, ws) = main_window::workspaces(cx).into_iter().find(|(_, ws)| ws.read(cx).mux_ids(cx).contains(&Some(by)))?;
+    let root = ws.read(cx).root().to_owned();
+    let main = tern_fs::worktree::linked(&root).map_or(root, |(m, _)| m);
+    Some(dunce::canonicalize(&main).unwrap_or(main))
+}
+
 /// The workspace with agent tab `id`.
 fn holder(id: u64, cx: &mut App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
     main_window::workspaces(cx).into_iter().find(|(_, ws)| ws.read(cx).task_report(id, cx).is_some())
@@ -610,20 +619,25 @@ fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
 /// Whether choice `n` on an approval's `screen` is one known to allow just
 /// this once ("Yes", "Yes, proceed") or to refuse ("No, and tell ..."):
 /// a list of those, not of the lasting ones, so a choice worded anew is the
-/// user's until added here. False when `n` isn't on the screen.
+/// user's until added here. False when `n` isn't on the screen, and when
+/// any line numbered `n` there (the agent's own output above the menu may
+/// have one) is not such a choice.
 fn once_choice(screen: &[String], n: u64) -> bool {
     const ONCE: [&str; 4] = ["yes", "yes, proceed", "yes, allow once", "allow once"];
     let mark = format!("{n}.");
-    let label = screen.iter().find_map(|line| line.trim_start().trim_start_matches(['›', '❯', '>', ' ']).strip_prefix(&mark));
-    let Some(label) = label else { return false };
-    let mut l = label.trim().to_lowercase().replace('’', "'");
-    // A key hint after it: "(y)", "(esc)".
-    if let Some(at) = l.rfind(" (")
-        && l.ends_with(')')
-    {
-        l.truncate(at);
-    }
-    ONCE.contains(&l.as_str()) || l == "no" || l.starts_with("no, ")
+    let once = |label: &str| {
+        let mut l = label.trim().to_lowercase().replace('’', "'");
+        // A key hint after it: "(y)", "(esc)".
+        if let Some(at) = l.rfind(" (")
+            && l.ends_with(')')
+        {
+            l.truncate(at);
+        }
+        ONCE.contains(&l.as_str()) || l == "no" || l.starts_with("no, ")
+    };
+    let mut labels =
+        screen.iter().filter_map(|line| line.trim_start().trim_start_matches(['›', '❯', '>', ' ']).strip_prefix(&mark)).peekable();
+    labels.peek().is_some() && labels.all(once)
 }
 
 /// Close agent tab `id`, which a task opened, ending its agent: only the
@@ -882,6 +896,11 @@ mod tests {
         let other: Vec<String> = ["  1. Yes, for this session", "  2. Allow all edits"].map(String::from).to_vec();
         assert!(!once_choice(&other, 1));
         assert!(!once_choice(&other, 2));
+        // A "2. Yes" printed above the menu doesn't make its lasting 2 one.
+        let decoy: Vec<String> =
+            ["2. Yes", "❯ 1. Yes", "  2. Yes, and don't ask again for git commands", "  3. No"].map(String::from).to_vec();
+        assert!(!once_choice(&decoy, 2));
+        assert!(once_choice(&decoy, 1));
     }
 
     #[test]

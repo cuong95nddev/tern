@@ -21,6 +21,32 @@ use serde_json::{Value, json};
 
 use crate::{AppServices, main_window, settings};
 
+/// Whether worktree `path` may be closed for `request`: a linked worktree
+/// (or a folder already gone) of the asking agent tab's repository; any,
+/// asked from outside an agent tab.
+fn closable(path: &Path, request: &Value, cx: &mut App) -> bool {
+    let repo = match request.get("by").and_then(Value::as_u64) {
+        Some(by) => match crate::agent_tasks::asker_repo(by, cx) {
+            Some(repo) => Some(repo),
+            None => return false,
+        },
+        None => None,
+    };
+    let main = if path.exists() {
+        match tern_fs::worktree::linked(path) {
+            Some((main, _)) => dunce::canonicalize(&main).unwrap_or(main),
+            None => return false,
+        }
+    } else {
+        // Gone: only a folder in its repository's worktrees folder.
+        match path.parent().filter(|p| p.file_name().is_some_and(|n| n == ".worktrees")).and_then(Path::parent) {
+            Some(main) => dunce::canonicalize(main).unwrap_or_else(|_| main.to_owned()),
+            None => return false,
+        }
+    };
+    repo.is_none_or(|repo| repo == main)
+}
+
 /// Answer request `ask`; a shot answers once its file is written.
 pub fn answer(ask: u64, request: &str, cx: &mut App) {
     let request: Value = serde_json::from_str(request).unwrap_or(Value::Null);
@@ -63,9 +89,10 @@ pub fn answer(ask: u64, request: &str, cx: &mut App) {
             let answer = match str_arg("path") {
                 // Only a linked worktree (or one already gone, whose
                 // programs are left running): never a repository's own
-                // checkout or any other folder.
-                Some(path) if Path::new(&path).exists() && tern_fs::worktree::linked(Path::new(&path)).is_none() => {
-                    failed(&format!("{path} is not a git worktree"))
+                // checkout or any other folder; and, asked from an agent
+                // tab, only one of that tab's own repository.
+                Some(path) if !closable(Path::new(&path), &request, cx) => {
+                    failed(&format!("{path} is not a git worktree of your repository"))
                 },
                 Some(path) => match main_window::close_folder(Path::new(&path), force && Path::new(&path).exists(), cx) {
                     Ok(closed) => json!({ "closed": closed }),
