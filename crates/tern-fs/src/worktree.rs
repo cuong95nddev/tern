@@ -285,6 +285,16 @@ pub fn prune(repo: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Whether a folder on the way from `root` to `root/rel` is a symbolic link.
+fn through_link(root: &Path, rel: &Path) -> bool {
+    let mut at = root.to_path_buf();
+    let Some(parent) = rel.parent() else { return false };
+    parent.components().any(|c| {
+        at.push(c);
+        std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
+    })
+}
+
 /// Copy into worktree `to` the files of checkout `from` that git doesn't
 /// track and `from`'s `.worktreeinclude` names (gitignore patterns: `.env`,
 /// `config/local.json`, ...): what a fresh checkout lacks to run. The files
@@ -303,8 +313,11 @@ pub fn copy_included(from: &Path, to: &Path) -> Result<Vec<PathBuf>, String> {
     for rel in out.split('\0').filter(|r| !r.is_empty()) {
         let rel = PathBuf::from(rel);
         let (src, dst) = (from.join(&rel), to.join(&rel));
-        // A file the checkout has (tracked there) is the branch's own.
-        if dst.exists() || !src.is_file() {
+        // A file the checkout has (tracked there) is the branch's own; a
+        // link there or on the way to it (one the branch tracks) could
+        // lead out of the worktree, and a link in `from` to anywhere.
+        let is_file = std::fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file());
+        if !is_file || std::fs::symlink_metadata(&dst).is_ok() || through_link(to, &rel) {
             continue;
         }
         if let Some(dir) = dst.parent() {
@@ -443,6 +456,20 @@ mod tests {
         fs::write(r.join(".worktrees/x/f"), "").unwrap();
         assert!(changes(&r).unwrap().iter().all(|l| !l.contains(".worktrees")));
         assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "KEY=1");
+        #[cfg(unix)]
+        {
+            // Never through a link out of the worktree, nor a link's target.
+            let out = place.path().join("out");
+            fs::create_dir_all(&out).unwrap();
+            fs::write(r.join(".worktreeinclude"), ".env\nconf/\nlink.env\n").unwrap();
+            fs::create_dir_all(r.join("conf")).unwrap();
+            fs::write(r.join("conf/secret"), "s").unwrap();
+            std::os::unix::fs::symlink(&out, wt.join("conf")).unwrap();
+            std::os::unix::fs::symlink(r.join("conf/secret"), r.join("link.env")).unwrap();
+            assert_eq!(copy_included(&r, &wt).unwrap(), Vec::<PathBuf>::new());
+            assert!(!out.join("secret").exists());
+            fs::remove_file(wt.join("conf")).unwrap();
+        }
 
         // Changes stop a plain removal.
         fs::write(wt.join("new.txt"), "x").unwrap();

@@ -61,7 +61,13 @@ pub fn answer(ask: u64, request: &str, cx: &mut App) {
         Some("worktree_close") => {
             let force = request.get("force").and_then(Value::as_bool).unwrap_or(false);
             let answer = match str_arg("path") {
-                Some(path) => match main_window::close_folder(Path::new(&path), force, cx) {
+                // Only a linked worktree (or one already gone, whose
+                // programs are left running): never a repository's own
+                // checkout or any other folder.
+                Some(path) if Path::new(&path).exists() && tern_fs::worktree::linked(Path::new(&path)).is_none() => {
+                    failed(&format!("{path} is not a git worktree"))
+                },
+                Some(path) => match main_window::close_folder(Path::new(&path), force && Path::new(&path).exists(), cx) {
                     Ok(closed) => json!({ "closed": closed }),
                     Err(e) => failed(&e),
                 },

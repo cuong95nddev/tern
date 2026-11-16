@@ -474,12 +474,27 @@ fn related(a: &Path, b: &Path) -> bool {
 fn home(request: &Value, cx: &mut App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
     let all = main_window::workspaces(cx);
     let folder = request.get("folder").and_then(Value::as_str).map(PathBuf::from);
+    let mine = by_of(request).and_then(|by| all.iter().find(|(_, ws)| ws.read(cx).mux_ids(cx).contains(&Some(by))).cloned());
     if request.get("exact").and_then(Value::as_bool) == Some(true) {
+        // Only a linked worktree of the asker's own repository (of a
+        // repository open in Tern, for one not in an agent tab): never
+        // another folder's workspace.
         let folder = folder?;
         let folder = dunce::canonicalize(&folder).unwrap_or(folder);
+        let (main, _) = tern_fs::worktree::linked(&folder)?;
+        let main = dunce::canonicalize(&main).unwrap_or(main);
+        let ok = match &mine {
+            Some((_, ws)) => {
+                related(ws.read(cx).root(), &main)
+                    || tern_fs::worktree::linked(ws.read(cx).root()).is_some_and(|(m, _)| dunce::canonicalize(&m).unwrap_or(m) == main)
+            },
+            None => by_of(request).is_none() && all.iter().any(|(_, ws)| ws.read(cx).root() == main),
+        };
+        if !ok {
+            return None;
+        }
         return all.into_iter().find(|(_, ws)| ws.read(cx).root() == folder);
     }
-    let mine = by_of(request).and_then(|by| all.iter().find(|(_, ws)| ws.read(cx).mux_ids(cx).contains(&Some(by))).cloned());
     mine.or_else(|| {
         let folder = folder?;
         all.into_iter().find(|(_, ws)| related(ws.read(cx).root(), &folder))
@@ -571,14 +586,14 @@ fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
     if approval && option.is_none() {
         return Err("an approval is answered by its choice's number: --option N (see its screen)".into());
     }
-    // One approval at a time: a choice that allows more from then on is
-    // the user's.
-    if approval
-        && let Some(n) = option
-        && let Some(view) = ws.read(cx).task_view(id)
-        && lasting_choice(&view.read(cx).screen_lines(), n)
-    {
-        return Err(format!("option {n} allows more than this once (don't ask again): only the user chooses it, in its tab"));
+    // One approval at a time: only a choice known to allow just this once,
+    // or to refuse, is an agent's; any other (don't ask again, always, one
+    // not on the screen) is the user's.
+    if approval && let Some(n) = option {
+        let screen = ws.read(cx).task_view(id).map(|v| v.read(cx).screen_lines()).unwrap_or_default();
+        if !once_choice(&screen, n) {
+            return Err(format!("option {n} is not a yes for this once or a no on its screen: only the user chooses it, in its tab"));
+        }
     }
     let mut steps = answer_keys(text, option)?;
     // Codex shows a question asked without waiting among its queued inputs:
@@ -592,17 +607,23 @@ fn answer_task(request: &Value, cx: &mut App) -> Result<Value, String> {
     Ok(json!({ "id": id, "answered": true }))
 }
 
-/// Whether choice `n` on an approval's `screen` allows more than this once
-/// ("Yes, and don't ask again for ...", "always allow").
-fn lasting_choice(screen: &[String], n: u64) -> bool {
+/// Whether choice `n` on an approval's `screen` is one known to allow just
+/// this once ("Yes", "Yes, proceed") or to refuse ("No, and tell ..."):
+/// a list of those, not of the lasting ones, so a choice worded anew is the
+/// user's until added here. False when `n` isn't on the screen.
+fn once_choice(screen: &[String], n: u64) -> bool {
+    const ONCE: [&str; 4] = ["yes", "yes, proceed", "yes, allow once", "allow once"];
     let mark = format!("{n}.");
-    screen.iter().any(|line| {
-        let t = line.trim_start().trim_start_matches(['›', '❯', '>', ' ']);
-        t.starts_with(&mark) && {
-            let l = t.to_lowercase().replace('’', "'");
-            l.contains("don't ask again") || l.contains("always")
-        }
-    })
+    let label = screen.iter().find_map(|line| line.trim_start().trim_start_matches(['›', '❯', '>', ' ']).strip_prefix(&mark));
+    let Some(label) = label else { return false };
+    let mut l = label.trim().to_lowercase().replace('’', "'");
+    // A key hint after it: "(y)", "(esc)".
+    if let Some(at) = l.rfind(" (")
+        && l.ends_with(')')
+    {
+        l.truncate(at);
+    }
+    ONCE.contains(&l.as_str()) || l == "no" || l.starts_with("no, ")
 }
 
 /// Close agent tab `id`, which a task opened, ending its agent: only the
@@ -736,7 +757,7 @@ mod tests {
     use serde_json::json;
     use tern_bridge::HookEvent;
 
-    use super::{Asks, Report, State, Track, answer_keys, lasting_choice, wake_line};
+    use super::{Asks, Report, State, Track, answer_keys, once_choice, wake_line};
     use crate::prompt_input::Step;
     use crate::terminal_view::ActivityStatus::{self, Blocked, Done, Working};
 
@@ -848,11 +869,19 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert!(!lasting_choice(&codex, 1));
-        assert!(lasting_choice(&codex, 2));
-        assert!(!lasting_choice(&codex, 3));
+        assert!(once_choice(&codex, 1));
+        assert!(!once_choice(&codex, 2));
+        assert!(once_choice(&codex, 3));
         let claude: Vec<String> = ["❯ 1. Yes", "  2. Yes, and don’t ask again for uv commands in /w", "  3. No"].map(String::from).to_vec();
-        assert!(lasting_choice(&claude, 2));
+        assert!(once_choice(&claude, 1));
+        assert!(!once_choice(&claude, 2));
+        assert!(once_choice(&claude, 3));
+        // Not on the screen, or worded in a way not known: the user's.
+        assert!(!once_choice(&claude, 4));
+        assert!(!once_choice(&[], 1));
+        let other: Vec<String> = ["  1. Yes, for this session", "  2. Allow all edits"].map(String::from).to_vec();
+        assert!(!once_choice(&other, 1));
+        assert!(!once_choice(&other, 2));
     }
 
     #[test]
